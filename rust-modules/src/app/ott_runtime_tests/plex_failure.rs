@@ -19,6 +19,7 @@ fn profile(id: &str, name: &str, kind: ProviderKind, source: &str) -> ProviderPr
 
 fn row(id: &str, title: &str, media: MediaLocator) -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: id.into(),
         title: title.into(),
         category: String::new(),

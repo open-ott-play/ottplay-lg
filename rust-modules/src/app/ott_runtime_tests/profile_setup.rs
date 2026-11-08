@@ -226,6 +226,7 @@ fn saved_source_catalog_play_back_and_restart_keep_the_profile() {
     assert_eq!(app.ott.as_ref().unwrap().page, "channels");
     assert_eq!(app.ott.as_ref().unwrap().active(), Some(&profile));
     let item = CatalogEntry {
+        synopsis: None,
         id: "fixture-channel".into(),
         title: "Fixture channel".into(),
         category: "Fixture".into(),

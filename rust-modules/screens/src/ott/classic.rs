@@ -193,7 +193,7 @@ pub(super) fn paint_left(p: Painter, layout: Layout, row: &OttRow, status: &str,
     let bands = DetailBands::new(area, status_h, next_view.as_ref().map(|(_, height)| *height));
     let content_bottom = bands.content.y + bands.content.h;
     let mut flow = VFlow::new(area.y, theme::space::SM);
-    let description = super::metadata::description(row, now);
+    let description = super::metadata::preview_description(row, now);
     if let Some(programme) = current_live {
         // Classic TV details describe the selected programme. Repeating the
         // channel name and category here needlessly crowds out its synopsis.

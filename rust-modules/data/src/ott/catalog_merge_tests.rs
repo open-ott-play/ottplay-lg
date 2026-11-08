@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 fn row(id: &str, title: &str) -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: id.into(), title: title.into(), category: String::new(),
         description: String::new(), poster: String::new(),
         media: MediaLocator::VPortal { request: json!({"id": id, "title": title}) },

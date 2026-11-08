@@ -444,6 +444,7 @@ pub(super) fn find_favorite(
     };
     if let Some(media) = direct {
         return Ok(CatalogEntry {
+            synopsis: None,
             id: expected_item.map(str::to_owned).unwrap_or_else(|| favorite.identity()),
             title: favorite.title.clone(),
             category: String::new(),
@@ -669,6 +670,7 @@ mod tests {
     #[test]
     fn vportal_folder_aliases_share_favorite_identity() {
         let item = |row: &str| CatalogEntry {
+            synopsis: None,
             id: row.into(),
             title: "Film".into(),
             category: row.into(),

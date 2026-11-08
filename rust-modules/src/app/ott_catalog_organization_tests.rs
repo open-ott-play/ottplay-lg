@@ -83,7 +83,7 @@ fn renamed_provider_inherits_new_channels_copy_remains_a_snapshot() {
 }
 
 fn catalog_entry(id: &str, title: &str, category: &str) -> CatalogEntry {
-    CatalogEntry { live: None, id: id.into(), title: title.into(), category: category.into(),
+    CatalogEntry { synopsis: None, live: None, id: id.into(), title: title.into(), category: category.into(),
         description: String::new(), poster: String::new(), duration_ms: None,
         media: MediaLocator::Http { url: "https://media.invalid/video.m3u8".into() },
         provider_id: None, provider_id_field: None }

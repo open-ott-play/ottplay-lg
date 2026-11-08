@@ -1023,6 +1023,128 @@ mod tests {
         assert!(request("https://host.invalid/poster.jpg", 4096, 375).is_none());
     }
     #[test]
+    fn loopback_http_jpeg_fetch_preserves_scheme_and_isolates_credentials() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        let _serial = plx_base::testlock::serial();
+        assert!(
+            plx_net::net::global_init() && plx_net::net::available(),
+            "poster transport regression requires host libcurl"
+        );
+        let color = [32u8, 96, 160];
+        let image = image::RgbImage::from_pixel(32, 16, image::Rgb(color));
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let jpeg = jpeg.into_inner();
+        assert!(jpeg.starts_with(&[0xff, 0xd8]) && jpeg.len() < MAX_BYTES);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let caller_headers = [
+            "Authorization: Bearer caller-auth-fixture".to_owned(),
+            "Cookie: session=caller-cookie-fixture".to_owned(),
+            "X-Plex-Token: plex-token-fixture".to_owned(),
+            "X-Provider-Key: provider-key-fixture".to_owned(),
+            "Referer: https://provider.invalid/private-fixture".to_owned(),
+        ];
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut requests = Vec::new();
+                // One authenticated control request, then exactly one poster request.
+                for _ in 0..2 {
+                    let mut socket = loop {
+                        match listener.accept() {
+                            Ok((socket, _)) => break socket,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline, "HTTP fixture was not reached");
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(error) => panic!("loopback accept failed: {error}"),
+                        }
+                    };
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    socket
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0u8];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        assert!(head.len() < 8192, "unbounded fixture request");
+                        socket.read_exact(&mut byte).unwrap();
+                        head.push(byte[0]);
+                    }
+                    requests.push(String::from_utf8(head).unwrap());
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        jpeg.len()
+                    )
+                    .unwrap();
+                    socket.write_all(&jpeg).unwrap();
+                }
+                requests
+            });
+            // A preceding caller's headers must never become ambient poster credentials.
+            let control = plx_net::net::request(
+                &format!("http://{address}/authenticated-fixture"),
+                &caller_headers,
+                "GET",
+                None,
+                plx_net::net::Timeouts {
+                    connect_s: 2,
+                    total_s: 3,
+                    total_ms: 0,
+                    low_speed_bps: 1,
+                    low_speed_s: 2,
+                },
+                false,
+                Some(MAX_BYTES),
+                None,
+            )
+            .expect("control request");
+            assert!(control.ok());
+            let url = format!("http://{address}/posters/h/fixture.jpg?shape=wide");
+            let (accepted_url, w, h) = request(&url, 12, 12).expect("HTTP artwork accepted");
+            assert_eq!(accepted_url, url);
+            let decoded = fetch(&accepted_url, w, h).expect("plaintext JPEG fetched and decoded");
+            assert_eq!((decoded.w, decoded.h), (12, 6));
+            assert_eq!(decoded.rgba.len(), 12 * 6 * 4);
+            for pixel in decoded.rgba.chunks_exact(4) {
+                assert_eq!(pixel[3], 255);
+                for channel in 0..3 {
+                    assert!(
+                        pixel[channel].abs_diff(color[channel]) <= 3,
+                        "JPEG pixel mismatch"
+                    );
+                }
+            }
+            let requests = peer.join().unwrap();
+            for header in &caller_headers {
+                assert!(requests[0].contains(header), "control header was not sent");
+            }
+            let mut lines = requests[1].split("\r\n");
+            assert_eq!(
+                lines.next(),
+                Some("GET /posters/h/fixture.jpg?shape=wide HTTP/1.1")
+            );
+            for line in lines.filter(|line| !line.is_empty()) {
+                let (name, _) = line.split_once(':').expect("request header");
+                assert!(
+                    ["host", "accept", "user-agent"].contains(&name.to_ascii_lowercase().as_str()),
+                    "poster carried a caller header: {name}"
+                );
+            }
+        });
+    }
+    #[test]
     fn decoded_thumbnail_retains_aspect_and_has_bounded_storage() {
         let image = image::RgbaImage::from_pixel(32, 64, image::Rgba([50, 60, 70, 255]));
         let mut bytes = std::io::Cursor::new(Vec::new());

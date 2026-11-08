@@ -17,7 +17,7 @@ fn transient_profile(root: &BoundSource) -> ProviderProfile {
         source_alias: root.name.clone(), enabled: true }
 }
 fn row(path: &str) -> CatalogEntry {
-    CatalogEntry { id: format!("actual:{path}"), title: "Clip".into(), category: String::new(),
+    CatalogEntry { synopsis: None, id: format!("actual:{path}"), title: "Clip".into(), category: String::new(),
         description: String::new(), poster: String::new(), duration_ms: None,
         provider_id: None, provider_id_field: None,
         live: None,

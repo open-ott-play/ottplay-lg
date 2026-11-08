@@ -691,6 +691,7 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
                         OttAction::EditSetting(key(adapter, "movie", i)),
                     );
                     item.media = Some(plx_screens::ott::OttMedia {
+                        synopsis: None,
                         kind: plx_screens::ott::OttMediaKind::Movie,
                         duration_ms: None,
                         progress: None,
@@ -795,7 +796,7 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         }
     }
     rows.push(button("stremio.back", "Cancel / Back"));
-    Some(OttView { status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
+    Some(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
         preview_context: None,
         order_context: None, random_context: None,
         catalog_progress: None,

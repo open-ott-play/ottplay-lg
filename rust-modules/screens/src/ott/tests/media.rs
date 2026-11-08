@@ -2,7 +2,7 @@ use super::*;
 
 fn typed(revision: u64, ids: &[&str], kind: OttMediaKind) -> Arc<OttView> {
     let mut view = (*snapshot(revision, ids)).clone();
-    for row in &mut view.rows { row.media = Some(OttMedia { kind, duration_ms: None, progress: None }); }
+    for row in &mut view.rows { row.media = Some(OttMedia { kind, duration_ms: None, progress: None, synopsis: None }); }
     Arc::new(view)
 }
 

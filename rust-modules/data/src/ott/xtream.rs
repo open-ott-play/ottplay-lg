@@ -251,6 +251,7 @@ pub fn streams(
             continue;
         }
         catalog.entries.push(CatalogEntry {
+            synopsis: None,
             id: identity(&profile.id, &format!("xtream:{kind}:{id}")),
             title: title(row, "name", format!("Channel {id}")),
             category: group(row, groups, if kind == "live" { "Other" } else { "Movies" }),
@@ -382,6 +383,7 @@ pub fn episodes(
             season,
             ep,
             CatalogEntry {
+                synopsis: None,
                 id: identity(&profile.id, &format!("xtream:series:{id}")),
                 title: title(
                     row,

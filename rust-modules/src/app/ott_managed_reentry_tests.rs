@@ -31,7 +31,7 @@ fn permanent() -> ProviderProfile {
         source: "https://media.invalid/list.m3u".into(), source_alias: "Permanent".into(), enabled: true }
 }
 fn entry() -> CatalogEntry {
-    CatalogEntry { id: "managed:42".into(), title: "Managed movie".into(), category: String::new(),
+    CatalogEntry { synopsis: None, id: "managed:42".into(), title: "Managed movie".into(), category: String::new(),
         description: String::new(), poster: String::new(),
         media: MediaLocator::Plex { server_id: SERVER.into(), rating_key: "42".into() },
         duration_ms: None, provider_id: None, provider_id_field: None, live: None }
@@ -195,7 +195,7 @@ fn only_explicit_resume_repoints_current_server_and_never_changes_the_owner() {
     assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
     // Revoking only the managed intent cannot block an unrelated bound Favorite.
     runtime.managed.active.as_ref().unwrap().cancel.store(true, Ordering::Release);
-    let unrelated = CatalogEntry { id: "live".into(), title: "Independent".into(),
+    let unrelated = CatalogEntry { synopsis: None, id: "live".into(), title: "Independent".into(),
         category: String::new(), description: String::new(), poster: String::new(),
         media: MediaLocator::Http { url: "https://media.invalid/live".into() },
         duration_ms: None, provider_id: Some("live".into()), provider_id_field: Some("id".into()), live: None };

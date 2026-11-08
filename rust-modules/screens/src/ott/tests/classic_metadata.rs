@@ -268,7 +268,7 @@ fn classic_list_visibility_changes_presentation_without_changing_identity() {
     assert_eq!(classic::list_label(&row, all.with_channel_display(0,0,0,1).unwrap(), Some(1_700_000_010)), "");
     assert!(matches!(&row.action, OttAction::Play(id) if id == "station"));
     row.guide_available = false;
-    row.media = Some(OttMedia { kind: OttMediaKind::Movie, duration_ms: None, progress: None });
+    row.media = Some(OttMedia { kind: OttMediaKind::Movie, duration_ms: None, progress: None, synopsis: None });
     assert_eq!(classic::list_label(&row, all, Some(1_700_000_010)), "Station", "media does not duplicate its title as EPG");
     row.title = "2026 news".into(); row.content_title = None;
     assert_eq!(classic::list_label(&row, all, Some(1_700_000_010)), "2026 news");
@@ -380,7 +380,7 @@ fn validated_http_channel_guide_supplies_its_classic_programme_name() {
     row.content_title = Some("Station".into());
     // HTTP locators retain no finite/live subtype. The admitted guide capability
     // is the source of truth, as it is for the adjacent Guide action.
-    row.media = Some(OttMedia { kind: OttMediaKind::Video, duration_ms: None, progress: None });
+    row.media = Some(OttMedia { kind: OttMediaKind::Video, duration_ms: None, progress: None, synopsis: None });
     assert!(row.guide_available);
     let on = plx_appkit::classic_settings::Preferences::default();
     assert_eq!(classic::list_label(&row, on, Some(1_700_000_010)), "Station  NOW_A");
@@ -403,7 +403,7 @@ fn current_guide_synopsis_uses_the_panel_and_keeps_next_at_the_bottom() {
     let mut row = fixture("NEXT_BODY").snapshot.rows[0].clone();
     row.content_title = Some("World News".into());
     row.detail = "News".into();
-    row.media = Some(OttMedia { kind: OttMediaKind::Video, duration_ms: None, progress: None });
+    row.media = Some(OttMedia { kind: OttMediaKind::Video, duration_ms: None, progress: None, synopsis: None });
     let description = "World News. Synthetic programme description for the OTTPlay visual comparison. No personal account or live channel is used.";
     let guide = row.guide.as_mut().unwrap();
     guide.current.as_mut().unwrap().title = "World News — current programme".into();
@@ -435,7 +435,7 @@ fn compact_programme_labels_do_not_require_the_selected_rows_full_guide() {
     let _serial = plx_base::testlock::serial();
     let mut row = fixture("SYNOPSIS_B").snapshot.rows[0].clone();
     row.content_title = Some("Station".into());
-    row.media = Some(OttMedia { kind: OttMediaKind::Video, duration_ms: None, progress: None });
+    row.media = Some(OttMedia { kind: OttMediaKind::Video, duration_ms: None, progress: None, synopsis: None });
     let selected_guide = row.guide.take();
     row.current_programme = Some(CurrentProgramme {
         title: "Other programme".into(), start_s: 1_700_000_000, end_s: 1_700_000_060,
@@ -558,7 +558,7 @@ fn classic_file_metadata_never_inherits_compact_television_programmes() {
     row.current_programme = Some(CurrentProgramme { title: "FOREIGN_PROGRAMME".into(), start_s: 10, end_s: 20 });
     row.guide_available = false;
     for kind in [OttMediaKind::Video, OttMediaKind::Movie, OttMediaKind::Episode, OttMediaKind::LocalVideo] {
-        row.media = Some(OttMedia { kind, duration_ms: Some(12_000), progress: None });
+        row.media = Some(OttMedia { kind, duration_ms: Some(12_000), progress: None, synopsis: None });
         let runs = sidebar_runs(&row, Some(15), Default::default());
         assert!(runs.iter().any(|run| run.text == "First.mp4"));
         assert!(runs.iter().any(|run| run.text == "SELECTED_FILE_SYNOPSIS"));
@@ -635,7 +635,7 @@ fn compact_progress_uses_only_valid_live_intervals() {
     assert_eq!(classic::list_progress_interval(&row, None), None);
     row.current_programme.as_mut().unwrap().end_s = 1_700_001_060;
     row.guide_available = false;
-    row.media = Some(OttMedia { kind: OttMediaKind::LocalVideo, duration_ms: None, progress: None });
+    row.media = Some(OttMedia { kind: OttMediaKind::LocalVideo, duration_ms: None, progress: None, synopsis: None });
     assert_eq!(classic::list_progress_interval(&row, None), None);
 }
 

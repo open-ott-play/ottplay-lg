@@ -1,6 +1,6 @@
 use super::{
     http_url, identity, model_bytes, resolve_http_url, text, Catalog, CatalogEntry, CatalogError,
-    MediaLocator, ProviderKind, ProviderProfile, CategoryHierarchy, CategoryMembership, CategoryNode, MAX_CATALOG_BYTES, MAX_CATALOG_ENTRIES,
+    MediaLocator, ProviderKind, ProviderProfile, SynopsisSpan, CategoryHierarchy, CategoryMembership, CategoryNode, MAX_CATALOG_BYTES, MAX_CATALOG_ENTRIES,
     MAX_CATALOG_MODEL_BYTES, MAX_METADATA_BYTES, MAX_REQUEST_BYTES,
 };
 use serde_json::{Map, Value};
@@ -85,7 +85,7 @@ struct PortalContext {
 }
 
 impl PortalContext {
-    fn from_item(item: &Value, parent: &Self, nested: bool, base: &str) -> Self {
+    fn from_item(item: &Value, parent: &Self, nested: bool, base: &str) -> Result<Self, CatalogError> {
         let value = |key: &str, fallback: &str| {
             item.get(key)
                 .and_then(scalar_text)
@@ -94,6 +94,12 @@ impl PortalContext {
                 .unwrap_or_else(|| fallback.to_owned())
         };
         let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+        // Decode only an item's own prose. Parent context is already normalized:
+        // inherited escaped examples must not be decoded/stripped a second time.
+        let prose = |key: &str, fallback: &str| -> Result<String, CatalogError> {
+            item.get(key).and_then(scalar_text).filter(|s| !s.trim().is_empty())
+                .map_or_else(|| Ok(fallback.to_owned()), |s| super::vportal_text::plain_text(&s))
+        };
         let own_title = value("title", &parent.title);
         let title = if !nested && parent.series && !parent.title.is_empty() {
             parent.title.clone()
@@ -116,12 +122,12 @@ impl PortalContext {
             .and_then(Value::as_str)
             .and_then(|v| nonempty_url(base, v));
         let has_own_art = own_landscape.is_some() || own_poster.is_some();
-        Self {
+        Ok(Self {
             title,
-            year: value("year", &parent.year),
-            duration: value("duration", &parent.duration),
-            age: value("agelimit", &parent.age),
-            description: value("description", &parent.description),
+            year: prose("year", &parent.year)?,
+            duration: prose("duration", &parent.duration)?,
+            age: prose("agelimit", &parent.age)?,
+            description: prose("description", &parent.description)?,
             landscape: own_landscape.unwrap_or_else(|| {
                 if has_own_art {
                     String::new()
@@ -138,7 +144,7 @@ impl PortalContext {
             }),
             series: kind == "multistream" || parent.series,
             ancestry: parent.ancestry.clone(),
-        }
+        })
     }
     fn byte_len(&self) -> usize {
         self.title.len()
@@ -365,21 +371,24 @@ fn walk(
             } else {
                 serde_json::to_string(&media).map_err(|_| CatalogError::InvalidFormat)?
             };
-            let metadata = PortalContext::from_item(item, parent, false, base);
-            let description = [
+            let metadata = PortalContext::from_item(item, parent, false, base)?;
+            let mut description = [
                 &metadata.year,
                 &metadata.duration,
                 &metadata.age,
-                &metadata.description,
             ]
             .into_iter()
             .filter(|s| !s.is_empty())
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
+            if !description.is_empty() && !metadata.description.is_empty() { description.push('\n'); }
+            let synopsis_start = description.len();
+            description.push_str(&metadata.description);
             if description.len() > MAX_METADATA_BYTES {
                 return Err(CatalogError::LimitExceeded);
             }
+            let synopsis = SynopsisSpan::new(&description, synopsis_start);
             // Prefer an item's portrait to inherited fanart when it supplies its own artwork.
             let poster = [
                 item.get("imglr").and_then(Value::as_str),
@@ -416,6 +425,7 @@ fn walk(
                 title,
                 category: text(category, 4096),
                 description,
+                synopsis,
                 poster,
                 media,
                 duration_ms,
@@ -449,7 +459,7 @@ fn walk(
         // A next item needs its container's record count to synthesize an offset.
         "next" => return Err(CatalogError::InvalidFormat),
         "videoportal" | "category" | "multistream" => {
-            let mut context = PortalContext::from_item(item, parent, depth > 0, base);
+            let mut context = PortalContext::from_item(item, parent, depth > 0, base)?;
             let child_category = if depth == 0 || kind == "videoportal" || title.is_empty() {
                 category.to_string()
             } else if category.is_empty() {
@@ -759,6 +769,56 @@ mod tests {
             source_alias: String::new(),
             enabled: true,
         }
+    }
+    #[test]
+    fn synopsis_normalizes_markup_retains_every_paragraph_and_does_not_strip_title_prose() {
+        let synopsis = format!("<b>Название</b> начинается в 2026 году.<br>Слова &amp; &#x442;&#1077;&#1082;&#1089;&#1090;.<p>{}</p><p>ПОЛНЫЙ_КОНЕЦ</p>",
+            "Длинное описание. ".repeat(300));
+        let body = serde_json::json!({"type":"stream", "title":"Название", "id":"film1", "url":"/one",
+            "year":"<b>2026</b>", "duration":"90 мин", "agelimit":"16+", "description":synopsis});
+        let page = parse_vportal_response(&body.to_string(), &profile(), "").unwrap();
+        let row = &page.catalog.entries[0];
+        assert!(row.description.starts_with("2026\n90 мин\n16+\nНазвание начинается в 2026 году.\nСлова & текст.\n\n"));
+        assert!(row.description.ends_with("\n\nПОЛНЫЙ_КОНЕЦ"));
+        assert_eq!(row.description.matches("Длинное описание.").count(), 300);
+        let span = row.synopsis.as_ref().unwrap().validated_for(&row.description).unwrap();
+        assert!(span.get(&row.description).unwrap().starts_with("Название начинается в 2026 году."));
+        assert_eq!(serde_json::from_str::<CatalogEntry>(&serde_json::to_string(row).unwrap()).unwrap(), *row);
+        let mut plain = body.clone();
+        plain["description"] = "different metadata".into();
+        assert_eq!(parse_vportal_response(&plain.to_string(), &profile(), "").unwrap().catalog.entries[0].id, row.id,
+            "metadata normalization does not change media identity");
+    }
+
+    #[test]
+    fn inherited_markup_decodes_once_and_keeps_http_poster_paths_and_complete_text() {
+        let root = PortalRequest::root().parse_response(r#"{"type":"videoportal","items":[{"type":"multistream","title":"Series","year":2026,"duration":"45 мин","description":"<p>История &amp; рассказ.</p><p>&lt;b&gt;literal&lt;/b&gt; &amp;lt;b&amp;gt;escaped&amp;lt;/b&amp;gt;\nПоследний абзац.</p>","img":"/posters/h/series.jpg","imglr":"/posters/l/series.jpg","request":{"id":"series"}}]}"#, &profile()).unwrap();
+        let page = root.pending[0].parse_response(r#"{"type":"multistream","items":[{"type":"stream","title":"One","request":{"id":"one"}},{"type":"next","request":{}}]}"#, &profile()).unwrap();
+        let first = &page.catalog.entries[0];
+        assert_eq!(first.poster, "https://portal.invalid:443/posters/l/series.jpg");
+        assert_eq!(first.description, "2026\n45 мин\nИстория & рассказ.\n\nliteral &lt;b&gt;escaped&lt;/b&gt;\nПоследний абзац.");
+        let next = page.pending[0].parse_response(r#"{"type":"multistream","items":[{"type":"stream","title":"Two","img":"/posters/h/two.jpg","request":{"id":"two"}}]}"#, &profile()).unwrap();
+        let second = &next.catalog.entries[0];
+        assert_eq!(second.poster, "https://portal.invalid:443/posters/h/two.jpg");
+        assert_eq!(second.description, first.description);
+        for row in [first, second] {
+            let span = row.synopsis.as_ref().unwrap().validated_for(&row.description).unwrap();
+            assert_eq!(span.get(&row.description), Some("История & рассказ.\n\nliteral &lt;b&gt;escaped&lt;/b&gt;\nПоследний абзац."));
+        }
+    }
+
+    #[test]
+    fn facts_without_provider_synopsis_remain_full_description_and_oversize_is_rejected() {
+        let mut body = serde_json::json!({"type":"stream", "title":"Year 2026", "url":"/one", "year":2026, "duration":"90 min"});
+        let page = parse_vportal_response(&body.to_string(), &profile(), "").unwrap();
+        let row = &page.catalog.entries[0];
+        assert_eq!(row.description, "2026\n90 min");
+        assert_eq!(row.synopsis.as_ref().unwrap().validated_for(&row.description).unwrap().get(&row.description), Some(""));
+        body["description"] = "я".repeat(MAX_METADATA_BYTES / 2).into();
+        assert_eq!(parse_vportal_response(&body.to_string(), &profile(), ""), Err(CatalogError::LimitExceeded),
+            "facts plus a full admitted synopsis must fit; never trim the synopsis");
+        body["description"] = "я".repeat(MAX_METADATA_BYTES / 2 + 1).into();
+        assert_eq!(parse_vportal_response(&body.to_string(), &profile(), ""), Err(CatalogError::LimitExceeded));
     }
     #[test]
     fn link_keeps_opaque_key_and_url_escapes() {

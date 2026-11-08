@@ -469,6 +469,7 @@ mod tests {
     }
     fn entry() -> CatalogEntry {
         CatalogEntry {
+            synopsis: None,
             id: "entry-a".into(),
             title: "Video".into(),
             category: String::new(),

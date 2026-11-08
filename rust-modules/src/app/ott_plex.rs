@@ -293,6 +293,7 @@ fn entry(profile: &ProviderProfile, library: &str, item: Metadata) -> Option<Cat
         item.title
     };
     Some(CatalogEntry {
+        synopsis: None,
         id: format!("{}:{}", profile.id, item.rating_key),
         title,
         category,

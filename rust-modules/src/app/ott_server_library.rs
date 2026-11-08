@@ -223,6 +223,7 @@ fn entry(
     }
     let (relative_path, root_alias) = roots.portable(item, source);
     Ok(Some(CatalogEntry {
+        synopsis: None,
         id: format!("{}:server:{key}", profile.id),
         title: item.name.clone(),
         category: if item.directory.is_empty() {

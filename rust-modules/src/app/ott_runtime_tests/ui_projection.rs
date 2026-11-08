@@ -15,7 +15,7 @@ fn listed(entries: Vec<CatalogEntry>) -> Runtime {
     runtime
 }
 fn leaf(id: &str, locator: MediaLocator, duration_ms: Option<u64>) -> CatalogEntry {
-    CatalogEntry { id: id.into(), title: "Movie S01E01 Live TV".into(), category: "Folder".into(),
+    CatalogEntry { synopsis: None, id: id.into(), title: "Movie S01E01 Live TV".into(), category: "Folder".into(),
         description: "Description retained in full.".into(), poster: String::new(), media: locator,
         duration_ms, provider_id: None, provider_id_field: None, live: None }
 }
@@ -208,6 +208,7 @@ fn portal_content_title_preserves_full_description_and_typed_artwork() {
     }, Some(9_000));
     entry.title = "1984 — Film".into();
     entry.description = "2026\n00:00:09\n12+\nFIRST sentence. SECOND sentence.\n\nFINAL paragraph.".into();
+    entry.synopsis = plx_data::ott::SynopsisSpan::new(&entry.description, entry.description.find("FIRST").unwrap());
     entry.poster = "https://fixture.invalid:443/fixed-film.png".into();
     let mut runtime = listed(vec![entry.clone()]);
     let profile = &mut runtime.saved.profiles.profiles[0];
@@ -222,6 +223,12 @@ fn portal_content_title_preserves_full_description_and_typed_artwork() {
         if url == &entry.poster));
     assert_eq!(row.media.as_ref().unwrap().kind, OttMediaKind::Video);
     assert_eq!(row.media.as_ref().unwrap().duration_ms, Some(9_000));
+    assert_eq!(row.media.as_ref().unwrap().synopsis.as_ref().unwrap().get(&row.description),
+        Some("FIRST sentence. SECOND sentence.\n\nFINAL paragraph."));
+
+    runtime.catalog.entries[0].description = "Updated text without the old prefix".into();
+    let view = runtime.view();
+    assert!(view.rows[0].media.as_ref().unwrap().synopsis.is_none(), "stale annotations must not crop new prose");
 }
 
 #[test]
@@ -244,7 +251,8 @@ fn favorite_content_title_keeps_its_own_label_and_exact_preview_metadata() {
         url: "https://fixture.invalid/video.mp4".into(),
     }, Some(12_000));
     preview.title = "Different server title".into();
-    preview.description = "FIRST sentence. SECOND sentence.\n\nFINAL paragraph.".into();
+    preview.description = "2026\nFIRST sentence. SECOND sentence.\n\nFINAL paragraph.".into();
+    preview.synopsis = plx_data::ott::SynopsisSpan::new(&preview.description, "2026\n".len());
     preview.poster = "https://fixture.invalid:443/fixed-film.png".into();
     runtime.favorite_preview = Some((id.clone(), preview.clone()));
     runtime.page = "favorites";
@@ -255,6 +263,8 @@ fn favorite_content_title_keeps_its_own_label_and_exact_preview_metadata() {
     // The display ordinal is separate from the exact saved content title.
     assert_eq!(row.title, format!("1  {}", favorite.title));
     assert_eq!(row.description, preview.description);
+    assert_eq!(row.media.as_ref().unwrap().synopsis.as_ref().unwrap().get(&row.description),
+        Some("FIRST sentence. SECOND sentence.\n\nFINAL paragraph."));
     assert!(matches!(row.poster.as_ref(), Some(plx_screens::ott::OttPoster::Http { url })
         if url == &preview.poster));
     assert_eq!(row.action, OttAction::Play(id.clone()));
