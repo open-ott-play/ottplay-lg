@@ -12,13 +12,16 @@ use plx_appkit::menu_visibility::Visibility;
 pub(super) const GROUP: GroupId = GroupId(1);
 
 pub(super) fn header(measure: &dyn Measure, width: f32, browse: u32, search: Option<u32>,
-    description: Option<u32>, open: bool, caption: &str) -> HeaderRow {
+    favorite: Option<(u32, &str)>, description: Option<u32>, open: bool, caption: &str) -> HeaderRow {
     let mut controls = Vec::new();
+    let mut primary = 0;
     if !open {
         if let Some(key) = search { controls.push((key, msg::ott_search().to_owned())); }
+        if let Some((key, label)) = favorite { controls.push((key, label.to_owned())); }
+        primary = controls.len();
         if let Some(key) = description { controls.push((key, msg::ott_description().to_owned())); }
     }
-    build_header(measure, width, browse, &controls, open, Some(caption))
+    build_header(measure, width, browse, &controls, primary, open, Some(caption))
 }
 
 /// Classic uses the same action identities as Browse, but the web footer's
@@ -80,7 +83,7 @@ pub(super) fn classic_footer_keys(snapshot: &OttView, controls: &[(u32, String)]
 }
 
 fn build_header(measure: &dyn Measure, width: f32, browse: u32,
-    labels: &[(u32, String)], open: bool, caption: Option<&str>) -> HeaderRow {
+    labels: &[(u32, String)], primary: usize, open: bool, caption: Option<&str>) -> HeaderRow {
     let mut left = vec![HeaderItem { label: msg::ott_browse().into(), focusable: true,
         fold_glyph: true, selected_plate: open, ..Default::default() }];
     if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
@@ -100,6 +103,22 @@ fn build_header(measure: &dyn Measure, width: f32, browse: u32,
             .map(|item| item.plate.x + item.plate.w).fold(0.0, f32::max);
         let right_start = layout.items.iter().filter(|item| matches!(item.slot, Slot::Right(_)))
             .map(|item| item.plate.x).fold(f32::INFINITY, f32::min);
+        // Description can move into Browse before shortening the category.
+        // Search and Favorite take priority over a long read-only caption.
+        if left_end + page_header::CLUSTER_GAP > right_start && controls.len() <= primary {
+            if let Some(title) = layout.items.iter().find(|item| item.slot == Slot::Left(1)) {
+                let trailing = title.plate.x + title.plate.w - title.text.x - title.text.w;
+                let budget = (right_start - page_header::CLUSTER_GAP - title.text.x - trailing).max(0.0);
+                let fitted = if budget > 0.0 {
+                    measure.fit_line(&left[1].label, budget, plx_ui::theme::size::BODY, false)
+                        .to_string_lossy().into_owned()
+                } else { String::new() };
+                if fitted != left[1].label {
+                    left[1].label = fitted;
+                    continue;
+                }
+            }
+        }
         if controls.is_empty() {
             // Keep the shared header's trailing text margin. A long source
             // category is a readout, not another focus target or a second row.
@@ -140,6 +159,14 @@ pub(super) struct Action {
     pub id: &'static str,
     pub row: Row,
     pub action: FormAction,
+}
+
+pub(super) fn page_action(page: &str) -> &'static str {
+    match page.split(':').next().unwrap_or("") {
+        "profiles" | "usb-folders" => "nav:profiles", "channels" => "nav:catalog",
+        "categories" => "nav:categories", "favorites" => "nav:favorites",
+        "settings" => "nav:settings", _ => "nav:providers",
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +227,17 @@ pub(super) fn available_at(snapshot: &OttView, selected: Option<usize>, visible:
             }
         }
     }
+    // Opening Browse keeps focus on the current page. Put its common list
+    // operations immediately below that stable identity, before global tools.
+    let mut primary = Vec::new();
+    for id in ["nav:search", "nav:favorite"] {
+        if let Some(index) = out.iter().position(|item| item.id == id) {
+            primary.push(out.remove(index));
+        }
+    }
+    let insert = out.iter().position(|item| item.id == page_action(&snapshot.page_id))
+        .map_or(0, |index| index + 1);
+    out.splice(insert..insert, primary);
     out
 }
 
@@ -325,7 +363,7 @@ mod tests {
                 let mut measure = TypographyMeasure::new(plx_ui::fixture::FixtureMeasure);
                 measure.set_font_scale(FontScale::from_percent(scale).unwrap());
                 for width in [1280.0, 1920.0] {
-                    let row = header(&measure, width, 1, Some(2), Some(3), false, "");
+                    let row = header(&measure, width, 1, Some(2), Some((4, msg::ott_favorite_add())), Some(3), false, "");
                     assert!(row.stops.iter().any(|(key, _)| *key == 1), "Browse is always reachable");
                     for (i, a) in row.layout.items.iter().enumerate() {
                         assert!(a.plate.x >= 0.0 && a.plate.x + a.plate.w <= width,

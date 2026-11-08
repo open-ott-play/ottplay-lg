@@ -143,6 +143,8 @@ mod catalog_diagnostics;
 mod preplay;
 #[path = "ott_playback_failure.rs"]
 mod playback_failure;
+#[path = "ott_failed_playback.rs"]
+mod failed_playback;
 #[path = "ott_catalog_organization_runtime.rs"]
 mod organization_runtime;
 #[path = "ott_catalog_publication.rs"]
@@ -578,6 +580,7 @@ pub(super) struct Runtime {
     play_cancel: Arc<AtomicBool>,
     play_ticket: Option<plx_media::route::PlayRequestTicket>,
     playing: Option<Playing>,
+    failed_playback: Option<failed_playback::FailedPlayback>,
     pending_play: Option<Invocation>,
     favorites: plx_data::ott::favorites_wire::Protocol,
     favorites_recovery_done: Arc<AtomicBool>,
@@ -960,6 +963,7 @@ impl Runtime {
             play_cancel: Arc::new(AtomicBool::new(false)),
             play_ticket: None,
             playing: None,
+            failed_playback: None,
             pending_play: None,
             favorites: plx_data::ott::favorites_wire::Protocol::default(),
             favorites_recovery_done: Arc::new(AtomicBool::new(true)),
@@ -1662,6 +1666,7 @@ impl Runtime {
         self.suspend_with_retry_reason(app, continuity_diagnostics::Reason::Suspend);
     }
     fn suspend_with_retry_reason(&mut self, app: &mut App, reason: continuity_diagnostics::Reason) {
+        self.failed_playback = None;
         // Reset at the actual lifecycle edge, even if no frame is rendered
         // between background/Standby and the next foreground input.
         self.sleep_timer = sleep_timer::State::default();
@@ -1703,6 +1708,7 @@ impl Runtime {
     }
     /// Retire catalogue ownership without touching a replacement native route.
     fn retire_catalog_playback(&mut self, app: &mut App) {
+        self.failed_playback = None;
         transient::cancel_play_candidate(self,app);
         transient::note_stop(self);
         self.playback_epoch = self.playback_epoch.wrapping_add(1);
@@ -1781,6 +1787,10 @@ impl Runtime {
         self.changed();
     }
     fn reconcile_owner(&mut self, app: &mut App) {
+        if self.failed_playback.is_some() && failed_playback::current(self, app).is_none() {
+            self.failed_playback = None;
+            self.playback_failure.clear();
+        }
         let identity = plx_media::route::playback_identity(&app.player.session);
         self.playback_failure.reconcile_owner(identity.as_ref());
         // An explicit OTT selection made after the retained native request is
@@ -1820,12 +1830,14 @@ impl Runtime {
         let kind = plx_media::player::error_now(&app.player.session).kind;
         let details = plx_media::player::report::failure_details_now(&app.player.session, &mut app.adapters.player);
         self.playback_failure.capture(self.playing.as_ref().and_then(|playing| playing.identity.as_ref()), kind, details);
+        self.failed_playback = failed_playback::capture(self, app);
         let plex_failure = transient::plex_remote::failure_event(self, app);
         self.checkpoint(app, false);
         self.playing = None;
         self.resume_floor = None;
         self.release_active_lease();
         plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+        if let Some(page) = bridge::player_mut(&mut app.pages) { page.transport_reset(false); }
         plx_media::route::cancel_play(&mut app.player.session);
         self.status = "Native playback failed".into();
         if plex_failure || !advance_on_failure {
@@ -3281,6 +3293,7 @@ impl Runtime {
         self.play_profile=Some((self.play_generation, profile.clone()));
         self.play_attachment=attachment;
         self.playback_failure.clear();
+        self.failed_playback = None;
         preplay::begin(self, &profile);
         if interactive && profile.kind == ProviderKind::VPortal {
             let result = vportal_quality::request(self, &profile);
@@ -6112,11 +6125,14 @@ mod performance_snapshot_tests {
 fn state(app: &App, runtime: &Runtime) -> Value {
     use plx_media::player::PlaybackState;
     let current = plx_media::player::state(&app.player.session);
-    let active = current != PlaybackState::Idle;
+    let failed = failed_playback::current(runtime, app);
+    let active = current != PlaybackState::Idle || failed.is_some();
     let state = if app.ott_standby {
         "standby"
     } else if runtime.play_target.is_some() {
         "loading"
+    } else if failed.is_some() {
+        "error"
     } else {
         match current {
             PlaybackState::Idle => "idle",
@@ -6138,7 +6154,8 @@ fn state(app: &App, runtime: &Runtime) -> Value {
     let playing = runtime
         .playing
         .as_ref()
-        .filter(|p| active && playing_matches(p, app));
+        .filter(|p| active && playing_matches(p, app))
+        .or(failed);
     let mut state = json!({"player":{"version":env!("CARGO_PKG_VERSION"),"platform":"webos-native","runtime":runtime.remote.runtime(),"standby":app.ott_standby},
         "playback":{"state":state,"kind":if !active {"none"} else if playing.is_some_and(|p|p.archive.is_some()) {"archive"} else if playing.is_some_and(|p|p.profile.kind==ProviderKind::M3u) {"live"} else {"vod"},
         "title": playing.map(|p|&p.entry.title),"provider":playing.map(|p|if p.profile.kind==ProviderKind::Local {"offline"} else {p.profile.kind.canonical_id()}),"media_id":playing.map(|p|&p.entry.id),"channel_number":null,
