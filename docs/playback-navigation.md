@@ -1,5 +1,37 @@
 # Playback navigation
 
+## Live channels and catalogue actions
+
+For a live OTT channel, the remote's **CH+/CH−** buttons select the next or
+previous item in the current list in both Classic and Modern. They work with
+the video controls visible or hidden. Number keys select a channel by its
+displayed number; a visible information banner does not block number entry.
+Multi-digit entry waits for the existing two-second input window before opening
+the selected channel. Finite-video seek shortcuts keep their separate rules.
+
+After a live-channel playback failure, CH+/CH− and number entry remain available
+only while the original profile, source and list are still current. Switching
+sources, stopping or suspending playback retires that recovery context. These
+keys do not grant transport control over the failed decoder or bypass kiosk and
+parental checks.
+
+A destination can also be refused before the decoder is replaced. In that case,
+the previous channel can keep playing. Direct multiplexed MPEG-TS HLS currently
+requires H.264 video with AAC audio (or no audio); a refusal names common known
+codec pairs. This is a limitation of the application's HLS segment handling,
+not a statement about the television's decoder capabilities. Playback of the
+same codecs from progressive files follows a different path.
+
+The Modern channel-list header offers **Search** and **Add/remove Favorite** for
+the selected playable item, followed by **Description** when space permits.
+Long category names shorten before these primary actions. In **Browse**, the
+current Channel list item retains focus: Down once reaches Search and Down twice
+reaches Add/remove Favorite when both actions are available. Returning from
+Browse preserves the selected item; adding a Favorite does not start playback.
+Installation-level menu visibility and source capabilities still apply.
+
+## Finite video transport
+
 **Modern** includes **Previous/Next** in the default control row for an episode with a
 neighbor in its existing PlayQueue; there is no setting for them. Movies, extras and a queue
 without either neighbor omit both, leaving the other three discs at the same positions.

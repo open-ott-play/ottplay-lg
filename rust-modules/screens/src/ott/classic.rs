@@ -226,7 +226,7 @@ pub(super) fn paint_left(p: Painter, layout: Layout, row: &OttRow, status: &str,
                 OttPoster::Http { url } => plx_ui::widgets::Art::Http { url, res: (250, 375) },
                 OttPoster::Local { key } => plx_ui::widgets::Art::Local { key },
             };
-            plx_ui::widgets::card_named(p, Rect::new(0.0, body.y, width, width * 1.5), art, None, theme::space::XS, false, 1.0, 0.0);
+            super::metadata::paint_art(p, Rect::new(0.0, body.y, width, width * 1.5), art, theme::space::XS);
             body.x += width + theme::space::MD;
             body.w = (body.w - width - theme::space::MD).max(0.0);
         }

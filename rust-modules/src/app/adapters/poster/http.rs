@@ -197,19 +197,20 @@ fn probe_with_start(
     h: i32,
     start: impl FnOnce(Input, u32, u32, u64, PosterKey) -> bool,
 ) -> Option<PosterKey> {
-    if plx_ui::card_motion::declines_request() {
-        return None;
-    }
+    let decline = plx_ui::card_motion::declines_request();
     let (url, w, h) = request(url, w, h)?;
     {
         let store = STORE.lock().unwrap_or_else(|e| e.into_inner());
-        if store.busy
-            && !store.slots.iter().any(|slot| {
-                slot.w == w
-                    && slot.h == h
-                    && matches!(&slot.input, Input::Http(known) if known == &url)
-            })
-        {
+        let known = store.slots.iter().find(|slot| {
+            slot.w == w && slot.h == h && matches!(&slot.input, Input::Http(known) if known == &url)
+        });
+        // Motion admission limits new work, not resident artwork. A refreshed
+        // snapshot or a sparse frame can make placement Unknown even when the
+        // exact image is ready; keep that hit visible and touch its usual LRU.
+        if decline && !known.is_some_and(|slot| matches!(slot.state, State::Ready)) {
+            return None;
+        }
+        if store.busy && known.is_none() {
             return None;
         }
     }
@@ -832,6 +833,64 @@ mod tests {
             held.settle(None);
         }
         reset();
+    }
+
+    #[test]
+    fn ready_http_art_survives_unknown_and_deferred_motion_without_starting_work() {
+        let _serial = plx_base::testlock::serial();
+        let _enforce = plx_ui::card_motion::enforce_for_test();
+        let url = "https://example.invalid/ready.jpg";
+        for moving in [false, true] {
+            tex::reset_for_test(MAX_BYTES);
+            reset();
+            hold_probe(url)
+                .expect("initial request")
+                .settle(Some(one_pixel(42)));
+            drain();
+            let key = {
+                let store = STORE.lock().unwrap();
+                assert!(matches!(store.slots[0].state, State::Ready));
+                store.slots[0].key
+            };
+            let _scope = if moving {
+                plx_ui::card_motion::Scope::moving_for_test()
+            } else {
+                plx_ui::card_motion::Scope::unknown_for_test()
+            };
+            assert!(plx_ui::card_motion::declines_request());
+            // A new snapshot owns another String for the same image. The
+            // source identity is the URL and size, not its borrowed address.
+            let refreshed_url = url.to_owned();
+            assert_eq!(
+                probe_with_start(&refreshed_url, 12, 12, |_, _, _, _, _| {
+                    panic!("ready artwork cannot start another worker")
+                }),
+                Some(key)
+            );
+            assert!(probe_with_start(
+                "https://example.invalid/new.jpg",
+                12,
+                12,
+                |_, _, _, _, _| panic!("motion must still defer new artwork")
+            )
+            .is_none());
+            assert!(probe_with_start(url, 13, 12, |_, _, _, _, _| panic!(
+                "another size is a new request"
+            ))
+            .is_none());
+            assert_eq!(
+                STORE.lock().unwrap().slots.len(),
+                1,
+                "declined misses claim no slots"
+            );
+            unresident(key);
+            assert!(probe_with_start(url, 12, 12, |_, _, _, _, _| panic!(
+                "motion must not reload evicted artwork"
+            ))
+            .is_none());
+            assert!(idle());
+            reset();
+        }
     }
 
     #[test]

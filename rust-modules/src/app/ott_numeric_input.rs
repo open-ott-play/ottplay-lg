@@ -67,13 +67,15 @@ fn owner(runtime: &Runtime, app: &App, rendered: bool) -> Option<Owner> {
         if torrent { return None; }
         if !matches!(app.route(), AppArg::Player) || app.pages.surface_up() { return None; }
         let screen = bridge::player(&app.pages)?;
-        if !screen.accepts_channel_number(&app.player.session, clock::now(), lifecycle::viewer_paused()) {
+        if !screen.accepts_channel_number() {
             return None;
         }
-        let playing = runtime.playing.as_ref()?;
+        let recovery = failed_playback::ready(runtime, app);
+        let playing = runtime.playing.as_ref().or_else(||
+            recovery.then(|| failed_playback::admissible(runtime, app)).flatten())?;
         // Archive playback retains its live channel metadata but owns VOD transport keys.
         if !favorites && (playing.archive.is_some() || !guide_ui::is_live(&playing.profile, &playing.entry)) { return None; }
-        if !playing.identity.as_ref().is_some_and(|identity|
+        if !recovery && !playing.identity.as_ref().is_some_and(|identity|
             plx_media::route::playback_identity_matches(&app.player.session, identity)) { return None; }
         (app.pages.top_page()?, false)
     };
@@ -139,7 +141,7 @@ fn seek13(runtime: &mut Runtime, app: &mut App, sym: u32) -> bool {
     { return false; }
     let now = clock::now();
     let Some(page) = bridge::player_mut(&mut app.pages) else { return false; };
-    if !page.accepts_channel_number(&app.player.session, now, lifecycle::viewer_paused()) {
+    if !page.accepts_numeric_seek(&app.player.session, now, lifecycle::viewer_paused()) {
         return false;
     }
     let step = i64::from(runtime.classic_preferences.seek13_seconds()) * 1_000_000_000 * direction;

@@ -22,20 +22,44 @@ impl OttScreen {
 
     pub(super) fn remote_page_key(&self, key: u32, direction: i32) -> Option<u32> {
         let current = self.catalog_keys.iter().position(|candidate| *candidate == key)?;
-        if self.grid_active() {
-            let index = plx_ui::screen::grid_page_index(current, self.catalog_keys.len(),
-                media::columns(self.card_presentation?), 2, direction)?;
-            return self.snapshot.rows.get(index).filter(|row| row.enabled)
-                .and_then(|_| self.catalog_keys.get(index)).copied();
+        let target = if self.grid_active() {
+            plx_ui::screen::grid_page_index(current, self.catalog_keys.len(),
+                media::columns(self.card_presentation?), 2, direction)?
+        } else {
+            let selected = self.form.index_of_key(RowKey(key))?;
+            let index = self.form.table.catalogue_next(selected as i32, direction, Some(self.table_frame().h))?;
+            let target = self.form.key_at(usize::try_from(index).ok()?)?.0;
+            // A page jump stays within the catalogue, not its footer controls.
+            self.catalog_keys.iter().position(|key| *key == target)
+                .unwrap_or(if direction > 0 { self.catalog_keys.len() - 1 } else { 0 })
+        };
+        // Disabled rows remain focusable for ordinary navigation, but cannot
+        // swallow every repeated page key at the same calculated destination.
+        // Prefer the next enabled row in the requested direction; at an edge,
+        // fall back toward the current row without wrapping or moving past it.
+        let target = if direction > 0 { target.max(current) } else { target.min(current) };
+        // Installation preserves catalogue order in the form, but can move
+        // interleaved snapshot controls into a separate section. Match its
+        // actual keys in one pass instead of indexing snapshot rows or doing
+        // a linear key lookup for each disabled candidate.
+        let mut catalog = self.catalog_keys.iter().copied().enumerate().peekable();
+        let mut preferred = None;
+        let mut fallback = None;
+        for row in 0..self.form.table.n_rows() {
+            let Some(binding) = self.form.binding_at(row as usize) else { continue; };
+            let Some(&(index, key)) = catalog.peek() else { break; };
+            if binding.key.0 != key { continue; }
+            catalog.next();
+            if binding.disabled { continue; }
+            if direction > 0 {
+                if index >= target { return Some(key); }
+                if index >= current { fallback = Some(key); }
+            } else if direction < 0 {
+                if index <= target { preferred = Some(key); }
+                else if index <= current && fallback.is_none() { fallback = Some(key); }
+            } else if index == current { return Some(key); }
         }
-        let selected = self.form.index_of_key(RowKey(key))?;
-        let index = self.form.table.catalogue_next(selected as i32, direction, Some(self.table_frame().h))?;
-        let target = self.form.key_at(usize::try_from(index).ok()?)?.0;
-        // A page jump stays within the catalogue, not its footer controls.
-        let target = if self.catalog_keys.contains(&target) { target }
-            else if direction > 0 { *self.catalog_keys.last()? }
-            else { *self.catalog_keys.first()? };
-        self.form.index_of_key(RowKey(target)).and_then(|i| self.form.activate(i)).map(|_| target)
+        preferred.or(fallback)
     }
 
     pub(super) fn remote_input<H: AppLike<Memory = PageMemory>>(&mut self,

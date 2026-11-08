@@ -34,13 +34,18 @@ fn sequence(runtime: &Runtime, playing: &Playing) -> bool {
 }
 
 pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
+    if failed_playback::ready(runtime, app) {
+        let source = failed_playback::current(runtime, app)?.identity.clone()?;
+        return Some(OttPlayerOffer { source, recovery_only: true, seek_arrows: false,
+            accept: Action::OpenCatalog, guide: false });
+    }
     if runtime.playing.is_none() {
         if app.pages.surface_up() || input_policy::navigation(runtime).is_err() { return None; }
         let source = player_browse::native_identity(runtime, app)?;
         let accept = if runtime.view_selection().1 || !lifecycle::viewer_paused() {
             Action::OpenCatalog
         } else { Action::TogglePause };
-        return Some(OttPlayerOffer { source, seek_arrows: true, accept, guide: false });
+        return Some(OttPlayerOffer { source, recovery_only: false, seek_arrows: true, accept, guide: false });
     }
     let playing = playing(runtime, app)?;
     let source = playing.identity.clone()?;
@@ -55,10 +60,11 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
     } else if playing.archive.is_some() {
         Action::OpenGuide
     } else { Action::OpenCatalog };
-    Some(OttPlayerOffer { source, seek_arrows, accept, guide })
+    Some(OttPlayerOffer { source, recovery_only: false, seek_arrows, accept, guide })
 }
 
 fn action_allowed(offer: &OttPlayerOffer, action: Action) -> bool {
+    if offer.recovery_only { return matches!(action, Action::Previous | Action::Next); }
     match action {
         Action::SeekBackward | Action::SeekForward => offer.seek_arrows,
         Action::OpenGuide => offer.guide,

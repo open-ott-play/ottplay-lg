@@ -88,6 +88,199 @@ fn native_channel_rocker_steps_from_playing_item_not_browse_focus() {
     }
 }
 
+fn live_m3u_remote_app(mode: plx_machine::machine::UiMode, visible_hud: bool) -> App {
+    let mut app = continuity_catalog_app(mode);
+    let runtime = app.ott.as_mut().unwrap();
+    let profile = &mut runtime.saved.profiles.profiles[0];
+    profile.kind = ProviderKind::M3u;
+    profile.source = "https://media.invalid/live.m3u".into();
+    let profile = profile.clone();
+    runtime.provider = ProviderKind::M3u;
+    for row in &mut runtime.catalog.entries {
+        row.media = MediaLocator::Http { url: format!("https://media.invalid/{}.m3u8", row.id) };
+        row.duration_ms = None;
+    }
+    let playing = runtime.playing.as_mut().unwrap();
+    playing.profile = profile;
+    playing.entry = runtime.catalog.entries[0].clone();
+    runtime.selected = Some("b".into()); // Browse focus is not the playing channel.
+    runtime.saving = true;
+    runtime.resolver_busy = true;
+    player::SHARED.duration_ns.store(0, Ordering::Release);
+    player::TX.commit_paused(false);
+    player::swap_state_for_test(player::PlaybackState::Playing);
+    publish(&mut app);
+    assert!(plx_appkit::info_panel::live_channel(app.bridge.metadata_view()));
+    let now = app.loop_t;
+    let hud = &mut bridge::player_mut(&mut app.pages).unwrap().hud;
+    if visible_hud {
+        hud.note_fresh_press(&app.player.session, now, false);
+        hud.extend(now, 60_000);
+    } else {
+        hud.hide(false);
+    }
+    assert_eq!(hud.visible(&app.player.session, now, false), visible_hud);
+    assert!(!app.pages.surface_up());
+    app.inputs.clear();
+    app
+}
+
+fn live_m3u_rocker_case(visible_hud: bool) {
+    use plx_machine::machine::UiMode;
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for (raw, wanted) in [(300, "a"), (301, "b")] {
+            let mut app = live_m3u_remote_app(mode, visible_hud);
+            let identity = route::playback_identity(&app.player.session);
+            let owner = app.pages.top_page();
+            let seek = player::seek_pending();
+            let fr = dispatch_bytes(&mut app, crate::app::events::encode_key(0, raw, true));
+            let offer = app.bridge.ott_player_offer().expect("live M3U has a fullscreen action offer");
+            assert!(!offer.seek_arrows && offer.guide, "live channel arrows must not borrow VOD seek authority");
+            finish_input(&mut app, &fr);
+            let runtime = app.ott.as_ref().unwrap();
+            assert_eq!(queued(&app), Some(wanted), "{mode:?}, visible HUD={visible_hud}, CH code={raw}");
+            assert_eq!(runtime.resolver_next.as_ref().unwrap().entry.as_ref().unwrap().id, wanted);
+            assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
+            assert_eq!(player::seek_pending(), seek, "channel selection must not enqueue a seek");
+            assert_eq!(player::duration_ns(), 0, "a finite timeline is not required");
+            assert_eq!(route::playback_identity(&app.player.session), identity);
+            assert_eq!(app.pages.top_page(), owner);
+            assert!(app.adapters.player.is_live() && app.player.pending_exit.is_none());
+            let generation = runtime.play_generation;
+            native_edge(&mut app, 0, raw, Edge::Repeat);
+            native_edge(&mut app, 0, raw, Edge::Up);
+            assert_eq!(queued(&app), Some(wanted));
+            assert_eq!(app.ott.as_ref().unwrap().play_generation, generation,
+                "repeat/release cannot replace an opening channel");
+        }
+    }
+}
+
+#[test]
+fn native_m3u_live_channel_rocker_with_hidden_hud_needs_no_duration() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    live_m3u_rocker_case(false);
+}
+
+#[test]
+fn native_m3u_live_channel_rocker_with_visible_hud_needs_no_duration() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    live_m3u_rocker_case(true);
+}
+
+fn fail_live_m3u(app: &mut App) {
+    let mut runtime = app.ott.take().unwrap();
+    let identity = runtime.playing.as_ref().unwrap().identity.clone();
+    runtime.playback_failure.admitted(runtime.play_generation, identity);
+    runtime.playing.as_mut().unwrap().advance_on_failure = false;
+    player::swap_state_for_test(player::PlaybackState::Error);
+    runtime.reconcile_failure(app);
+    assert!(runtime.playing.is_none() && !app.adapters.player.is_live());
+    assert!(!bridge::player(&app.pages).unwrap().scrub.is_live(), "terminal cleanup retires stale gesture ownership");
+    runtime.reconcile_owner(app);
+    assert!(failed_playback::admissible(&runtime, app).is_some());
+    assert!(runtime.playback_failure.snapshot().is_some());
+    assert_eq!(state(app, &runtime)["playback"]["state"], "error");
+    app.ott = Some(runtime);
+}
+
+#[test]
+fn native_m3u_failed_channel_rocker_keeps_exact_list_authority_after_cleanup() {
+    use plx_machine::machine::UiMode;
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for (raw, wanted) in [(300, "a"), (301, "b")] {
+            let mut app = live_m3u_remote_app(mode, true);
+            bridge::player_mut(&mut app.pages).unwrap().scrub.reveal = true;
+            fail_live_m3u(&mut app);
+            let observation = json!(app.ott.as_ref().unwrap().playback_failure.snapshot());
+            // EPG/art/title publication does not change the occurrence's media binding.
+            app.ott.as_mut().unwrap().catalog.entries[0].description = "Updated programme".into();
+            app.ott.as_mut().unwrap().catalog_revision += 1;
+            let fr = dispatch_bytes(&mut app, crate::app::events::encode_key(0, raw, true));
+            assert!(app.bridge.ott_player_offer().unwrap().recovery_only);
+            assert_eq!(json!(app.ott.as_ref().unwrap().playback_failure.snapshot()), observation);
+            finish_input(&mut app, &fr);
+            assert_eq!(queued(&app), Some(wanted), "{mode:?}: failed channel CH {raw}");
+            let runtime = app.ott.as_ref().unwrap();
+            assert!(runtime.failed_playback.is_none() && runtime.playback_failure.snapshot().is_none());
+            assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
+            assert_eq!(player::seek_pending(), -1);
+        }
+    }
+}
+
+#[test]
+fn failed_channel_recovery_rechecks_source_view_and_exact_media_before_dispatch() {
+    use plx_screens::registry::{OttPlayerAction as Action, OttPlayerRequest};
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for change in 0..7 {
+        let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Modern, false);
+        fail_live_m3u(&mut app);
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        let request = OttPlayerRequest { owner: app.pages.top_page().unwrap(),
+            source: app.bridge.ott_player_offer().unwrap().source.clone(), action: Action::Next };
+        if change == 0 {
+            for action in [Action::SeekForward, Action::TogglePause, Action::OpenMenu, Action::OpenCatalog] {
+                assert!(crate::app::ott_runtime::remote_player_action(&mut app,
+                    OttPlayerRequest { action, ..request.clone() }).is_err(),
+                    "a retained failure grants no transport or menu authority");
+            }
+        }
+        let runtime = app.ott.as_mut().unwrap();
+        match change {
+            0 => runtime.saved.profiles.profiles[0].source = "https://other.invalid/list.m3u".into(),
+            1 => runtime.generation += 1,
+            2 => runtime.saved.category = "Another list".into(),
+            3 => runtime.playback_epoch += 1,
+            4 => runtime.catalog.entries[0].media = MediaLocator::Http { url: "https://other.invalid/replaced.ts".into() },
+            5 => runtime.failed_playback = None,
+            _ => app.adapters.player.install(player::engine::engine_after_reload_for_test()),
+        }
+        assert!(crate::app::ott_runtime::remote_player_action(&mut app, request).is_err(), "change {change}");
+        let runtime = app.ott.as_ref().unwrap();
+        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+        assert_eq!(player::seek_pending(), -1);
+    }
+}
+
+#[test]
+fn native_m3u_number_one_uses_live_channel_owner_across_hud_and_failure() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        for visible_hud in [false, true] {
+            for failed in [false, true] {
+                let mut app = live_m3u_remote_app(mode, visible_hud);
+                if failed { fail_live_m3u(&mut app); }
+                let now = app.loop_t;
+                let hud = &mut bridge::player_mut(&mut app.pages).unwrap().hud;
+                if visible_hud {
+                    hud.note_fresh_press(&app.player.session, now, false);
+                    hud.extend(now, 60_000);
+                } else {
+                    hud.hide(false);
+                }
+                assert_eq!(hud.visible(&app.player.session, now, false), visible_hud);
+                app.ott.as_mut().unwrap().saving = false;
+                native_edge(&mut app, u32::from(b'1'), 0, Edge::Down);
+                native_edge(&mut app, u32::from(b'1'), 0, Edge::Up);
+                assert!(queued(&app).is_none(), "number entry waits for the multi-digit deadline");
+                let mut runtime = app.ott.take().unwrap();
+                let deadline = runtime.now_ms() + 2_001;
+                crate::app::ott_runtime::numeric_input::tick(&mut runtime, &mut app, deadline);
+                app.ott = Some(runtime);
+                assert_eq!(queued(&app), Some("c"), "{mode:?}, HUD={visible_hud}, failed={failed}: 1 selects first channel, not VOD seek");
+                assert_eq!(player::seek_pending(), -1);
+            }
+        }
+    }
+}
+
 #[test]
 fn native_blue_opens_categories_and_back_keeps_the_same_paused_decoder() {
     let _lock = plx_base::testlock::serial();

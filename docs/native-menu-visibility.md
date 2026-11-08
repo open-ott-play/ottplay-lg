@@ -12,7 +12,7 @@ These are installation-wide menu choices, separate from the provider-scoped chan
 - **OTT Settings:** Audio tracks and Subtitles and appearance. Hiding these menu entries does not disable the audio/subtitle controls already available in the player HUD or the track panel.
 - **Player overflow (`…`):** Playback quality, Playback speed, and Stats for nerds. Capability checks still apply. An explicit playback-failure recovery action can open the quality page even if its normal overflow entry is hidden.
 
-Picture/Zoom, Picture-in-Picture and archive actions are outside these visibility toggles. Native Picture/Zoom entries are offered only when the current playback exposes the corresponding capability. Main application navigation tabs, playback transport controls and track-panel tabs are outside these menu choices. The OTT Search and Description header shortcuts follow their matching menu choices.
+Picture/Zoom, Picture-in-Picture and archive actions are outside these visibility toggles. Native Picture/Zoom entries are offered only when the current playback exposes the corresponding capability. Main application navigation tabs, playback transport controls and track-panel tabs are outside these menu choices. The OTT Search, Add/remove Favorite and Description header shortcuts follow their matching menu choices. See [playback navigation](playback-navigation.md) for their placement and remote shortcuts.
 
 ## Remote settings
 

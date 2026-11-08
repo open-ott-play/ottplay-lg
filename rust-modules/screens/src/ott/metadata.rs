@@ -101,6 +101,19 @@ pub(super) fn preview_rect(row:&OttRow,status:&str,measure:&dyn Measure,layout:R
     (measured.body.h>=0.0).then_some(rect)
 }
 
+fn art_frame(frame: Rect, image: widgets::ArtImage) -> Rect {
+    plx_appkit::scrub_preview::fit_rect(frame, image.w, image.h)
+}
+
+/// Details show the complete asset, whether it is a channel logo or a poster.
+/// Resolve once through the ordinary cache and arrival animation; the fitted
+/// image keeps the frame's centre, so its motion sample remains the same.
+pub(super) fn paint_art(p: Painter, frame: Rect, art: Art<'_>, radius: f32) {
+    let image = widgets::resolve_card_art(p, frame, &art);
+    let fitted = art_frame(frame, image);
+    widgets::card_named_led(p, fitted, art, None, radius, false, 1.0, 0.0, Some(image));
+}
+
 pub(super) fn paint(p:Painter,measure:&dyn Measure,row:&OttRow,status:&str,status_working:bool,reading:bool,cards:bool,layout:RouteLayout,preview:Option<Rect>,now:Option<i64>){
     let area=layout.narrative;
     let flow=flow(row,status,measure,layout,preview,now);
@@ -147,7 +160,7 @@ pub(super) fn paint(p:Painter,measure:&dyn Measure,row:&OttRow,status:&str,statu
             OttPoster::Http{url}=>Art::Http{url,res:(250,375)},
             OttPoster::Local{key}=>Art::Local{key},
         };
-        widgets::card_named(p,frame,art,None,theme::CARD_RING_RAD,false,1.0,0.0);
+        paint_art(p,frame,art,theme::CARD_RING_RAD);
         body.x+=frame.w+theme::space::LG;body.w-=frame.w+theme::space::LG;
     }
     let line_h=TextView::new(description,theme::size::LABEL,plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY)).with_measure(measure).line_h();
@@ -160,4 +173,41 @@ pub(super) fn paint(p:Painter,measure:&dyn Measure,row:&OttRow,status:&str,statu
         else {msg::ott_description_hint()};
     TextView::new(hint,theme::size::CAPTION,plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_TERTIARY)).with_measure(measure)
         .draw(p,Rect::new(area.x,layout.action.y,area.w,layout.action.h));
+}
+
+#[cfg(test)]
+mod artwork_tests {
+    use super::*;
+
+    #[test]
+    fn details_preserve_complete_wide_square_and_tall_art_inside_full_and_clipped_frames() {
+        let key = plx_machine::machine::PosterKey(1);
+        let arts = [Art::Http { url: "https://example.invalid/logo.png", res: (250, 375) },
+            Art::Thumb { sid: 1, key: "/poster", res: (250, 375) }, Art::Local { key: &key }];
+        for frame in [Rect::new(96.0, 350.0, 250.0, 375.0),
+            Rect::new(0.0, 400.0, 120.0, 180.0), Rect::new(96.0, 850.0, 250.0, 80.0)] {
+            for (w, h) in [(400.0, 100.0), (100.0, 100.0), (100.0, 400.0)] {
+                let image = widgets::ArtImage { tex: 1, w, h, shown: 1.0 };
+                let fitted = art_frame(frame, image);
+                assert!(fitted.x >= frame.x - 0.001 && fitted.y >= frame.y - 0.001);
+                assert!(fitted.x + fitted.w <= frame.x + frame.w + 0.001);
+                assert!(fitted.y + fitted.h <= frame.y + frame.h + 0.001);
+                assert!((fitted.cx() - frame.cx()).abs() < 0.001);
+                assert!((fitted.cy() - frame.cy()).abs() < 0.001);
+                assert!((fitted.w / fitted.h - w / h).abs() < 0.001);
+                for art in &arts {
+                    assert!(widgets::art_uv(art, w, h, fitted).into_iter()
+                        .zip(plx_gfx::gfx::UV_FULL).all(|(actual, full)| (actual - full).abs() < 0.000001),
+                        "details must retain every edge of the image");
+                }
+            }
+            assert_eq!(art_frame(frame, widgets::ArtImage::NONE), frame,
+                "unloaded art retains the existing bounded placeholder");
+        }
+        let poster = Rect::new(0.0, 0.0, 250.0, 375.0);
+        let logo = widgets::ArtImage { tex: 1, w: 400.0, h: 100.0, shown: 1.0 };
+        assert_eq!(art_frame(poster, logo), Rect::new(0.0, 156.25, 250.0, 62.5));
+        assert!(widgets::art_uv(&arts[0], logo.w, logo.h, poster)[2] < 1.0,
+            "ordinary grid cards still use their established cover crop");
+    }
 }
