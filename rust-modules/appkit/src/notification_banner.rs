@@ -68,6 +68,7 @@ struct Phase {
     heading: f32,
     surface: f32,
     text: f32,
+    ring: f32,
 }
 
 fn progress(elapsed: u64, duration: u64) -> f32 {
@@ -78,7 +79,7 @@ fn smooth(x: f32) -> f32 { x * x * (3.0 - 2.0 * x) }
 fn phase(b: &Banner, now: u64, reduced_motion: bool) -> Option<Phase> {
     if !active(b, now) { return None; }
     if reduced_motion {
-        return Some(Phase { slide: 0.0, aperture: 1.0, heading: 1.0, surface: 1.0, text: 1.0 });
+        return Some(Phase { slide: 0.0, aperture: 1.0, heading: 1.0, surface: 1.0, text: 1.0, ring: 0.0 });
     }
     let age = now - b.started_ms;
     let lifetime = b.expires_ms - b.started_ms;
@@ -92,6 +93,9 @@ fn phase(b: &Banner, now: u64, reduced_motion: bool) -> Option<Phase> {
         surface: (0.04 + 0.96 * enter) * (1.0 - 0.82 * dim),
         // Never apply the long surface fade to readable text.
         text: enter * (1.0 - out),
+        // A one-second lap keeps the notification's activity visible without adding motion to its
+        // layout. This is painted as a segmented circle around the severity glyph below.
+        ring: (age % 1_000) as f32 / 1_000.0,
     })
 }
 
@@ -219,9 +223,9 @@ fn draw_text(b: &Banner, state: Phase, top: f32, opacity: f32, p: Painter, measu
     let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 0.70 };
     let surface = p.alpha(state.surface * (opacity + 0.08).min(1.0) * 0.8);
     surface.rrect(rect, 20.0, 20.0, [0.09, 0.11, 0.15, 1.0]);
-    surface.rrect(Rect::new(rect.x, rect.y + 16.0, 3.0, height - 32.0), 1.5, 1.5, accent);
     let icon = Rect::new(rect.x + PAD, rect.y + PAD, ICON, ICON);
     surface.rrect(icon, 14.0, 14.0, [accent[0] * 0.2, accent[1] * 0.2, accent[2] * 0.2, 1.0]);
+    draw_activity_ring(surface, icon, accent, state.ring, state.text);
     icons::draw(surface, if b.severity == Severity::Info { Icon::Info } else { Icon::Alert },
         Rect::new(icon.x + 9.0, icon.y + 9.0, 24.0, 24.0), accent);
     let x = icon.x + ICON + GAP;
@@ -237,6 +241,29 @@ fn draw_text(b: &Banner, state: Phase, top: f32, opacity: f32, p: Painter, measu
     message.draw(text, Rect::new(x, y + shown_heading, TEXT_WIDTH, message_h));
     p.clip_clear();
     height
+}
+
+/// Small segmented circular activity mark. The painter intentionally has no arc primitive; twelve
+/// rounded segments give the banner a device-independent circle without allocating a texture or
+/// disturbing the notification's card geometry. The severity colour and glyph continue to identify
+/// the alert type, while this ring communicates that the banner is active.
+fn draw_activity_ring(p: Painter, icon: Rect, color: [f32; 4], phase: f32, alpha: f32) {
+    const SEGMENTS: usize = 12;
+    const RADIUS: f32 = 24.0;
+    const DOT: f32 = 3.2;
+    let center_x = icon.x + icon.w * 0.5;
+    let center_y = icon.y + icon.h * 0.5;
+    let first = ((phase.rem_euclid(1.0) * SEGMENTS as f32).floor() as usize) % SEGMENTS;
+    for i in 0..SEGMENTS {
+        let angle = (i as f32 / SEGMENTS as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let x = center_x + angle.cos() * RADIUS - DOT * 0.5;
+        let y = center_y + angle.sin() * RADIUS - DOT * 0.5;
+        let trail = (i + SEGMENTS - first) % SEGMENTS;
+        let strength = (1.0 - trail as f32 / SEGMENTS as f32) * 0.75 + 0.25;
+        let mut ink = color;
+        ink[3] *= alpha.clamp(0.0, 1.0) * strength;
+        p.rrect(Rect::new(x, y, DOT, DOT), DOT * 0.5, DOT * 0.5, ink);
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +308,27 @@ mod tests {
         assert_eq!(after.text, 1.0);
         assert_eq!(after.heading, 0.0);
         assert!(phase(&b, 2300, false).unwrap().heading > 0.0);
+    }
+
+    #[test]
+    fn activity_indicator_is_a_full_circle_and_advances() {
+        let icon = Rect::new(20.0, 20.0, ICON, ICON);
+        let (mut left, mut top, mut right, mut bottom) =
+            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for i in 0..12 {
+            let angle = i as f32 / 12.0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let x = icon.x + icon.w * 0.5 + angle.cos() * 24.0 - 1.6;
+            let y = icon.y + icon.h * 0.5 + angle.sin() * 24.0 - 1.6;
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x + 3.2);
+            bottom = bottom.max(y + 3.2);
+        }
+        assert!(right - left >= 45.0 && bottom - top >= 45.0,
+            "segments should surround the glyph: {left},{top}..{right},{bottom}");
+        let before = phase(&banner(), 1_001, false).unwrap().ring;
+        let after = phase(&banner(), 1_251, false).unwrap().ring;
+        assert!(after > before, "ring phase must advance while the banner is visible");
     }
 
     #[test]

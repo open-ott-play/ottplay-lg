@@ -510,7 +510,7 @@ impl OttScreen {
                 // Reuse navigation memory's progressive restore and explicit-input
                 // cancellation; the temporary first row is not a new user choice.
                 Some(Memory { page_id: snapshot.page_id.clone(), source: (!self.classic_mode).then(|| snapshot.shelf_context.clone()).flatten(), shelves: Vec::new(), focus: Some(format!("item:{id}")),
-                    selected: Some(id.clone()), scroll: 0.0, keys: self.keys.clone(), next_key: self.next_key })
+                    selected: Some(id.clone()), table_scroll: 0.0, scroll: 0.0, keys: self.keys.clone(), next_key: self.next_key })
             });
         if let Some(memory) = &restore {
             self.keys = memory.keys.clone();
@@ -722,7 +722,7 @@ impl OttScreen {
             .and_then(|_| self.media.and_then(|index| snapshot.rows.get(index)))
             .map(|row| format!("item:{}", row.id));
         plx_base::diag::spans::span("ott_table", || {
-            if let Some(memory) = &restore { self.form.open(form, restored_body.as_ref().or(memory.focus.as_ref()).or(Some(&selected))); }
+            if let Some(memory) = &restore { self.form.restore(form, restored_body.as_ref().or(memory.focus.as_ref()).or(Some(&selected)), memory.table_scroll); }
             else if same_page {
                 if let Some((_, focus)) = return_to { self.form.refresh_with(form, focus, Some(&selected)); }
                 else { self.form.refresh_with(form, None, Some(&selected)); }
@@ -918,6 +918,15 @@ impl OttScreen {
         Some(self.header_cache.get(key.finish(), ||
             navigation::header(measure, Rect::FULL.w, browse, search,
                 favorite.as_ref().map(|(key, label)| (*key, label.as_str())), description, self.browse, &caption)))
+    }
+
+    fn modern_footer(&self, measure: &dyn plx_machine::machine::Measure) -> Option<plx_ui::page_header::HeaderRow> {
+        if self.classic_mode || self.browse || self.reading || self.editor.is_some() || self.snapshot.rows.is_empty() { return None; }
+        let now = self.guide_clock.now_for(self.media.and_then(|index| self.snapshot.rows.get(index)).and_then(|row| row.guide.as_ref()));
+        let actions = navigation::available_at(&self.snapshot, self.media, self.menu_visibility, now);
+        let header_keys: Vec<_> = self.header(measure).map_or_else(Vec::new,
+            |header| header.stops.iter().map(|(key, _)| *key).collect());
+        navigation::modern_footer(measure, Rect::FULL.w, &actions, &self.keys, &self.snapshot, &header_keys)
     }
 
     /// Update only the row whose guide clock changed (label and progress interval); never rebuild or scan
@@ -1198,9 +1207,9 @@ impl OttScreen {
         if self.editor.is_none() && !self.reading && !favorite {
             if self.keys.get("nav:browse") == Some(&key) { self.open_browse(fx); return; }
             if !self.classic_mode && !self.browse {
-                if let Some(id) = ["nav:search", "nav:favorite", "nav:description"].into_iter()
-                    .find(|id| self.keys.get(*id) == Some(&key)) {
-                    self.activate_context(id, fx);
+                if let Some(id) = self.keys.iter().find(|(id, elem)| **elem == key && navigation::is_context_control(id))
+                    .map(|(id, _)| id.clone()) {
+                    self.activate_context(&id, fx);
                     return;
                 }
             }
@@ -1445,7 +1454,8 @@ impl OttScreen {
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { to, by, .. } => {
-                let header_focus = self.header(cx.measure).is_some_and(|header| header.stops.iter().any(|(key, _)| *key == to.elem));
+                let header_focus = self.header(cx.measure).is_some_and(|header| header.stops.iter().any(|(key, _)| *key == to.elem))
+                    || self.modern_footer(cx.measure).is_some_and(|footer| footer.stops.iter().any(|(key, _)| *key == to.elem));
                 if matches!(by, plx_ui::screen::By::Dir | plx_ui::screen::By::Pointer) {
                     self.search_return.pending = None;
                     if self.snapshot.page_id != "actions" { self.search_return.from_actions = None; }
@@ -1555,12 +1565,16 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
                 out.push(group);
             }
         }
+        if let Some(footer) = self.modern_footer(cx.measure) {
+            if let Some(group) = footer.focus(self.entry, navigation::FOOTER_GROUP, (0.0, 0.0), Rect::FULL).group_spec() { out.push(group); }
+        }
     }
     fn group_of(&self, key: &u32, cx: &Cx<'_, H>) -> Option<GroupId> {
         if let Some(group) = self.exit.prompt.group_of(*key) { return group; }
         if self.header(cx.measure).is_some_and(|header| header.stops.iter().any(|(elem, _)| elem == key)) {
             return Some(navigation::GROUP);
         }
+        if self.modern_footer(cx.measure).is_some_and(|footer| footer.stops.iter().any(|(elem, _)| elem == key)) { return Some(navigation::FOOTER_GROUP); }
         if self.reading { Focusable::<H>::group_of(&self.document_focus(), key, cx) } else if self.grid_active() { Focusable::<H>::group_of(&self.grid_view(), key, cx) } else { Focusable::<H>::group_of(&self.view(cx.measure), key, cx) }
     }
     fn press_kind(&self, key: &u32, _cx: &Cx<'_, H>) -> Option<ElemKind> {
@@ -1575,12 +1589,19 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
             let focus = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip());
             if focus.contains(key.elem) { return focus.neighbour(key, dir); }
         }
+        if let Some(footer) = self.modern_footer(cx.measure) {
+            let focus = footer.focus(self.entry, navigation::FOOTER_GROUP, (0.0, 0.0), Rect::FULL);
+            if focus.contains(key.elem) { return focus.neighbour(key, dir); }
+        }
         if self.reading { Focusable::<H>::neighbour(&self.document_focus(), key, dir, cx) } else if self.grid_active() { Focusable::<H>::neighbour(&self.grid_view(), key, dir, cx) } else { Focusable::<H>::neighbour(&self.view(cx.measure), key, dir, cx) }
     }
     fn place(&self, key: &u32, cx: &Cx<'_, H>, at: At) -> Option<Placed> {
         if let Some(placed) = self.exit.prompt.place(*key, cx.measure) { return placed; }
         if let Some(header) = self.header(cx.measure) {
             if let Some(placed) = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).place(*key, at) { return Some(placed); }
+        }
+        if let Some(footer) = self.modern_footer(cx.measure) {
+            if let Some(placed) = footer.focus(self.entry, navigation::FOOTER_GROUP, (0.0, 0.0), Rect::FULL).place(*key, at) { return Some(placed); }
         }
         if self.reading { Focusable::<H>::place(&self.document_focus(), key, cx, at) } else if self.grid_active() { Focusable::<H>::place(&self.grid_view(), key, cx, at) } else { Focusable::<H>::place(&self.view(cx.measure), key, cx, at) }
     }
@@ -1591,6 +1612,9 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
         if let Some(header) = self.header(cx.measure) {
             if let Some(key) = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).reconcile(want) { return key; }
         }
+        if let Some(footer) = self.modern_footer(cx.measure) {
+            if let Some(key) = footer.focus(self.entry, navigation::FOOTER_GROUP, (0.0, 0.0), Rect::FULL).reconcile(want) { return key; }
+        }
         if self.reading { Focusable::<H>::reconcile(&self.document_focus(), want, cx) } else if self.grid_active() { Focusable::<H>::reconcile(&self.grid_view(), want, cx) } else { Focusable::<H>::reconcile(&self.view(cx.measure), want, cx) }
     }
     fn seat(&self, group: GroupId, from: Placed, cx: &Cx<'_, H>) -> FocusKey<u32> {
@@ -1600,6 +1624,11 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
         if group == navigation::GROUP {
             if let Some(header) = self.header(cx.measure) {
                 return header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).seat(from);
+            }
+        }
+        if group == navigation::FOOTER_GROUP {
+            if let Some(footer) = self.modern_footer(cx.measure) {
+                return footer.focus(self.entry, navigation::FOOTER_GROUP, (0.0, 0.0), Rect::FULL).seat(from);
             }
         }
         if self.reading { Focusable::<H>::seat(&self.document_focus(), group, from, cx) } else if self.grid_active() { Focusable::<H>::seat(&self.grid_view(), group, from, cx) } else { Focusable::<H>::seat(&self.view(cx.measure), group, from, cx) }
@@ -1763,6 +1792,17 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
                     }
                 }
             }
+            if let Some(footer) = self.modern_footer(frame.measure) {
+                footer.draw(frame.painter, 0.0, &TabStrip::new(), 0.0, None);
+                if frame.records_stops() {
+                    let focus = footer.focus(self.entry, navigation::FOOTER_GROUP, (0.0, 0.0), Rect::FULL);
+                    for &(elem, _) in &footer.stops {
+                        let Some(placed) = focus.place(elem, At::Drawn) else { continue };
+                        frame.stop(frame.painter, Stop { key: FocusKey { entry: self.entry, elem }, rect: placed.rect,
+                            rest_rect: placed.rest_rect, clip: placed.clip, hover: Hover::Focus, activate: Activate::Press });
+                    }
+                }
+            }
             if self.classic_mode && self.snapshot.page_id != "loading" && (self.editor.is_some() || self.browse || self.media.is_none()) {
                 let selection_copy;
                 let copy = if self.form.table.is_classic_choices() && self.editor.is_none() && !self.browse && self.status.is_empty() {
@@ -1790,8 +1830,11 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
         if self.exit.prompt.visible() { return; }
         if self.editor.is_none() && !self.reading {
             let first = if self.grid_active() { self.shelves.first().map_or(GroupId(0), |shelf| shelf.group) } else { GroupId(0) };
+            let last = if self.grid_active() { self.shelves.last().map_or(first, |shelf| shelf.group) } else { first };
             out.push(Link { from: first, dir: Dir::Up, to: navigation::GROUP });
             out.push(Link { from: navigation::GROUP, dir: Dir::Down, to: first });
+            out.push(Link { from: last, dir: Dir::Down, to: navigation::FOOTER_GROUP });
+            out.push(Link { from: navigation::FOOTER_GROUP, dir: Dir::Up, to: last });
             if self.grid_active() {
                 for pair in self.shelves.windows(2) {
                     out.push(Link { from: pair[0].group, dir: Dir::Down, to: pair[1].group });

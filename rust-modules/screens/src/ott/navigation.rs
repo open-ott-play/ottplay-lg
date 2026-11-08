@@ -10,6 +10,30 @@ use super::{FormAction, OttAction, OttView};
 use plx_appkit::menu_visibility::Visibility;
 
 pub(super) const GROUP: GroupId = GroupId(1);
+pub(super) const FOOTER_GROUP: GroupId = GroupId(2);
+
+/// Modern channel/category pages expose the same contextual actions at the bottom edge.
+pub(super) fn modern_footer(measure: &dyn Measure, width: f32, actions: &[Action],
+    keys: &std::collections::HashMap<String, u32>, snapshot: &OttView, header_keys: &[u32]) -> Option<HeaderRow> {
+    let mut controls: Vec<(u32, String)> = if matches!(snapshot.page_id.split(':').next(), Some("channels" | "favorites")) {
+        classic_controls(snapshot, actions, keys)
+    } else if snapshot.page_id.split(':').next() == Some("categories") {
+        ["nav:categories", "nav:actions", "nav:description", "nav:search"].iter().filter_map(|id| {
+            let action = actions.iter().find(|action| action.id == *id)?;
+            Some((*keys.get(*id)?, action.row.label.clone()))
+        }).collect()
+    } else { return None; };
+    controls.retain(|(key, _)| !header_keys.contains(key));
+    if controls.is_empty() { return None; }
+    let left = controls.iter().map(|(_, label)| HeaderItem { label: label.clone(), focusable: true, ..Default::default() }).collect();
+    let page = PageHeader::new(PageHeaderSpec { left, ..Default::default() }, &[], measure);
+    let mut layout = page.layout(width, measure);
+    let top = (Rect::FULL.h - page_header::HEIGHT - page_header::TOP).max(page_header::TOP);
+    for item in &mut layout.items { item.text.y = top; item.plate.y = top; }
+    layout.glyph = None;
+    let stops = controls.iter().enumerate().map(|(index, (key, _))| (*key, index)).collect();
+    Some(HeaderRow::new(page, layout, stops))
+}
 
 pub(super) fn header(measure: &dyn Measure, width: f32, browse: u32, search: Option<u32>,
     favorite: Option<(u32, &str)>, description: Option<u32>, open: bool, caption: &str) -> HeaderRow {

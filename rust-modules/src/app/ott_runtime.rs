@@ -3452,6 +3452,11 @@ impl Runtime {
                         };
                         (plx_media::ff::ExternalSource::Http(resolved.url), resolved.lease)
                     };
+                    if profile.kind == ProviderKind::M3u && archive.is_none()
+                        && preplay::is_hls_source(&source)
+                    {
+                        reporter.live_hls();
+                    }
                     reporter.inspect(|| vportal_quality::inspect(source, lease, &cancel))?
                 };
                 if cancel.load(Ordering::Relaxed) {
