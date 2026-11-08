@@ -355,6 +355,27 @@ pub(super) fn fetch_until(url: &str, owner: &mut Owner<'_>, deadline: Instant)
     ))
 }
 
+/// Keep the existing admission rule and expose only fixed codec-pair labels.
+/// Unknown probe strings must never carry source text into a player error.
+fn codec_refusal(video: &str, audio: &str) -> Option<&'static str> {
+    Some(match (video, audio) {
+        ("h264", "" | "aac") => return None,
+        ("hevc", "") => "Native HLS does not support HEVC video without audio",
+        ("hevc", "aac") => "Native HLS does not support HEVC video with AAC audio",
+        ("hevc", "ac3") => "Native HLS does not support HEVC video with AC-3 audio",
+        ("hevc", "eac3") => "Native HLS does not support HEVC video with E-AC-3 audio",
+        ("hevc", "mp2") => "Native HLS does not support HEVC video with MP2 audio",
+        ("h264", "ac3") => "Native HLS does not support H.264 video with AC-3 audio",
+        ("h264", "eac3") => "Native HLS does not support H.264 video with E-AC-3 audio",
+        ("h264", "mp2") => "Native HLS does not support H.264 video with MP2 audio",
+        ("h264", "mp3") => "Native HLS does not support H.264 video with MP3 audio",
+        ("mpeg2video", "aac") => "Native HLS does not support MPEG-2 video with AAC audio",
+        ("mpeg2video", "mp2") => "Native HLS does not support MPEG-2 video with MP2 audio",
+        ("mpeg2video", "ac3") => "Native HLS does not support MPEG-2 video with AC-3 audio",
+        _ => "Native HLS requires H.264 video and AAC audio",
+    })
+}
+
 pub(super) fn inspect(
     url: &str,
     cancelled: Arc<AtomicBool>,
@@ -388,8 +409,8 @@ pub(super) fn inspect(
                     segment.inner.resource.path
                 );
                 let mut info = super::inspect::raw(&ExternalSource::Http(url), cancelled)?;
-                if info.video_codec != "h264" || (!info.audio_codec.is_empty() && info.audio_codec != "aac") {
-                    return Err("Native HLS requires H.264 video and AAC audio");
+                if let Some(reason) = codec_refusal(&info.video_codec, &info.audio_codec) {
+                    return Err(reason);
                 }
                 // This table describes one segment, not all variants/tracks in
                 // the presentation. Keep its rows for the existing manual menu.
@@ -548,6 +569,43 @@ fn seek_start(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codec_diagnostics_preserve_the_existing_admission_rule() {
+        for video in ["h264", "hevc", "mpeg2video", "H264", "", "https://private.invalid/source"] {
+            for audio in ["", "aac", "ac3", "eac3", "mp2", "mp3", "opus", "AAC"] {
+                let previously_admitted = video == "h264" && (audio.is_empty() || audio == "aac");
+                assert_eq!(codec_refusal(video, audio).is_none(), previously_admitted);
+            }
+        }
+    }
+
+    #[test]
+    fn codec_diagnostics_name_known_rejected_pairs_without_echoing_unknown_values() {
+        for (video, audio, label) in [
+            ("hevc", "", "HEVC video without audio"),
+            ("hevc", "aac", "HEVC video with AAC audio"),
+            ("hevc", "ac3", "HEVC video with AC-3 audio"),
+            ("hevc", "eac3", "HEVC video with E-AC-3 audio"),
+            ("hevc", "mp2", "HEVC video with MP2 audio"),
+            ("h264", "ac3", "H.264 video with AC-3 audio"),
+            ("h264", "eac3", "H.264 video with E-AC-3 audio"),
+            ("h264", "mp2", "H.264 video with MP2 audio"),
+            ("h264", "mp3", "H.264 video with MP3 audio"),
+            ("mpeg2video", "aac", "MPEG-2 video with AAC audio"),
+            ("mpeg2video", "mp2", "MPEG-2 video with MP2 audio"),
+            ("mpeg2video", "ac3", "MPEG-2 video with AC-3 audio"),
+        ] {
+            assert_eq!(codec_refusal(video, audio).unwrap(), format!("Native HLS does not support {label}"));
+        }
+        for (video, audio) in [
+            ("h264", "https://private.invalid/source?token=private"),
+            ("https://private.invalid/source?token=private", "aac"),
+            ("hevc", "untrusted\ntext"), ("vp9", "aac"), ("hevc", "opus"),
+        ] {
+            assert_eq!(codec_refusal(video, audio), Some("Native HLS requires H.264 video and AAC audio"));
+        }
+    }
     #[test]
     fn separate_parser_supports_variants_and_cross_origin_without_credentials() {
         let p=parse("https://a.invalid:443/master.m3u8","#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100,CODECS=\"avc1.64001f,mp4a.40.2\"\nhttps://b.invalid/low.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200\nhigh.m3u8").unwrap();
