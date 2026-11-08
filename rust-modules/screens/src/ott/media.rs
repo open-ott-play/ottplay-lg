@@ -423,6 +423,7 @@ pub(super) fn status(view: &OttView) -> String {
     // placeholder-exempt: copy builder only; note_status accounts at each visible status paint.
     use plx_platform::i18n::msg;
     let Some(progress) = view.catalog_progress else { return view.status.clone(); };
+    if progress.complete && !progress.loading { return view.status.clone(); }
     let loaded = i64::try_from(progress.loaded).unwrap_or(i64::MAX);
     let count = match progress.total.filter(|total| *total >= progress.loaded) {
         Some(total) => msg::ott_loaded_total(loaded, i64::try_from(total).unwrap_or(i64::MAX)),

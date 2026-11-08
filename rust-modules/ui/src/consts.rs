@@ -268,10 +268,12 @@ pub enum RemoteButton {
 /// an unrelated raw scancode. Physical Info is deliberately not guessed.
 pub fn remote_button(sym: c_uint, wcode: c_uint) -> Option<RemoteButton> {
     if classify(sym, wcode) != Key::Other { return None; }
-    if sym == SDLK_PAGEUP || wcode == WCODE_CH_UP_KEY {
+    // Some webOS native input paths provide only the scancode and leave `sym`
+    // empty. PageUp/PageDown are the same stable SDL scancodes in that form.
+    if sym == SDLK_PAGEUP || matches!(wcode, 75 | WCODE_CH_UP_KEY) {
         return Some(RemoteButton::ChannelUp);
     }
-    if sym == SDLK_PAGEDOWN || wcode == WCODE_CH_DOWN_KEY {
+    if sym == SDLK_PAGEDOWN || matches!(wcode, 78 | WCODE_CH_DOWN_KEY) {
         return Some(RemoteButton::ChannelDown);
     }
     Some(match wcode {
@@ -473,10 +475,10 @@ mod canonical_input_tests {
 /// [`is_bound`] is the predicate that answers that question.
 #[inline]
 pub fn page_dir(sym: c_uint, wcode: c_uint) -> Option<c_int> {
-    if sym == SDLK_PAGEUP || wcode == WCODE_CH_UP_KEY {
+    if sym == SDLK_PAGEUP || matches!(wcode, 75 | WCODE_CH_UP_KEY) {
         return Some(-1);
     }
-    if sym == SDLK_PAGEDOWN || wcode == WCODE_CH_DOWN_KEY {
+    if sym == SDLK_PAGEDOWN || matches!(wcode, 78 | WCODE_CH_DOWN_KEY) {
         return Some(1);
     }
     None

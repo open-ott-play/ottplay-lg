@@ -27,7 +27,7 @@ use plx_ui::frame::Budget;
 use plx_ui::route_screen::RouteLayout;
 use plx_ui::screen::{Activate, At, Dir, DrawFrame, EdgeRule, ElemKind, FocusSource, Focusable, GroupSpec,
     HitSource, Hover, Link, Part, Placed, RenderStrategy, Screen, ScreenEvent, Step, Stop};
-use plx_ui::table::Row;
+use plx_ui::table::{Badge, Row, RowArt};
 use plx_ui::table_screen::{Header, TableScreen};
 use plx_ui::text_buffer::TextBuffer;
 use plx_ui::document_reader::DocumentReader;
@@ -615,10 +615,16 @@ impl OttScreen {
             if !torrent_catalogue || torrent_item { self.catalog_keys.push(key.0); }
             if self.metadata_row(row) { self.media_keys.insert(key.0, i); }
             let catalogue_item = classic_catalogue && matches!(row.action, OttAction::Play(_));
-            let mut presentation = Row::new(if catalogue_item {
-                classic::list_label(row, snapshot.classic_preferences, self.guide_clock.now_for(row.guide.as_ref()))
-            } else { row.title.clone() }).server_label()
-                .detail(if classic_catalogue { String::new() } else { row.detail.clone() }).server_detail().checked(row.favorite);
+            let channel_item = catalogue_item && row.media.as_ref()
+                .is_some_and(|media| media.kind == OttMediaKind::LiveChannel);
+            let row_now = self.guide_clock.now_for(row.guide.as_ref());
+            let detail = if channel_item { classic::catalogue_detail(row, row_now) }
+                else if classic_catalogue { String::new() } else { row.detail.clone() };
+            let title = if channel_item { classic::catalogue_title(row).to_owned() }
+                else if catalogue_item { classic::list_label(row, snapshot.classic_preferences, row_now) }
+                else { row.title.clone() };
+            let mut presentation = Row::new(title).server_label()
+                .detail(detail.clone()).server_detail().checked(row.favorite);
             if row.favorite && matches!(&row.action, OttAction::GuideProgramme { .. }) {
                 // Guide rows use the accepted checked state as a timer marker,
                 // before their date rather than in the title's checkbox slot.
@@ -626,8 +632,23 @@ impl OttScreen {
             }
             if catalogue_item {
                 catalogue_number += 1;
-                presentation.set_secondary_label_start(classic::list_secondary_start(row,
-                    snapshot.classic_preferences, &presentation.label));
+                presentation = presentation.catalogue_number(catalogue_number.to_string());
+                if channel_item {
+                    let art = row.poster.as_ref().map(|poster| match poster {
+                        OttPoster::Local { key } => RowArt::Local(*key),
+                        OttPoster::Http { url } => RowArt::Http(url.clone()),
+                        OttPoster::Plex { server, key } => RowArt::Plex { server: *server, key: key.clone() },
+                    });
+                    if let Some(art) = art { presentation = presentation.catalogue_art(art); }
+                    else { presentation = presentation.catalogue_icon(plx_ui::icons::Icon::Show); }
+                    let epg_available = row.current_programme.is_some()
+                        || row.guide.as_ref().is_some_and(|guide|
+                            guide.current.is_some() || guide.next.is_some());
+                    let epg = if epg_available { "EPG ✓" } else { "EPG —" };
+                    let archive = if row.records_available { "Archive ✓" } else { "Archive —" };
+                    presentation = presentation.badge(Badge::Text(epg.into()))
+                        .badge(Badge::Text(archive.into()));
+                }
             }
             if classic_choices {
                 // Values share the title's row. Explanatory text stays in the
@@ -641,9 +662,6 @@ impl OttScreen {
                 if let Some((start, end)) = classic::list_progress_interval(row, self.guide_clock.now_for(row.guide.as_ref())) {
                     presentation = presentation.progress_interval(start, end);
                 }
-            }
-            if catalogue_item && snapshot.classic_preferences.show_number() {
-                presentation = presentation.catalogue_number(catalogue_number.to_string());
             }
             if classic_catalogue && category_page && Self::category_numbered(row) {
                 category_number += 1;
@@ -937,8 +955,12 @@ impl OttScreen {
         let Some(row) = self.snapshot.rows.get(index) else { return; };
         if !matches!(row.action, OttAction::Play(_)) { return; }
         let now = self.guide_clock.now_for(row.guide.as_ref());
-        let label = classic::list_label(row, self.snapshot.classic_preferences, now);
-        let secondary = classic::list_secondary_start(row, self.snapshot.classic_preferences, &label);
+        let channel_item = row.media.as_ref().is_some_and(|media| media.kind == OttMediaKind::LiveChannel);
+        let label = if channel_item { classic::catalogue_title(row).to_owned() }
+            else { classic::list_label(row, self.snapshot.classic_preferences, now) };
+        let detail = if channel_item { classic::catalogue_detail(row, now) } else { String::new() };
+        let secondary = if channel_item { None }
+            else { classic::list_secondary_start(row, self.snapshot.classic_preferences, &label) };
         let progress = self.snapshot.classic_preferences.show_progress()
             .then(|| classic::list_progress_interval(row, now)).flatten();
         let Some(key) = self.keys.get(&format!("item:{}", row.id)) else { return; };
@@ -948,13 +970,17 @@ impl OttScreen {
         if self.form.key_at(index) != Some(RowKey(*key)) { return; }
         let mut offset = index;
         let changed = self.form.table.sections.iter().find_map(|section| {
-            if offset < section.rows.len() { Some(section.rows[offset].label != label || section.rows[offset].progress_bounds() != progress || section.rows[offset].secondary_label_start() != secondary) }
+            if offset < section.rows.len() { Some(section.rows[offset].label != label
+                || (channel_item && section.rows[offset].detail != detail)
+                || section.rows[offset].progress_bounds() != progress
+                || section.rows[offset].secondary_label_start() != secondary) }
             else { offset -= section.rows.len(); None }
         }).unwrap_or(false);
         if changed {
             if let Ok(index) = i32::try_from(index) {
                 if let Some(row) = self.form.table.row_mut(index) {
                     row.label = label;
+                    if channel_item { row.detail = detail; }
                     row.set_secondary_label_start(secondary);
                     row.set_progress_interval(progress);
                 }

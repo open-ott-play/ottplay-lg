@@ -78,6 +78,8 @@ pub(crate) enum AfterReply {
     },
     Input {
         key: plx_machine::machine::Key,
+        sym: u32,
+        wcode: u32,
         page: Option<plx_machine::machine::InstanceId>,
         surface: Option<&'static str>,
         last_input: u32,
