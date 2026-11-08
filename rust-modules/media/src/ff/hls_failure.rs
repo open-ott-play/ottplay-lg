@@ -9,6 +9,20 @@ pub(super) fn classify(reason: &str) -> DemuxExitClass {
     match reason {
         "HLS transport unavailable"
         | "Could not fetch HLS playlist"
+        | "Initial HLS playlist request timed out"
+        | "Selected HLS playlist request timed out"
+        | "HLS playlist request timed out"
+        | "HLS playlist body transfer timed out"
+        | "HLS playlist server returned HTTP 401"
+        | "HLS playlist server returned HTTP 403"
+        | "HLS playlist server returned HTTP 404"
+        | "HLS playlist server returned HTTP 429"
+        | "HLS playlist server returned a server error"
+        | "HLS playlist server returned an HTTP error"
+        | "HLS playlist network transport failed"
+        | "HLS playlist local transport failed"
+        | "HLS playlist local transport setup failed"
+        | "HLS playlist server refused the requested byte range"
         | "HLS playlist transfer failed"
         | "Truncated HLS response" => HlsPlaylistFetchFailed,
 
