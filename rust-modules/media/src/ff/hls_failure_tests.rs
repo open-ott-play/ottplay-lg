@@ -47,6 +47,23 @@ fn playlist_open_body_and_content_length_failures_remain_separate() {
 }
 
 #[test]
+fn typed_playlist_acquisition_keeps_its_existing_structured_failure_class() {
+    for reason in [
+        "Initial HLS playlist request timed out", "Selected HLS playlist request timed out",
+        "HLS playlist request timed out", "HLS playlist body transfer timed out",
+        "HLS playlist server returned HTTP 401", "HLS playlist server returned HTTP 403",
+        "HLS playlist server returned HTTP 404", "HLS playlist server returned HTTP 429",
+        "HLS playlist server returned a server error", "HLS playlist server returned an HTTP error",
+        "HLS playlist network transport failed", "HLS playlist local transport failed",
+        "HLS playlist local transport setup failed", "HLS playlist server refused the requested byte range",
+    ] {
+        assert_eq!(classify(reason), HlsPlaylistFetchFailed);
+        assert_eq!(classify(&format!("{reason}: private source")), HlsFailed);
+    }
+    assert_eq!(classify("HLS request cancelled"), HlsFailed, "cancellation policy is unchanged");
+}
+
+#[test]
 fn unknown_and_near_match_text_keep_the_original_bounded_hls_failure() {
     for reason in [
         "",
