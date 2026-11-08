@@ -71,6 +71,21 @@ fn category_shelves_remember_each_rows_item_on_vertical_and_wheel_keys() {
 }
 
 #[test]
+fn category_shelf_vertical_links_reach_footer_only_after_last_shelf() {
+    let _guard = plx_base::testlock::serial();
+    let (mut d, mut rig) = mount_snapshot(fixture(OttMediaKind::Movie));
+    let mut now = 256;
+    step(&mut d, &mut rig, &mut now, Key::Right);
+    step(&mut d, &mut rig, &mut now, Key::Down);
+    assert_item(&d, "category-b", "entry-0");
+    for _ in 0..4 { step(&mut d, &mut rig, &mut now, Key::Right); }
+    assert_item(&d, "category-b", "entry-15");
+    let footer_key = screen(&d).modern_footer(&rig.measure).unwrap().stops[0].0;
+    step(&mut d, &mut rig, &mut now, Key::Down);
+    assert_eq!(d.focus().unwrap().elem, footer_key, "Down from the final shelf should enter the footer");
+}
+
+#[test]
 fn shared_item_occurrences_have_distinct_focus_and_canonical_tap_hold_actions() {
     let _guard = plx_base::testlock::serial();
     for hold in [false, true] {

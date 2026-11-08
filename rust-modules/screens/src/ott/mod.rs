@@ -924,7 +924,9 @@ impl OttScreen {
         if self.classic_mode || self.browse || self.reading || self.editor.is_some() || self.snapshot.rows.is_empty() { return None; }
         let now = self.guide_clock.now_for(self.media.and_then(|index| self.snapshot.rows.get(index)).and_then(|row| row.guide.as_ref()));
         let actions = navigation::available_at(&self.snapshot, self.media, self.menu_visibility, now);
-        navigation::modern_footer(measure, Rect::FULL.w, &actions, &self.keys, &self.snapshot)
+        let header_keys: Vec<_> = self.header(measure).map_or_else(Vec::new,
+            |header| header.stops.iter().map(|(key, _)| *key).collect());
+        navigation::modern_footer(measure, Rect::FULL.w, &actions, &self.keys, &self.snapshot, &header_keys)
     }
 
     /// Update only the row whose guide clock changed (label and progress interval); never rebuild or scan
@@ -1828,10 +1830,11 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
         if self.exit.prompt.visible() { return; }
         if self.editor.is_none() && !self.reading {
             let first = if self.grid_active() { self.shelves.first().map_or(GroupId(0), |shelf| shelf.group) } else { GroupId(0) };
+            let last = if self.grid_active() { self.shelves.last().map_or(first, |shelf| shelf.group) } else { first };
             out.push(Link { from: first, dir: Dir::Up, to: navigation::GROUP });
             out.push(Link { from: navigation::GROUP, dir: Dir::Down, to: first });
-            out.push(Link { from: first, dir: Dir::Down, to: navigation::FOOTER_GROUP });
-            out.push(Link { from: navigation::FOOTER_GROUP, dir: Dir::Up, to: first });
+            out.push(Link { from: last, dir: Dir::Down, to: navigation::FOOTER_GROUP });
+            out.push(Link { from: navigation::FOOTER_GROUP, dir: Dir::Up, to: last });
             if self.grid_active() {
                 for pair in self.shelves.windows(2) {
                     out.push(Link { from: pair[0].group, dir: Dir::Down, to: pair[1].group });

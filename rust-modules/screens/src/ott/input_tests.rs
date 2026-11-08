@@ -1131,6 +1131,25 @@ fn modern_channel_footer_has_real_pointer_stop_and_dispatches_category_action() 
 }
 
 #[test]
+fn modern_footer_reuses_no_focus_keys_from_the_top_header() {
+    let _guard = plx_base::testlock::serial();
+    for page_id in ["channels:all", "categories:all"] {
+        let mut view = (*navigation_view(page_id, 7,
+            vec![navigation_row("channel-one", OttAction::Play("channel-one".into()))], Some("channel-one"))).clone();
+        view.rows[0].description = "Programme description".into();
+        view.search = Some(OttSearch { query: String::new(), scope: String::new() });
+        view.order_context = Some("order-context".into());
+        let (d, _) = mount_snapshot(Arc::new(view));
+        let page = d.nav.top_page().unwrap();
+        let screen = page.inst.as_ref().unwrap().screen.as_any().unwrap().downcast_ref::<OttScreen>().unwrap();
+        let header: Vec<_> = screen.header(&FixtureMeasure).unwrap().stops.iter().map(|(key, _)| *key).collect();
+        let footer: Vec<_> = screen.modern_footer(&FixtureMeasure).unwrap().stops.iter().map(|(key, _)| *key).collect();
+        assert!(!footer.is_empty());
+        assert!(footer.iter().all(|key| !header.contains(key)), "{page_id}: a footer key is already owned by the top header");
+    }
+}
+
+#[test]
 fn channel_list_entry_center_release_and_repeat_do_not_advance_selected_channel() {
     let _guard = plx_base::testlock::serial();
     let rows = (1..=3).map(|n| navigation_row(&format!("channel-{n}"), OttAction::Play(format!("channel-{n}"))))
