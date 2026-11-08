@@ -10,13 +10,13 @@ pub(super) struct FailedPlayback {
     favorites: bool,
 }
 
-pub(super) fn capture(runtime: &Runtime, app: &App) -> Option<FailedPlayback> {
+pub(super) fn capture(runtime: &Runtime, app: &App) -> Option<Box<FailedPlayback>> {
     let playing = runtime.playing.as_ref().filter(|playing| playing_matches(playing, app))?;
     if playing.archive.is_some() || !guide_ui::is_live(&playing.profile, &playing.entry)
         || playing.identity.is_none() { return None; }
     let (category, favorites) = runtime.view_selection();
-    Some(FailedPlayback { playing: playing.clone(), generation: runtime.generation,
-        playback_epoch: runtime.playback_epoch, category: category.into(), favorites })
+    Some(Box::new(FailedPlayback { playing: playing.clone(), generation: runtime.generation,
+        playback_epoch: runtime.playback_epoch, category: category.into(), favorites }))
 }
 
 /// Cheap ownership check used by per-frame publication after decoder cleanup.

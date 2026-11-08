@@ -580,7 +580,8 @@ pub(super) struct Runtime {
     play_cancel: Arc<AtomicBool>,
     play_ticket: Option<plx_media::route::PlayRequestTicket>,
     playing: Option<Playing>,
-    failed_playback: Option<failed_playback::FailedPlayback>,
+    // A rare receipt must not add another full Playing to every Runtime stack copy.
+    failed_playback: Option<Box<failed_playback::FailedPlayback>>,
     pending_play: Option<Invocation>,
     favorites: plx_data::ott::favorites_wire::Protocol,
     favorites_recovery_done: Arc<AtomicBool>,

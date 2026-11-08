@@ -15,6 +15,13 @@ sources, stopping or suspending playback retires that recovery context. These
 keys do not grant transport control over the failed decoder or bypass kiosk and
 parental checks.
 
+A destination can also be refused before the decoder is replaced. In that case,
+the previous channel can keep playing. Direct multiplexed MPEG-TS HLS currently
+requires H.264 video with AAC audio (or no audio); a refusal names common known
+codec pairs. This is a limitation of the application's HLS segment handling,
+not a statement about the television's decoder capabilities. Playback of the
+same codecs from progressive files follows a different path.
+
 The Modern channel-list header offers **Search** and **Add/remove Favorite** for
 the selected playable item, followed by **Description** when space permits.
 Long category names shorten before these primary actions. In **Browse**, the
