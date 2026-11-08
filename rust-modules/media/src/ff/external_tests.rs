@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "hls_mp2_tests.rs"]
+mod mp2_tests;
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
@@ -391,7 +394,7 @@ fn independent_hls_audio_pick_emits_selected_tone_across_reordered_segments() {
         let timeline = crate::hls::SegmentTimeline::default();
         let mut clock = timeline.begin(source.duration).unwrap();
         unsafe { hls_demux_segment_path(&source,
-            HlsSegmentRequest { path: &source.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(4 * 1024 * 1024), audio: Some(pick), rendition: None, video: HlsVideoEntry::Independent },
+            HlsSegmentRequest { path: &source.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(4 * 1024 * 1024), audio: Some(pick), rendition: None, video: HlsVideoEntry::Independent, mp2: None },
             &mut clock, &mut *aq, &mut net, "aac", SegmentAcquisition::for_cursor(None)) }
     };
     let tone = |name: &str, output: HlsSegmentOutput| {
@@ -486,7 +489,7 @@ fn hls_audio_stream_survives_late_pmt_stream_table_growth() {
     let mut clock = crate::hls::SegmentTimeline::default().begin(segment.duration).unwrap();
     let output = unsafe {
         hls_demux_segment_path(&segment,
-            HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(8 * 1024 * 1024), audio: None, rendition: None, video: HlsVideoEntry::Independent },
+            HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(8 * 1024 * 1024), audio: None, rendition: None, video: HlsVideoEntry::Independent, mp2: None },
             &mut clock, &mut *aq, &mut net, "aac", SegmentAcquisition::for_cursor(None))
     }.unwrap_or_else(|_| panic!("late PMT must not invalidate the retained audio AVStream"));
     assert_eq!(HLS_TEST_STREAM_COUNTS.with(|counts| counts.get()), (2, 6),

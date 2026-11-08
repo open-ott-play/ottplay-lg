@@ -41,8 +41,11 @@ impl Selection {
         }
         let track = usize::try_from(ordinal).ok().and_then(|i| inventory.audio.get(i))
             .ok_or("HLS audio track is missing")?;
-        if track.codec != "aac" || track.channels <= 0 || track.sample_rate <= 0 {
-            return Err("HLS audio selection requires known AAC format");
+        let aac = track.codec == "aac" && track.channels > 0 && track.sample_rate > 0;
+        let mp2 = super::hls_mp2::format(&track.codec, track.channels, track.sample_rate)
+            && track.decoder_available;
+        if !aac && !mp2 {
+            return Err("HLS audio selection requires known AAC or decodable MP2 format");
         }
         let selected = Descriptor::of(track);
         let mut expected: Vec<_> = inventory.audio.iter().map(Descriptor::of).collect();

@@ -2369,7 +2369,7 @@ $(FFMPEG_HOST_STAGED): pkg/%.dylib: $(FFMPEG_HOST_INC)/libavformat/avformat.h ci
 # output to it bit for bit, which is also what proves every decoder `devcaps::APP_DECODED` names is in the build.
 check-ffmpeg: $(FFMPEG_HOST_STAGED) $(LIBASS_HOST_STAGED)
 	cd rust-modules && CARGO_INCREMENTAL=0 PLX_FFMPEG_DIR=$(CURDIR)/pkg PATH="$$HOME/.cargo/bin:$$PATH" \
-	  cargo +$(RUST_TOOLCHAIN) test --lib -p plx_media -- ff::image_subtitle_tests ff::subtitle_charset_tests ff::subside::tests::side_reader_draws_a_shifted_cue_from_a_generated_mkv ff::late_audio_tests ff::pcm_decode_tests --ignored
+	  cargo +$(RUST_TOOLCHAIN) test --lib -p plx_media -- ff::image_subtitle_tests ff::subtitle_charset_tests ff::subside::tests::side_reader_draws_a_shifted_cue_from_a_generated_mkv ff::late_audio_tests ff::pcm_decode_tests ff::external_tests::mp2_tests --ignored
 
 # The same ABI gate the cross build runs, at the other pointer width. ci/ffabi-assert.c `#if`s on
 # `__SIZEOF_POINTER__` and carries both tables, so this compile is what holds ff.rs's 64-bit
