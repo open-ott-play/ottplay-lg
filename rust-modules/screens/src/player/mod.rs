@@ -295,9 +295,16 @@ impl PlayerScreen {
     }
 
     /// Pure presentation gate used by the common application number owner.
-    pub fn accepts_channel_number(&self, session: &plx_media::route::PlaybackSession, now: u32, paused: bool) -> bool {
-        !self.hud.visible(session, now, paused) && !self.scrub.is_live()
+    pub fn accepts_channel_number(&self) -> bool {
+        self.hud_policy == HudPolicy::Normal && !self.scrub.is_live()
             && !self.repair_alert.visible() && !self.reminder_notice.visible()
+    }
+
+    /// Finite-video 1/3 seeks retain the bare-video policy. A visible live HUD
+    /// does not prevent the separately source-bound channel number owner.
+    pub fn accepts_numeric_seek(&self, session: &plx_media::route::PlaybackSession, now: u32, paused: bool) -> bool {
+        self.accepts_channel_number() && !self.hud.visible(session, now, paused)
+            && !plx_appkit::player_hud::transport_hidden(session)
     }
 
     pub fn set_number_notice(&mut self, value: &Option<(String, String)>, now: u32) {
@@ -1292,7 +1299,10 @@ impl PlayerScreen {
         let direction_or_ok = matches!(key, Key::Up | Key::Down | Key::Left { alt: false }
             | Key::Right { alt: false } | Key::Ok);
         let remote = (key == Key::Other).then(|| consts::remote_button(sym, wcode)).flatten();
-        if !plx_media::route::playback_identity_matches(ps, &offer.source) {
+        let recovery_channel = offer.recovery_only
+            && matches!(remote, Some(RemoteButton::ChannelUp | RemoteButton::ChannelDown));
+        if offer.recovery_only && !recovery_channel { return None; }
+        if !offer.recovery_only && !plx_media::route::playback_identity_matches(ps, &offer.source) {
             // A captured OTT command is not permission to control a replacement
             // source through the generic fallback. No offer is different: that
             // remains an ordinary player or desktop event.
@@ -1307,7 +1317,7 @@ impl PlayerScreen {
             && self.scrub.reveal && !self.scrub.key.engaged && !self.scrub.drag
             && !self.transport_tap;
         if self.hud_policy != HudPolicy::Normal
-            || plx_appkit::player_hud::transport_hidden(ps)
+            || (plx_appkit::player_hud::transport_hidden(ps) && !recovery_channel)
             || (self.scrub.is_live() && !reveal_only_categories)
         { return None; }
         // This is the PRE-press sample. note_global_press has already cleared

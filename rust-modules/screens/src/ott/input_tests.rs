@@ -247,6 +247,83 @@ fn open_browse(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32) -> u32 
     completed
 }
 
+fn discoverable_live_catalog(favorite: bool) -> Arc<OttView> {
+    let mut view = (*navigation_view("channels:m3u-owner", 1,
+        ["first", "selected"].into_iter().map(|id| {
+            let mut row = navigation_row(id, OttAction::Play(id.into()));
+            row.media = Some(OttMedia { kind: OttMediaKind::LiveChannel, duration_ms: None, progress: None });
+            row.description = "Current programme details".into();
+            row.favorite = favorite;
+            row
+        }).collect(), Some("selected"))).clone();
+    view.title = msg::ott_channel_list().into();
+    view.category_label = Some("Long current category / ".repeat(16));
+    view.search = Some(OttSearch { query: String::new(), scope: "Current M3U list".into() });
+    Arc::new(view)
+}
+
+fn semantic_actions(rig: &TestRig) -> Vec<&OttAction> {
+    rig.actions.iter().filter(|action| !matches!(action,
+        OttAction::Preview(_) | OttAction::PreviewAt { .. } | OttAction::FocusAt { .. })).collect()
+}
+
+#[test]
+fn dispatcher_modern_header_search_and_favorite_remain_visible_with_a_long_category() {
+    let _guard = plx_base::testlock::serial();
+    let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::Ru);
+    for favorite in [false, true] {
+        for action in ["nav:search", "nav:favorite"] {
+            let (mut d, mut rig) = boot_snapshot(discoverable_live_catalog(favorite));
+            // The actual placed/drawn controls must exist, not just action IDs.
+            draw_pointer_map(&mut d, &rig, &["nav:browse", "nav:search", "nav:favorite"]);
+            let screen = d.nav.top_page().unwrap().inst.as_ref().unwrap().screen.as_any().unwrap()
+                .downcast_ref::<OttScreen>().unwrap();
+            let header = screen.header(&rig.measure).unwrap();
+            assert!(header.page.spec().right.iter().any(|item| item.label == if favorite {
+                msg::ott_favorite_remove() } else { msg::ott_favorite_add() }));
+            focus_header(&mut d, &mut rig, "nav:browse", 256);
+            frame(&mut d, &mut rig, 320, vec![key(Key::Right, tick(320))]);
+            assert_focus(&d, "nav:search");
+            if action == "nav:favorite" {
+                frame(&mut d, &mut rig, 336, vec![key(Key::Right, tick(336))]);
+            }
+            assert_focus(&d, action);
+            press_header_ok(&mut d, &mut rig, 384);
+            let expected = if action == "nav:search" { OttAction::BeginSearch }
+                else { OttAction::ToggleFavorite("selected".into()) };
+            assert_eq!(semantic_actions(&rig), vec![&expected]);
+        }
+    }
+}
+
+#[test]
+fn dispatcher_browse_places_search_and_favorite_next_to_the_current_list() {
+    let _guard = plx_base::testlock::serial();
+    for favorite in [false, true] {
+        for action in ["nav:search", "nav:favorite"] {
+            let (mut d, mut rig) = boot_snapshot(discoverable_live_catalog(favorite));
+            let completed = open_browse(&mut d, &mut rig, 256);
+            frame(&mut d, &mut rig, completed + 16, vec![key(Key::Down, tick(completed + 16))]);
+            assert_focus(&d, "nav:search");
+            if action == "nav:favorite" {
+                frame(&mut d, &mut rig, completed + 32, vec![key(Key::Down, tick(completed + 32))]);
+            }
+            assert_focus(&d, action);
+            press_navigation_ok(&mut d, &mut rig, completed + 48, false);
+            let expected = if action == "nav:search" { OttAction::BeginSearch }
+                else { OttAction::ToggleFavorite("selected".into()) };
+            assert_eq!(semantic_actions(&rig), vec![&expected], "Browse must never start playback");
+            if action == "nav:search" {
+                // The fixture records BeginSearch without publishing an editor;
+                // Back closes the still-open Browse and restores its subject.
+                frame(&mut d, &mut rig, completed + 160,
+                    vec![key(Key::Back, tick(completed + 160))]);
+            }
+            assert_focus(&d, "item:selected");
+        }
+    }
+}
+
 #[test]
 fn dispatcher_provider_to_profiles_focuses_setup_or_profile_without_bouncing() {
     let _guard = plx_base::testlock::serial();
@@ -380,12 +457,12 @@ fn dispatcher_navigation_and_editor_keep_immediate_ok() {
     let _guard = plx_base::testlock::serial();
     let (mut d, mut rig) = boot(false);
     let completed = open_browse(&mut d, &mut rig, 256);
-    for offset in [16, 32, 48] {
+    for offset in [16, 32, 48, 64] {
         let now = completed + offset;
         frame(&mut d, &mut rig, now, vec![key(Key::Down, tick(now))]);
     }
     assert_focus(&d, "nav:settings");
-    frame(&mut d, &mut rig, completed + 64, vec![key(Key::Ok, tick(completed + 64))]);
+    frame(&mut d, &mut rig, completed + 80, vec![key(Key::Ok, tick(completed + 80))]);
     assert_eq!(rig.actions.iter().filter(|a| matches!(a, OttAction::ShowSettings)).count(), 1,
         "navigation still activates on Down, without waiting for release");
     let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
@@ -394,9 +471,9 @@ fn dispatcher_navigation_and_editor_keep_immediate_ok() {
             session: 7, key: "profile.name".into(), title: "Name".into(), value: "Fixture".into(),
             secret: false, limit: 64,
         }))))));
-    frame(&mut d, &mut rig, completed + 80, vec![key_up(Key::Ok, tick(completed + 80))]);
-    frame(&mut d, &mut rig, completed + 96, vec![key(Key::Down, tick(completed + 96))]);
-    frame(&mut d, &mut rig, completed + 112, vec![key(Key::Ok, tick(completed + 112))]);
+    frame(&mut d, &mut rig, completed + 96, vec![key_up(Key::Ok, tick(completed + 96))]);
+    frame(&mut d, &mut rig, completed + 112, vec![key(Key::Down, tick(completed + 112))]);
+    frame(&mut d, &mut rig, completed + 128, vec![key(Key::Ok, tick(completed + 128))]);
     assert_eq!(rig.actions.iter().filter(|a| matches!(a,
         OttAction::SubmitSetting { key, value, .. } if key == "profile.name" && value == "Fixture")).count(), 1,
         "Save still commits immediately on Down");

@@ -47,7 +47,7 @@ fn playback() -> (plx_media::route::PlaybackSession, OttPlayerOffer) {
     plx_media::route::install_plex_playback_for_test(&mut session,
         plx_plex::plex::ServerId::from_raw(0), "remote-fixture");
     let source = plx_media::route::playback_identity(&session).unwrap();
-    (session, OttPlayerOffer { source, seek_arrows: false, accept: Action::OpenCatalog, guide: true })
+    (session, OttPlayerOffer { source, recovery_only: false, seek_arrows: false, accept: Action::OpenCatalog, guide: true })
 }
 fn bare(session: &plx_media::route::PlaybackSession) -> PlayerScreen {
     let mut page = PlayerScreen::new(ENTRY);
@@ -124,6 +124,81 @@ fn hidden_fullscreen_buttons_emit_one_owned_action_in_both_themes() {
             assert_eq!(request.action, expected);
         }
     }
+}
+
+#[test]
+fn failed_source_offer_only_dispatches_physical_channel_steps() {
+    let _lock = plx_base::testlock::serial();
+    let (_, mut offer) = playback();
+    offer.recovery_only = true;
+    let session = plx_media::route::PlaybackSession::default();
+    plx_media::route::reset_player_control_for_test(&session);
+    assert!(!plx_media::route::playback_identity_matches(&session, &offer.source));
+    struct Restore(u8);
+    impl Drop for Restore {
+        fn drop(&mut self) { plx_media::player::restore_state_for_test(self.0); }
+    }
+    let _state = Restore(plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Error));
+    assert!(player_hud::transport_hidden(&session));
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for (code, action) in [(consts::WCODE_CH_UP_KEY, Action::Next),
+            (consts::WCODE_CH_DOWN_KEY, Action::Previous)] {
+            for (edge, at_edge, count) in [(Edge::Down, false, 1), (Edge::Repeat, false, 1),
+                (Edge::Up, false, 0), (Edge::Down, true, 0)] {
+                let (_, requests) = send(&mut PlayerScreen::new(ENTRY), &session, Some(&offer), mode,
+                    0, code, edge, at_edge, None);
+                assert_eq!(ott(&requests).len(), count);
+                if count == 1 {
+                    assert_eq!(ott(&requests)[0].action, action);
+                    assert_eq!(ott(&requests)[0].source, offer.source);
+                }
+            }
+            for policy in [HudPolicy::Lifted, HudPolicy::Hidden] {
+                let mut page = PlayerScreen::new(ENTRY); page.hud_policy = policy;
+                let (_, requests) = send(&mut page, &session, Some(&offer), mode,
+                    0, code, Edge::Down, false, None);
+                assert!(ott(&requests).is_empty(), "a covering surface still owns input");
+            }
+        }
+        for (sym, code) in [(consts::SDLK_UP, 82), (consts::SDLK_DOWN, 81),
+            (consts::SDLK_LEFT, 80), (consts::SDLK_RIGHT, 79), (consts::SDLK_RETURN, 40),
+            (0, consts::WCODE_RED), (0, consts::WCODE_BLUE), (0, consts::WCODE_YELLOW)] {
+            let (_, requests) = send(&mut PlayerScreen::new(ENTRY), &session, Some(&offer), mode,
+                sym, code, Edge::Down, false, None);
+            assert!(ott(&requests).is_empty(), "recovery grants no transport or menu action");
+        }
+    }
+}
+
+#[test]
+fn channel_numbers_allow_visible_hud_but_numeric_seeks_keep_the_bare_video_gate() {
+    let _lock = plx_base::testlock::serial();
+    let (session, _) = playback();
+    struct Restore(u8);
+    impl Drop for Restore {
+        fn drop(&mut self) { plx_media::player::restore_state_for_test(self.0); }
+    }
+    let _state = Restore(plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Playing));
+    let mut page = PlayerScreen::new(ENTRY);
+    page.hud.dismissed = true;
+    assert!(page.accepts_channel_number());
+    assert!(page.accepts_numeric_seek(&session, 1_000, false));
+    page.hud.dismissed = false;
+    page.hud.extend_default(1_000);
+    assert!(page.hud.visible(&session, 1_000, false));
+    assert!(page.accepts_channel_number());
+    assert!(!page.accepts_numeric_seek(&session, 1_000, false));
+    plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Error);
+    page.hud.dismissed = true;
+    assert!(page.accepts_channel_number(), "the runtime must validate retained failed-source authority");
+    assert!(!page.accepts_numeric_seek(&session, 1_000, false));
+    for policy in [HudPolicy::Lifted, HudPolicy::Hidden] {
+        page.hud_policy = policy;
+        assert!(!page.accepts_channel_number());
+    }
+    page.hud_policy = HudPolicy::Normal;
+    page.scrub.ns = 0;
+    assert!(!page.accepts_channel_number(), "a pending seek retains its input owner");
 }
 
 #[test]

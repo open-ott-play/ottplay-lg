@@ -73,6 +73,141 @@ fn remote_channel_paging_is_a_focus_request_not_a_play_request() {
 }
 
 #[test]
+fn remote_channel_paging_skips_disabled_destinations_in_both_presentations() {
+    use plx_machine::machine::UiMode;
+    let measure = plx_ui::fixture::FixtureMeasure;
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for direction in [-1, 1] {
+            let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
+            screen.refresh_presentation(mode, &measure);
+            let names: Vec<_> = (0..80).map(|i| format!("row-{i}")).collect();
+            let refs: Vec<_> = names.iter().map(String::as_str).collect();
+            screen.install(snapshot(1, &refs));
+            screen.refresh_presentation(mode, &measure);
+            let current = if direction > 0 { 0 } else { 79 };
+            let key = screen.keys[&format!("item:row-{current}")];
+            let destination = screen.remote_page_key(key, direction).unwrap();
+            let index = screen.catalog_keys.iter().position(|key| *key == destination).unwrap();
+            assert_ne!(index, current);
+            let mut view = (*screen.snapshot).clone();
+            view.revision += 1;
+            view.rows[index].enabled = false;
+            screen.install(Arc::new(view));
+            screen.refresh_presentation(mode, &measure);
+            assert!(!screen.grid_active(), "disabled rows use the ordinary table");
+            let wanted = (index as i32 + direction) as usize;
+            let expected = screen.catalog_keys[wanted];
+            assert_eq!(screen.remote_page_key(key, direction), Some(expected));
+
+            let mut cx = Cx::<FavoritesModeHost> { views: mode, tick: Default::default(), measure: &measure,
+                focus: Default::default(), press: Default::default(),
+                owner: plx_machine::machine::InputOwner::Entry(EntryId(1)) };
+            cx.focus.current = Some(FocusKey { entry: EntryId(1), elem: key });
+            let mut output = Vec::new();
+            let mut present = plx_machine::present::Present::new();
+            let code = if direction > 0 { consts::WCODE_CH_DOWN_KEY } else { consts::WCODE_CH_UP_KEY };
+            screen.step(&raw_mode(code, Edge::Down), &cx,
+                &mut Effects::new(&mut output, MachineId::Instance(InstanceId(1)), &mut present));
+            assert!(mode_actions(&output).is_empty(), "paging does not play or select a provider");
+            let requested = output.iter().find_map(|event| match &event.fx {
+                Fx::Deliver(_, Delivery::Screen(ScreenEvent::Enter(plx_ui::screen::Enter::Fresh {
+                    focus: plx_ui::screen::FocusTarget::Elem(target) }))) => Some(target.elem), _ => None,
+            });
+            assert_eq!(requested, Some(expected), "{mode:?}, direction {direction}, destination {index}");
+        }
+    }
+}
+
+#[test]
+fn remote_channel_paging_clamps_to_available_rows_without_wrapping() {
+    use plx_machine::machine::UiMode;
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for direction in [-1, 1] {
+            let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
+            screen.refresh_presentation(mode, &plx_ui::fixture::FixtureMeasure);
+            let names: Vec<_> = (0..8).map(|i| format!("row-{i}")).collect();
+            let refs: Vec<_> = names.iter().map(String::as_str).collect();
+            let mut view = (*snapshot(1, &refs)).clone();
+            let (current, wanted, disabled) = if direction > 0 {
+                (0, 5, [6, 7])
+            } else { (7, 2, [0, 1]) };
+            for index in disabled { view.rows[index].enabled = false; }
+            screen.install(Arc::new(view));
+            let current = screen.catalog_keys[current];
+            let boundary = screen.catalog_keys[wanted];
+            assert_eq!(screen.remote_page_key(current, direction), Some(boundary));
+            assert_eq!(screen.remote_page_key(boundary, direction), Some(boundary),
+                "a disabled end must not wrap to the opposite end");
+            let mut view = (*screen.snapshot).clone();
+            view.revision += 1;
+            for row in &mut view.rows { row.enabled = false; }
+            screen.install(Arc::new(view));
+            assert_eq!(screen.remote_page_key(current, direction), None);
+        }
+    }
+}
+
+#[test]
+fn classic_paging_uses_content_bindings_with_interleaved_controls() {
+    use plx_machine::machine::UiMode;
+    let measure = plx_ui::fixture::FixtureMeasure;
+    for direction in [-1, 1] {
+        for destination_enabled in [false, true] {
+            let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
+            screen.refresh_presentation(UiMode::Classic, &measure);
+            let mut view = (*snapshot(1, &["first", "search", "second"])).clone();
+            view.page_id = "torrent-results".into();
+            let current = if direction > 0 { 0 } else { 2 };
+            let destination = 2 - current;
+            for index in [0, 2] {
+                view.rows[index].id = format!("torznab:1:source:{index}");
+                view.rows[index].action = OttAction::Play(format!("torrent:{}", view.rows[index].id));
+            }
+            view.rows[1].id = "torrent.query:1:edit".into();
+            view.rows[1].action = OttAction::EditSetting(view.rows[1].id.clone());
+            view.rows[1].enabled = !destination_enabled;
+            view.rows[destination].enabled = destination_enabled;
+            // A leading control also prevents the first content item from
+            // accidentally retaining its snapshot index when paging left.
+            let control = view.rows[1].clone();
+            let mut leading = control;
+            leading.id = "torrent.retry".into();
+            leading.action = OttAction::EditSetting(leading.id.clone());
+            view.rows.insert(0, leading);
+            screen.install(Arc::new(view));
+            screen.refresh_presentation(UiMode::Classic, &measure);
+            screen.classic_visible = true;
+            assert!(screen.form.table.is_classic_catalogue());
+            assert_eq!(screen.catalog_keys.len(), 2, "controls are excluded from the catalogue");
+            let key = screen.keys[&format!("item:torznab:1:source:{current}")];
+            let expected = if destination_enabled {
+                screen.keys[&format!("item:torznab:1:source:{destination}")]
+            } else { key };
+            assert_eq!(screen.remote_page_key(key, direction), Some(expected));
+
+            let mut cx = Cx::<FavoritesModeHost> { views: UiMode::Classic, tick: Default::default(), measure: &measure,
+                focus: Default::default(), press: Default::default(),
+                owner: plx_machine::machine::InputOwner::Entry(EntryId(1)) };
+            cx.focus.current = Some(FocusKey { entry: EntryId(1), elem: key });
+            let input = ScreenEvent::Input(plx_machine::machine::InputEvent { at: Default::default(),
+                source: plx_machine::machine::Source::RemoteFifo,
+                kind: InputKind::Key { key: if direction > 0 { Key::Right } else { Key::Left },
+                    sym: 0, wcode: 0, edge: Edge::Down, at_edge: false } });
+            let mut output = Vec::new();
+            let mut present = plx_machine::present::Present::new();
+            screen.step(&input, &cx,
+                &mut Effects::new(&mut output, MachineId::Instance(InstanceId(1)), &mut present));
+            assert!(mode_actions(&output).is_empty(), "paging never activates content or controls");
+            let requested = output.iter().find_map(|event| match &event.fx {
+                Fx::Deliver(_, Delivery::Screen(ScreenEvent::Enter(plx_ui::screen::Enter::Fresh {
+                    focus: plx_ui::screen::FocusTarget::Elem(target) }))) => Some(target.elem), _ => None,
+            });
+            assert_eq!(requested, Some(expected), "direction {direction}, enabled {destination_enabled}");
+        }
+    }
+}
+
+#[test]
 fn classic_categories_use_existing_wrapping_rows_and_clamped_pages() {
     let measure = plx_ui::fixture::FixtureMeasure;
     let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
