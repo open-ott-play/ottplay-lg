@@ -821,14 +821,17 @@ pub(super) fn bind_local(
     candidate.profiles.active_profile = Some(candidate.profiles.profiles[index].id.clone());
     Ok(candidate)
 }
-fn input_key(value: &str) -> Option<Key> {
+fn input_key(value: &str) -> Option<(Key, u32, u32)> {
+    use plx_ui::consts::{WCODE_CH_DOWN_KEY, WCODE_CH_UP_KEY};
     match value {
-        "up" => Some(Key::Up),
-        "down" => Some(Key::Down),
-        "left" => Some(Key::Left),
-        "right" => Some(Key::Right),
-        "ok" => Some(Key::Ok),
-        "back" => Some(Key::Back),
+        "up" => Some((Key::Up, 0, 0)),
+        "down" => Some((Key::Down, 0, 0)),
+        "left" => Some((Key::Left, 0, 0)),
+        "right" => Some((Key::Right, 0, 0)),
+        "ok" => Some((Key::Ok, 0, 0)),
+        "back" => Some((Key::Back, 0, 0)),
+        "channel_up" | "ch+" => Some((Key::Other, 0, WCODE_CH_UP_KEY)),
+        "channel_down" | "ch-" => Some((Key::Other, 0, WCODE_CH_DOWN_KEY)),
         _ => None,
     }
 }
@@ -1269,7 +1272,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 }
             }
             let mut data = json!({"version":1,"player":{"version":env!("PLX_VERSION"),"build_sha":env!("PLX_BUILD_SHA"),"platform":"webos-native","runtime":runtime.remote.runtime(),"standby":app.ott_standby},
-                "input":["up","down","left","right","ok","back"],"playback":playback,"lifecycle":["exit_app","standby","wake"],
+                "input":["up","down","left","right","ok","back","channel_up","channel_down"],"playback":playback,"lifecycle":["exit_app","standby","wake"],
                 "vportal_settings":{"version":1},"player_settings":{"version":1,"operations":["schema","get","set"],"max_page_size":20},
                 "favorites_global":plx_data::ott::favorites_wire::Protocol::capability(),
                 "favorites_global_items":{"version":1}});
@@ -1485,7 +1488,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 return Some(unsupported("Unsupported navigation key"));
             };
             let effect = AfterReply::Input {
-                key,
+                key: key.0,
+                sym: key.1,
+                wcode: key.2,
                 page: app.pages.top_page(),
                 surface: app.pages.top_surface_name(),
                 last_input: app.last_input,
@@ -1635,6 +1640,8 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
             }
             AfterReply::Input {
                 key,
+                sym,
+                wcode,
                 page,
                 surface,
                 last_input,
@@ -1655,8 +1662,8 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
                         source: Source::Script,
                         kind: InputKind::Key {
                             key,
-                            sym: 0,
-                            wcode: 0,
+                            sym,
+                            wcode,
                             edge,
                             at_edge: false,
                         },

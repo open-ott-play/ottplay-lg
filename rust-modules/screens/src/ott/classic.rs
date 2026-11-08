@@ -35,6 +35,22 @@ pub(super) fn list_label(row: &OttRow, preferences: plx_appkit::classic_settings
     parts.join("  ")
 }
 
+/// A numbered live channel keeps its identity on the primary line; the
+/// current programme is a separate row detail so long titles cannot hide it.
+pub(super) fn catalogue_title(row: &OttRow) -> &str {
+    row.content_title.as_deref().filter(|name| !name.trim().is_empty()).unwrap_or(&row.title)
+}
+
+pub(super) fn catalogue_detail(row: &OttRow, now: Option<i64>) -> String {
+    if !row.guide_available { return String::new(); }
+    let programme = row.current_programme.as_ref().filter(|programme| {
+        let now = now.unwrap_or(programme.start_s);
+        programme.start_s <= now && now < programme.end_s
+    }).map(|programme| programme.title.as_str())
+        .or_else(|| current_programme(row, now).map(|programme| programme.title));
+    programme.unwrap_or_default().to_owned()
+}
+
 /// The secondary run is derived from the same name/visibility projection as
 /// `list_label`; it never parses server-provided punctuation or changes identity.
 pub(super) fn list_secondary_start(row: &OttRow, preferences: plx_appkit::classic_settings::Preferences, label: &str) -> Option<usize> {
