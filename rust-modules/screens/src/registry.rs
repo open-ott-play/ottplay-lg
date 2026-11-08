@@ -2862,7 +2862,11 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // the three controlled anchors must be freshly recorded and replayed on this shape.
 // Classic search return adds its source-bound origin, draft and pending revision.
 // Derived from the failing full screen-inventory assertion on c03bed94.
-const SCREEN_SHAPES_PIN: u64 = 0xc61a3dc940b5054e;
+/// **OTT provider-category shelves** (`0xc61a_3dc9_40b5_054e` → this): the OTT
+/// screen census gains category membership, stable presentation source, retained
+/// occurrence focus and shelf motion. Old recording headers remain incompatible;
+/// only reviewed fixtures that never mount OTT may migrate their census header.
+const SCREEN_SHAPES_PIN: u64 = 0xa2a2_f6e8_8fc7_72fa;
 
 #[cfg(test)]
 mod arg_tests {

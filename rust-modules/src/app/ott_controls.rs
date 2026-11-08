@@ -243,6 +243,7 @@ mod tests {
     fn filtering_a_category_preserves_the_numbers_drawn_by_the_native_list() {
         let entries: Vec<_> = (1..=7)
             .map(|number| CatalogEntry {
+                synopsis: None,
                 id: number.to_string(),
                 title: format!("Film {number}"),
                 category: if number == 3 || number == 7 {

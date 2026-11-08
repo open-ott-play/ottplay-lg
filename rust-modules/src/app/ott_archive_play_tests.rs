@@ -11,6 +11,7 @@ fn fixture() -> (ProviderProfile, CatalogEntry, ArchiveInterval) {
         enabled: true,
     };
     let entry = CatalogEntry {
+        synopsis: None,
         id: "channel".into(),
         title: "Channel".into(),
         category: "Channels".into(),

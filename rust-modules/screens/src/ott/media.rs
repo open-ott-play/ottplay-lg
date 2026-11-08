@@ -1,7 +1,7 @@
 //! Typed OTT media rendered by the shared native card stack. These borrowed
 //! projections never fetch, copy or re-order the runtime's catalogue.
 use super::{OttAction, OttMediaKind, OttPoster, OttView};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use plx_machine::machine::{Cx, FocusKey, GroupId};
 use plx_ui::cards::{self, CardSource, GridSpec, Kind, SectionSpec, Stack, StackPage, TileLabel};
 use plx_ui::screen::{At, Dir, DrawFrame, Focusable, GroupSpec, Part, Placed, Step};
@@ -9,7 +9,166 @@ use plx_ui::widgets::Art;
 use crate::registry::{AppLike, PageMemory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Section { Head, Items }
+pub(super) enum Section { Head, Items, Shelf(u32) }
+
+/// Only occurrence keys and row indices live here; metadata stays in OttView.
+pub(super) struct Shelf {
+    pub snapshot_index: usize,
+    pub group: GroupId,
+    pub keys: Vec<u32>,
+    pub index: HashMap<u32, usize>,
+    pub landscape: bool,
+}
+
+pub(super) fn occurrence_id(source: &str, category: &str, item: &str) -> String {
+    format!("shelf-item:{}:{source}{}:{category}{}:{item}", source.len(), category.len(), item.len())
+}
+
+pub(super) fn group_id(source: &str, category: &str) -> String {
+    format!("shelf-group:{}:{source}{}:{category}", source.len(), category.len())
+}
+
+impl super::OttScreen {
+    pub(super) fn install_shelves(&mut self, snapshot: &OttView) {
+        self.shelves.clear();
+        self.shelf_index.clear();
+        let live = (!self.classic_mode && self.card_presentation.is_some() && valid_shelves(snapshot))
+            .then(|| self.shelf_key_plan(snapshot)).flatten();
+        self.prune_shelf_keys(live.as_ref());
+        if live.is_none() { self.card_focus = None; return; }
+        let source = snapshot.shelf_context.as_deref().unwrap_or_default();
+        for (snapshot_index, shelf) in snapshot.shelves.iter().enumerate() {
+            // Group 0 is the flat form, 1 the header and 2 the inert top spacer.
+            let group = GroupId(self.row_key(&group_id(source, &shelf.id)).0 + 3);
+            let mut keys = Vec::with_capacity(shelf.rows.len());
+            let mut landscape = true;
+            for &row_index in &shelf.rows {
+                let row = &snapshot.rows[row_index];
+                let key = self.row_key(&occurrence_id(source, &shelf.id, &row.id)).0;
+                self.media_keys.insert(key, row_index);
+                keys.push(key);
+                landscape &= row.media.as_ref().is_some_and(|media|
+                    matches!(media.kind, OttMediaKind::LiveChannel | OttMediaKind::Episode));
+            }
+            let index = keys.iter().enumerate().map(|(index, key)| (*key, index)).collect();
+            self.shelf_index.insert(group.0, self.shelves.len());
+            self.shelves.push(Shelf { snapshot_index, group, keys, index, landscape });
+        }
+        self.card_focus = self.card_focus.filter(|key|
+            self.shelves.iter().any(|shelf| shelf.index.contains_key(key)));
+    }
+
+    /// Prove the complete allocation before interning anything. The ordinary
+    /// canonical rows and navigation controls are allocated after the shelves;
+    /// reserve their missing keys as well so shelves cannot exhaust that space.
+    fn shelf_key_plan(&self, snapshot: &OttView) -> Option<HashSet<String>> {
+        let source = snapshot.shelf_context.as_deref()?;
+        let mut next = self.next_key;
+        let mut live = HashSet::new();
+        let mut admit = |id: String, group: bool| -> Option<()> {
+            let key = if let Some(&key) = self.keys.get(&id) { key } else {
+                let key = next;
+                next = next.checked_add(1)?;
+                key
+            };
+            // FormTable reserves the upper key band for controls. Both the
+            // occurrence key and its offset group must stay in the lower band.
+            if key >= crate::registry::BAND { return None; }
+            if group { key.checked_add(3).filter(|group| *group < crate::registry::BAND)?; }
+            live.insert(id);
+            Some(())
+        };
+        for shelf in &snapshot.shelves {
+            admit(group_id(source, &shelf.id), true)?;
+            for &index in &shelf.rows {
+                admit(occurrence_id(source, &shelf.id, &snapshot.rows[index].id), false)?;
+            }
+        }
+        let controls = super::navigation::CONTEXT_IDS.into_iter()
+            .chain(["nav:browse", "nav:refresh", "nav:back"]);
+        let mut remaining = 0u32;
+        for id in controls {
+            if !self.keys.contains_key(id) { remaining = remaining.checked_add(1)?; }
+        }
+        for row in &snapshot.rows {
+            if !self.keys.contains_key(&format!("item:{}", row.id)) {
+                remaining = remaining.checked_add(1)?;
+            }
+        }
+        // `next` may equal the exclusive ceiling only after allocating the
+        // last legal key. Keep all later canonical/control keys below it too.
+        next.checked_add(remaining).filter(|next| *next <= crate::registry::BAND)?;
+        Some(live)
+    }
+
+    /// Shelf vocabularies track only this publication, including a refused or
+    /// empty layout. Canonical rows/control keys retain their existing lifetime.
+    fn prune_shelf_keys(&mut self, live: Option<&HashSet<String>>) {
+        let focus = self.card_focus;
+        let mut retired_focus = false;
+        let media_keys = &mut self.media_keys;
+        self.keys.retain(|id, key| {
+            let shelf = id.starts_with("shelf-item:") || id.starts_with("shelf-group:");
+            let keep = !shelf || live.is_some_and(|live| live.contains(id));
+            if !keep {
+                media_keys.remove(key);
+                retired_focus |= focus == Some(*key);
+            }
+            keep
+        });
+        if retired_focus { self.card_focus = None; }
+    }
+
+    /// A shelf occurrence is a focus identity, never a form or playback identity.
+    pub(super) fn canonical_card_key(&self, key: u32) -> u32 {
+        self.media_keys.get(&key).and_then(|index| self.snapshot.rows.get(*index))
+            .and_then(|row| self.keys.get(&format!("item:{}", row.id))).copied().unwrap_or(key)
+    }
+
+    pub(super) fn card_target(&self, key: u32) -> u32 {
+        if self.classic_mode || self.browse || self.shelves.is_empty() { return key; }
+        if self.shelves.iter().any(|shelf| shelf.index.contains_key(&key)) { return key; }
+        let Some(&row) = self.media_keys.get(&key) else { return key; };
+        self.card_focus.filter(|focus| self.media_keys.get(focus) == Some(&row))
+            .or_else(|| self.shelves.iter().flat_map(|shelf| &shelf.keys)
+                .find(|key| self.media_keys.get(key) == Some(&row)).copied()).unwrap_or(key)
+    }
+
+    pub(super) fn shelf_page_key(&self, key: u32, direction: i32) -> Option<u32> {
+        let shelf = self.shelves.iter().find(|shelf| shelf.index.contains_key(&key))?;
+        let index = shelf.index[&key];
+        let style = shelf_style(shelf.landscape);
+        let count = (super::navigation::route().content.w / (style.w + style.gap)).floor().max(1.0) as usize;
+        let target = if direction > 0 { index.saturating_add(count).min(shelf.keys.len() - 1) }
+            else if direction < 0 { index.saturating_sub(count) } else { index };
+        shelf.keys.get(target).copied()
+    }
+}
+
+fn valid_shelves(snapshot: &OttView) -> bool {
+    if snapshot.shelves.is_empty() || snapshot.shelf_context.is_none()
+        || snapshot.page_id.split(':').next() != Some("channels")
+        || snapshot.search.as_ref().is_some_and(|search| !search.query.is_empty()) { return false; }
+    let limit = plx_data::ott::MAX_CATALOG_ENTRIES;
+    if snapshot.rows.len() > limit || snapshot.shelves.len() > limit { return false; }
+    let Some(occurrences) = snapshot.shelves.iter().try_fold(0usize,
+        |total, shelf| total.checked_add(shelf.rows.len()).filter(|total| *total <= limit)) else { return false; };
+    if occurrences < snapshot.rows.len() { return false; }
+    let mut identities = HashSet::new();
+    if !snapshot.rows.iter().all(|row| identities.insert(row.id.as_str())) { return false; }
+    let mut categories = HashSet::new();
+    let mut covered = vec![false; snapshot.rows.len()];
+    for shelf in &snapshot.shelves {
+        if shelf.id.is_empty() || shelf.rows.is_empty() || !categories.insert(&shelf.id) { return false; }
+        let mut seen = HashSet::new();
+        for &index in &shelf.rows {
+            let Some(row) = covered.get_mut(index) else { return false; };
+            if !seen.insert(index) { return false; }
+            *row = true;
+        }
+    }
+    covered.into_iter().all(|covered| covered)
+}
 
 pub(super) fn presentation(view: &OttView) -> Option<bool> {
     if view.rows.is_empty() { return None; }
@@ -37,6 +196,14 @@ pub(super) struct Page<'a> {
     pub snapshot: &'a OttView,
     pub keys: &'a [u32],
     pub index: &'a HashMap<u32, usize>,
+    pub shelves: &'a [Shelf],
+    pub shelf_index: &'a HashMap<u32, usize>,
+}
+
+impl Page<'_> {
+    fn shelf(&self, group: u32) -> Option<&Shelf> {
+        self.shelves.get(*self.shelf_index.get(&group)?)
+    }
 }
 
 pub(super) struct Cards<'a> {
@@ -44,16 +211,23 @@ pub(super) struct Cards<'a> {
     snapshot: &'a OttView,
     keys: &'a [u32],
     index: &'a HashMap<u32, usize>,
+    rows: Option<&'a [usize]>,
+}
+
+impl Cards<'_> {
+    fn row(&self, i: usize) -> &super::OttRow {
+        &self.snapshot.rows[self.rows.map_or(i, |rows| rows[i])]
+    }
 }
 
 impl<H: AppLike<Memory = PageMemory>> CardSource<H> for Cards<'_> {
-    fn len(&self) -> usize { self.snapshot.rows.len() }
+    fn len(&self) -> usize { self.keys.len() }
     fn elem(&self, i: usize) -> u32 { self.keys[i] }
     fn index_of(&self, elem: &u32) -> Option<usize> { self.index.get(elem).copied() }
     fn art(&self, i: usize) -> Art<'_> {
-        let landscape = matches!(self.snapshot.rows[i].media.as_ref().map(|media| media.kind), Some(OttMediaKind::LiveChannel | OttMediaKind::Episode));
+        let landscape = matches!(self.row(i).media.as_ref().map(|media| media.kind), Some(OttMediaKind::LiveChannel | OttMediaKind::Episode));
         let res = if landscape { (640, 360) } else { (420, 630) };
-        match &self.snapshot.rows[i].poster {
+        match &self.row(i).poster {
             Some(OttPoster::Plex { server, key }) => Art::Thumb { sid: *server, key, res },
             Some(OttPoster::Http { url }) => Art::Http { url, res },
             Some(OttPoster::Local { key }) => Art::Local { key },
@@ -61,10 +235,10 @@ impl<H: AppLike<Memory = PageMemory>> CardSource<H> for Cards<'_> {
         }
     }
     fn label(&self, i: usize) -> TileLabel {
-        label(&self.snapshot.rows[i], self.landscape, &crate::registry::captions::policy())
+        label(self.row(i), self.landscape, &crate::registry::captions::policy())
     }
     fn progress(&self, i: usize) -> Option<f32> {
-        let media = self.snapshot.rows[i].media.as_ref()?;
+        let media = self.row(i).media.as_ref()?;
         let progress = media.progress?;
         if media.duration_ms.is_some_and(|duration| duration != progress.duration_ms) { return None; }
         (progress.duration_ms > 0 && progress.position_ms > 0 && progress.position_ms < progress.duration_ms)
@@ -72,7 +246,7 @@ impl<H: AppLike<Memory = PageMemory>> CardSource<H> for Cards<'_> {
     }
     fn overlay(&self, painter: plx_ui::Painter, i: usize, tile: &cards::Tile,
         measure: &dyn plx_machine::machine::Measure) {
-        let row = &self.snapshot.rows[i];
+        let row = self.row(i);
         if row.poster.is_none() {
             // An absent image cannot identify the tile. Keep its canonical name
             // on the empty face even when the focused caption is elsewhere.
@@ -99,20 +273,70 @@ impl<H: AppLike<Memory = PageMemory>> StackPage<H> for Page<'_> {
         let Some(landscape) = self.presentation else { return; };
         let frame = super::navigation::route().content;
         out.push(SectionSpec::new(Section::Head, Kind::Custom { height: frame.y, focusable: false }, GroupId(2)));
-        out.push(SectionSpec::new(Section::Items, Kind::Grid {
-            spec: GridSpec::resting(frame.y).columns(columns(landscape), style(landscape), frame.x),
-        }, GroupId(0)));
+        if self.shelves.is_empty() {
+            out.push(SectionSpec::new(Section::Items, Kind::Grid {
+                spec: GridSpec::resting(frame.y).columns(columns(landscape), style(landscape), frame.x),
+            }, GroupId(0)));
+        } else {
+            for shelf in self.shelves {
+                out.push(SectionSpec::new(Section::Shelf(shelf.group.0), Kind::Shelf {
+                    style: shelf_style(shelf.landscape), heading: HEADING_HEIGHT,
+                }, shelf.group).seated(plx_ui::screen::Seat::RememberedFirst)
+                    .edges([plx_ui::screen::EdgeRule::Geometric, plx_ui::screen::EdgeRule::Geometric,
+                        plx_ui::screen::EdgeRule::Stop, plx_ui::screen::EdgeRule::Stop]));
+            }
+        }
     }
-    fn fallback(&self, _cx: &Cx<'_, H>, out: &mut Vec<Section>) { out.push(Section::Items); }
+    fn fallback(&self, _cx: &Cx<'_, H>, out: &mut Vec<Section>) {
+        if self.shelves.is_empty() { out.push(Section::Items); }
+        else { out.extend(self.shelves.iter().map(|shelf| Section::Shelf(shelf.group.0))); }
+    }
     fn cards<'a>(&'a self, _cx: &'a Cx<'_, H>, section: Section) -> Option<Cards<'a>> {
-        (section == Section::Items && self.presentation.is_some()).then_some(Cards {
-            landscape: self.presentation == Some(true), snapshot: self.snapshot, keys: self.keys, index: self.index,
-        })
+        if self.presentation.is_none() { return None; }
+        match section {
+            Section::Items if self.shelves.is_empty() => Some(Cards {
+                landscape: self.presentation == Some(true), snapshot: self.snapshot, keys: self.keys,
+                index: self.index, rows: None,
+            }),
+            Section::Shelf(group) => {
+                let shelf = self.shelf(group)?;
+                Some(Cards { landscape: shelf.landscape, snapshot: self.snapshot,
+                    keys: &shelf.keys, index: &shelf.index,
+                    rows: Some(&self.snapshot.shelves[shelf.snapshot_index].rows) })
+            }
+            _ => None,
+        }
     }
     fn card_has_menu(&self, _cx: &Cx<'_, H>, _section: Section, _elem: &u32) -> bool { false }
-    fn caption_policy(&self, _section: Section) -> Option<plx_ui::caption_policy::CaptionPolicy> {
-        (self.presentation == Some(false)).then(crate::registry::captions::policy)
+    fn caption_policy(&self, section: Section) -> Option<plx_ui::caption_policy::CaptionPolicy> {
+        let landscape = match section {
+            Section::Shelf(group) => self.shelf(group)?.landscape,
+            _ => self.presentation?,
+        };
+        (!landscape).then(crate::registry::captions::policy)
     }
+    fn draw_heading(&self, section: Section, frame: &mut DrawFrame<'_, '_, H>, rect: plx_ui::Rect, lift: f32) {
+        let Section::Shelf(group) = section else { return; };
+        let Some(shelf) = self.shelf(group) else { return; };
+        let content = super::navigation::route().content;
+        cards::draw_heading(frame.painter.alpha(frame.page_alpha),
+            &self.snapshot.shelves[shelf.snapshot_index].title, "", content.x,
+            rect.y + plx_ui::theme::space::MD - lift, content.w, frame.measure);
+    }
+    fn reveal_margin(&self, _section: Section) -> f32 { super::navigation::route().content.y }
+    fn shelf_foot(&self, _cx: &Cx<'_, H>, _section: Section) -> f32 { plx_ui::consts::UNDER_LABEL_AIR }
+}
+
+const HEADING_HEIGHT: f32 = plx_ui::theme::size::HEADLINE as f32 + 2.0 * plx_ui::theme::space::MD;
+
+fn shelf_style(landscape: bool) -> &'static cards::RowStyle {
+    static PORTRAIT: std::sync::OnceLock<cards::RowStyle> = std::sync::OnceLock::new();
+    static LANDSCAPE: std::sync::OnceLock<cards::RowStyle> = std::sync::OnceLock::new();
+    let slot = if landscape { &LANDSCAPE } else { &PORTRAIT };
+    slot.get_or_init(|| {
+        let content = super::navigation::route().content;
+        cards::RowStyle { margin_x: content.x, viewport_width: Some(content.w), ..style(landscape) }
+    })
 }
 
 /// Own only the small borrowed page declaration so callers can delegate focus
@@ -208,7 +432,7 @@ mod label_tests {
             current_programme: None, id: "file-1".into(), title: "7 Fixture One.mp4".into(), content_title: Some("Fixture One.mp4".into()),
             detail: "Local videos".into(), description: String::new(), poster: None, guide: None,
             guide_available: false, records_available: false, media: Some(super::super::OttMedia { kind: OttMediaKind::LocalVideo,
-                duration_ms: Some(12_000), progress: None }),
+                duration_ms: Some(12_000), progress: None, synopsis: None }),
             action: OttAction::Play("file-1".into()), enabled: true, favorite: false,
         }
     }
@@ -313,10 +537,10 @@ mod label_tests {
             OttMediaKind::LiveChannel | OttMediaKind::Episode);
         let view = OttView { status_working: false, page_id: "channels:fixture".into(), revision: 1, title: String::new(),
             classic_preferences: Default::default(), volume_available: false, category_label: None, description: String::new(), status: String::new(),
-            selected_row: Some(row.id.clone()), rows: vec![row], search: None, catalog_progress: None,
+            selected_row: Some(row.id.clone()), shelves: Vec::new(), shelf_context: None, rows: vec![row], search: None, catalog_progress: None,
             preview_context: None, random_context: None, order_context: None };
         let index = HashMap::from([(1, 0)]);
-        let cards = Cards { landscape, snapshot: &view, keys: &[1], index: &index };
+        let cards = Cards { landscape, snapshot: &view, keys: &[1], index: &index, rows: None };
         let style = style(landscape);
         let scale = if focused { style.focus_scale } else { 1.0 };
         let tile = cards::Tile { rect: plx_ui::Rect::new(100.0, 100.0, style.w, style.h).scaled(scale),

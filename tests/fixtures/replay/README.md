@@ -131,6 +131,34 @@ reviewed exception for a census-only change in an unused type is documented belo
 every recorded payload and still requires full replay validation. The D1 results below describe
 that earlier build, not current all-domain acceptance.
 
+**Unused OTT category-shelf census migration (2026-11-08, source-only).**
+The Modern shelf state adds category membership, source-bound occurrence focus
+and shelf motion to `Ott::SHAPE`. Comparing `5610a22` and `97c1498` changes only
+that descriptor in the ordered census; App/wire declarations and the canonical
+encoder are unchanged. The CI assertions compute screen fingerprint
+`0xc61a3dc940b5054e` -> `0xa2a2f6e88fc772fa` and complete product fingerprint
+`17501014213284926484` (`0xf2e017b3dfe91414`) -> `2784988197135039552`
+(`0x26a6440281e3bc40`). Only the product fingerprint belongs in recording headers.
+
+The three existing synthetic Home, Settings and Filmography anchors do not
+instantiate OTT: controlled boot sets `App::ott = None`, and the controlled
+navigation codec rejects OTT arguments. Their complete segments retain 522,
+829 and 1277 frame grades and ten, 24 and ten owned input edges respectively.
+The shared card changes preserve default viewport geometry and first-match
+body reconciliation; no anchor inputs or expected behavior are replaced.
+
+Only the three manifest `state_fp` fields change. Initial objects and hashes,
+anchor flags, segment bytes, measurements, effects, resolutions and frame grades
+remain exact. `pre_modern_shelves_recording_headers_remain_refused` keeps the
+production parser's rejection of the predecessor shape, including rejection
+before malformed segment parsing; the existing strict initial/request preflight
+remains enabled. Recordings that instantiate OTT require fresh capture.
+
+This is a conditional source migration, not a runtime replay PASS. Full Targets
+and Resolve replay with complete counts and zero differences has **not run**
+for this change. No initial or per-frame hash may be edited to resolve a later
+replay divergence; that requires the ordinary capture procedure.
+
 **Unused OTT Search-return census migration (2026-11-05, source-only).**
 The SearchBack state adds `search_return` to `Ott::SHAPE` and its logical writer.
 The complete ordered source census changes only that OTT descriptor; App,

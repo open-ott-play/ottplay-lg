@@ -538,7 +538,7 @@ fn provider_fixture() -> (super::super::ProviderProfile, super::super::CatalogEn
     (ProviderProfile { id: "portal-fixture".into(), name: "Fixture".into(),
         kind: ProviderKind::VPortal, source: "portal::[key:fixture]https://media.invalid/nas/api".into(),
         source_alias: String::new(), enabled: true },
-    CatalogEntry { id: "fixture".into(), title: "Fixture".into(),
+    CatalogEntry { synopsis: None, id: "fixture".into(), title: "Fixture".into(),
         category: String::new(), description: String::new(), poster: String::new(),
         media: MediaLocator::VPortal { request: json!({"id":1}) }, duration_ms: Some(10_000),
         provider_id: Some("1".into()), provider_id_field: Some("id".into()), live: None })

@@ -135,6 +135,7 @@ mod runtime {
         for key in ["42", "43"] {
             let id = format!("{}:{key}", profile.id);
             result.entries.push(plx_data::ott::CatalogEntry {
+                synopsis: None,
                 id: id.clone(), title: format!("Episode {key}"), category: "Season".into(),
                 description: String::new(), poster: String::new(),
                 media: plx_data::ott::MediaLocator::Plex { server_id: profile.source.clone(), rating_key: key.into() },

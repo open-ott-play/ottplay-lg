@@ -17,6 +17,7 @@ mod m3u;
 mod profiles;
 mod urls;
 mod vportal;
+mod vportal_text;
 mod categories;
 
 pub use local::{catalog_from_local_files, LocalFile, is_local_video_path, valid_local_relative_path, valid_local_source_label};
@@ -81,6 +82,9 @@ pub struct CatalogEntry {
     pub title: String,
     pub category: String,
     pub description: String,
+    /// Source-owned synopsis boundary; the full description retains generated facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synopsis: Option<SynopsisSpan>,
     pub poster: String,
     pub media: MediaLocator,
     pub duration_ms: Option<u64>,
@@ -88,6 +92,52 @@ pub struct CatalogEntry {
     pub provider_id: Option<String>,
     #[serde(default)] pub provider_id_field: Option<String>,
     #[serde(default)] pub live: Option<guide::ChannelMetadata>,
+}
+
+/// A byte boundary attested by the parser, never inferred from title-like prose.
+/// The fingerprint detects metadata replacement; it is not authentication.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynopsisSpan {
+    byte_start: usize,
+    text_bytes: usize,
+    text_fingerprint: u64,
+    /// Validation belongs to one immutable UI snapshot, never persisted input.
+    #[serde(skip)]
+    validated: bool,
+}
+
+impl SynopsisSpan {
+    pub fn new(description: &str, byte_start: usize) -> Option<Self> {
+        description.get(byte_start..)?;
+        (description.len() <= MAX_METADATA_BYTES).then(|| Self {
+            byte_start,
+            text_bytes: description.len(),
+            text_fingerprint: synopsis_fingerprint(description),
+            validated: false,
+        })
+    }
+
+    /// Validate once at projection, after the final description has been chosen.
+    pub fn validated_for(&self, description: &str) -> Option<Self> {
+        (description.len() == self.text_bytes
+            && description.len() <= MAX_METADATA_BYTES
+            && description.get(self.byte_start..).is_some()
+            && synopsis_fingerprint(description) == self.text_fingerprint)
+            .then(|| Self { validated: true, ..self.clone() })
+    }
+
+    /// Constant-time access for the immutable snapshot validated at projection.
+    /// Replacing that snapshot's description requires a new `validated_for` call.
+    pub fn get<'a>(&self, description: &'a str) -> Option<&'a str> {
+        (self.validated && description.len() == self.text_bytes)
+            .then(|| description.get(self.byte_start..)).flatten()
+    }
+}
+
+fn synopsis_fingerprint(value: &str) -> u64 {
+    value.bytes().fold(0xcbf29ce484222325_u64, |hash, byte|
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3))
 }
 
 impl std::fmt::Debug for CatalogEntry {
@@ -225,3 +275,6 @@ pub(super) fn identity(profile: &str, value: &str) -> String {
 #[cfg(test)]
 #[path = "catalog_merge_tests.rs"]
 mod merge_tests;
+
+#[cfg(test)]
+mod synopsis_tests;

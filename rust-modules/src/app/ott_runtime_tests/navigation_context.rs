@@ -386,6 +386,7 @@ fn partially_failed_plex_navigation_still_fences_late_loaded() {
 
 fn entry(id: &str) -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: id.into(),
         title: format!("{id}.mp4"),
         category: String::new(),

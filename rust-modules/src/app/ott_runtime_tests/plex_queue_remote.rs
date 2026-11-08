@@ -29,6 +29,7 @@ fn permanent() -> ProviderProfile {
 
 fn live_entry() -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: "live".into(),
         title: "Live fixture".into(),
         category: "News".into(),
