@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Lignes de la liste Classic",
+  "ott.classic_side": "Côté de la liste Classic",
+  "ott.classic_arrows": "Flèches dans Classic",
+  "ott.classic_seek": "Saut avec 1/3 (secondes)",
+  "ott.classic_rows_help": "Nombre souhaité de lignes par page Classic ; un texte plus grand et la place disponible peuvent le réduire",
+  "ott.classic_side_help": "Choisir le côté de la liste Classic et de l’aperçu vidéo",
+  "ott.classic_arrows_help": "Action de gauche/droite dans Classic ; les commandes plein écran restent inchangées",
+  "ott.classic_seek_help": "Commandes masquées, 1/3 recule ou avance dans les vidéos et archives ; les chaînes en direct et les Favoris gardent la sélection par numéro",
+  "ott.classic_right": "Droite",
+  "ott.classic_left": "Gauche",
+  "ott.classic_paging": "Changer de page",
+  "ott.classic_volume": "Volume",
+  "ott.classic_context": "Catégories / détails",
+  "ott.classic_show_progress": "Afficher la progression de l’émission",
+  "ott.classic_show_progress_help": "Afficher la progression de l’émission en cours dans les listes de chaînes Classic"
+}

@@ -1,0 +1,42 @@
+{
+  "ott.order_actions": {
+    "value": "Actions",
+    "description": "Native list order: actions."
+  },
+  "ott.order_shuffle": {
+    "value": "Shuffle",
+    "description": "Native list order: shuffle."
+  },
+  "ott.order_reset": {
+    "value": "Reset order",
+    "description": "Native list order: reset."
+  },
+  "ott.order_changed": {
+    "value": "The list changed; reopen Actions",
+    "description": "Native list order: changed."
+  },
+  "ott.order_unavailable": {
+    "value": "List order is unavailable for this source",
+    "description": "Native list order: unavailable."
+  },
+  "ott.order_too_large": {
+    "value": "This list is too large to save its order",
+    "description": "Native list order: too_large."
+  },
+  "ott.order_add_to_category": {
+    "value": "Add to category",
+    "description": "Native list Actions: add the selected entry to a category."
+  },
+  "ott.order_choose_category": {
+    "value": "Choose category",
+    "description": "Native list Actions: choose the destination category."
+  },
+  "ott.order_sort_alphabetical": {
+    "value": "Sort by alphabet",
+    "description": "Native list Actions: display entries sorted alphabetically."
+  },
+  "ott.order_sort_as_is": {
+    "value": "As Is",
+    "description": "Native list Actions: use the saved list order instead of alphabetical sorting. This does not reset to the provider’s original order."
+  }
+}

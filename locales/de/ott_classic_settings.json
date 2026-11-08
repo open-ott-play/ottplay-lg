@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Classic-Listenzeilen",
+  "ott.classic_side": "Seite der Classic-Liste",
+  "ott.classic_arrows": "Pfeiltasten in Classic",
+  "ott.classic_seek": "Sprungweite für 1/3 (Sekunden)",
+  "ott.classic_rows_help": "Gewünschte Zeilen pro Classic-Seite; große Schrift und verfügbarer Platz können die Zahl verringern",
+  "ott.classic_side_help": "Seite der Classic-Liste und der Videovorschau wählen",
+  "ott.classic_arrows_help": "Links/Rechts in Classic-Listen; die Vollbildsteuerung bleibt unverändert",
+  "ott.classic_seek_help": "1/3 spult bei ausgeblendeten Bedienelementen in Videos und Archiven; Live-Sender und Favoriten behalten die Nummernauswahl",
+  "ott.classic_right": "Rechts",
+  "ott.classic_left": "Links",
+  "ott.classic_paging": "Seitenwechsel",
+  "ott.classic_volume": "Lautstärke",
+  "ott.classic_context": "Kategorien / Details",
+  "ott.classic_show_progress": "Sendungsfortschritt anzeigen",
+  "ott.classic_show_progress_help": "Fortschritt der aktuellen Sendung in Classic-Senderlisten anzeigen"
+}

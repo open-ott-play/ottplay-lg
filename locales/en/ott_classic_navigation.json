@@ -1,0 +1,21 @@
+{
+  "ott.classic_channel_category": {
+    "value": "Channel list. Category: {category}",
+    "description": "Classic channel or Favorites list caption. Category is the unchanged projected category label, not an inferred source or route name.",
+    "args": {
+      "category": "str"
+    }
+  },
+  "ott.classic_category_selection": {
+    "value": "Category selection",
+    "description": "Classic category selection page caption."
+  },
+  "ott.classic_epg": {
+    "value": "EPG",
+    "description": "Short Classic red-key label for the programme guide."
+  },
+  "ott.classic_category": {
+    "value": "Category",
+    "description": "Short Classic blue-key label for category selection."
+  }
+}

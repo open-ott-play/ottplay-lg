@@ -1,0 +1,102 @@
+{
+  "ott.organization_manage": {
+    "value": "Organize categories",
+    "description": "Native local category and channel organization: manage."
+  },
+  "ott.organization_create": {
+    "value": "Create category",
+    "description": "Native local category and channel organization: create."
+  },
+  "ott.organization_rename": {
+    "value": "Rename category",
+    "description": "Native local category and channel organization: rename."
+  },
+  "ott.organization_copy": {
+    "value": "Copy category",
+    "description": "Native local category and channel organization: copy."
+  },
+  "ott.organization_delete": {
+    "value": "Delete category",
+    "description": "Native local category and channel organization: delete."
+  },
+  "ott.organization_up": {
+    "value": "Move up",
+    "description": "Native local category and channel organization: up."
+  },
+  "ott.organization_down": {
+    "value": "Move down",
+    "description": "Native local category and channel organization: down."
+  },
+  "ott.organization_add": {
+    "value": "Add channel",
+    "description": "Native local category and channel organization: add."
+  },
+  "ott.organization_remove": {
+    "value": "Remove from category",
+    "description": "Native local category and channel organization: remove."
+  },
+  "ott.organization_reset": {
+    "value": "Reset organization",
+    "description": "Native local category and channel organization: reset."
+  },
+  "ott.organization_members": {
+    "value": "Select a channel to change its order or membership.",
+    "description": "Native local category and channel organization: members."
+  },
+  "ott.organization_local": {
+    "value": "Changes apply to this player only.",
+    "description": "Native local category and channel organization: local."
+  },
+  "ott.organization_reopen": {
+    "value": "The catalog changed. Open the organizer again.",
+    "description": "Native local category and channel organization: reopen."
+  },
+  "ott.organization_confirm_delete": {
+    "value": "Delete this category?",
+    "description": "Native local category and channel organization: confirm delete."
+  },
+  "ott.organization_confirm_reset": {
+    "value": "Restore the original categories and order?",
+    "description": "Native local category and channel organization: confirm reset."
+  },
+  "ott.organization_keep_media": {
+    "value": "Channels and Favorites will be kept.",
+    "description": "Native local category and channel organization: keep media."
+  },
+  "ott.organization_unavailable": {
+    "value": "Category editing is unavailable for this source.",
+    "description": "Native category editing: unavailable."
+  },
+  "ott.organization_invalid": {
+    "value": "The saved category settings are invalid.",
+    "description": "Native category editing: invalid."
+  },
+  "ott.organization_too_large": {
+    "value": "Category changes exceed the storage limit. Reset some changes before trying again.",
+    "description": "Native category editing: too large."
+  },
+  "ott.organization_duplicate_name": {
+    "value": "A category with that name already exists.",
+    "description": "Native category editing: duplicate name."
+  },
+  "ott.organization_invalid_name": {
+    "value": "Use a shorter category name on a single line.",
+    "description": "Native category editing: invalid name."
+  },
+  "ott.organization_ambiguous": {
+    "value": "Some channels have the same identity. This catalog cannot be edited safely.",
+    "description": "Native category editing: ambiguous."
+  },
+  "ott.organization_exhausted": {
+    "value": "No more category identifiers are available.",
+    "description": "Native category editing: exhausted."
+  },
+  "ott.organization_close_editor": {
+    "value": "Close the current editor before organizing categories.",
+    "description": "Native category editing: close editor."
+  },
+  "ott.organization_restart": {
+    "value": "Restart the player before editing categories again.",
+    "description": "Native category editing: restart."
+  }
+}

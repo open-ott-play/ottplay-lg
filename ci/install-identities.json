@@ -1,0 +1,17 @@
+[
+  {
+    "name": "stable",
+    "app_id": "com.openottplay.player.native",
+    "object_id": "ottstate.stable"
+  },
+  {
+    "name": "debug",
+    "app_id": "com.openottplay.player.native.debug",
+    "object_id": "ottstate.debug"
+  },
+  {
+    "name": "nightly",
+    "app_id": "com.openottplay.player.native.nightly",
+    "object_id": "ottstate.night"
+  }
+]

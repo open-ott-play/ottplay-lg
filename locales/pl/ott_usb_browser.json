@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Foldery USB",
+  "ott.usb_browser_use": "Użyj tego folderu",
+  "ott.usb_browser_parent": "Folder nadrzędny",
+  "ott.usb_browser_root": "Katalog główny dysku",
+  "ott.usb_browser_previous": "Poprzednia strona",
+  "ott.usb_browser_next": "Następna strona",
+  "ott.usb_browser_more": "Wczytaj więcej",
+  "ott.usb_browser_browse_root": "Otwórz katalog główny",
+  "ott.usb_browser_choose": "Wybierz folder na tym dysku USB",
+  "ott.usb_browser_reading": "Odczytywanie folderów…",
+  "ott.usb_browser_cancelled": "Anulowano wczytywanie folderów",
+  "ott.usb_browser_return": "Wróć bez zmiany wybranego źródła",
+  "ott.usb_browser_more_help": "Wyszukaj więcej folderów w tym katalogu",
+  "ott.usb_browser_limit": "Osiągnięto limit listy. Użyj tego folderu lub wpisz dokładną ścieżkę w profilu.",
+  "ott.usb_browser_partial": "Niepełna lista folderów. Wczytaj więcej, aby znaleźć pozostałe foldery.",
+  "ott.usb_browser_unreadable": "Nie udało się odczytać części nazw. Odśwież lub wybierz dostępny folder.",
+  "ott.usb_browser_empty": "Brak podfolderów. Użyj tego folderu, aby uwzględnić jego filmy.",
+  "ott.usb_browser_ready": "Otwórz podfolder lub użyj tego folderu.",
+  "ott.usb_browser_checking": "Sprawdzanie wybranego folderu USB…",
+  "ott.usb_browser_changed": "Wybór USB się zmienił; zamknij to okno"
+}

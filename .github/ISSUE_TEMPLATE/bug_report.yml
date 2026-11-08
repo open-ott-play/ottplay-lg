@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible OTTPlay LG problem.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Source revision or package version
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: TV model and firmware, or host test environment
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, expected result and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant redacted logs or screenshots
+      description: Remove tokens, private source URLs and device access information.

@@ -1,0 +1,122 @@
+{
+  "ott.settings_group_interface": {
+    "value": "Interface",
+    "description": "Title of the native Classic group for interface settings."
+  },
+  "ott.settings_group_lists": {
+    "value": "Lists",
+    "description": "Title of the native Classic group for list settings."
+  },
+  "ott.settings_group_infobar": {
+    "value": "Infobar",
+    "description": "Title of the native Classic group for playback information-bar settings."
+  },
+  "ott.settings_group_buttons": {
+    "value": "Buttons",
+    "description": "Title of the native Classic group for button settings."
+  },
+  "ott.settings_save": {
+    "value": "Save Settings",
+    "description": "Action that durably saves the current Classic settings group draft."
+  },
+  "ott.settings_draft_help": {
+    "value": "Changes are saved only with Save Settings",
+    "description": "Group draft help. Save Settings names the settings_save action; closing the draft does not save it."
+  },
+  "ott.settings_value_return": {
+    "value": "Return to the group without changing this value",
+    "description": "Value-picker return action help. Returning leaves this value unchanged in the group draft."
+  },
+  "ott.settings_changed": {
+    "value": "Settings changed; reopen this group",
+    "description": "The settings snapshot changed; the user must reopen this group before editing."
+  },
+  "ott.settings_saving": {
+    "value": "This group is being saved",
+    "description": "Status while the current settings group is being saved."
+  },
+  "ott.settings_saved": {
+    "value": "Settings saved",
+    "description": "Status after the settings group has been saved."
+  },
+  "ott.settings_separate": {
+    "value": "Separate settings",
+    "description": "Heading for settings actions that save separately from the current group draft."
+  },
+  "ott.settings_separate_help": {
+    "value": "These actions save separately",
+    "description": "These actions save their own changes independently of Save Settings."
+  },
+  "ott.settings_separate_close_help": {
+    "value": "Closing does not undo changes already saved",
+    "description": "Closing this section cannot undo changes its independent actions have already saved."
+  },
+  "ott.settings_font_scale": {
+    "value": "Interface text scale (%)",
+    "description": "Title of the setting for interface text scale, shown as a percentage."
+  },
+  "ott.settings_parental_unlock": {
+    "value": "Unlock parental access",
+    "description": "Action granting access through the existing parental-control check; does not disable the PIN."
+  },
+  "ott.settings_parental_create": {
+    "value": "Set parental PIN",
+    "description": "Action to set the parental-control PIN."
+  },
+  "ott.settings_parental_disable": {
+    "value": "Disable parental PIN",
+    "description": "Action to disable the parental-control PIN through the existing authorization flow."
+  },
+  "ott.settings_parental_channels": {
+    "value": "Toggle channel protection",
+    "description": "Action toggling parental protection of channel access."
+  },
+  "ott.settings_parental_settings": {
+    "value": "Toggle settings protection",
+    "description": "Action toggling parental protection of settings."
+  },
+  "ott.settings_parental_providers": {
+    "value": "Toggle provider selection protection",
+    "description": "Action toggling parental protection of provider selection."
+  },
+  "ott.settings_group_remote": {
+    "value": "Remote control",
+    "description": "Title of the native Classic section containing separate remote-control settings actions."
+  },
+  "ott.settings_group_parental": {
+    "value": "Parental control",
+    "description": "Title of the native Classic section containing separate parental-control settings actions."
+  },
+  "ott.settings_font_scale_prompt": {
+    "value": "Interface text scale (20–200%)",
+    "description": "Prompt for entering the interface text scale. The accepted range is 20–200 percent."
+  },
+  "ott.settings_font_scale_invalid": {
+    "value": "Enter an integer from 20 to 200",
+    "description": "Validation error for interface text scale. Enter a whole number in the inclusive range 20–200."
+  },
+  "ott.settings_show_number": {
+    "value": "Show channel number in list",
+    "description": "Channel list setting: show the channel number in each list row."
+  },
+  "ott.settings_show_name": {
+    "value": "Show channel name in list",
+    "description": "Channel list setting: show the channel name in each list row."
+  },
+  "ott.settings_show_program": {
+    "value": "Show program name",
+    "description": "Channel list setting: show the programme name in each list row."
+  },
+  "ott.settings_show_description": {
+    "value": "Show description",
+    "description": "Channel list setting: show descriptions in the list."
+  },
+  "ott.settings_yes": {
+    "value": "Yes",
+    "description": "Affirmative choice for a boolean setting, such as showing a channel-list field."
+  },
+  "ott.settings_no": {
+    "value": "No",
+    "description": "Negative choice for a boolean setting, such as hiding a channel-list field."
+  }
+}

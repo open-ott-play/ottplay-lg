@@ -1,0 +1,10 @@
+{
+  "ott.remote_find": "Найти сервер управления",
+  "ott.remote_unconfigured": "Поиск серверов не настроен",
+  "ott.remote_invalid_profile": "Ошибка настройки поиска",
+  "ott.remote_finding": "Поиск серверов управления…",
+  "ott.remote_choose": "Выберите сервер управления",
+  "ott.remote_empty": "Серверы не найдены. Повторите поиск.",
+  "ott.remote_failed": "Ошибка поиска. Повторите попытку.",
+  "ott.remote_choice_expired": "Список изменился. Повторите поиск."
+}

@@ -1,0 +1,30 @@
+{
+  "modern.player.live": {
+    "value": "Live",
+    "description": "Compact native Modern playback state or existing transport action label."
+  },
+  "modern.player.replay": {
+    "value": "Replay",
+    "description": "Compact native Modern playback state or existing transport action label."
+  },
+  "modern.player.video": {
+    "value": "Video",
+    "description": "Compact native Modern playback state or existing transport action label."
+  },
+  "modern.player.previous": {
+    "value": "Previous",
+    "description": "Compact native Modern playback state or existing transport action label."
+  },
+  "modern.player.next": {
+    "value": "Next",
+    "description": "Compact native Modern playback state or existing transport action label."
+  },
+  "modern.player.more": {
+    "value": "More",
+    "description": "Compact native Modern playback state or existing transport action label."
+  },
+  "modern.player.restart": {
+    "value": "Start over",
+    "description": "Compact native Modern playback state or existing transport action label."
+  }
+}

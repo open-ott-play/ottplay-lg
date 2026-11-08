@@ -1,0 +1,12 @@
+{
+  "ott.order_actions": "Műveletek",
+  "ott.order_shuffle": "Keverés",
+  "ott.order_reset": "Sorrend visszaállítása",
+  "ott.order_changed": "A lista megváltozott; nyissa meg újra a Műveleteket",
+  "ott.order_unavailable": "Ennél a forrásnál a listasorrend nem állítható",
+  "ott.order_too_large": "A lista túl nagy a sorrend mentéséhez",
+  "ott.order_add_to_category": "Hozzáadás kategóriához",
+  "ott.order_choose_category": "Kategória kiválasztása",
+  "ott.order_sort_alphabetical": "Rendezés betűrendben",
+  "ott.order_sort_as_is": "Mentett sorrend"
+}

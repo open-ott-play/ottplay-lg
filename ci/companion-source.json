@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/open-ott-play/ottplay-foss",
+  "revision": "47adabad66b41b33e126925f7f00b17c7bf19b58",
+  "scope": "Verifier input pins only; supplied companion must separately match its source and linker receipts.",
+  "verifier_files": {
+    "native/webos/companion/build.py": "618a863b365a136c5abaac3e2a4eac900ed299927d58c893c6b6cb554c2d1ecc",
+    "native/webos/companion/manifest.json": "c93a9270d8d037721657e22f6b77972571c95d518d57c18ad3d4e670be8e2177",
+    "src-rs/companion/webos_link.py": "177ea74c4eab3965336f6991b5befdcdc497e1c9cd13a763acbfc6895c5d4929"
+  }
+}

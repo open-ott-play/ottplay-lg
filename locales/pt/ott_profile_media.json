@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Carregar lista de reprodução",
+  "ott.profile_edit": "Editar {name}",
+  "ott.m3u_media_links": "Ligações da mediateca…",
+  "ott.m3u_media_link": "Ligação da mediateca",
+  "ott.m3u_media_changed": "As definições multimédia M3U foram alteradas. Reabra o editor.",
+  "ott.m3u_media_invalid": "A ligação VPortal associada é inválida"
+}

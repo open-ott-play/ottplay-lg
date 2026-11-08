@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Lautstärkeschritt (%)",
+  "ott.volume_step_prompt": "Lautstärkeschritt (3–10 %)",
+  "ott.volume_step_invalid": "Gib eine ganze Zahl von 3 bis 10 ein",
+  "ott.info_timeout": "Anzeigedauer der Informationen (Sekunden)",
+  "ott.info_timeout_prompt": "Anzeigedauer der Informationen (3–20 Sekunden)",
+  "ott.info_timeout_invalid": "Gib eine ganze Zahl von 3 bis 20 ein"
+}

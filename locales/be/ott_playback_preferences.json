@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Крок гучнасці (%)",
+  "ott.volume_step_prompt": "Крок гучнасці (3–10%)",
+  "ott.volume_step_invalid": "Увядзіце цэлы лік ад 3 да 10",
+  "ott.info_timeout": "Час паказу інфармацыі (секунды)",
+  "ott.info_timeout_prompt": "Час паказу інфармацыі (3–20 секунд)",
+  "ott.info_timeout_invalid": "Увядзіце цэлы лік ад 3 да 20"
+}

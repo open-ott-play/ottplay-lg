@@ -1,0 +1,8 @@
+{
+  "ott.records": "Nagrania",
+  "ott.records_empty": "Brak programów w EPG dla tego okresu archiwum",
+  "ott.records_unavailable": "Nagrania tego kanału są niedostępne",
+  "ott.records_incomplete": "Lista nagrań jest niepełna lub niedostępna",
+  "ott.records_window": "Nagrania obejmują cały okres archiwum",
+  "ott.records_order": "Nagrania są uporządkowane według tytułu"
+}

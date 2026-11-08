@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Righe della lista Classic",
+  "ott.classic_side": "Lato della lista Classic",
+  "ott.classic_arrows": "Frecce in Classic",
+  "ott.classic_seek": "Salto con 1/3 (secondi)",
+  "ott.classic_rows_help": "Righe desiderate per pagina Classic; testo grande e spazio disponibile possono ridurne il numero",
+  "ott.classic_side_help": "Scegli il lato della lista Classic e dell’anteprima video",
+  "ott.classic_arrows_help": "Azione sinistra/destra nelle liste Classic; i comandi a schermo intero non cambiano",
+  "ott.classic_seek_help": "Con i controlli nascosti, 1/3 va indietro o avanti nei video e negli archivi; i canali in diretta e i Preferiti mantengono la selezione numerica",
+  "ott.classic_right": "Destra",
+  "ott.classic_left": "Sinistra",
+  "ott.classic_paging": "Cambia pagina",
+  "ott.classic_volume": "Volume",
+  "ott.classic_context": "Categorie / dettagli",
+  "ott.classic_show_progress": "Mostra avanzamento del programma",
+  "ott.classic_show_progress_help": "Mostra l’avanzamento del programma attuale negli elenchi di canali Classic"
+}

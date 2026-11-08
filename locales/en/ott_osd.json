@@ -1,0 +1,38 @@
+{
+  "ott.osd_level": {
+    "value": "OSD background level",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_clock": {
+    "value": "Permanent clock",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_level_help": {
+    "value": "Choose an on-screen background level (default 7)",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_clock_help": {
+    "value": "Show a permanent clock during playback",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_off": {
+    "value": "Off",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_background": {
+    "value": "Background",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_transparent": {
+    "value": "Transparent",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_changed": {
+    "value": "Display settings changed; select the option again",
+    "description": "Native display setting; changes presentation only after a successful save."
+  },
+  "ott.osd_close_editor": {
+    "value": "Close the editor before changing display settings",
+    "description": "Native display setting; changes presentation only after a successful save."
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "ott.menu_items": {
+    "value": "Menu items",
+    "description": "Native menu visibility: items."
+  },
+  "ott.menu_visible": {
+    "value": "Visible",
+    "description": "Native menu visibility: visible."
+  },
+  "ott.menu_hidden": {
+    "value": "Hidden",
+    "description": "Native menu visibility: hidden."
+  },
+  "ott.menu_reset": {
+    "value": "Reset menu items",
+    "description": "Native menu visibility: reset."
+  },
+  "ott.menu_reset_help": {
+    "value": "Show all menu items",
+    "description": "Native menu visibility: reset_help."
+  },
+  "ott.menu_help": {
+    "value": "Choose which items appear in menus",
+    "description": "Native menu visibility: help."
+  },
+  "ott.menu_favorite": {
+    "value": "Add or remove Favorite",
+    "description": "Native menu visibility: favorite."
+  },
+  "ott.menu_audio": {
+    "value": "Audio tracks",
+    "description": "Native menu visibility: audio."
+  },
+  "ott.menu_subtitles": {
+    "value": "Subtitles and appearance",
+    "description": "Native menu visibility: subtitles."
+  },
+  "ott.menu_changed": {
+    "value": "Menu settings changed; select the item again",
+    "description": "Native menu visibility: changed."
+  },
+  "ott.menu_invalid": {
+    "value": "Invalid menu visibility settings",
+    "description": "Native menu visibility: invalid."
+  }
+}

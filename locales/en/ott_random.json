@@ -1,0 +1,14 @@
+{
+  "ott.random_play": {
+    "value": "Play random item",
+    "description": "Internal random playback: play."
+  },
+  "ott.random_changed": {
+    "value": "The list changed; select Random again",
+    "description": "Internal random playback: changed."
+  },
+  "ott.random_unavailable": {
+    "value": "Random playback is unavailable for this list",
+    "description": "Internal random playback: unavailable."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Archivdauer in Stunden",
+  "ott.archive_hours_prompt": "Archivdauer (0 verwendet die Wiedergabeliste)",
+  "ott.archive_hours_invalid": "Geben Sie ganze Stunden von 0 bis 8760 ein",
+  "ott.archive_hours_changed": "Archiveinstellungen geändert; Editor erneut öffnen",
+  "ott.archive_hours_profile": "Wählen Sie ein M3U-Fernsehprofil"
+}

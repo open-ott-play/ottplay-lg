@@ -1,0 +1,245 @@
+{
+  "version": 1,
+  "op": "schema",
+  "runtime": "fixture",
+  "context": {
+    "token": "fixture:context",
+    "provider": "m3u",
+    "profile": 1
+  },
+  "settings": [
+    {
+      "id": "nativeSubtitleFont",
+      "type": "string",
+      "scope": "application",
+      "sensitive": false,
+      "access": {
+        "read": true,
+        "write": true
+      },
+      "default_value": "inter_bold",
+      "constraints": {
+        "values": [
+          "inter_bold",
+          "inter_regular"
+        ],
+        "max_utf8_bytes": 32
+      },
+      "choices": [
+        {
+          "value": "inter_bold",
+          "label": "Inter Bold",
+          "aliases": [
+            "inter_bold"
+          ]
+        },
+        {
+          "value": "inter_regular",
+          "label": "Inter Regular",
+          "aliases": [
+            "inter_regular"
+          ]
+        }
+      ],
+      "apply": "immediate",
+      "description": "Installation-wide native text subtitle appearance. Saving does not select a track, restart playback or wake the player. Image subtitles keep their original artwork."
+    },
+    {
+      "id": "nativeSubtitleColor",
+      "type": "string",
+      "scope": "application",
+      "sensitive": false,
+      "access": {
+        "read": true,
+        "write": true
+      },
+      "default_value": "white",
+      "constraints": {
+        "values": [
+          "white",
+          "yellow",
+          "green",
+          "cyan",
+          "blue",
+          "magenta",
+          "red"
+        ],
+        "max_utf8_bytes": 32
+      },
+      "choices": [
+        {
+          "value": "white",
+          "label": "White",
+          "aliases": [
+            "white"
+          ]
+        },
+        {
+          "value": "yellow",
+          "label": "Yellow",
+          "aliases": [
+            "yellow"
+          ]
+        },
+        {
+          "value": "green",
+          "label": "Green",
+          "aliases": [
+            "green"
+          ]
+        },
+        {
+          "value": "cyan",
+          "label": "Cyan",
+          "aliases": [
+            "cyan"
+          ]
+        },
+        {
+          "value": "blue",
+          "label": "Blue",
+          "aliases": [
+            "blue"
+          ]
+        },
+        {
+          "value": "magenta",
+          "label": "Magenta",
+          "aliases": [
+            "magenta"
+          ]
+        },
+        {
+          "value": "red",
+          "label": "Red",
+          "aliases": [
+            "red"
+          ]
+        }
+      ],
+      "apply": "immediate",
+      "description": "Installation-wide native text subtitle appearance. Saving does not select a track, restart playback or wake the player. Image subtitles keep their original artwork."
+    },
+    {
+      "id": "nativeSubtitleOutline",
+      "type": "string",
+      "scope": "application",
+      "sensitive": false,
+      "access": {
+        "read": true,
+        "write": true
+      },
+      "default_value": "normal",
+      "constraints": {
+        "values": [
+          "none",
+          "thin",
+          "normal",
+          "thick",
+          "extra_thick"
+        ],
+        "max_utf8_bytes": 32
+      },
+      "choices": [
+        {
+          "value": "none",
+          "label": "None",
+          "aliases": [
+            "none"
+          ]
+        },
+        {
+          "value": "thin",
+          "label": "Thin",
+          "aliases": [
+            "thin"
+          ]
+        },
+        {
+          "value": "normal",
+          "label": "Normal",
+          "aliases": [
+            "normal"
+          ]
+        },
+        {
+          "value": "thick",
+          "label": "Thick",
+          "aliases": [
+            "thick"
+          ]
+        },
+        {
+          "value": "extra_thick",
+          "label": "Extra thick",
+          "aliases": [
+            "extra_thick"
+          ]
+        }
+      ],
+      "apply": "immediate",
+      "description": "Installation-wide native text subtitle appearance. Saving does not select a track, restart playback or wake the player. Image subtitles keep their original artwork."
+    },
+    {
+      "id": "nativeSubtitleBackground",
+      "type": "string",
+      "scope": "application",
+      "sensitive": false,
+      "access": {
+        "read": true,
+        "write": true
+      },
+      "default_value": "transparent",
+      "constraints": {
+        "values": [
+          "transparent",
+          "quarter",
+          "half",
+          "three_quarter",
+          "opaque"
+        ],
+        "max_utf8_bytes": 32
+      },
+      "choices": [
+        {
+          "value": "transparent",
+          "label": "Transparent",
+          "aliases": [
+            "transparent"
+          ]
+        },
+        {
+          "value": "quarter",
+          "label": "25% opacity",
+          "aliases": [
+            "quarter"
+          ]
+        },
+        {
+          "value": "half",
+          "label": "50% opacity",
+          "aliases": [
+            "half"
+          ]
+        },
+        {
+          "value": "three_quarter",
+          "label": "75% opacity",
+          "aliases": [
+            "three_quarter"
+          ]
+        },
+        {
+          "value": "opaque",
+          "label": "Opaque",
+          "aliases": [
+            "opaque"
+          ]
+        }
+      ],
+      "apply": "immediate",
+      "description": "Installation-wide native text subtitle appearance. Saving does not select a track, restart playback or wake the player. Image subtitles keep their original artwork."
+    }
+  ],
+  "next_cursor": null
+}

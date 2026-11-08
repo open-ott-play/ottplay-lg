@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Éléments du menu",
+  "ott.menu_visible": "Visible",
+  "ott.menu_hidden": "Masqué",
+  "ott.menu_reset": "Réinitialiser les éléments du menu",
+  "ott.menu_reset_help": "Afficher tous les éléments du menu",
+  "ott.menu_help": "Choisissez les éléments à afficher dans les menus",
+  "ott.menu_favorite": "Ajouter ou retirer des favoris",
+  "ott.menu_audio": "Pistes audio",
+  "ott.menu_subtitles": "Sous-titres et apparence",
+  "ott.menu_changed": "Les réglages du menu ont changé ; sélectionnez à nouveau cet élément",
+  "ott.menu_invalid": "Réglages de visibilité du menu non valides"
+}

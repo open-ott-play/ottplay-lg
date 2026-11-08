@@ -1,0 +1,10 @@
+{
+  "ott.remote_find": "Procurar servidor de controlo",
+  "ott.remote_unconfigured": "Pesquisa não configurada",
+  "ott.remote_invalid_profile": "Configuração de pesquisa inválida",
+  "ott.remote_finding": "A procurar servidores de controlo…",
+  "ott.remote_choose": "Selecionar servidor de controlo",
+  "ott.remote_empty": "Nenhum servidor encontrado. Tentar de novo.",
+  "ott.remote_failed": "Falha na pesquisa. Tentar de novo.",
+  "ott.remote_choice_expired": "A lista mudou. Pesquisar de novo."
+}

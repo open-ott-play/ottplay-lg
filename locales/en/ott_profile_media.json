@@ -1,0 +1,29 @@
+{
+  "ott.profile_load_playlist": {
+    "value": "Load playlist",
+    "description": "Explicitly load the active M3U playlist after editing its source."
+  },
+  "ott.profile_edit": {
+    "value": "Edit {name}",
+    "args": {
+      "name": "str"
+    },
+    "description": "Edit action for a captured provider profile. Preserve the supplied profile name verbatim."
+  },
+  "ott.m3u_media_links": {
+    "value": "Media library links…",
+    "description": "Title and opening action for the M3U attached media-link selector."
+  },
+  "ott.m3u_media_link": {
+    "value": "Media library link",
+    "description": "Title of the private attached VPortal link editor for one captured M3U profile."
+  },
+  "ott.m3u_media_changed": {
+    "value": "M3U media settings changed. Reopen the editor.",
+    "description": "Fixed stale-context error for the M3U attached media-link editor; no source details."
+  },
+  "ott.m3u_media_invalid": {
+    "value": "Invalid attached VPortal link",
+    "description": "Fixed invalid-link error for the M3U attached VPortal editor; never include the entered link."
+  }
+}

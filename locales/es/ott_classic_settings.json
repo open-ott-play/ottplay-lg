@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Filas de la lista Classic",
+  "ott.classic_side": "Lado de la lista Classic",
+  "ott.classic_arrows": "Flechas en Classic",
+  "ott.classic_seek": "Salto con 1/3 (segundos)",
+  "ott.classic_rows_help": "Filas deseadas por página Classic; el texto grande y el espacio disponible pueden reducirlas",
+  "ott.classic_side_help": "Elige el lado de la lista Classic y de la vista previa de vídeo",
+  "ott.classic_arrows_help": "Acción de izquierda/derecha en listas Classic; los controles a pantalla completa no cambian",
+  "ott.classic_seek_help": "Con los controles ocultos, 1/3 retrocede o avanza en vídeos y archivos; los canales en directo y Favoritos mantienen la selección numérica",
+  "ott.classic_right": "Derecha",
+  "ott.classic_left": "Izquierda",
+  "ott.classic_paging": "Cambiar página",
+  "ott.classic_volume": "Volumen",
+  "ott.classic_context": "Categorías / detalles",
+  "ott.classic_show_progress": "Mostrar progreso del programa",
+  "ott.classic_show_progress_help": "Mostrar el progreso del programa actual en las listas de canales Classic"
+}

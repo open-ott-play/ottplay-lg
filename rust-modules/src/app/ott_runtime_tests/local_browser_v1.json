@@ -1,0 +1,419 @@
+{
+  "version": 1,
+  "description": "Independent synthetic wire cases, not one sequential workflow or device qualification.",
+  "capabilities": {
+    "local_browser": {
+      "version": 1,
+      "operations": [
+        "roots",
+        "list",
+        "more",
+        "select"
+      ],
+      "max_entries": 64
+    },
+    "local_media_handles": {
+      "version": 1,
+      "operations": [
+        "connect",
+        "play",
+        "shuffle"
+      ]
+    }
+  },
+  "browser_cases": [
+    {
+      "name": "available_roots",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "roots"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "roots",
+        "state": "ready",
+        "generation": "roots-1",
+        "kind": "roots",
+        "entries": [
+          {
+            "id": "root-1",
+            "name": "USB SSD",
+            "kind": "root"
+          }
+        ],
+        "parent_id": null,
+        "select_id": null,
+        "next_cursor": null,
+        "partial": false,
+        "limit_reached": false
+      }
+    },
+    {
+      "name": "empty_roots",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "roots"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "roots",
+        "state": "ready",
+        "generation": "roots-2",
+        "kind": "roots",
+        "entries": [],
+        "parent_id": null,
+        "select_id": null,
+        "next_cursor": null,
+        "partial": false,
+        "limit_reached": false
+      }
+    },
+    {
+      "name": "directory_page",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "generation": "roots-1",
+        "entry_id": "root-1"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "state": "ready",
+        "generation": "dir-1",
+        "kind": "directories",
+        "entries": [
+          {
+            "id": "entry-1",
+            "name": "Family movies",
+            "kind": "directory"
+          }
+        ],
+        "parent_id": null,
+        "select_id": "select-dir-1",
+        "next_cursor": "cursor-1",
+        "partial": false,
+        "limit_reached": false
+      }
+    },
+    {
+      "name": "retained_next_page",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "generation": "dir-1",
+        "cursor": "cursor-1"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "state": "ready",
+        "generation": "dir-2",
+        "kind": "directories",
+        "entries": [
+          {
+            "id": "entry-2",
+            "name": "Три кота",
+            "kind": "directory"
+          }
+        ],
+        "parent_id": "parent-2",
+        "select_id": "select-dir-2",
+        "next_cursor": null,
+        "partial": false,
+        "limit_reached": false
+      }
+    },
+    {
+      "name": "bounded_more",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "more",
+        "generation": "dir-2",
+        "select_id": "select-dir-2"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "more",
+        "state": "ready",
+        "generation": "dir-3",
+        "kind": "directories",
+        "entries": [],
+        "parent_id": null,
+        "select_id": "select-dir-3",
+        "next_cursor": null,
+        "partial": true,
+        "limit_reached": true
+      }
+    },
+    {
+      "name": "select_without_playback_or_save",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "select",
+        "generation": "dir-3",
+        "select_id": "select-dir-3"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "select",
+        "state": "ready",
+        "generation": "dir-3",
+        "source": {
+          "id": "usb-source-1",
+          "name": "Family movies",
+          "kind": "folder",
+          "handle": "handle-1",
+          "stable_identity": true
+        },
+        "persisted": false,
+        "activated": false
+      }
+    },
+    {
+      "name": "roots_busy",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "roots"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "roots",
+        "state": "error",
+        "error": "busy"
+      }
+    },
+    {
+      "name": "list_stale",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "generation": "old-1",
+        "entry_id": "entry-1"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "state": "error",
+        "error": "stale"
+      }
+    },
+    {
+      "name": "more_limit_exceeded",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "more",
+        "generation": "dir-3",
+        "select_id": "select-dir-3"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "more",
+        "state": "error",
+        "error": "limit_exceeded"
+      }
+    },
+    {
+      "name": "select_source_changed",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "select",
+        "generation": "dir-3",
+        "select_id": "select-dir-3"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "select",
+        "state": "error",
+        "error": "source_changed"
+      }
+    },
+    {
+      "name": "display_names_are_not_paths",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "generation": "roots-1",
+        "entry_id": "root-1"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "state": "ready",
+        "generation": "dir-1",
+        "kind": "directories",
+        "entries": [
+          {
+            "id": "name-1",
+            "name": "back\\slash",
+            "kind": "directory"
+          },
+          {
+            "id": "name-2",
+            "name": " ",
+            "kind": "directory"
+          },
+          {
+            "id": "name-3",
+            "name": "..",
+            "kind": "directory"
+          }
+        ],
+        "parent_id": null,
+        "select_id": "select-dir-1",
+        "next_cursor": "cursor-1",
+        "partial": false,
+        "limit_reached": false
+      }
+    },
+    {
+      "name": "root_pagination",
+      "request": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "generation": "roots-previous",
+        "cursor": "root-cursor"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "list",
+        "state": "ready",
+        "generation": "roots-1",
+        "kind": "roots",
+        "entries": [
+          {
+            "id": "root-1",
+            "name": "USB SSD",
+            "kind": "root"
+          }
+        ],
+        "parent_id": null,
+        "select_id": null,
+        "next_cursor": null,
+        "partial": false,
+        "limit_reached": false
+      }
+    }
+  ],
+  "handle_cases": [
+    {
+      "name": "connect_verified_source",
+      "request": {
+        "runtime": "native-qa-1",
+        "op": "connect",
+        "source_handle": "handle-1"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "connect",
+        "state": "ready",
+        "source": {
+          "id": "usb-source-1",
+          "name": "Family movies",
+          "kind": "folder",
+          "available": true
+        },
+        "count": 0,
+        "shuffled": false,
+        "accepted": true,
+        "playback_confirmed": false,
+        "source_handle": "handle-1"
+      }
+    },
+    {
+      "name": "play_verified_source",
+      "request": {
+        "runtime": "native-qa-1",
+        "op": "play",
+        "source_handle": "handle-1",
+        "session": true
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "play",
+        "state": "ready",
+        "source": {
+          "id": "usb-source-1",
+          "name": "Family movies",
+          "kind": "folder",
+          "available": true
+        },
+        "count": 4,
+        "shuffled": false,
+        "accepted": true,
+        "playback_confirmed": false,
+        "source_handle": "handle-1",
+        "session": true
+      }
+    },
+    {
+      "name": "shuffle_verified_source",
+      "request": {
+        "runtime": "native-qa-1",
+        "op": "shuffle",
+        "source_handle": "handle-1",
+        "session": true
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-qa-1",
+        "op": "shuffle",
+        "state": "ready",
+        "source": {
+          "id": "usb-source-1",
+          "name": "Family movies",
+          "kind": "folder",
+          "available": true
+        },
+        "count": 4,
+        "shuffled": true,
+        "accepted": true,
+        "playback_confirmed": false,
+        "source_handle": "handle-1",
+        "session": true
+      }
+    }
+  ],
+  "contract_sha256": "4ebbb877dfe540ae471bca7df74305cb0951eb332cf4d5038ae9a623e72ee2db"
+}

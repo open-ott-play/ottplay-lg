@@ -1,0 +1,234 @@
+//! Scrim/entrance alpha composition, nested draw across a push/pop, the mount-time
+//! session-write regression, and the root page's detail-line width fit.
+
+use super::*;
+#[allow(unused_imports)]
+use super::test_support::*;
+use plx_machine::machine::Measure as _;
+
+/// Spec §14 phase 8: `Family::Settings`'s scrim/entrance composition reads
+/// `DrawFrame::nav_page_alpha` rather than the `ui::nav` statics — these two pin the
+/// arithmetic itself (the wiring at the two call sites is a straight field read, checked by
+/// the compiler and by every existing draw test in this module staying green). A route dip
+/// in flight (a non-1.0 `nav_page_alpha`) must dim the scrim and the entrance exactly as
+/// much as the surface's own appear does — before this field existed, both call sites read
+/// the live global instead of whatever a host test's `DrawFrame` carried, so a test built on
+/// the OLD shape could not have told a wired composition from an ignored parameter; a
+/// process-wide static is either at rest (1.0, indistinguishable from the identity) or being
+/// driven by a second test racing this one (`testlock::serial()`'s whole reason for existing
+/// — see `docs/../test-suite-global-pollution.md`), never a controlled non-1.0 value a test
+/// can set.
+#[test]
+fn settings_scrim_and_entrance_alpha_compose_local_and_nav_page_alpha() {
+    // The peak is the PANEL role's row in `theme::underlay`, not a number of this module's.
+    const SCRIM_A: f32 = theme::underlay::DIM_PANEL;
+    assert_eq!(SCRIM_A, 0.46, "Settings' dim is the design's `scrimStill`");
+    assert_eq!(settings_scrim_alpha(1.0, 1.0), SCRIM_A);
+    assert_eq!(settings_entrance_alpha(1.0, 1.0), 1.0);
+    // the surface is fully open (local 1.0) but the route beneath it is mid-dip (0.5): both
+    // the scrim and the entrance must read the dip, not just the surface's own appear.
+    assert_eq!(settings_scrim_alpha(1.0, 0.5), SCRIM_A * 0.5);
+    assert_eq!(settings_entrance_alpha(1.0, 0.5), 0.5);
+    // the surface is itself still appearing (local 0.5) over a route at rest (1.0).
+    assert_eq!(settings_scrim_alpha(0.5, 1.0), SCRIM_A * 0.5);
+    assert_eq!(settings_entrance_alpha(0.5, 1.0), 0.5);
+    // both in flight at once multiply, never clamp or pick a max.
+    assert_eq!(settings_scrim_alpha(0.5, 0.4), SCRIM_A * 0.2);
+    assert_eq!(settings_entrance_alpha(0.5, 0.4), 0.2);
+}
+
+#[test]
+fn nested_draw_preserves_navigation_at_rest_and_through_push_and_pop() {
+    use plx_ui::containers::stack::Entry;
+    use plx_ui::screen::NavPresentation;
+    use std::{cell::RefCell, rc::Rc};
+
+    let navigation = NavPresentation {
+        page_alpha: 0.21, chrome_alpha: 0.37, view_tab: Some(2), blur_amount: 0.63, chrome_lift: 0.0,
+    };
+    let cases: &[(&str, f32, f32, bool, &[u32])] = &[
+        ("rest after pop", 0.0, 0.0, false, &[2]),
+        ("rest after push", 1.0, 1.0, false, &[2]),
+        ("mid-push", 0.5, 1.0, false, &[1, 2]),
+        ("mid-pop", 0.5, 0.0, true, &[2, 3]),
+    ];
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    for &(label, pos, target, popping, order) in cases {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let instance = |id| Instance {
+            id: InstanceId(id),
+            screen: Box::new(DrawProbe { id, seen: Rc::clone(&seen) }) as Box<dyn Screen<InnerHost>>,
+            inflight: Vec::new(),
+            staged: false,
+            staged_effects: Vec::new(),
+        };
+        // Install inert bodies directly: no real page construction, auth/session reads or
+        // lifecycle side effects. Both resting cases retain a page underneath the top.
+        let mut inner = NavStack::new(Box::new(Immediate));
+        for id in [1, 2] {
+            inner.entries.push(Entry {
+                id: EntryId(id), arg: SettingsPage::Root, ret: ReturnState::default(),
+                inst: Some(instance(id)), evicted: false,
+            });
+        }
+        let mut surface = RouteSurface {
+            entry: EntryId(0), id: InstanceId(0), kind: Family::Settings,
+            boot: None, inner, ids: Minter::default(),
+            push: Push { route: plx_ui::route_screen::RoutePush::at(pos), open: target == 1.0,
+                leaving: popping.then(|| instance(3)) },
+            ground: RouteGround::new(), ground_ready: false, remembered: Vec::new(),
+            back_labels: [plx_platform::i18n::msg::settings_back_c()],
+            back_pop: CtlPop::new(), back_armed: None,
+        };
+        let outer = cx(None);
+        let c = inner_cx(&outer);
+        let mut f = DrawFrame::with_navigation(&c, Painter::root(), navigation);
+        let before = LogicalState::hash(&surface);
+        surface.draw_pages(&mut f, Painter::root());
+        assert_eq!(LogicalState::hash(&surface), before, "{label}: draw changed logical state");
+        actual.push((label, seen.borrow().clone()));
+        expected.push((label, order.iter().map(|&id| (id, navigation)).collect::<Vec<_>>()));
+    }
+    assert_eq!(actual, expected, "every nested draw path must inherit the outer snapshot");
+}
+
+/// **OPENING SETTINGS MUST NOT WRITE THE SESSION FILE.** Device-measured, 2026-09-09:
+/// `fps:modal-ramp` (open and dismiss the Settings modal every 1500 ms) read a `worstframe`
+/// of 188-210 ms against a 75 ms ceiling, with `FRAMEDROP` putting 150-181 ms of it in
+/// `navcommit=` — the dispatcher's POST-COMMIT DRAIN, which is where this surface's mount and
+/// its root page's `ScreenEvent::Enter` run.
+///
+/// [`RootPage::rebuild`] asks [`signed_in`] whether this television has an account, once at
+/// construction and again on `Enter`, so TWICE per open. That question used to go through
+/// [`plx_plex::plex::session::load`] — the read-modify-WRITE door, whose own doc says a read that
+/// can turn into a save "is not [an acceptable trade] on a path a keypress can reach", and
+/// "do not add a per-frame reader of this file". On this television the key manager is
+/// unusable ("session protection: no usable key manager; using the 0600 file fallback"), so
+/// every `load` takes the plaintext branch and re-persists: `write_atomic`, i.e. a temp file,
+/// `sync_all`, a rename and a second `sync_all` on the directory. Two flash writes with four
+/// fsyncs, synchronously, on the frame that opens the modal. Instrumented on the set the same
+/// day: 23 `load`s in one 18 s run, `saves=1 plaintext=1` on every one, 6-15 ms each in that
+/// session and ~75 ms each in the sessions that failed — which is also why the symptom is
+/// BIMODAL, and why it bisected to a range containing no functional change at all.
+///
+/// The assertion is the file's INODE, not its mtime: `write_atomic` renames a fresh temp file
+/// into place, so a write always moves it, whatever a filesystem's timestamp resolution.
+/// Watched red against `session::load()` — the inode changed on the mount.
+#[test]
+fn opening_settings_never_writes_the_session_file() {
+    use std::os::unix::fs::MetadataExt;
+    let _g = plx_base::testlock::serial();
+    let sess = scratch_session("surface-no-session-write");
+    let file = sess.path();
+    let before = std::fs::metadata(&file).expect("the scratch session exists");
+    let mut s = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root);
+    step(&mut s, ScreenEvent::Mount, None);
+    let after = std::fs::metadata(&file).expect("the scratch session still exists");
+    assert_eq!(
+        before.ino(),
+        after.ino(),
+        "opening Settings rewrote the session file: a flash write with two fsyncs on the \
+         frame the modal mounts (fps:modal-ramp, 150 ms of navcommit)"
+    );
+    assert_eq!(before.len(), after.len(), "and nothing about its contents moved either");
+}
+
+/// **Every detail sub-line the root Settings page draws must fit the width its own row gives
+/// it.** `ui/table.rs`'s row draw elides `row.detail` against `text_w = text_right - label_x -
+/// trailing`, and `trailing` is NOT one number: a `.toggle` row spends it on the "On"/"Off" word
+/// plus a gap, a `.chevron` row spends it on the chevron glyph alone, so a toggle row's budget is
+/// tighter than a chevron row's. `CHECK_W`, `GAP` and `CONTENT_PAD`, the constants that would let
+/// this test replay `text_w` exactly, are private to `ui::table` (by design — see that module's
+/// doc on why the geometry is not a public surface), so plumbing the true per-row budget from
+/// here is impractical; this is the documented fallback the task asked for instead.
+///
+/// So: this measures every detail line the root page draws (`MEASURE`, the same `Measure`
+/// capability the real draw uses, at `theme::size::CAPTION`, the same rung `ui/table.rs` elides
+/// the sub-line at) and asserts none of them is wider than "Privacy, licences, source code,
+/// trademarks and contact." — the Legal notices row's detail, which is already on screen today
+/// and known to fit. It is a DIRECTIONAL check, not a simulation of the table's own arithmetic:
+/// the Legal notices row is a `.chevron` row, so its budget is the more GENEROUS of the two kinds
+/// this table draws, and a `.toggle` row (Automatically Sign In, Play trailers automatically)
+/// passing this bound is evidence its line got shorter, not proof it clears the tighter toggle
+/// budget specifically. The device capture is still what finally settles a real elide.
+#[test]
+fn every_root_detail_line_fits_a_known_good_width() {
+    let _g = plx_base::testlock::serial();
+    let _sess = multi_user_session("root-detail-widths");
+    let page = RootPage::new(EntryId(0), plx_data::stores::browse::DirectoryView::empty_for_test());
+    let sz = theme::size::CAPTION;
+    let known_good = "Privacy, licences, source code, trademarks and contact.";
+    let budget = MEASURE.width_str(known_good, sz, false);
+
+    let mut checked = 0;
+    for sec in &page.form.table.sections {
+        for row in &sec.rows {
+            if row.detail.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let w = MEASURE.width_str(&row.detail, sz, false);
+            assert!(
+                w <= budget,
+                "{:?}'s detail {:?} measures {w} — wider than {known_good:?} at {budget}, the \
+                 known-fitting line it is being held to",
+                row.label,
+                row.detail,
+            );
+        }
+    }
+    assert_eq!(
+        checked, 10,
+        "expected a detail line on exactly Favorite libraries, Under posters, Video & playback, \
+         Audio & subtitles, Language, Automatically Sign In, Play trailers automatically, Privacy & \
+         data, Legal notices, and About PlxNative (this host is not webOS 1-3, so no Interface \
+         resolution row; its fit is `settings_text_fit_tests`) — got {checked}; \
+         did the signed-in multi-user fixture stop building one of these rows?"
+    );
+}
+
+/// A direct picker target must retain the same parents as an interactive visit. Mounts
+/// use the real shared stack and page constructors; no intermediate lifecycle is discarded.
+#[test]
+fn direct_picker_boot_commits_parents_once_and_nonpickers_stay_roots() {
+    let _guard = plx_base::testlock::serial();
+    let _session = seated_scratch_session("settings-boot-trail");
+    let cases = [
+        (Family::Settings, SettingsPage::Picker(PickerKind::Quality),
+            vec![SettingsPage::Root, SettingsPage::Playback, SettingsPage::Picker(PickerKind::Quality)]),
+        (Family::Settings, SettingsPage::Picker(PickerKind::DirectPlay),
+            vec![SettingsPage::Root, SettingsPage::Playback, SettingsPage::Picker(PickerKind::DirectPlay)]),
+        (Family::Settings, SettingsPage::Picker(PickerKind::AudioLanguage),
+            vec![SettingsPage::Root, SettingsPage::AudioSubtitles, SettingsPage::Picker(PickerKind::AudioLanguage)]),
+        (Family::Settings, SettingsPage::Picker(PickerKind::UiResolution),
+            vec![SettingsPage::Root, SettingsPage::Picker(PickerKind::UiResolution)]),
+        (Family::Settings, SettingsPage::Playback, vec![SettingsPage::Playback]),
+        (Family::FirstRunConsent, SettingsPage::ConsentStage(0), vec![SettingsPage::ConsentStage(0)]),
+    ];
+    for (kind, target, expected) in cases {
+        let mut surface = RouteSurface::new(EntryId(0), InstanceId(0), kind, target);
+        step(&mut surface, ScreenEvent::Mount, None);
+        assert_eq!(surface.inner.entries.iter().map(|e| e.arg).collect::<Vec<_>>(), expected,
+            "{target:?}: every boot parent must be retained in order");
+        assert!(surface.inner.entries.iter().all(|e| e.inst.is_some()),
+            "{target:?}: every retained page must run its mount lifecycle");
+        assert!(!surface.inner.is_pending(), "{target:?}: the entire boot trail must be committed");
+        let identities: Vec<_> = surface.inner.entries.iter()
+            .map(|e| (e.id, e.inst.as_ref().map(|i| i.id))).collect();
+        assert!(step(&mut surface, ScreenEvent::Mount, None).is_empty(),
+            "{target:?}: a repeated Mount must not emit a second boot lifecycle");
+        assert_eq!(surface.inner.entries.iter()
+            .map(|e| (e.id, e.inst.as_ref().map(|i| i.id))).collect::<Vec<_>>(), identities,
+            "{target:?}: a repeated Mount must preserve every entry and instance");
+    }
+}
+
+#[test]
+fn pending_boot_target_participates_in_surface_logical_state() {
+    let root = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root);
+    let picker = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings,
+        SettingsPage::Picker(PickerKind::Quality));
+    assert_ne!(LogicalState::hash(&root), LogicalState::hash(&picker),
+        "different destinations must not have identical pre-Mount state");
+}

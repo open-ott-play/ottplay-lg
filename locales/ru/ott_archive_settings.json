@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Глубина архива, ч",
+  "ott.archive_hours_prompt": "Глубина архива (0 — данные плейлиста)",
+  "ott.archive_hours_invalid": "Введите целое число часов от 0 до 8760",
+  "ott.archive_hours_changed": "Настройки архива изменились; откройте редактор заново",
+  "ott.archive_hours_profile": "Выберите профиль телевидения M3U"
+}

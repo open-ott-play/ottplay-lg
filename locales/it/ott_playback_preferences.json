@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Incremento volume (%)",
+  "ott.volume_step_prompt": "Incremento volume (3–10%)",
+  "ott.volume_step_invalid": "Inserisci un numero intero da 3 a 10",
+  "ott.info_timeout": "Durata di visualizzazione delle informazioni (secondi)",
+  "ott.info_timeout_prompt": "Durata di visualizzazione delle informazioni (3–20 secondi)",
+  "ott.info_timeout_invalid": "Inserisci un numero intero da 3 a 20"
+}

@@ -1,0 +1,9 @@
+{
+  "ott.interface_title": "Interfaccia",
+  "ott.interface_classic": "Classica",
+  "ott.interface_modern": "Moderna",
+  "ott.interface_selected": "Selezionata",
+  "ott.interface_help": "Scegli l’aspetto del lettore",
+  "ott.interface_changed": "La selezione è cambiata. Scegli di nuovo.",
+  "ott.interface_close_editor": "Chiudi l’editor prima di cambiare interfaccia"
+}

@@ -1,0 +1,8 @@
+{
+  "ott.records": "Registrazioni",
+  "ott.records_empty": "Nessun programma nella guida per questo periodo di archivio",
+  "ott.records_unavailable": "Le registrazioni di questo canale non sono disponibili",
+  "ott.records_incomplete": "L’elenco delle registrazioni è incompleto o non disponibile",
+  "ott.records_window": "Le registrazioni coprono l’intero periodo di archivio",
+  "ott.records_order": "Le registrazioni sono ordinate per titolo"
+}

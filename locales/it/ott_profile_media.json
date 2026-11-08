@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Carica playlist",
+  "ott.profile_edit": "Modifica {name}",
+  "ott.m3u_media_links": "Link della raccolta multimediale…",
+  "ott.m3u_media_link": "Link della raccolta multimediale",
+  "ott.m3u_media_changed": "Le impostazioni multimediali M3U sono cambiate. Riapri l’editor.",
+  "ott.m3u_media_invalid": "Il link VPortal associato non è valido"
+}

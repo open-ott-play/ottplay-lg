@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Poziom tła menu ekranowego",
+  "ott.osd_clock": "Stały zegar",
+  "ott.osd_level_help": "Wybierz poziom tła menu ekranowego (domyślnie 7)",
+  "ott.osd_clock_help": "Pokazuj zegar przez cały czas odtwarzania",
+  "ott.osd_off": "Wyłączony",
+  "ott.osd_background": "Z tłem",
+  "ott.osd_transparent": "Przezroczysty",
+  "ott.osd_changed": "Ustawienia wyświetlania zmieniły się; wybierz opcję ponownie",
+  "ott.osd_close_editor": "Zamknij edytor przed zmianą ustawień wyświetlania"
+}

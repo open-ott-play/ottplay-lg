@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Lejátszási lista betöltése",
+  "ott.profile_edit": "{name} szerkesztése",
+  "ott.m3u_media_links": "Médiatár-hivatkozások…",
+  "ott.m3u_media_link": "Médiatár-hivatkozás",
+  "ott.m3u_media_changed": "Az M3U médiabeállításai megváltoztak. Nyisd meg újra a szerkesztőt.",
+  "ott.m3u_media_invalid": "Érvénytelen csatolt VPortal-hivatkozás"
+}

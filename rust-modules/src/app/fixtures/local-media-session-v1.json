@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "capability": {
+    "version": 1
+  },
+  "probe_request": {
+    "action": "capabilities",
+    "params": {
+      "local_media_session": true,
+      "local_media_progressive": true
+    }
+  },
+  "session_probe_request": {
+    "action": "capabilities",
+    "params": {
+      "local_media_session": true
+    }
+  },
+  "play_request": {
+    "action": "local_media",
+    "params": {
+      "op": "play",
+      "runtime": "page-123",
+      "source": "Movies",
+      "session": true
+    }
+  },
+  "play_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "play",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": false,
+    "accepted": true,
+    "playback_confirmed": false,
+    "session": true
+  },
+  "shuffle_request": {
+    "action": "local_media",
+    "params": {
+      "op": "shuffle",
+      "runtime": "page-123",
+      "source": "Movies",
+      "session": true
+    }
+  },
+  "shuffle_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "shuffle",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": true,
+    "accepted": true,
+    "playback_confirmed": false,
+    "session": true
+  },
+  "progressive_play_request": {
+    "action": "local_media",
+    "params": {
+      "op": "play",
+      "runtime": "page-123",
+      "source": "Movies",
+      "progressive": true,
+      "session": true
+    }
+  },
+  "progressive_play_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "play",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": false,
+    "accepted": true,
+    "playback_confirmed": false,
+    "scanning": true,
+    "session": true
+  },
+  "progressive_shuffle_request": {
+    "action": "local_media",
+    "params": {
+      "op": "shuffle",
+      "runtime": "page-123",
+      "source": "Movies",
+      "progressive": true,
+      "session": true
+    }
+  },
+  "progressive_shuffle_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "shuffle",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": true,
+    "accepted": true,
+    "playback_confirmed": false,
+    "scanning": true,
+    "session": true
+  },
+  "error_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "shuffle",
+    "state": "error",
+    "error": "source_ambiguous"
+  }
+}

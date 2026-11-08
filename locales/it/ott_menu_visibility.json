@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Voci del menu",
+  "ott.menu_visible": "Visibile",
+  "ott.menu_hidden": "Nascosta",
+  "ott.menu_reset": "Ripristina voci del menu",
+  "ott.menu_reset_help": "Mostra tutte le voci del menu",
+  "ott.menu_help": "Scegli quali voci mostrare nei menu",
+  "ott.menu_favorite": "Aggiungi o rimuovi dai Preferiti",
+  "ott.menu_audio": "Tracce audio",
+  "ott.menu_subtitles": "Sottotitoli e aspetto",
+  "ott.menu_changed": "Le impostazioni del menu sono cambiate; seleziona di nuovo la voce",
+  "ott.menu_invalid": "Impostazioni di visibilità del menu non valide"
+}

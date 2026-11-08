@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Wiersze listy Classic",
+  "ott.classic_side": "Strona listy Classic",
+  "ott.classic_arrows": "Strzałki na liście Classic",
+  "ott.classic_seek": "Skok klawiszami 1/3 (sekundy)",
+  "ott.classic_rows_help": "Preferowana liczba wierszy na stronie Classic; duży tekst i dostępne miejsce mogą ją zmniejszyć",
+  "ott.classic_side_help": "Wybierz stronę listy Classic i podglądu wideo",
+  "ott.classic_arrows_help": "Działanie lewo/prawo na listach Classic; sterowanie pełnoekranowe pozostaje bez zmian",
+  "ott.classic_seek_help": "Przy ukrytych elementach sterowania 1/3 przewija wideo i archiwum; kanały na żywo i Ulubione zachowują wybór numerem",
+  "ott.classic_right": "Po prawej",
+  "ott.classic_left": "Po lewej",
+  "ott.classic_paging": "Zmiana strony",
+  "ott.classic_volume": "Głośność",
+  "ott.classic_context": "Kategorie / opis",
+  "ott.classic_show_progress": "Pokaż postęp programu",
+  "ott.classic_show_progress_help": "Pokaż postęp bieżącego programu na listach kanałów Classic"
+}

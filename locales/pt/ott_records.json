@@ -1,0 +1,8 @@
+{
+  "ott.records": "Gravações",
+  "ott.records_empty": "Não há programas no guia para este período do arquivo",
+  "ott.records_unavailable": "As gravações deste canal não estão disponíveis",
+  "ott.records_incomplete": "A lista de gravações está incompleta ou indisponível",
+  "ott.records_window": "As gravações abrangem todo o período do arquivo",
+  "ott.records_order": "As gravações estão ordenadas por título"
+}

@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Charger la liste de lecture",
+  "ott.profile_edit": "Modifier {name}",
+  "ott.m3u_media_links": "Liens de la médiathèque…",
+  "ott.m3u_media_link": "Lien de la médiathèque",
+  "ott.m3u_media_changed": "Les paramètres multimédias M3U ont changé. Rouvrez l’éditeur.",
+  "ott.m3u_media_invalid": "Le lien VPortal associé est invalide"
+}

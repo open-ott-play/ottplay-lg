@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Carpetas USB",
+  "ott.usb_browser_use": "Usar esta carpeta",
+  "ott.usb_browser_parent": "Carpeta superior",
+  "ott.usb_browser_root": "Raíz de la unidad",
+  "ott.usb_browser_previous": "Página anterior",
+  "ott.usb_browser_next": "Página siguiente",
+  "ott.usb_browser_more": "Cargar más",
+  "ott.usb_browser_browse_root": "Abrir raíz de la unidad",
+  "ott.usb_browser_choose": "Elige una carpeta de esta unidad USB",
+  "ott.usb_browser_reading": "Leyendo carpetas…",
+  "ott.usb_browser_cancelled": "Carga de carpetas cancelada",
+  "ott.usb_browser_return": "Volver sin cambiar la fuente seleccionada",
+  "ott.usb_browser_more_help": "Buscar más carpetas en este directorio",
+  "ott.usb_browser_limit": "Se alcanzó el límite de la lista. Usa esta carpeta o introduce la ruta exacta en el perfil.",
+  "ott.usb_browser_partial": "Lista de carpetas parcial. Carga más para buscar otras carpetas.",
+  "ott.usb_browser_unreadable": "No se pudieron leer algunos nombres. Actualiza o elige una carpeta disponible.",
+  "ott.usb_browser_empty": "No hay subcarpetas. Usa esta carpeta para incluir sus vídeos.",
+  "ott.usb_browser_ready": "Abre una subcarpeta o usa esta carpeta.",
+  "ott.usb_browser_checking": "Comprobando la carpeta USB seleccionada…",
+  "ott.usb_browser_changed": "La selección USB cambió; cierra este selector"
+}

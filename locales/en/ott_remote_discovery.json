@@ -1,0 +1,34 @@
+{
+  "ott.remote_find": {
+    "value": "Find command server",
+    "description": "Native remote-control Settings action. Reads the explicitly configured public discovery catalog; does not approve pairing."
+  },
+  "ott.remote_unconfigured": {
+    "value": "Discovery not configured",
+    "description": "Hint on manual Remote control server entry when no discovery catalog is configured. Manual entry remains available."
+  },
+  "ott.remote_invalid_profile": {
+    "value": "Discovery configuration invalid",
+    "description": "Hint on manual Remote control server entry when the build discovery profile is invalid. Manual entry remains available."
+  },
+  "ott.remote_finding": {
+    "value": "Finding command servers…",
+    "description": "Native discovery progress, shown in the Find row and status."
+  },
+  "ott.remote_choose": {
+    "value": "Select a command server",
+    "description": "Native discovery result prompt. The viewer must choose a visible server before pairing."
+  },
+  "ott.remote_empty": {
+    "value": "No servers found. Try again.",
+    "description": "Native discovery found no servers. The same Find action retries; manual address entry remains available."
+  },
+  "ott.remote_failed": {
+    "value": "Discovery failed. Try again.",
+    "description": "Native discovery failed. The same Find action retries; manual address entry remains available."
+  },
+  "ott.remote_choice_expired": {
+    "value": "Server list changed. Find again.",
+    "description": "A previously displayed discovery choice is no longer current. Find again instead of guessing another server."
+  }
+}

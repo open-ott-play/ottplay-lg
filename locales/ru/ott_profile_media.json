@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Загрузить плейлист",
+  "ott.profile_edit": "Редактировать {name}",
+  "ott.m3u_media_links": "Ссылки медиатеки…",
+  "ott.m3u_media_link": "Ссылка медиатеки",
+  "ott.m3u_media_changed": "Настройки медиатеки M3U изменились. Откройте редактор заново.",
+  "ott.m3u_media_invalid": "Неверная прикреплённая ссылка VPortal"
+}

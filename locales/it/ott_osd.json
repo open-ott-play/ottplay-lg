@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Livello dello sfondo dei menu a schermo",
+  "ott.osd_clock": "Orologio permanente",
+  "ott.osd_level_help": "Scegli il livello dello sfondo dei menu a schermo (predefinito: 7)",
+  "ott.osd_clock_help": "Mostra sempre l’orologio durante la riproduzione",
+  "ott.osd_off": "Disattivato",
+  "ott.osd_background": "Con sfondo",
+  "ott.osd_transparent": "Trasparente",
+  "ott.osd_changed": "Le impostazioni di visualizzazione sono cambiate; seleziona di nuovo l’opzione",
+  "ott.osd_close_editor": "Chiudi l’editor prima di modificare le impostazioni di visualizzazione"
+}

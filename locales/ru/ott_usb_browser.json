@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Папки USB",
+  "ott.usb_browser_use": "Использовать эту папку",
+  "ott.usb_browser_parent": "Родительская папка",
+  "ott.usb_browser_root": "Корень диска",
+  "ott.usb_browser_previous": "Предыдущая страница",
+  "ott.usb_browser_next": "Следующая страница",
+  "ott.usb_browser_more": "Загрузить ещё",
+  "ott.usb_browser_browse_root": "Открыть корень диска",
+  "ott.usb_browser_choose": "Выберите папку на USB-диске",
+  "ott.usb_browser_reading": "Чтение папок…",
+  "ott.usb_browser_cancelled": "Загрузка папок отменена",
+  "ott.usb_browser_return": "Вернуться без изменения выбранного источника",
+  "ott.usb_browser_more_help": "Найти другие папки в этом каталоге",
+  "ott.usb_browser_limit": "Достигнут предел списка. Используйте эту папку или укажите точный путь в профиле.",
+  "ott.usb_browser_partial": "Список папок неполный. Загрузите ещё, чтобы найти другие папки.",
+  "ott.usb_browser_unreadable": "Некоторые имена папок недоступны. Обновите список или выберите доступную папку.",
+  "ott.usb_browser_empty": "Подпапок нет. Используйте эту папку, чтобы добавить её видео.",
+  "ott.usb_browser_ready": "Откройте подпапку или используйте эту папку.",
+  "ott.usb_browser_checking": "Проверка выбранной папки USB…",
+  "ott.usb_browser_changed": "Выбор USB изменился; закройте это окно"
+}

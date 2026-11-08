@@ -1,0 +1,45 @@
+{
+  "invalid_ids": [
+    "",
+    "0",
+    "01",
+    "-1",
+    "+1",
+    "1.0",
+    "1e2",
+    " 1",
+    "1/2",
+    "1?token=x",
+    "１００",
+    "100000000000000000000"
+  ],
+  "invalid_counts": [
+    null,
+    true,
+    false,
+    -1,
+    0.5,
+    1.0,
+    "",
+    "-1",
+    "1.0",
+    "1e2",
+    " 1",
+    "18446744073709551616"
+  ],
+  "invalid_part_keys": [
+    "https://other.invalid/video.mp4",
+    "//other.invalid/video.mp4",
+    "/library/metadata/1",
+    "/library/parts/",
+    "/library/parts/1/../file",
+    "/library/parts/%2e%2e/file",
+    "/library/parts/1/%5cfile",
+    "/library/parts/1/%00file",
+    "/library/parts/1/%XX",
+    "/library/parts/1/file?X-Plex-Token=secret",
+    "/library/parts/1/file#fragment",
+    "/library/parts/1/1/file?%58-Plex-Token=secret",
+    "/library/parts/1/1/file?download=%0d%0aX-Test:yes"
+  ]
+}

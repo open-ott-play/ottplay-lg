@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Пункты меню",
+  "ott.menu_visible": "Виден",
+  "ott.menu_hidden": "Скрыт",
+  "ott.menu_reset": "Сбросить пункты меню",
+  "ott.menu_reset_help": "Показать все пункты меню",
+  "ott.menu_help": "Выберите, какие пункты показывать в меню",
+  "ott.menu_favorite": "Добавить или удалить избранное",
+  "ott.menu_audio": "Аудиодорожки",
+  "ott.menu_subtitles": "Субтитры и оформление",
+  "ott.menu_changed": "Настройки меню изменились; выберите пункт ещё раз",
+  "ott.menu_invalid": "Некорректные настройки видимости меню"
+}

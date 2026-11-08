@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Classic listasorok",
+  "ott.classic_side": "A Classic lista oldala",
+  "ott.classic_arrows": "Nyilak a Classic listában",
+  "ott.classic_seek": "1/3 léptetés (másodperc)",
+  "ott.classic_rows_help": "Kívánt sorok száma Classic oldalanként; a nagy betűk és a rendelkezésre álló hely csökkenthetik",
+  "ott.classic_side_help": "A Classic lista és a videóelőnézet oldalának kiválasztása",
+  "ott.classic_arrows_help": "Bal/jobb művelet a Classic listákban; a teljes képernyős vezérlés nem változik",
+  "ott.classic_seek_help": "Rejtett vezérlőknél az 1/3 vissza- vagy előreteker a videóban és archívumban; az élő csatornáknál és Kedvenceknél megmarad a számválasztás",
+  "ott.classic_right": "Jobbra",
+  "ott.classic_left": "Balra",
+  "ott.classic_paging": "Lapozás",
+  "ott.classic_volume": "Hangerő",
+  "ott.classic_context": "Kategóriák / részletek",
+  "ott.classic_show_progress": "Műsor előrehaladásának megjelenítése",
+  "ott.classic_show_progress_help": "Az aktuális műsor előrehaladásának megjelenítése a Classic csatornalistákban"
+}

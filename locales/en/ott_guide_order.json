@@ -1,0 +1,18 @@
+{
+  "ott.guide_order_time": {
+    "value": "By time",
+    "description": "Chronological order for the loaded single-channel guide window."
+  },
+  "ott.guide_order_title": {
+    "value": "By title",
+    "description": "Title order for the loaded single-channel guide window, retaining all broadcasts."
+  },
+  "ott.guide_order_selected": {
+    "value": "Selected",
+    "description": "Marks the currently selected guide order."
+  },
+  "ott.guide_order_reopen": {
+    "value": "Reopen the guide list to change its order",
+    "description": "An order action from an old or non-list guide page requires reopening the guide list."
+  }
+}

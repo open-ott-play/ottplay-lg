@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Cartelle USB",
+  "ott.usb_browser_use": "Usa questa cartella",
+  "ott.usb_browser_parent": "Cartella superiore",
+  "ott.usb_browser_root": "Radice dell’unità",
+  "ott.usb_browser_previous": "Pagina precedente",
+  "ott.usb_browser_next": "Pagina successiva",
+  "ott.usb_browser_more": "Carica altro",
+  "ott.usb_browser_browse_root": "Apri la radice dell’unità",
+  "ott.usb_browser_choose": "Scegli una cartella su questa unità USB",
+  "ott.usb_browser_reading": "Lettura delle cartelle…",
+  "ott.usb_browser_cancelled": "Caricamento cartelle annullato",
+  "ott.usb_browser_return": "Torna senza cambiare la sorgente selezionata",
+  "ott.usb_browser_more_help": "Cerca altre cartelle in questa directory",
+  "ott.usb_browser_limit": "Limite dell’elenco raggiunto. Usa questa cartella o inserisci il percorso esatto nel profilo.",
+  "ott.usb_browser_partial": "Elenco parziale. Carica altro per cercare altre cartelle.",
+  "ott.usb_browser_unreadable": "Alcuni nomi non sono leggibili. Aggiorna o scegli una cartella disponibile.",
+  "ott.usb_browser_empty": "Nessuna sottocartella. Usa questa cartella per includere i suoi video.",
+  "ott.usb_browser_ready": "Apri una sottocartella o usa questa cartella.",
+  "ott.usb_browser_checking": "Verifica della cartella USB selezionata…",
+  "ott.usb_browser_changed": "La selezione USB è cambiata; chiudi questa finestra"
+}

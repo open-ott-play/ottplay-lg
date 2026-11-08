@@ -1,0 +1,86 @@
+name: Native checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Source contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '22'
+      - run: python3 ci/check-public-source.py
+      - run: python3 -m unittest discover -s scripts -p 'test_lg_*.py' -v
+      - run: node scripts/check-shared-core.cjs
+
+  native:
+    name: Native host tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install host development libraries
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev libwayland-dev libglib2.0-dev
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: rust-modules
+      - name: Test native application and layers
+        run: python3 scripts/lg-build.py check --work-dir "$RUNNER_TEMP/lg-check" --jobs 2
+
+  arm:
+    name: ARM shared core
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config libclang-18-dev
+      - uses: ./.github/actions/rust-toolchain
+      - uses: ./.github/actions/webos-ndk
+        id: sdk
+      - name: Compile and link with the television ABI
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+        run: >-
+          python3 ci/check-shared-core-arm.py
+          --sdk "$WEBOS_SDK"
+          --target-dir "$RUNNER_TEMP/shared-core-arm"
+          --libclang /usr/lib/llvm-18/lib
+
+  gate:
+    name: CI gate
+    if: always()
+    needs: [source, native, arm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require completed checks
+        env:
+          SOURCE: ${{ needs.source.result }}
+          NATIVE: ${{ needs.native.result }}
+          ARM: ${{ needs.arm.result }}
+        run: test "$SOURCE" = success && test "$NATIVE" = success && test "$ARM" = success

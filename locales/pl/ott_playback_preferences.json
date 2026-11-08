@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Krok głośności (%)",
+  "ott.volume_step_prompt": "Krok głośności (3–10%)",
+  "ott.volume_step_invalid": "Wpisz liczbę całkowitą od 3 do 10",
+  "ott.info_timeout": "Czas wyświetlania informacji (sekundy)",
+  "ott.info_timeout_prompt": "Czas wyświetlania informacji (3–20 sekund)",
+  "ott.info_timeout_invalid": "Wpisz liczbę całkowitą od 3 do 20"
+}

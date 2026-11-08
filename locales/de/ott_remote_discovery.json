@@ -1,0 +1,10 @@
+{
+  "ott.remote_find": "Steuerungsserver suchen",
+  "ott.remote_unconfigured": "Serversuche nicht eingerichtet",
+  "ott.remote_invalid_profile": "Serversuche falsch konfiguriert",
+  "ott.remote_finding": "Steuerungsserver werden gesucht…",
+  "ott.remote_choose": "Steuerungsserver auswählen",
+  "ott.remote_empty": "Keine Server gefunden. Erneut suchen.",
+  "ott.remote_failed": "Suche fehlgeschlagen. Erneut versuchen.",
+  "ott.remote_choice_expired": "Serverliste geändert. Erneut suchen."
+}

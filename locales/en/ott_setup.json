@@ -1,0 +1,134 @@
+{
+  "ott.profile_add": {
+    "value": "Add profile",
+    "description": "Native provider profile setup: add."
+  },
+  "ott.profile_name": {
+    "value": "Profile name",
+    "description": "Native provider profile setup: name."
+  },
+  "ott.profile_source": {
+    "value": "Source address or folder",
+    "description": "Native provider profile setup: source."
+  },
+  "ott.profile_setup": {
+    "value": "Profile setup",
+    "description": "Native provider profile setup: setup."
+  },
+  "ott.profile_help": {
+    "value": "Enter the connection details supplied by your provider.",
+    "description": "Native provider profile setup: help."
+  },
+  "ott.profile_source_help": {
+    "value": "Enter a source address or folder.",
+    "description": "Native provider profile setup: source help."
+  },
+  "ott.profile_save": {
+    "value": "Save profile",
+    "description": "Native provider profile setup: save."
+  },
+  "ott.profile_not_set": {
+    "value": "Not set",
+    "description": "Native provider profile setup: not set."
+  },
+  "ott.profile_set": {
+    "value": "Set",
+    "description": "Native provider profile setup: set."
+  },
+  "ott.profile_server": {
+    "value": "Server URL",
+    "description": "Native provider profile setup: server."
+  },
+  "ott.profile_portal": {
+    "value": "Portal URL",
+    "description": "Native provider profile setup: portal."
+  },
+  "ott.profile_username": {
+    "value": "Username",
+    "description": "Native provider profile setup: username."
+  },
+  "ott.profile_password": {
+    "value": "Password",
+    "description": "Native provider profile setup: password."
+  },
+  "ott.profile_mac": {
+    "value": "MAC address",
+    "description": "Native provider profile setup: mac."
+  },
+  "ott.profile_select": {
+    "value": "Select a profile first.",
+    "description": "Native provider profile setup: select."
+  },
+  "ott.profile_changed": {
+    "value": "This profile changed. Reopen it before saving.",
+    "description": "Native provider profile setup: changed."
+  },
+  "ott.profile_inactive": {
+    "value": "This editor is no longer active. Reopen it.",
+    "description": "Native provider profile setup: inactive."
+  },
+  "ott.profile_saving": {
+    "value": "Saving profile…",
+    "description": "Native provider profile setup: saving."
+  },
+  "ott.profile_unavailable": {
+    "value": "This field is unavailable for this provider.",
+    "description": "Native provider profile setup: unavailable."
+  },
+  "ott.profile_invalid": {
+    "value": "Check the profile name and connection details.",
+    "description": "Native provider profile setup: invalid."
+  },
+  "ott.profile_long": {
+    "value": "This value is too long.",
+    "description": "Native provider profile setup: long."
+  },
+  "ott.profile_create_failed": {
+    "value": "Could not create a profile.",
+    "description": "Native provider profile setup: create failed."
+  },
+  "ott.profile_restart": {
+    "value": "Restart the player to finish saving settings.",
+    "description": "Native provider profile setup: restart."
+  },
+  "ott.profile_m3u": {
+    "value": "M3U television",
+    "description": "Native provider profile setup: m3u."
+  },
+  "ott.profile_local": {
+    "value": "Local videos",
+    "description": "Native provider profile setup: local."
+  },
+  "ott.profile_plex": {
+    "value": "Connect Plex",
+    "description": "Native provider profile setup: plex."
+  },
+  "ott.profile_remote": {
+    "value": "Remote control server",
+    "description": "Native provider profile setup: remote."
+  },
+  "ott.profile_settings": {
+    "value": "Playback and interface settings",
+    "description": "Native provider profile setup: settings."
+  },
+  "ott.profile_folder": {
+    "value": "Folder on this device",
+    "description": "Native provider profile setup: folder."
+  },
+  "ott.profile_no_matches": {
+    "value": "No matches. Clear the search to show all items.",
+    "description": "Native provider profile setup: no matches."
+  },
+  "ott.profile_empty": {
+    "value": "This list is empty.",
+    "description": "Native provider profile setup: empty."
+  },
+  "ott.profile_provider_limit": {
+    "value": "This provider already has 15 profiles.",
+    "description": "Native profile capacity validation: provider limit."
+  },
+  "ott.profile_total_limit": {
+    "value": "There are already 90 profiles.",
+    "description": "Native profile capacity validation: total limit."
+  }
+}

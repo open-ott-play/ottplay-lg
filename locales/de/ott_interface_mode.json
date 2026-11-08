@@ -1,0 +1,9 @@
+{
+  "ott.interface_title": "Oberfläche",
+  "ott.interface_classic": "Klassisch",
+  "ott.interface_modern": "Modern",
+  "ott.interface_selected": "Ausgewählt",
+  "ott.interface_help": "Darstellung des Players wählen",
+  "ott.interface_changed": "Die Auswahl wurde geändert. Bitte erneut wählen.",
+  "ott.interface_close_editor": "Vor dem Wechsel den Editor schließen"
+}

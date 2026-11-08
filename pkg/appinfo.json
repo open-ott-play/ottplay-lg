@@ -1,0 +1,21 @@
+{
+  "id": "com.openottplay.player.native",
+  "version": "0.3.0",
+  "vendor": "OTTPlay",
+  "type": "native",
+  "main": "plxnative",
+  "title": "OTTPlay",
+  "appDescription": "Native OTTPlay for TV channels, local videos and Plex",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "iconColor": "#edf1f1",
+  "splashBackground": "splash.png",
+  "nativeLifeCycleInterfaceVersion": 2,
+  "handlesRelaunch": false,
+  "transparent": true,
+  "requiredMemory": 160,
+  "requiredPermissions": [
+    "database.operation",
+    "securitykey.operation"
+  ]
+}

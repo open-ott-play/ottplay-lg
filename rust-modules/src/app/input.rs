@@ -1,0 +1,1995 @@
+//! The key ladders of the non-player routes and the pointer state: OK/BACK/direction handling per
+//! screen, the card activation, the onboarding and account arms, the press-and-hold path. Moved
+//! out of `app.rs` verbatim in phase 1a (a pure move; `pub(crate)` widening only).
+//!
+//! **Phase 5b (2026-09-07) took the consent and settings arms out of this file.** The Settings
+//! family — Settings root, Legal, first-run/Settings consent, the Home-sources editor — is now
+//! owned `Screen`s mounted through `app::bridge`, and their keys reach them as `InputEvent`s the
+//! loop hands the dispatcher before this ladder is ever consulted; see the deleted-function notes
+//! near `key_onboarding` and `enter_profiles_from_onboard` for what used to live here. What this
+//! file keeps of consent is only the boot-time GATE deciding *when* to open the screen
+//! (`maybe_ask_consent`), never an arm that reads its keys.
+//!
+//! **Phase 6 (2026-09-07) did the same to the QR sign-in and the who's-watching picker.** Both
+//! are owned screens now (`screens::login`/`screens::profiles`), so `key_onboarding` itself —
+//! along with the pure `onboarding_back`/`OnboardBack`/`profiles_pin_pad_open` rule it called —
+//! is gone; see the note where it stood. Their root BACK now goes directly to Session; its
+//! adapter owns the platform claim/result. The loop retains the phase→route follower and
+//! consumes only the Session owner's committed Ready handoff.
+
+use plx_screens::player::input::HudStart;
+use super::*;
+
+
+/// The Magic Remote POINTER, as one value: which input mode the remote is in, what the
+/// cursor is doing, and the two gestures that outlive a single event (a scrub drag and the
+/// wheel's own debounce).
+///
+/// `dpad_mode`/`cur_hidden`/`mot_accum` are one rule between them and are why this is a
+/// type: the first D-pad press hides the cursor and switches modes, and motion only switches
+/// back once it has accumulated past the gate (see `remote_synth_ptr`, which has to defeat
+/// that gate to click at all).
+pub(crate) struct Pointer {
+    pub(crate) dpad_mode: bool,  // D-pad input owns focus; pointer motion below the gate is ignored
+    pub(crate) cur_hidden: bool, // the pointer is hidden right now (LG's hide or the transparent cursor)
+    pub(crate) mot_accum: f32,   // motion accumulated since D-pad mode was entered, in logical px
+    pub(crate) prev_mx: f32,     // last motion's position, for that accumulation (-1 = none yet)
+    pub(crate) prev_my: f32,
+    pub(crate) last_motion: u32, // last motion tick — playback hides an idle cursor off this
+    /// **A pointer button is DOWN right now** — so this motion is a DRAG (§7.5), and the idle
+    /// cursor is not hidden out from under a hand that is holding something.
+    ///
+    /// It was `drag`, "a click is dragging the HUD scrub band", and it meant the player's scrub
+    /// gesture: `app/run.rs`'s own click block set it, its motion arm moved the preview and its
+    /// button-up committed the seek. That gesture belongs to `PlayerScreen` (restructure phase 12,
+    /// PX-PLAYER), so the flag went with it (`screens::player::input::Scrub::drag`) and what is
+    /// left here is the pointer-machine FACT the loop still has to know: the button's state, which
+    /// decides whether a motion event is dispatched as `InputKind::Pointer` or `InputKind::Drag`.
+    pub(crate) button_down: bool,
+    pub(crate) last_wheel: u32,  // last wheel tick, for the wheel's own debounce
+    /// The button now held went DOWN as an OK key, not a click ([`click_is_ok`]), so its up must
+    /// be an OK key-up too.
+    pub(crate) ok_from_click: bool,
+    /// The pointer resting in the top or bottom edge band scrolls the page ([`EdgeScroll`]).
+    pub(crate) edge: EdgeScroll,
+}
+impl Pointer {
+    /// Pointer mode, cursor shown, nothing held or dragging — where the loop starts.
+    pub(crate) const IDLE: Pointer = Pointer {
+        dpad_mode: false,
+        cur_hidden: false,
+        mot_accum: 0.0,
+        prev_mx: -1.0,
+        prev_my: -1.0,
+        last_motion: 0,
+        button_down: false,
+        last_wheel: 0,
+        ok_from_click: false,
+        edge: EdgeScroll::IDLE,
+    };
+}
+
+/// How far from the top or bottom of the screen the pointer scrolls the page ([`EdgeScroll`]).
+/// 80 px: at 120 the glide started too readily while the pointer was only on its way to the top
+/// or bottom row (tried on an LG C2 and C3).
+pub(crate) const EDGE_BAND: f32 = 80.0;
+/// How far from the left or right edge the pointer glides the row under it ([`EdgeScroll::pan`]).
+pub(crate) const EDGE_SIDE_BAND: f32 = 120.0;
+/// How long the pointer rests in an edge band before the page starts to move.
+pub(crate) const EDGE_DWELL_MS: u32 = 150;
+/// How long the glide takes to come up to its speed once it starts.
+pub(crate) const EDGE_RAMP_MS: u32 = 350;
+/// The glide's speed with the pointer at the very edge, in the page's own rows a second (the unit
+/// of `InputKind::Wheel`'s `dy`: the Library scales it by its grid pitch).
+pub(crate) const EDGE_ROWS_PER_S: f32 = 2.6;
+/// The sideways glide's speed with the pointer at the very left or right edge, px a second (about
+/// three and a half posters).
+pub(crate) const EDGE_PAN_PX_PER_S: f32 = 1000.0;
+/// The share of that speed at the band's inner border: deeper into the band is faster.
+const EDGE_MIN_SHARE: f32 = 0.35;
+
+/// **The pointer at the top or bottom edge glides the page**, the way the Magic Remote scrolls
+/// LG's own lists (and Glasshouse's home rows): continuously, not a row at a time.
+///
+/// The pointer scrolls a page by its edges and nothing else: a hover moves focus but never the
+/// page (`Screen::glides` pages: Home, the Library and the rest), a click brings the page to what
+/// it clicked, and keys move by whole rows. So a pointer that comes to rest in an edge band glides
+/// the page, over cards or not: after [`EDGE_DWELL_MS`] every frame hands the page a fractional
+/// `InputKind::Wheel` (+ up, - down, the wheel's sign), easing in over [`EDGE_RAMP_MS`] to a speed
+/// that grows toward the edge. Only the navigation bar's buttons are the bar's own pointer: over
+/// one the glide stops (it starts again, easing in, once the pointer is off it). Stepping FOCUS a row at a time could not glide:
+/// the critically damped scroll spring settles between steps, so the page pulsed (a simulation of
+/// `gfx::spring` at `K_SCROLL`: still a 2:1 speed swing at a step every 160 ms).
+///
+/// While a glide runs, the pointer's moves inside the band are not hover ([`moved`](Self::moved)
+/// says so), so the card under it does not take focus as the page slides; leaving the band ends
+/// the glide and hands the pointer back to hover.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct EdgeScroll {
+    /// The pointer's last position, `None` once it is hidden (LG's auto-hide or a D-pad press).
+    at: Option<(f32, f32)>,
+    /// The glide under way: its direction (+1 up, -1 down) and when the pointer came to the band.
+    glide: Option<(i32, u32)>,
+    /// The last frame [`step`](Self::step) ran on: the glide times its own frames. It runs in
+    /// `run::playback_tick`, before the loop has worked out `Frame::dt` (still 0 there), and a
+    /// glide that took the frame's dt would move the page by nothing on every frame (the host rigs
+    /// set `dt` by hand, which hid exactly that during development).
+    last: Option<u32>,
+    /// The sideways glide under way ([`pan`](Self::pan)): its direction (+1 right, -1 left) and
+    /// when the pointer came to the side band.
+    pan: Option<(i32, u32)>,
+    /// The last frame [`pan`](Self::pan) ran on (it times its own frames, as `step` does).
+    pan_last: Option<u32>,
+}
+
+impl EdgeScroll {
+    pub(crate) const IDLE: EdgeScroll = EdgeScroll { at: None, glide: None, last: None, pan: None, pan_last: None };
+
+    fn band(y: f32) -> Option<i32> {
+        if y < EDGE_BAND {
+            Some(1)
+        } else if y >= plx_ui::consts::SCR_H - EDGE_BAND {
+            Some(-1)
+        } else {
+            None
+        }
+    }
+
+    /// The pointer moved to `(x, y)`, over a button of the navigation bar when `on_bar`. `true`
+    /// while a glide holds it, so the move is not hover; a move onto the bar stops the glide and
+    /// is the bar's hover.
+    pub(crate) fn moved(&mut self, x: f32, y: f32, on_bar: bool) -> bool {
+        self.at = Some((x, y));
+        if on_bar || self.glide.is_some_and(|(dir, _)| Self::band(y) != Some(dir)) {
+            self.glide = None;
+        }
+        self.glide.is_some()
+    }
+
+    /// The pointer is gone (hidden, or the D-pad took over): no glide until it moves again.
+    pub(crate) fn stop(&mut self) {
+        *self = Self::IDLE;
+    }
+
+    /// Where the pointer rests now, for the caller's hit test.
+    pub(crate) fn at(&self) -> Option<(f32, f32)> {
+        self.at
+    }
+
+    /// One frame at `now` (ms): the wheel `dy` to hand the page, if any, for the time since the
+    /// last frame this ran on. `on_bar` is whether the pointer is over a button of the navigation
+    /// bar (the profile chip, the tabs, Search): the glide stops there, whether it was running or
+    /// not, and starts again (dwell and ease-in) once the pointer is off the buttons.
+    pub(crate) fn step(&mut self, on_bar: bool, now: u32) -> Option<f32> {
+        let dt = self.last.map_or(0.0, |last| now.wrapping_sub(last).min(100) as f32 / 1000.0);
+        self.last = Some(now);
+        let Some((_, y)) = self.at else {
+            self.glide = None;
+            return None;
+        };
+        let Some(dir) = Self::band(y) else {
+            self.glide = None;
+            return None;
+        };
+        if on_bar {
+            self.glide = None;
+            return None;
+        }
+        let since = match self.glide {
+            Some((d, since)) if d == dir => since,
+            _ => {
+                self.glide = Some((dir, now));
+                now
+            }
+        };
+        let t = now.wrapping_sub(since);
+        if t < EDGE_DWELL_MS {
+            return None;
+        }
+        let ramp = ((t - EDGE_DWELL_MS) as f32 / EDGE_RAMP_MS as f32).min(1.0);
+        let ramp = ramp * ramp * (3.0 - 2.0 * ramp);
+        let from_edge = if dir > 0 { y } else { plx_ui::consts::SCR_H - y };
+        let depth = (1.0 - from_edge / EDGE_BAND).clamp(0.0, 1.0);
+        let share = EDGE_MIN_SHARE + (1.0 - EDGE_MIN_SHARE) * depth;
+        let dy = dir as f32 * EDGE_ROWS_PER_S * share * ramp * dt;
+        (dy != 0.0).then_some(dy)
+    }
+
+    /// **The sideways glide**, one frame at `now` (ms): the `InputKind::Pan` `dx` (px, + shows more
+    /// on the right) to hand the page for the row under the pointer, if any. A pointer resting in
+    /// the left or right [`EDGE_SIDE_BAND`] (and in neither vertical band, which take the corners)
+    /// glides the row it is over after the same dwell, on the same ease-in, faster nearer the edge,
+    /// up to [`EDGE_PAN_PX_PER_S`]. Unlike the vertical glide it does not hold the pointer's hover:
+    /// the side bands hold controls of their own (the Library's alphabet rail, Detail's Play), and
+    /// a row the glide moved no longer follows its focus, so a card the pointer comes to rest on
+    /// cannot pull it back. A page with nothing sideways at the pointer ignores it.
+    pub(crate) fn pan(&mut self, on_bar: bool, now: u32) -> Option<f32> {
+        let dt = self.pan_last.map_or(0.0, |last| now.wrapping_sub(last).min(100) as f32 / 1000.0);
+        self.pan_last = Some(now);
+        let side = self.at.filter(|_| !on_bar).and_then(|(x, y)| {
+            if Self::band(y).is_some() {
+                None
+            } else if x < EDGE_SIDE_BAND {
+                Some((-1, x))
+            } else if x >= plx_ui::consts::SCR_W - EDGE_SIDE_BAND {
+                Some((1, plx_ui::consts::SCR_W - x))
+            } else {
+                None
+            }
+        });
+        let Some((dir, from_edge)) = side else {
+            self.pan = None;
+            return None;
+        };
+        let since = match self.pan {
+            Some((d, since)) if d == dir => since,
+            _ => {
+                self.pan = Some((dir, now));
+                now
+            }
+        };
+        let t = now.wrapping_sub(since);
+        if t < EDGE_DWELL_MS {
+            return None;
+        }
+        let ramp = ((t - EDGE_DWELL_MS) as f32 / EDGE_RAMP_MS as f32).min(1.0);
+        let ramp = ramp * ramp * (3.0 - 2.0 * ramp);
+        let depth = (1.0 - from_edge / EDGE_SIDE_BAND).clamp(0.0, 1.0);
+        let share = EDGE_MIN_SHARE + (1.0 - EDGE_MIN_SHARE) * depth;
+        let dx = dir as f32 * EDGE_PAN_PX_PER_S * share * ramp * dt;
+        (dx != 0.0).then_some(dx)
+    }
+}
+
+/// **Is this pointer click really the remote's OK button?**
+///
+/// On a set without LG's `SDL_webOSCursorVisibility` (webOS 3.9.3's SDL 2.0.4, issue #642) the
+/// app hides the pointer by swapping in a transparent cursor (`boot::hide_cursor`). The system
+/// still believes its pointer is up, so the Magic Remote's OK arrives as a CLICK at wherever that
+/// invisible pointer sits, never as an OK key: the viewer arrows to the `…` disc, presses OK, and
+/// the click lands on the picture and toggles pause. (Measured on an OLED55B7V-Z, 3.9.3,
+/// 2026-10-15: Up, Right, Right, no OK key in the event log, and the player paused.) Where LG's
+/// call exists the system hides its own pointer and OK arrives as a key, so the click never comes.
+///
+/// So while the D-pad owns focus on a transparent-cursor set, a click is the OK key on the focused
+/// control when either the pointer has not travelled far enough to leave D-pad mode
+/// ([`DPAD_MOTION_GATE`]) or it lands on no control at all. **Not "while the pointer is
+/// hidden"**: pressing OK jiggles a Magic Remote, any motion at all shows the pointer again, and a
+/// fix keyed on `cur_hidden` never fired on the device. **Nor travel alone**: travel is summed
+/// since the last D-pad press, so a hand simply holding the remote drifts past any gate — measured
+/// 600 px between Up, Right, Right and OK over full-screen video, where the player never leaves
+/// D-pad mode, and the click paused the film under a lit `…` disc. A click that lands ON a control
+/// after real travel is still that control's.
+pub(crate) fn click_is_ok(dpad_mode: bool, motion_since_dpad: f32, on_control: bool, transparent_cursor: bool) -> bool {
+    dpad_mode && transparent_cursor && (motion_since_dpad < DPAD_MOTION_GATE || !on_control)
+}
+
+/// Pointer travel, in logical px accumulated since the last D-pad press, that hands focus back to
+/// the pointer: below it, motion is the hand holding the remote, not a deliberate move.
+pub(crate) const DPAD_MOTION_GATE: f32 = 120.0;
+
+// `home_activate` (the OK/pointer activation ladder for the legacy Home grid) was retired with
+// the legacy `ui::home` module when phase 8 made Home an owned `Screen` — its job (trail reset,
+// status/pill/card dispatch through `activate_card`) now lives in the owned screen's own input
+// handling (`screens::home`, wired through `app::content`/`app::bridge`). Comments elsewhere in
+// this file and in `run.rs`/`nav.rs`/`boot.rs`/`playback.rs`/`metadata.rs` that still name it are
+// historical references to the extraction that produced `activate_card`, not live call sites.
+
+/// **A show/season Play (`activate_card`'s non-movie/episode arm), between its ASYNC detail
+/// request and the landing that decides play-vs-open.**
+///
+/// D7: this used to be `MetadataCmd::LoadDetailNow` — a BLOCKING fetch run on the press frame —
+/// followed immediately by a read of `plx_data::metadata::current()`, which only worked BECAUSE the
+/// load had already finished by the next statement (`load_detail_now`'s own doc: "every remaining
+/// call of this is a deliberate freeze"). `activate_card` now fires `MetadataCmd::RequestDetail`
+/// (non-blocking) and arms one of these; [`menu_play_tick`] is the continuation, run every frame
+/// from the same site `app/run.rs` already pumps the detail landing from, never on the press frame
+/// itself.
+#[derive(Clone)]
+pub(crate) struct MenuPlayAwait {
+    sid: plx_plex::plex::ServerId,
+    /// The rk the press is actually waiting for: the SHOW's, for both the show and season arms
+    /// (a season's own `rk` names no page of its own — see `activate_card`'s original comment,
+    /// preserved on [`menu_play_tick`]).
+    expect: String,
+    /// `Some(season index)` for a season row — resolved into the loaded show's season list only
+    /// once the parent has actually landed as `expect` (a strictly narrower guard than the old
+    /// blocking arm's, which read whatever `plx_data::metadata::current()` happened to hold even
+    /// when the fetch had failed and it was a stale, unrelated show).
+    season_index: Option<i64>,
+    hud_start: HudStart,
+    /// The frame clock past which the wait gives up and lands on the page anyway — the same
+    /// shape and the same 12s ceiling `dev::scenarios::play_arm`'s own `play_await` uses for
+    /// "this never got where it was going".
+    deadline: u32,
+    phase: MenuPlayPhase,
+    /// A landing opens the page instead of playing (a launch link's `open`).
+    open: bool,
+    /// A miss logs and leaves the stack as it is instead of opening the page: a launch link's key
+    /// came from outside the app, so a page for it may not exist (`app::deeplink`).
+    stay_on_miss: bool,
+}
+
+/// Which asynchronous load a [`MenuPlayAwait`] is waiting on. Both phases are polled by the one
+/// [`menu_play_tick`] and bounded by the one `deadline`.
+#[derive(Clone, Copy)]
+enum MenuPlayPhase {
+    /// The parent detail request `activate_card` issued.
+    Detail,
+    /// A SEASON press whose requested season's episodes were not the listed ones: the parent has
+    /// landed and `MetadataCmd::LoadSeason(idx)` is in flight. `gen` is `season_gen` read right
+    /// after issuing it — a later read that differs means another season press, a new item or a
+    /// page change replaced the fetch, and the wait is no longer the landing's owner (the season
+    /// mailbox's own staleness rule, `metadata::pump_season`, applied to the continuation).
+    Season { gen: u32, idx: usize },
+}
+
+impl MenuPlayAwait {
+    /// The wait armed by a press at frame `now`: it starts on the detail request `activate_card`
+    /// has just issued, and carries the same 12s ceiling for its whole life.
+    fn new(sid: plx_plex::plex::ServerId, expect: String, season_index: Option<i64>, hud_start: HudStart, now: u32) -> Self {
+        Self {
+            sid, expect, season_index, hud_start, deadline: now.wrapping_add(12_000), phase: MenuPlayPhase::Detail,
+            open: false, stay_on_miss: false,
+        }
+    }
+
+    /// The wait for a launch link's item (`app::deeplink`), its detail request just issued.
+    pub(crate) fn for_link(sid: plx_plex::plex::ServerId, rk: String, open: bool, now: u32) -> Self {
+        Self { open, stay_on_miss: true, ..Self::new(sid, rk, None, HudStart::Ordinary, now) }
+    }
+}
+
+/// **What a card ACTIVATION does, once its screen has decided whether the press means PLAY.**
+///
+/// Extracted from `home_activate` on 2026-09-05, when the Library grew shelves of its own and
+/// therefore a Continue Watching deck of its own. Everything here is a property of the ITEM and of
+/// that one boolean — a movie or episode plays; a show or season opens its page and fires Play once
+/// the load has landed on the expected item; anything else opens a page, with a season selected
+/// where the row names one. None of it is a property of Home, which is why forking a second copy
+/// for the Library would have been two places to keep the "a failed fetch leaves the PREVIOUS
+/// detail in place, so do not blindly fire on_ok" rule correct in.
+///
+/// `want_play` is the caller's, because only the screen knows: on Home it is the hero's Play
+/// button, or a deck row while `DeckPress::Play`; on the Library a tile on that library's own
+/// `*.inprogress.*` shelf under the same setting. The deck menu's Play row on a show or season
+/// card (`apply_item_action`) arrives here with it set too.
+///
+/// `menu_play_await`/`now` are D7's continuation seam: the show/season arm no longer decides
+/// play-vs-open on this call at all (see [`MenuPlayAwait`]/[`menu_play_tick`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn activate_card(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    mm: &plx_data::pms::PmsMovie,
+    want_play: bool,
+    hud_start: HudStart,
+    mut ret: Option<plx_ui::screen::ReturnState<u32, plx_screens::registry::PageMemory>>,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    menu_play_await: &mut Option<MenuPlayAwait>,
+    now: u32,
+) {
+    if mm.kind == plx_data::pms::KIND_COLLECTION {
+        let arg = plx_screens::registry::AppArg::Content(
+            collection_content_arg(mm));
+        match ret.take() {
+            Some(ret) => super::bridge::nav_push_with_return(pages, arg, ret),
+            None => super::bridge::nav_push(pages, arg),
+        }
+        return;
+    }
+    let rk = mm.rk.clone();
+    if want_play {
+        match mm.kind {
+            0 | 3 => play_item_now(ps, pa, mm, false, Origin::Here, hud_start, ret.take(), pages, bridge),
+            _ => {
+                // show / season: request its page ASYNCHRONOUSLY and fire its Play once the
+                // load actually LANDS on the expected item — a failed fetch leaves the
+                // PREVIOUS detail in place, so blindly firing on_ok would play whatever page
+                // was open before. The decision itself (play vs. land on the page) is
+                // [`menu_play_tick`]'s job now, run once the landing (or its settled failure,
+                // or the ceiling) says the wait is over — never on this call.
+                let expect = if mm.kind == 2 {
+                    mm.show_rk.clone()
+                } else {
+                    rk.clone()
+                };
+                // a show/season row's parent lives on the SAME server as the row itself
+                let sid = mm.sid;
+                bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::RequestDetail { sid, rk: expect.clone() });
+                *menu_play_await = Some(MenuPlayAwait::new(
+                    sid, expect, (mm.kind == 2).then_some(mm.season_index as i64), hud_start, now));
+            }
+        }
+    } else if mm.kind == 2 {
+        // season: open the SHOW page with that season selected
+        super::bridge::open_detail(pages, bridge, mm.sid, &mm.show_rk, Some(mm.season_index), ret.take());
+    } else if mm.kind == 3 {
+        // **An episode opens its OWN page**, which is the same page the card menu's "Go to Episode"
+        // opens (`Action::GoToItem`) — `detail.rs` serves leaves. It used to open the SHOW's page
+        // with the episode's season selected, on the reasoning that the item the tile advertised
+        // should be in view; but a season tab is not the episode, and the tile the user pressed
+        // named one episode. With a press on a discovery shelf now MEANING "show me this", the
+        // most specific page that answers is the episode's.
+        //
+        // The show is still one press away: it is the card menu's second navigation row, and the
+        // episode page's own BACK returns to the shelf.
+        //
+        // This is the DISCOVERY shelves' press. A Continue Watching episode never reaches this arm
+        // while its press opens details: [`activate_deck_card`] opens the SHOW on the card's season
+        // first (the card menu then offers Go to Episode instead), and falls through to here only
+        // for an episode whose row names no show.
+        super::bridge::open_detail(pages, bridge, mm.sid, &rk, None, ret.take());
+    } else {
+        super::bridge::open_detail(pages, bridge, mm.sid, &rk, None, ret.take());
+    }
+}
+
+/// Does a card press open the SHOW's page instead of going through [`activate_card`]? Only a
+/// Continue Watching episode whose press does not play, and only while it names its show
+/// ([`plx_screens::item_menu::deck_episode_opens_show`], which the card menu reads for its
+/// Go to Episode / Go to Show rows too). Pure, so the decision is testable without a session.
+pub(crate) fn deck_press_opens_show(mm: &plx_data::pms::PmsMovie, from_deck: bool, want_play: bool) -> bool {
+    from_deck && !want_play && plx_screens::item_menu::deck_episode_opens_show(mm)
+}
+
+/// **A press on a card the caller knows to be on Continue Watching**, `from_deck` being the
+/// SHELF's answer (Home's hub, a library's own `is_continue` shelf). Under "Open details" an
+/// episode there opens its SHOW on the card's season — the page that shows where the viewer is in
+/// the series — while a discovery shelf's episode ([`activate_card`]) still opens its own page.
+/// Everything else, and every press that plays, is [`activate_card`] unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn activate_deck_card(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    mm: &plx_data::pms::PmsMovie,
+    from_deck: bool,
+    want_play: bool,
+    hud_start: HudStart,
+    mut ret: Option<plx_ui::screen::ReturnState<u32, plx_screens::registry::PageMemory>>,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    menu_play_await: &mut Option<MenuPlayAwait>,
+    now: u32,
+) {
+    if deck_press_opens_show(mm, from_deck, want_play) {
+        super::bridge::open_detail(pages, bridge, mm.sid, &mm.show_rk,
+            (mm.season_index > 0).then_some(mm.season_index), ret.take());
+        return;
+    }
+    activate_card(ps, pa, mm, want_play, hud_start, ret, pages, bridge, menu_play_await, now);
+}
+
+fn collection_content_arg(mm: &plx_data::pms::PmsMovie) -> plx_screens::registry::ContentArg {
+    plx_screens::registry::ContentArg::Collection(plx_plex::plex::collections::CollectionRef::by_rk(
+        mm.sid, &mm.rk, mm.sec, &mm.title))
+}
+
+/// The landing half of `activate_card`'s show/season Play — see [`MenuPlayAwait`]. Called every
+/// frame, route-unconditional, from the same site `app/run.rs` already pumps the detail landing
+/// from (right beside `plx_data::stores::metadata::pump_detail()`): a landing must never depend on
+/// which screen is mounted, since the press that started the wait may have come from Home while a
+/// different page is up by the time it settles.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn menu_play_tick(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    menu_play_await: &mut Option<MenuPlayAwait>,
+    now: u32,
+) {
+    let Some(wait) = menu_play_await.clone() else {
+        return;
+    };
+    let MenuPlayAwait { sid, ref expect, season_index, hud_start, deadline, phase, open, stay_on_miss } = wait;
+    // Something else already moved the app onto the player this frame (a different press, an
+    // auto-advance) — the wait is moot and must not fire a second Play on top of it.
+    if super::bridge::player(pages).is_some() {
+        *menu_play_await = None;
+        return;
+    }
+    let expired = now.wrapping_sub(deadline) < u32::MAX / 2;
+    if let MenuPlayPhase::Season { gen, idx } = phase {
+        // The season fetch is still ours only while its generation stands and the item it hangs
+        // off is still the loaded one: another season press, a new detail request or a page's
+        // `Clear` (BACK) each move one of the two, and a landing after that must play nothing.
+        let (ours, loading, landed) = {
+            let view = bridge.metadata_view();
+            let cur = view.current();
+            let ours = view.season_gen() == gen
+                && cur.is_some_and(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, expect)));
+            // A FAILED fetch releases the tab back to the season whose episodes are listed
+            // (`pump_season`), so "the requested season is the selected one" is the success test.
+            (ours, view.season_loading(), cur.is_some_and(|d| d.cur_season == idx))
+        };
+        if !ours {
+            *menu_play_await = None;
+            return;
+        }
+        if loading && !expired {
+            return; // still waiting — try again next frame
+        }
+        if loading || !landed {
+            *menu_play_await = None;
+            // ceiling, or the fetch settled as a failure — land on the page, as the detail phase does
+            super::bridge::open_detail(pages, bridge, sid, expect, None, None);
+            return;
+        }
+        if !play_door_open(ps, pa, pages, bridge, menu_play_await, (sid, expect, stay_on_miss), expired) {
+            return;
+        }
+        *menu_play_await = None;
+        play_loaded_hero(ps, pa, pages, bridge, sid, expect, hud_start);
+        return;
+    }
+    let landed = bridge.metadata_view().current()
+        .map(|d| plx_plex::plex::same_item((d.sid, &d.rk), (sid, expect)))
+        .unwrap_or(false);
+    if !landed {
+        // Give up once the addressed request has SETTLED without landing this item (a failed or
+        // refused fetch keeps the previous item in place — `detail_request_status` answers
+        // `Some(false)`), or past the ceiling — the same two ways `dev::scenarios::play_arm`'s own
+        // wait ends without a play, both logged rather than silent there for the same reason: a
+        // wait that neither played nor said why would read as a hang.
+        let settled = bridge.metadata_view().detail_request_status(sid, expect) == Some(false);
+        if !settled && !expired {
+            return; // still waiting — try again next frame
+        }
+        *menu_play_await = None;
+        if stay_on_miss {
+            plx_base::eventlog::log(&format!(
+                "deeplink: not opened, rk={expect} ({})", if settled { "not returned" } else { "timed out" }));
+            return;
+        }
+        // nothing playable / load failed — land on the page, through the transition. `season:
+        // None`: the container's own reuse rule is what keeps a re-open from stacking a second
+        // copy of a page the user is already standing on (`bridge::open_detail`).
+        super::bridge::open_detail(pages, bridge, sid, expect, None, None);
+        return;
+    }
+    if open {
+        *menu_play_await = None;
+        super::bridge::open_detail(pages, bridge, sid, expect, None, None);
+        return;
+    }
+    // The season resolution reads whatever `current()` holds — which, now that `landed` is
+    // known true, is genuinely `expect`'s own detail (on a failed fetch the old blocking arm could
+    // resolve a season index against a stale, unrelated show that happened to still be loaded).
+    // A season row whose episodes are not the listed ones is fetched like a season tab press —
+    // ASYNC, `LoadSeason` — and the wait continues in the `Season` phase; the list it would
+    // otherwise play from is the PREVIOUS season's.
+    if let Some(i) = season_index {
+        let view = bridge.metadata_view();
+        let pick = view.current().and_then(|d| {
+            d.seasons.iter().position(|s| s.index == i).map(|idx| (idx, d.cur_season))
+        });
+        if let Some((idx, cur_season)) = pick {
+            if idx != cur_season {
+                bridge.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::LoadSeason(idx));
+                // The bare store leaves the season job on its outbox: start it in this call.
+                bridge.start_store_jobs();
+                let gen = bridge.metadata_view().season_gen();
+                *menu_play_await = Some(MenuPlayAwait { phase: MenuPlayPhase::Season { gen, idx }, ..wait });
+                return;
+            }
+        }
+    }
+    if !play_door_open(ps, pa, pages, bridge, menu_play_await, (sid, expect, stay_on_miss), expired) {
+        return;
+    }
+    *menu_play_await = None;
+    play_loaded_hero(ps, pa, pages, bridge, sid, expect, hud_start);
+}
+
+/// **The play door of a [`MenuPlayAwait`]:** the landing may play only through the one door every
+/// Play from a page goes through ([`super::content::clear_engine_for_play`]), because a preview
+/// can still be letting go of the engine when the item lands. `true` means the engine is free and
+/// the caller plays. `false` means the wait goes on, still armed, and is asked again next frame;
+/// at the wait's own `deadline` (`expired`) it ends instead, as the wait's other expiries do: a
+/// link logs why and leaves the stack alone, a card press lands on the item's page.
+unsafe fn play_door_open(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    menu_play_await: &mut Option<MenuPlayAwait>,
+    (sid, expect, stay_on_miss): (plx_plex::plex::ServerId, &str, bool),
+    expired: bool,
+) -> bool {
+    if super::content::clear_engine_for_play(ps, pa, super::bridge::player(pages).is_some()) {
+        return true;
+    }
+    if expired {
+        *menu_play_await = None;
+        if stay_on_miss {
+            plx_base::eventlog::log(&format!("deeplink: not opened, rk={expect} (engine busy)"));
+        } else {
+            super::bridge::open_detail(pages, bridge, sid, expect, None, None);
+        }
+    }
+    false
+}
+
+/// The end of a settled [`MenuPlayAwait`]: play the loaded item's hero (a show's next episode, or
+/// `episodes[0]` of the selected season), or open its page when nothing is playable.
+unsafe fn play_loaded_hero(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    sid: plx_plex::plex::ServerId,
+    expect: &str,
+    hud_start: HudStart,
+) {
+    if let Some(resume_ns) = super::playback::request_loaded_hero(ps, bridge.metadata_mut()) {
+        start_playback(ps, pa, resume_ns, Origin::Here, hud_start, None, pages, bridge);
+    } else {
+        super::bridge::open_detail(pages, bridge, sid, expect, None, None);
+    }
+}
+
+/// **D7 — reproduced against the historical (pre-fix) tree, not merely simulated.** Before this
+/// package's fix, `activate_card`'s show/season arm called `MetadataCmd::LoadDetailNow` — a
+/// BLOCKING fetch on the calling thread — and decided play-vs-open on the very next statement.
+/// Run against the pre-fix worktree (base `3100d981`, `activate_card`'s OLD 11-argument
+/// signature, no `menu_play_await`/`now`) with a registered-but-refused test server
+/// (`127.0.0.1:1`, `detail_panel_tests.rs`'s own established pattern — no real PMS involved):
+///
+/// ```text
+/// d7-repro: detail_loading()=false immediately after the press call
+/// test app::input::d7_repro::a_show_play_decides_synchronously_on_the_press_call ... ok
+/// ```
+///
+/// `detail_loading()` was ALREADY `false` right after the call returned — the load had already
+/// run to completion, synchronously, on the thread that is supposed to be servicing input and
+/// drawing frames. Because the fix changes `activate_card`'s own signature (it gains
+/// `menu_play_await`/`now`), that exact test cannot compile against the fixed code, so this
+/// module asserts the SAME observable — but the opposite way, which is what the fix buys: the
+/// call must return with the load still IN FLIGHT and the decision deferred to
+/// [`menu_play_tick`], never resolved on the press frame.
+///
+/// Runs in the default feature set too: `menu_play_tick`'s landed arm reaches `start_playback` and
+/// the video sink, but `port.rs` installs `tv::sink::NoSink` under `cfg(test)`, so the sink a bare
+/// `cargo test --lib` meets answers every verb with nothing (`player::ffi` is compiled, and never reached).
+#[cfg(test)]
+mod activate_card_tests {
+    use super::*;
+
+    /// A show/season Play must not decide play-vs-open on the press frame: it fires an ASYNC
+    /// `RequestDetail` and arms [`MenuPlayAwait`], leaving `metadata::detail_loading()` `true`
+    /// until [`menu_play_tick`] is driven by a subsequent frame's landing (or its settled
+    /// failure, or the ceiling) — see this function's own doc for the pre-fix run that motivated
+    /// it.
+    #[test]
+    fn a_show_or_season_play_no_longer_decides_on_the_press_frame() {
+        let _guard = plx_base::testlock::serial();
+        let mut ps = plx_media::route::PlaybackSession::default();
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut pa = plx_media::player::adapter::PlayerAdapter::new(mt);
+        let mut pages = plx_ui::dispatch::Dispatcher::<super::bridge::AppHost>::new();
+        let mut bridge = super::bridge::Bridge::for_test(|| 0);
+        let mut menu_play_await = None;
+
+        struct Cleanup(*mut super::bridge::Bridge);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                // SAFETY: captured from `bridge` just above, which outlives this guard for the
+                // whole test body.
+                unsafe { &mut *self.0 }.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::Clear);
+                plx_plex::plex::reset_servers_for_test();
+            }
+        }
+        let _cleanup = Cleanup(&mut bridge as *mut _);
+        plx_plex::plex::reset_servers_for_test();
+        let sid = plx_plex::plex::register_for_test("press-frame", "127.0.0.1", 1, "t", "c-press-frame");
+        let mm = plx_data::pms::PmsMovie { sid, rk: "show-1".into(), kind: 1, ..Default::default() };
+
+        unsafe {
+            activate_card(&mut ps, &mut pa, &mm, true, HudStart::Fixed(1000), None,
+                &mut pages, &mut bridge, &mut menu_play_await, 0);
+        }
+
+        assert!(
+            plx_data::metadata::detail_loading(bridge.metadata_mut().adapter_ref()),
+            "the parent detail must still be IN FLIGHT right after the press — the play/open \
+             decision must wait for menu_play_tick, not run on this call"
+        );
+        assert!(menu_play_await.is_some(), "the continuation state must be armed");
+        // the CONTAINER must not have moved yet either — no premature page, no play. Nothing has
+        // ever been asked of this tree, so any pending op at all is one this press made.
+        assert!(!pages.has_pending_navigation(), "no premature navigation");
+
+        // Drive the continuation before anything can land (no worker has had a chance to run on
+        // a fresh test process): it must still be waiting, not give up early.
+        unsafe {
+            menu_play_tick(&mut ps, &mut pa, &mut pages, &mut bridge, &mut menu_play_await, 0);
+        }
+        assert!(menu_play_await.is_some(), "with nothing settled and the ceiling not reached, the wait continues");
+        assert!(!pages.has_pending_navigation(), "…and still nothing has been navigated to");
+
+        // Past the 12s ceiling (`dev::scenarios::play_arm`'s own), the wait must give up and land
+        // on the page rather than hang forever.
+        unsafe {
+            menu_play_tick(&mut ps, &mut pa, &mut pages, &mut bridge, &mut menu_play_await, 12_001);
+        }
+        assert!(menu_play_await.is_none(), "the ceiling must end the wait");
+        assert!(pages.has_pending_navigation(),
+            "…and land on the page rather than leaving the press with no effect at all");
+    }
+
+    /// The deck menu's Play row on a SHOW or SEASON card (`DeckPress::Details`) takes the very
+    /// `want_play` path OK takes in Play mode: it arms [`MenuPlayAwait`] on the CAPTURED row's
+    /// server and expected key (a season waits for its show) and starts no playback on the
+    /// press frame. A row that is not the captured one does nothing.
+    #[test]
+    fn the_menu_play_row_on_a_show_or_season_card_takes_the_want_play_path() {
+        use plx_screens::item_menu::Action;
+        let _guard = plx_base::testlock::serial();
+        let mut ps = plx_media::route::PlaybackSession::default();
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut pa = plx_media::player::adapter::PlayerAdapter::new(mt);
+        let mut pages = plx_ui::dispatch::Dispatcher::<super::bridge::AppHost>::new();
+        let mut bridge = super::bridge::Bridge::for_test(|| 0);
+
+        struct Cleanup(*mut super::bridge::Bridge);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                // SAFETY: captured from `bridge` just below, which outlives this guard.
+                unsafe { &mut *self.0 }.metadata_mut().run(plx_data::stores::metadata::MetadataCmd::Clear);
+                plx_plex::plex::reset_servers_for_test();
+            }
+        }
+        let _cleanup = Cleanup(&mut bridge as *mut _);
+        plx_plex::plex::reset_servers_for_test();
+        let sid = plx_plex::plex::register_for_test("menu-play", "127.0.0.1", 1, "t", "c-menu-play");
+
+        let show = plx_data::pms::PmsMovie { sid, rk: "show-1".into(), kind: 1, ..Default::default() };
+        let season = plx_data::pms::PmsMovie { sid, rk: "season-9".into(), kind: 2,
+            show_rk: "show-1".into(), season_index: 4, ..Default::default() };
+        for (card, expect, season_index) in [(&show, "show-1", None), (&season, "show-1", Some(4))] {
+            let mut menu_play_await = None;
+            let req = |act, item| plx_screens::registry::ItemMenuReq {
+                act, sid, item, season: None, loaded_episode: false, from_home: false };
+            // a key that is not the captured row's: nothing happens
+            unsafe { apply_item_action(&mut ps, &mut pa, req(Action::Play("other".into()), Some(card.clone())),
+                &mut pages, &mut bridge, &mut crate::app::playback::LivePlaybackResources,
+                &mut menu_play_await, 0); }
+            assert!(menu_play_await.is_none(), "{}", card.rk);
+            unsafe { apply_item_action(&mut ps, &mut pa, req(Action::Play(card.rk.clone()), Some(card.clone())),
+                &mut pages, &mut bridge, &mut crate::app::playback::LivePlaybackResources,
+                &mut menu_play_await, 7); }
+            let armed = menu_play_await.as_ref().unwrap_or_else(|| panic!("{} must arm the wait", card.rk));
+            assert_eq!((armed.sid, armed.expect.as_str(), armed.season_index, armed.deadline),
+                (sid, expect, season_index, 7u32.wrapping_add(12_000)));
+            assert!(plx_data::metadata::detail_loading(bridge.metadata_mut().adapter_ref()),
+                "the page's detail is requested, the play decision waits for the landing");
+            assert!(!pages.has_pending_navigation(), "no premature navigation or playback");
+        }
+    }
+
+    #[test]
+    fn a_collection_card_opens_the_collection_page() {
+        let _guard = plx_base::testlock::serial();
+        let mut ps = plx_media::route::PlaybackSession::default();
+        let mt = unsafe { plx_base::task::MainThread::assume() };
+        let mut pa = plx_media::player::adapter::PlayerAdapter::new(mt);
+        let mut pages = plx_ui::dispatch::Dispatcher::<super::bridge::AppHost>::new();
+        let mut bridge = super::bridge::Bridge::for_test(|| 0);
+        let mut menu_play_await = None;
+        let collection = plx_data::pms::PmsMovie { rk: "50001".into(),
+            kind: plx_data::pms::KIND_COLLECTION, ..Default::default() };
+        unsafe { activate_card(&mut ps, &mut pa, &collection, false, HudStart::Fixed(1000), None,
+            &mut pages, &mut bridge, &mut menu_play_await, 0); }
+        assert!(pages.has_pending_navigation(), "a collection must queue its own page");
+        assert!(matches!(collection_content_arg(&collection),
+            plx_screens::registry::ContentArg::Collection(id)
+                if id.rk == "50001" && id.sec == 0 && id.tag == 0 && id.name.is_empty()));
+        assert!(menu_play_await.is_none(), "a collection must not arm playback");
+        assert!(!plx_data::metadata::detail_loading(bridge.metadata_mut().adapter_ref()),
+            "a collection must not request movie metadata");
+    }
+}
+
+/// Launch policy shared by live and fixture resources. Origin and resume choices stay here;
+/// resources cannot see the page stack or choose a return destination.
+struct LiveItemPlayback<'a, R>(&'a mut R);
+
+impl<R: super::playback::PlaybackResources> LiveItemPlayback<'_, R> {
+    fn loaded_episode(
+        &mut self,
+        ps: &mut plx_media::route::PlaybackSession,
+        pa: &mut plx_media::player::adapter::PlayerAdapter,
+        rk: &str,
+        version: Option<plx_plex::plex::MediaId>,
+        pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+        bridge: &mut super::bridge::Bridge,
+    ) {
+        // Play from Start restarts; a picked version resumes, as Play does.
+        let resume_ns = match version {
+            None => 0,
+            Some(_) => bridge.metadata_view().current()
+                .and_then(|d| d.episodes.position(rk).and_then(|i| d.episodes.get(i)))
+                .map_or(0, |ep| plx_data::metadata::resume_ns(ep.resume_ms, ep.dur_ms)),
+        };
+        if self.0.request_episode(ps, bridge.metadata_mut(), rk, version) {
+            super::playback::start_playback_with(ps, pa, resume_ns, Origin::Here, HudStart::Ordinary,
+                None, pages, bridge, self.0);
+        }
+    }
+
+    fn captured_card(
+        &mut self,
+        ps: &mut plx_media::route::PlaybackSession,
+        pa: &mut plx_media::player::adapter::PlayerAdapter,
+        item: &plx_data::pms::PmsMovie,
+        from_start: bool,
+        version: Option<plx_plex::plex::MediaId>,
+        pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+        bridge: &mut super::bridge::Bridge,
+    ) {
+        super::playback::play_item_now_with(ps, pa, item, from_start, version, Origin::Here, HudStart::Ordinary,
+            None, pages, bridge, self.0);
+    }
+}
+
+/// The [`Scope`](plx_data::viewstate::Scope) of a Mark watched/unwatched row: the captured row's own
+/// ([`Scope::of_row`](plx_data::viewstate::Scope::of_row)), or the season tab the menu was opened
+/// on when the item is no catalog row. Anything else is the one leaf it names.
+fn mark_scope(
+    rk: &str,
+    item: Option<&plx_data::pms::PmsMovie>,
+    season: Option<&(String, i64)>,
+) -> plx_data::viewstate::Scope {
+    use plx_data::viewstate::Scope;
+    match (item.filter(|m| m.rk == rk), season) {
+        (Some(row), _) => Scope::of_row(row),
+        (None, Some((show_rk, index))) => Scope::Season { show_rk: show_rk.clone(), index: *index },
+        (None, None) => Scope::Leaf,
+    }
+}
+
+/// Perform an item-menu [`Action`](plx_screens::item_menu::Action) — the ONE dispatch, drained
+/// from `AppFx::ItemMenu` after every dispatcher frame (`content::content_requests`). The menu
+/// itself only reports the choice; every route flip, server call and refresh is here.
+///
+/// It was reached from TWO call sites, the OK key's ladder arm and the pointer click's — the exact
+/// shape `home_activate` and `activate_ctrl_row` were unified out of, and it had the same latent
+/// drift. The surface owns both edges now (`Activate::Immediate` over the container's stop
+/// registry), so there is one producer and one drain.
+///
+/// **`req` carries what `MenuHost` used to say, and it is two bits rather than six variants.**
+/// `loaded_episode` is the only one that changes what an action MEANS: only the detail page's
+/// episode filmstrip holds an item that is a leaf of the loaded season, so its Play from Start goes
+/// through that page's own episode path and its scrobble makes the page re-read itself. Every other
+/// entry point — Home, the Library grid, a Search shelf, a person's filmography, and the detail
+/// page's own RELATED shelf, which stands on that page while its tiles are OTHER items — is a card
+/// row, and they are all the same arm: the row rides on the request instead of being looked up in
+/// the hub catalog, which only Home's cards are ever in.
+///
+/// **`from_home` no longer decides anything here.** It selected `app::nav::menu_leave`, whose whole
+/// body was `if from_home { trail.reset() }` — spending the history behind Home because the menu on
+/// the root is the user acting on the root. Home IS the container's root, and a menu opened on it
+/// is opened with nothing above that root, so the reset was a no-op in the only case that could
+/// reach it; expressing it as a `Root(Home)` op would have been actively wrong, since the `Push`
+/// that follows in the same frame SUPERSEDES the newest request. The bit stays on the argument
+/// (and in the recorded state) as the fact it is.
+pub(super) unsafe fn apply_item_action<R: super::playback::PlaybackResources>(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    req: plx_screens::registry::ItemMenuReq,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    resources: &mut R,
+    menu_play_await: &mut Option<MenuPlayAwait>,
+    now: u32,
+) {
+    let mut playback = LiveItemPlayback(resources);
+    use plx_screens::item_menu::Action;
+    let plx_screens::registry::ItemMenuReq { act, sid, item, season, loaded_episode, from_home } = req;
+    // `sid` is WHICH SERVER this menu's rows are about, captured when the panel was presented.
+    // Every arm below turns an rk into a fetch, a scrobble or a play, and resolving one against
+    // `plex::current_server()` is the reported bug itself: on a merged Continue Watching shelf,
+    // Play from Start on a friend's episode found OUR row with the same key and played a different
+    // film under the friend's title.
+    //
+    // The empty-rk guard the head of this function used to carry is the SURFACE's now
+    // (`ItemMenuScreen::activate`): a row with no target never becomes a request at all.
+    match act {
+        Action::GoToItem(rk) => {
+            let _ = from_home; // see the note below `apply_item_action`
+            super::bridge::open_detail(pages, bridge, sid, &rk, None, None);
+        }
+        // The Watchlist hold menu's Remove: the store flips the tile at once, the page plays its
+        // removal landing and a refused write puts the tile back with no toast (Q8).
+        Action::WatchlistRemove(guid) => {
+            let from_page = super::bridge::Bridge::watchlist_page_on_top(pages);
+            bridge.watchlist_remove(&guid, from_page);
+        }
+        // The write is queued on the Watchlist store (the ledger flips the face at once and puts it
+        // back if plex.tv refuses) and the strip's bookmark pulses: the APP owns that, not the menu.
+        Action::WatchlistAdd { hex } => bridge.watchlist_add(hex),
+        // The hold menu's Go to row: the catalog page of the title, by the identity captured when
+        // the menu opened (a guid with no catalog id has no page).
+        Action::GoToCatalog(guid) => {
+            if let Some(hex) = super::bridge::hex_of_guid(&guid) {
+                super::bridge::open_catalog(pages, hex, None);
+            }
+        }
+        Action::GoToShow(show_rk, season) => {
+            super::bridge::open_detail(pages, bridge, sid, &show_rk, (season > 0).then_some(season), None);
+        }
+        // The two watch-state rows, and they are TWO because a part-watched item offers both:
+        // `Action::watch_write` reads the verb off the ROW the user aimed at. It used to be one
+        // variant carrying what the item was NOW, inverted here — which with a pair of rows would
+        // give both of them the same bool and make one do the opposite of its own label.
+        //
+        // Otherwise the same ritual as the detail page's watch discs, and the same CODE: flip every
+        // surface that describes the item at once, write on a worker, refetch the hubs when the
+        // write lands so Continue Watching reflects it (a watched episode leaves the shelf; its
+        // successor takes the slot).
+        //
+        // All three used to run inline, on this thread, justified as "~100ms LAN and deliberately
+        // so". That priced one server on one LAN; with a share registered the item's server is
+        // routinely remote or asleep, and the same press parked the whole UI for seconds — see
+        // `plx_data::viewstate`, which is where the reasoning, the ordering rules and the
+        // `client_for(sid)`-never-`client()` note now live.
+        //
+        // When the popover was over the DETAIL page, that page is re-read too — its exact address
+        // and the episode ride together, so a landing after navigation cannot refresh another page.
+        ref a @ (Action::MarkWatched(ref rk) | Action::MarkUnwatched(ref rk)) => {
+            // Unreachable by construction — this arm matches exactly the two variants
+            // `watch_write` answers for — and a `return` rather than an `expect` because a
+            // panic here unwinds out of the SDL loop and kills the app. If a third write row
+            // is ever added to this pattern without a verb, it does nothing instead.
+            let Some(w) = a.watch_write() else { return };
+            // This press re-reads nothing: the page learns the server's numbers from the read-back
+            // of the item, its season and its show (`content::reconcile_details`), after the write
+            // has landed. A RELATED tile's own tick is flipped by `metadata::set_watched_local`,
+            // which walks the Related shelf for exactly this case.
+            // NO GUID from here, and deliberately: a catalog row carries none, and the guid the
+            // detail page is holding belongs to the SHOW when this rk is one of its episodes. A
+            // guid that is merely close marks a DIFFERENT title watched on every other source, so
+            // `viewstate` looks the right one up from `(sid, rk)` on its own worker instead.
+            // A show or season row also changes every episode row under it, wherever one is held
+            // (a Search result, a Continue Watching card): the scope is read off the row in hand.
+            let scope = mark_scope(rk, item.as_ref(), season.as_ref());
+            let outcome = bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Request {
+                sid, rk: rk.to_string(), write: w, scope, guid: String::new(),
+            });
+            super::bridge::execute_endpoint_outcomes(pages, outcome.endpoints);
+        }
+        Action::RemoveFromDeck(rk) => {
+            // A HIDE, not a reset: the server keeps the item's `viewOffset`, so the card leaves
+            // the shelf while the resume point survives and playing it again picks up where it
+            // left off. That is why this is NOT `unscrobble`, which would throw the position
+            // away. See `plex::Client::remove_from_continue_watching`.
+            //
+            // The card leaves the deck on THIS frame (`ViewEdit::LeftDeck` — it must
+            // not still sit under the user's cursor after they removed it) and the refetch
+            // follows the write. The shelf is sourced from `/hubs/continueWatching`, which is
+            // the hub this action actually affects — built from `/hubs`'s `home.continue` it
+            // would come back still listing the item (see `pms::project`).
+            //
+            // No detail refresh: this row exists only on a Continue Watching card.
+            // No guid, and it would be ignored if there were one: a deck removal does not follow
+            // the title across sources (`viewstate::Write::propagates`) — your Continue Watching
+            // row is yours, and hiding a friend's item from it is not a claim about their deck.
+            let outcome = bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Request {
+                sid, rk: rk.to_string(), write: plx_data::viewstate::Write::RemoveFromDeck,
+                scope: plx_data::viewstate::Scope::Leaf, guid: String::new(),
+            });
+            super::bridge::execute_endpoint_outcomes(pages, outcome.endpoints);
+        }
+        // The deck card's Play row (OK opens the page): the same captured-row launch as Play from
+        // Start, resuming instead of restarting. The row only exists on a Card menu, never on the
+        // filmstrip, so there is no loaded-episode path. A show or season has no stream of its
+        // own: it takes `activate_card`'s want_play arm — the very path OK takes in Play mode —
+        // on the captured row (same server, same key), never a re-resolve.
+        Action::Play(rk) => {
+            if let Some(mm) = item.as_ref().filter(|m| m.rk == rk) {
+                if matches!(mm.kind, 0 | 3) {
+                    playback.captured_card(ps, pa, mm, false, None, pages, bridge);
+                } else {
+                    activate_card(ps, pa, mm, true, HudStart::Ordinary, None, pages, bridge,
+                        menu_play_await, now);
+                }
+            }
+        }
+        Action::PlayFromStart(rk) => {
+            // On the detail page the target is an episode of the LOADED SEASON, which the hub
+            // catalog usually doesn't hold at all (only the one Continue Watching is showing
+            // ever does) — so it plays through the page's own episode path, the same one OK
+            // on the still uses, with the resume dropped.
+            // …the FILMSTRIP's host only. A Related tile is not among the loaded episodes, so this
+            // lookup would miss and the press would do nothing — it takes the card-row arm below,
+            // which plays the row the menu captured.
+            if loaded_episode {
+                playback.loaded_episode(ps, pa, &rk, None, pages, bridge);
+                return;
+            }
+            // **The row the menu was opened ON, not a re-resolve by key.** This used to walk the
+            // HOME hub catalog (`pms::index_of_rk`), which is a lookup that only ever answers for a
+            // card that is on a Home shelf — so on the Library grid, a Search result or a person's
+            // filmography the arm found nothing and the press did nothing at all, silently. The
+            // panel is about ONE item and captured it when it was presented; `ItemMenuArg`'s row is
+            // that capture, which is both the fix and the smaller claim (it also cannot be
+            // re-pointed by a hub refetch rebuilding the catalog under an open panel — the reason
+            // the old lookup deferred in the first place).
+            //
+            // The `rk` guard is what keeps the two in step: every other arm acts on the action's
+            // own key, so playing a row that does not carry it would be this dispatch disagreeing
+            // with itself.
+            if let Some(mm) = item.as_ref().filter(|m| m.rk == rk) {
+                playback.captured_card(ps, pa, mm, true, None, pages, bridge);
+            }
+        }
+        // The menu turns itself into the version list; this never arrives (`ItemMenuScreen::activate`).
+        Action::ChooseVersion(_) => {}
+        // A picked version plays like Play: the filmstrip's leaf through the loaded season, a card
+        // through the row the menu captured, resuming where it left off.
+        Action::PlayVersion { rk, media } => {
+            if loaded_episode {
+                playback.loaded_episode(ps, pa, &rk, Some(media), pages, bridge);
+            } else if let Some(mm) = item.as_ref().filter(|m| m.rk == rk) {
+                playback.captured_card(ps, pa, mm, false, Some(media), pages, bridge);
+            }
+        }
+        Action::PlayTrailer {
+            rk,
+            part,
+            vcodec,
+            acodec,
+            title,
+        } => {
+            if rk.is_empty() || part.is_empty() {
+                return;
+            }
+            let intent = plx_screens::registry::PlayIntent::Item {
+                sid,
+                rk,
+                part,
+                vcodec,
+                acodec,
+                title,
+                context: plx_data::metadata::TRAILER_CONTEXT.to_string(),
+                version: None,
+            };
+            // A press-and-hold context menu can reach here within the same beat as opening it,
+            // which only STARTED the open preview's abandonment (`ContentReq::ItemMenu`'s own
+            // `halt_preview`) — its Load thread may still hold the engine installed. Starting a
+            // second Load against that installed engine hits the double-start conflict guard and
+            // silently refuses instead of playing, exactly the ordinary Play path's own race
+            // (`ContentReq::Play` in `app::content`), so this takes the same hold-until-released
+            // path rather than calling `request_play`/`start_playback_with` directly.
+            if !super::content::clear_engine_for_play(ps, pa, super::bridge::player(pages).is_some()) {
+                super::content::hold_feature(intent, 0, None);
+                return;
+            }
+            if !super::content::request_play_intent(ps, bridge.metadata_mut(), &intent) {
+                return;
+            }
+            super::playback::start_playback_with(
+                ps,
+                pa,
+                0,
+                Origin::Here,
+                HudStart::Ordinary,
+                None,
+                pages,
+                bridge,
+                playback.0,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "menu_play_season_tests.rs"]
+mod menu_play_season_tests;
+
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "item_menu_player_return_tests.rs"]
+mod item_menu_player_return_tests;
+
+// ---- the key ladder: one function per arm ------------------------------------------------------
+//
+// The run loop's key handler is a LADDER: a key-up, a hardware auto-repeat and the preamble every
+// fresh press runs; then the DISPATCHER's arm and the route-scoped ones after it, each
+// `continue`ing; then one chained `else if` on key identity. Each arm's BODY is a function here,
+// in the order the ladder tries them — bar the ones with no body to name (the dispatcher's arm is
+// one `app.inputs.push`, the pointer-hidden arm is empty). No count is given, deliberately: three
+// arms left this ladder in phase 5b alone and every remaining player arm left it in phase 12, and
+// a number here rots without anything failing.
+//
+// Every guard, every `continue` and the order itself stay at the CALL SITE, because the order is
+// part of the behaviour: an earlier guard subsumes later ones it overlaps with, and that is only
+// legible while the tests sit in one list, in order, in one place. (The clearest example used to
+// be `key_player_failed`, whose guard deliberately subsumed every player arm below it; the whole
+// group is `PlayerScreen`'s since phase 12, where the same precedence is the FIRST test in
+// `handle_key` rather than the height of an arm in a chain.)
+//
+// No host test executes any of this: it runs inside the SDL event loop. The gate over it is
+// `tools/keytable.py`, which drives the simulator through (screen x key) and diffs the focus
+// fingerprint each press produces against a recorded table.
+
+/// A key-up: the reliable release (this remote sends exactly one per press). Retires this sym from
+/// the physically-down slot and springs a deferred grid-card press back.
+///
+/// It cleared a second slot — `HeldKey::sym`, the client-side hold-repeat's own — until phase 10
+/// deleted that timer with its last consumer (the item menu). What is left is `down_sym`, which is
+/// a fact about the PHYSICAL key rather than about whoever read it, and the press machine's
+/// release, which is a fact about the LOOP's own deferred press. **Both are why this still runs
+/// unconditionally, above the tree-ownership question**: a key the ladders never saw go down would
+/// otherwise look held for as long as a surface was up.
+///
+/// **The scrub half is gone** (restructure phase 12, PX-PLAYER). It ran on
+/// `PlayerScreen::scrub` — a field of a screen that has owned the whole gesture since it began
+/// answering `HitSource::Engine`, and which arms its own `TAP_COMMIT_MS` debounce on
+/// `Edge::Up` — so the two together issued TWO seeks for one tap. The commit, the debounce and
+/// the reveal-cancel are `screens::player::PlayerScreen::key_scrub_release`'s now, and
+/// the commit reaches `commit_seek` through `PlayerReq::CommitSeek` instead of through here.
+pub(crate) fn on_key_up(
+    sym: c_uint,
+    ok_armed: bool,
+    down_sym: &mut u32,
+    press: &mut plx_ui::press::Press,
+) {
+    if sym == *down_sym {
+        *down_sym = 0;
+    }
+    if is_ok(sym) && ok_armed {
+        // OK released over a grid card: start the spring-back; the deferred
+        // activation commits from the per-frame loop once the bounce has shown.
+        press.release(clock::now());
+    }
+}
+
+/// A hardware AUTO-REPEAT (held key). **All that is left of it is the deferred press's liveness
+/// beat** — the dropped-key-up net in `ui::press`, which is the loop's own machine and belongs to
+/// no screen.
+///
+/// The client-side hold-repeat timer went in phase 10: every discrete focus list in the app — the
+/// home grid, detail, the Settings family, the player's four panels and, last of them, the item
+/// context menu — is an owned screen or a surface on the dispatcher, so a repeat reaching one is
+/// an `InputEvent` carrying `Edge::Repeat` handed over before this function is reached, and the
+/// cadence is applied THERE (`RepeatGate`, to the DIRECTIONS only).
+///
+/// The player's continuous scrub was the last thing this drove directly, and it went the same way
+/// in phase 12 (PX-PLAYER): `PlayerScreen::key_scrub_repeat` engages the ramp off its own
+/// `Edge::Repeat`, which is the same event one layer down, and the per-frame advance is that
+/// screen's `Tick`. Nothing about the gesture is read or written from here any more, which is what
+/// makes `PlayerScreen::scrub` a field with ONE owner.
+pub(crate) fn on_auto_repeat(sym: c_uint, ok_armed: bool, press: &mut plx_ui::press::Press) {
+    if ok_armed && is_ok(sym) {
+        press.note_alive(clock::now()); // OK held: keep the dropped-key-up net honest
+    }
+}
+
+/// What EVERY fresh press does before the ladder sees it: remember the sym as physically down,
+/// un-dismiss the HUD, abort an armed click that a non-OK key slid off, and — the LG pointer
+/// convention, global to every screen including the onboarding ones the ladder dispatches first —
+/// let the first D-pad press dismiss the Magic-Remote cursor and put input in D-pad mode. Pointer
+/// motion brings it back.
+///
+/// The cursor gate takes the plain syms only (`alt: false`), which is exactly the set the four
+/// spelled-out `sym ==` comparisons here took. Whether the alternate D-pad codes BELONG in it is an
+/// open behavioural question — the Chapters strip accepts them and does not hide the cursor — and
+/// naming the identity did not settle it.
+///
+/// # The unsupported-key invariant (LG checklist item 40)
+///
+/// **This function runs BEFORE the ladder has decided whether anything takes the press**, and two
+/// of the things it does are GLOBAL rather than local to an arm: un-dismissing the player HUD, and
+/// aborting a tvOS click in flight. So until 2026-08-23 an unsupported key — a colour button,
+/// GUIDE, INFO, a universal remote's extra half — raised the transport over playback and cancelled
+/// a press the user was in the middle of, and neither is a thing "the app ignored that key" is
+/// allowed to mean. Both are now gated on [`is_bound`], whose doc carries the whole map and the one
+/// place it deliberately over-approximates.
+///
+/// **The invariant is about CONSUMPTION, not about [`Key::Other`].** `Other` is a legitimate
+/// identity for real, handled keys — the Library pager (a separate `page_dir` predicate) and
+/// Search's Backspace/Clear both classify as `Other` and are then taken by hand — so making the
+/// variant inert would break all of them. `is_bound` is the superset that answers the actual
+/// question.
+///
+/// Three things stay UNCONDITIONAL and each for its own reason. `down_sym` is bookkeeping
+/// about the physical key, not a side effect: without it a held unsupported key's auto-repeats
+/// would each arrive as a fresh press (`state & 0x100 != 0 && sym == app.down_sym` in the
+/// caller). The D-pad cursor gate is already narrower than `is_bound` — it takes the four plain
+/// direction syms and nothing else — so it needs no second guard. And the caller's `last_input`
+/// stamp is a local read only by arms that run in the same iteration, so an unbound press cannot
+/// carry it anywhere.
+pub(crate) unsafe fn begin_fresh_press(
+    ps: &plx_media::route::PlaybackSession,
+    key: Key,
+    sym: c_uint,
+    wcode: c_uint,
+    now: u32,
+    down_sym: &mut u32,
+    hud: Option<&mut HudState>,
+    ptr: &mut Pointer,
+    ok_armed: &mut bool,
+    press: &mut plx_ui::press::Press,
+) {
+    *down_sym = sym;
+    note_global_press(ps, sym, wcode, now, hud, ok_armed, press);
+    if matches!(
+        key,
+        Key::Up | Key::Down | Key::Left { alt: false } | Key::Right { alt: false }
+    ) {
+        if !ptr.dpad_mode || !ptr.cur_hidden {
+            hide_cursor();
+        }
+        ptr.dpad_mode = true;
+        ptr.cur_hidden = true;
+        ptr.mot_accum = 0.0;
+        ptr.edge.stop();
+    }
+}
+
+/// **The two GLOBAL effects of a fresh press, and the guard that decides whether they happen** —
+/// the half of [`begin_fresh_press`] that LG checklist item 40 is about. Queued Player
+/// keys pass no HUD here: the Player samples it once at ordered event delivery.
+///
+/// Split out for one blunt reason: `begin_fresh_press` calls `hide_cursor`, which acts on whatever
+/// pointer calls the process's SDL exports (resolved at run time, `app/boot.rs`), so a host test
+/// that reached it would be grading the host's SDL rather than the press. This half touches no SDL
+/// at all, so the invariant is gradeable by `make check` instead of only by a television.
+pub(crate) fn note_global_press(
+    ps: &plx_media::route::PlaybackSession,
+    sym: c_uint,
+    wcode: c_uint,
+    now: u32,
+    hud: Option<&mut HudState>,
+    ok_armed: &mut bool,
+    press: &mut plx_ui::press::Press,
+) {
+    if !is_bound(sym, wcode) {
+        return; // an unsupported key is not input the app acted on — see `begin_fresh_press`
+    }
+    // What the user could SEE, and only then the un-dismiss — one operation, because the order is
+    // load-bearing (`HudState::note_fresh_press`). Surface-owned keys sample here. Queued
+    // keys owned by the Player pass None and use the same operation at delivery, so a
+    // later key in the ingress batch cannot overwrite the earlier key's visibility.
+    if let Some(hud) = hud {
+        hud.note_fresh_press(ps, now, paused());
+    }
+    // a fresh non-OK key (navigation / BACK) while a click is armed aborts the press — spring the
+    // card back to rest WITHOUT activating (you "slid off" the control). A key the app does not
+    // bind is not sliding off anything: nothing moved, so nothing is abandoned.
+    if *ok_armed && !is_ok(sym) {
+        press.cancel();
+        *ok_armed = false;
+    }
+}
+
+/// **The unsupported-key invariant, graded.** `tools/keytable.py` grades the other half — that an
+/// unbound press moves no focus on any screen — and cannot see either of these two, because neither
+/// appears in a focus fingerprint.
+#[cfg(test)]
+mod unsupported_key_tests {
+    use super::*;
+
+    /// Drive one fresh press through [`note_global_press`] and report what it left behind:
+    /// `(a click is still armed, the HUD is still dismissed)`. `press::*`, `hud_until()` and
+    /// `hud_until()` and `paused()` are crate globals, so every caller holds `testlock::serial()`;
+    /// the press is the test's own `Press`.
+    fn press(ps: &plx_media::route::PlaybackSession, sym: c_uint, wcode: c_uint) -> (bool, bool) {
+        let mut hud = HudState::IDLE;
+        let mut ok_armed = true; // a click is in flight, as if OK were still down on a card
+        hud.dismissed = true; // …and the transport was hidden by hand (UP from the control row)
+        let mut p = plx_ui::press::Press::new();
+        p.begin(1_000);
+        note_global_press(ps, sym, wcode, 1_000, Some(&mut hud), &mut ok_armed, &mut p);
+        let out = (p.is_active() && ok_armed, hud.dismissed);
+        p.cancel();
+        out
+    }
+
+    /// A key the app binds behaves exactly as it always has: it un-dismisses the HUD and aborts the
+    /// click it slid off. BACK is the case to use — it is not OK, so it takes the abort branch.
+    #[test]
+    fn a_bound_key_still_wakes_the_hud_and_aborts_the_click() {
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let _g = plx_base::testlock::serial();
+        let (armed, dismissed) = press(&ps, SDLK_ESCAPE, 0);
+        assert!(
+            !armed,
+            "BACK slides off the control — the press is cancelled"
+        );
+        assert!(!dismissed, "…and any key un-dismisses the transport");
+    }
+
+    /// **The regression.** An unsupported key must do NEITHER — it is not input the app acted on,
+    /// so it may not raise the transport over playback and it may not abandon a press in flight.
+    /// 269 is HOME (`SDL_SCANCODE_AC_HOME`, evdev 172 `KEY_HOMEPAGE`); every other unbound
+    /// scancode takes the same branch.
+    #[test]
+    fn an_unsupported_key_wakes_nothing_and_abandons_nothing() {
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let _g = plx_base::testlock::serial();
+        for (sym, wcode, what) in [
+            (0, 269, "HOME"),
+            (0, 270, "AC_BACK"),
+            (b'a' as c_uint, 4, "a letter"),
+        ] {
+            let (armed, dismissed) = press(&ps, sym, wcode);
+            assert!(armed, "{what} must not cancel the armed click");
+            assert!(dismissed, "{what} must not un-dismiss the HUD");
+        }
+    }
+
+    /// The digits are the one place [`is_bound`] deliberately over-approximates (its doc argues
+    /// it): the who's-watching PIN keypad types from them, so they count as bound everywhere.
+    /// Pinned so the trade-off stays a decision on record rather than something a reader finds.
+    #[test]
+    fn a_number_key_counts_as_bound_because_the_pin_keypad_types_from_it() {
+        let ps = plx_media::route::PlaybackSession::IDLE;
+        let _g = plx_base::testlock::serial();
+        let (armed, dismissed) = press(&ps, b'5' as c_uint, 34);
+        assert!(!armed);
+        assert!(!dismissed);
+    }
+}
+
+/// What the root press does once `auth::cancel` has answered.
+///
+/// A plan rather than a bool so the production code visibly OWNS each call and the log line names
+/// what was decided. It used to have a third arm, `RestartAndHome`, because `auth::cancel`
+/// invalidated the running sign-in BEFORE deciding whether it could back out, so a `false` on the
+/// QR screen left a dead poller behind a live code and the press had to `auth::retry` on the way
+/// out. That ordering was issue #30 and is gone: a refused `cancel` changes nothing (`auth::cancel`'s
+/// doc, `a_refused_back_leaves_the_live_pin_poll_running`), so the flow it refused to leave is
+/// still running and a restart here would DISCARD it — a fresh code over a poll the user's phone may
+/// already have answered. Retired 2026-09-04 on Codex's integrated review.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AfterCancel {
+    /// There was somewhere to go inside the app; the main loop's phase→route follower takes it
+    /// from here. Nothing to ask the platform for.
+    BackedOut,
+    /// Nowhere to go inside the app, and nothing was disturbed. Straight to the television's Home.
+    Home,
+}
+
+/// The whole of the rule, pure so the pairing with the log line is gradeable: a `cancel` that
+/// backed out is not a root press after all; one that refused leaves everything as it was and hands
+/// the screen to the television.
+pub(crate) fn after_cancel(backed_out: bool) -> AfterCancel {
+    if backed_out {
+        AfterCancel::BackedOut
+    } else {
+        AfterCancel::Home
+    }
+}
+
+// `key_onboarding`, `OnboardBack`, `onboarding_back` and `profiles_pin_pad_open` stood here.
+// **Phase 6 retired all four.** Login and Who's Watching are OWNED screens now
+// (`screens::login`/`screens::profiles`, mounted through `app::bridge`), so their keys are
+// `InputEvent`s the loop hands the dispatcher before this ladder is ever consulted — the same
+// coexistence rule phase 5b applied to the Settings family and to first-run Favourites, above.
+// Login/Profiles now distinguish local pad BACK from root themselves, then send the addressed
+// Session command directly. The Session adapter uses after_cancel for the platform half.
+
+// `settings_root_owns_input` stood here, with `settings_child_input_tests` beside it: "Settings
+// remains open behind its Home editor, but it must not own input while that child route is
+// visible." Both are gone with the two-route choreography they arbitrated — the Home editor is a
+// PAGE of the surface's own stack now, so the surface's top page IS the input owner and the
+// question is `Dispatcher::owns_input` (spec §11: this test module dissolves into `input_owner()`).
+// `commit_onboarding` went with them: the first-run screen arms and commits its own press.
+
+/// BACK from Shared Sources returns to the identity step and records no source answer. Starting a
+/// ChangeProfile flow re-seeds the roster from the owner's captured session, so this is a
+/// real usable picker rather than a static screen with no worker behind it.
+///
+/// **No `ui::profiles::enter()`** (phase 6, mirroring first-run Favourites' own removal in 5b):
+/// the picker is an OWNED screen now, and naming the route is the whole of mounting a fresh one —
+/// `AppMounter::mount` constructs a new `ProfilesScreen` the moment the tree follows this route.
+pub(crate) fn enter_profiles_from_onboard(pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>) {
+    super::bridge::execute_session_command(pages,
+        plx_session::auth::SessionCmd::StartSwitch(plx_session::auth::Picker::ChangeProfile));
+    super::bridge::nav_root_if_unsettled(pages, AppArg::Profiles);
+}
+
+/// Put the telemetry question on screen, if this boot is one that should see it.
+///
+/// **Asked as soon as there is an AUTHORIZED ACCOUNT, and before the profile picker.**
+///
+/// The decision belongs to the SIGN-IN — `telemetry_candidates()` is one file with no profile
+/// key, shared by every profile on the account, and `auth::forget_account` unlinks it when the
+/// account signs out — so the person who signed the television in is the person who should answer
+/// it, and the next account to sign in is asked afresh. Asking after the picker (which is what
+/// shipped until 2026-09-02) put a data-protection question to whichever household member
+/// happened to be selected, up to and including a managed child profile, and dressed an
+/// account-wide answer as a personal setting.
+///
+/// It is still not asked at BOOT: a fresh install boots to the QR screen with nothing to consent
+/// about yet, and asking before somebody has managed to sign in is asking while they have nothing
+/// to lose by walking away.
+///
+/// Cheap and idempotent: an unavailable sender never opens consent, even for development
+/// triggers. `should_show` is false once a decision has been recorded, and false on any
+/// automated boot, so every call site can simply ask. Nothing is stored by asking — and that is a
+/// property of the SURFACE, not of this function: presenting `AppArg::FirstRunConsent` mounts a
+/// `ConsentPage` holding a draft, and only its two answer pills reach `ConsentCmd::Record`.
+///
+/// Phase 5b: the screen is the tree's, so this presents rather than opens. `bridge::open_*` is
+/// itself idempotent while the surface is up (any phase), which is what lets the three per-frame
+/// routing call sites go on simply asking.
+pub(crate) fn maybe_ask_consent(pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>) {
+    if !plx_telemetry::telemetry::sender::configured() {
+        return;
+    }
+    let c = plx_telemetry::telemetry::consent::current().unwrap_or_default();
+    // dev: /tmp/plxnative-consent[=<crash|product>] forces either first-run purpose even on an
+    // automated boot. This screen is suppressed BY the presence of any trigger, so without an
+    // override it cannot be reached headlessly at all. Selecting Product changes display state
+    // only; no answer is stored by a harness boot — the stage byte is where the surface STARTS,
+    // and reaching stage 1 that way skips the crash question rather than answering it.
+    if let Some(target) = crate::dev::scenarios::consent_override() {
+        // `screens::consent`'s `STAGE_PRODUCT`, spelled here because it is that module's private
+        // encoding of `SettingsPage::ConsentStage` and this is its only outside caller. The
+        // companion bit (`ERRORS_SHARED`, 0x10) is deliberately NOT set: a dev boot has answered
+        // nothing, so the product stage opens with the crash answer at its default.
+        let stage = u8::from(target.trim() == "product");
+        super::bridge::open_first_run_consent_at(pages, stage);
+        return;
+    }
+    if plx_screens::consent::should_show(&c, crate::dev::any_trigger_present()) {
+        super::bridge::open_first_run_consent(pages);
+    }
+}
+
+#[cfg(all(test, feature = "devtriggers"))]
+mod consent_capability_tests {
+    #[test]
+    fn disabled_reporting_cannot_be_offered_by_a_development_trigger() {
+        let _serial = plx_base::testlock::serial();
+        assert!(!plx_telemetry::telemetry::sender::configured());
+        plx_base::devtrig::with_private_triggers(|| {
+            for stage in ["crash", "product"] {
+                std::fs::write(plx_base::devtrig::path("consent"), stage).unwrap();
+                assert_eq!(crate::dev::scenarios::consent_override().as_deref(), Some(stage));
+                let mut pages = plx_ui::dispatch::Dispatcher::<crate::app::bridge::AppHost>::new();
+                let mut rig = crate::app::bridge::Bridge::for_test(|| 0);
+                super::maybe_ask_consent(&mut pages);
+                crate::app::bridge::frame(&mut pages, &mut rig, Default::default(), vec![]);
+                assert!(pages.nav.modals.surfaces.is_empty(), "unavailable {stage} reporting must not open a consent surface");
+            }
+        });
+    }
+}
+
+/// Leave the first-run question for Home — `LoopReq::OnboardDone`.
+///
+/// The trail is RESET rather than pushed to: this route is the last of the onboarding gates and
+/// Home is the root behind it, so a BACK from Home must reach the ROOT PRESS exactly as it does on
+/// any other boot — not walk back into a question that has already been answered. (That press is
+/// [`back_at_root`], the television's own Home; what this reset guarantees is that Home is still the
+/// root when it lands, which is what puts the user one BACK from it either way.)
+///
+/// **It has only the first-run half now** (phase 5b). The Settings-hosted editor used to come
+/// through here too, and the branch that served it was the whole reason `SETTINGS_HOME_RETURN`
+/// existed: the editor was a `Route` drawn from outside the Settings modal, so leaving it had to
+/// restore the page the modal was standing on. It is a PAGE of the surface's own stack now — its
+/// Done/Cancel is one `NavOp::Pop` inside the surface and the host route never moved — so there is
+/// no parked route to restore and no second exit to tell apart from this one. The screen's two
+/// exits are therefore two different `LoopReq`s rather than one `Action` with four variants.
+pub(crate) fn enter_home_from_onboard(pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>) {
+    // The consent pair is NOT asked here any more: it is the sign-in's decision, shared by every
+    // profile on the account, and is put before the profile picker, which is upstream of this whole step. See `maybe_ask_consent`.
+    // The selection just recorded is an input to Home's merge (`pms::feeds_home`), and the merge
+    // re-runs off `browse`'s section generation — which `apply_pins` (the editor's one commit
+    // write) has already bumped. Nothing to kick here; Home builds from the answer on its first
+    // frame.
+    //
+    // `Root(Home)` IS the reset: it retires every entry, the onboarding gate included, and mints
+    // Home as the sole survivor.
+    super::bridge::nav_root_if_unsettled(pages, AppArg::Home);
+}
+
+/// What a confirmed **Delete all local data** does next, given how many files could not be
+/// unlinked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct DeleteOutcome {
+    /// Leave for the sign-in screen.
+    pub(crate) to_sign_in: bool,
+    /// Write the leftovers to the event log.
+    pub(crate) report_leftovers: bool,
+}
+
+/// **Two independent facts, and conflating them was the bug.**
+///
+/// The Session adapter clears account credentials before [`delete_all_local_data`] sweeps the
+/// remaining files. A leftover therefore cannot undo sign-out or retain the old route.
+/// Routing on the cleanup result therefore answered the wrong question: one unremovable file — and
+/// the candidate lists span BOTH install prefixes, whose jail profiles disagree about which are
+/// writable, so a leftover is an ordinary outcome on a healthy set — left the user sitting in
+/// Settings on top of an app that had just signed itself out. The next BACK dropped them onto an
+/// empty Home with no session, no servers and no route to sign-in short of relaunching.
+///
+/// It is a function rather than a branch because the branch lives inside the SDL key loop, where
+/// no host test can reach it.
+pub(crate) fn delete_outcome(leftovers: usize) -> DeleteOutcome {
+    DeleteOutcome {
+        to_sign_in: true,
+        report_leftovers: leftovers > 0,
+    }
+}
+
+/// The one destructive Settings operation. Individual UI rows never remove their own files.
+///
+/// Extra local-file sweep after the Session adapter closes telemetry and clears credentials.
+/// Returns paths it could NOT unlink, never a decision to keep the erased account active.
+///
+/// A leftover is a file that is still THERE. The candidate lists name `/media/internal`, which
+/// some jails mount read-only, and Linux answers EROFS from the parent's mount before it looks the
+/// child up — so an unlink refusal alone does not say a file remains. The shared rule
+/// ([`plx_platform::storage::remove_file_or_prove_absent`]) counts a refusal whose no-follow lookup finds
+/// no entry as removed; a file that exists, or cannot be looked at, stays a leftover.
+fn remove_local_file(path: &std::path::Path) -> Result<(), String> {
+    remove_or_prove_absent(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The erase sweeps' removal rule as a plain `fn`, for the sweeps `ui/` owns
+/// ([`plx_ui::rec::erase_owned_artifacts`]), which may not name the storage layer themselves.
+pub(crate) fn remove_or_prove_absent(path: &std::path::Path) -> std::io::Result<()> {
+    plx_platform::storage::remove_file_or_prove_absent(path).map(|_| ())
+}
+
+fn erase_runtime_logs(root: &std::path::Path) -> Vec<String> {
+    let mut failures = Vec::new();
+    for name in plx_base::paths::runtime_file::LOGS {
+        if name == plx_platform::storage::diagnostics::NAME {
+            continue;
+        }
+        if let Err(error) = remove_local_file(&root.join(name)) {
+            failures.push(error);
+        }
+    }
+    failures
+}
+
+/// The file half of [`delete_all_local_data`]: the recording artifacts and logs under
+/// `runtime_root`, then every persistent candidate in `persistent`. Returns what could not be
+/// removed.
+fn sweep_local_files(persistent: impl IntoIterator<Item = std::path::PathBuf>,
+    runtime_root: &std::path::Path) -> Vec<String> {
+    let mut failures = plx_ui::rec::erase_owned_artifacts(runtime_root, remove_or_prove_absent);
+    for path in persistent {
+        if let Err(e) = remove_local_file(&path) {
+            failures.push(e);
+        }
+    }
+    failures.extend(erase_runtime_logs(runtime_root));
+    failures
+}
+
+pub(crate) fn delete_all_local_data(meta: &mut plx_data::stores::metadata::MetadataStore,
+    mut failures: Vec<String>) -> Vec<String> {
+    failures.extend(sweep_local_files(
+        plx_base::paths::obsolete_last_place_candidates()
+            .into_iter()
+            .chain(plx_base::paths::telemetry_candidates())
+            .chain(plx_base::paths::telemetry_spool_candidates())
+            .chain(plx_base::paths::telemetry_crashmark_candidates())
+            .chain(plx_base::paths::telemetry_session_candidates()),
+        plx_base::paths::runtime_dir(),
+    ));
+    meta.run(plx_data::stores::metadata::MetadataCmd::Clear);
+    // No explicit `ClearRecents` here (phase 7 Search cutover retired the legacy screen's own
+    // thin `recents::clear()` wrapper this used to call): recent Search terms
+    // live INSIDE the session file (`plx_data::search::recents`), and the adapter already deleted that
+    // file before this completion sweep. An explicit clear here would emit its own save job
+    // racing the ordered credential deletion — the worse of the two orders resurrects a stub session file
+    // AFTER "delete everything" already removed it. Letting the file deletion alone answer
+    // for recents removes that race rather than leaving it to chance ordering.
+    //
+    // Telemetry was closed by the preceding owner effect, before the credential clear and
+    // this sweep. Returning survivors cannot reopen its producer gate or restore an identifier.
+    failures
+}
+
+#[cfg(test)]
+mod delete_all_tests {
+    use super::{erase_runtime_logs, sweep_local_files};
+
+    /// A scratch tree standing in for the television: `persistent/` for the `/media/internal`
+    /// candidates (the obsolete last place and the three telemetry files, by their device names)
+    /// and `runtime/` for the runtime root. Removed on drop.
+    struct Tv(std::path::PathBuf);
+
+    impl Tv {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(".plx-delete-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("persistent")).unwrap();
+            std::fs::create_dir_all(root.join("runtime")).unwrap();
+            Self(root)
+        }
+        fn persistent(&self) -> Vec<std::path::PathBuf> {
+            ["lastplace.json", "telemetry.json", "telemetry-spool.bin", "telemetry-crashmark.json", "telemetry-session.json"]
+                .iter()
+                .map(|name| self.0.join("persistent").join(format!(".com.openottplay.player.native.debug-{name}")))
+                .collect()
+        }
+        fn runtime(&self) -> std::path::PathBuf {
+            self.0.join("runtime")
+        }
+    }
+
+    impl Drop for Tv {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The webOS 4.10.2 report: none of the four `/media/internal` files exists, but the jail
+    /// mounts that directory read-only and Linux answers `unlink` with EROFS from the parent's
+    /// mount before it looks the child up. Nothing was left behind, so nothing is a leftover.
+    #[test]
+    fn absent_files_behind_a_read_only_mount_are_not_leftovers() {
+        let _serial = plx_base::testlock::serial();
+        let tv = Tv::new("absent-erofs");
+        let _erofs = plx_platform::storage::UnlinkFaultForTest::install(&tv.0, libc::EROFS);
+        let leftovers = sweep_local_files(tv.persistent(), &tv.runtime());
+        assert!(leftovers.is_empty(), "absent files reported as leftovers: {leftovers:?}");
+    }
+
+    /// The counter-case: a file that EXISTS behind the same refusal really survived, and must
+    /// still be reported so the user is told data may remain.
+    #[test]
+    fn present_files_behind_a_read_only_mount_are_still_leftovers() {
+        let _serial = plx_base::testlock::serial();
+        let tv = Tv::new("present-erofs");
+        let persistent = tv.persistent();
+        for path in &persistent {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let log = tv.runtime().join(plx_base::paths::runtime_file::EVENTS);
+        let rec = tv.runtime().join("plxnative-rec");
+        std::fs::write(&log, b"x").unwrap();
+        std::fs::write(&rec, b"x").unwrap();
+        let _erofs = plx_platform::storage::UnlinkFaultForTest::install(&tv.0, libc::EROFS);
+        let leftovers = sweep_local_files(persistent.clone(), &tv.runtime());
+        assert_eq!(leftovers.len(), persistent.len() + 2, "{leftovers:?}");
+        assert!(persistent.iter().chain([&log, &rec]).all(|p| p.exists()));
+    }
+
+    #[test]
+    fn runtime_log_sweep_includes_the_storage_diagnostics_snapshot() {
+        let _serial = plx_base::testlock::serial();
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                plx_platform::storage::diagnostics::reset_for_test();
+            }
+        }
+        let _restore = Restore;
+        let root = std::env::temp_dir().join(format!(
+            ".plx-delete-runtime-logs-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        for name in plx_base::paths::runtime_file::LOGS {
+            std::fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        let event = root.join(plx_base::paths::runtime_file::EVENTS);
+        let diagnostics = root.join(plx_platform::storage::diagnostics::NAME);
+
+        plx_platform::storage::diagnostics::disable();
+        plx_platform::storage::diagnostics::finish_disable(&root).unwrap();
+        assert!(erase_runtime_logs(&root).is_empty());
+        assert!(plx_base::paths::runtime_file::LOGS
+            .iter()
+            .all(|name| !root.join(name).exists()));
+        assert!(!event.exists());
+        assert!(!diagnostics.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+// (`key_item_menu` stood here — the item menu's own arm of the loop's key ladder: OK committed
+// and flipped `app.route` back to the host, BACK closed, UP/DOWN moved the cursor and armed the
+// client-side hold-repeat timer. The menu is a `ModalStack` surface since phase 10, so every one
+// of those is the container's: the dispatcher hands it the key, `ItemMenuScreen::step` answers
+// BACK with `NavOp::Dismiss` and paces the repeats itself (`RepeatGate`/`PANEL_REPEAT_MS`), the
+// focus engine walks the rows, and `Activate::Immediate` commits. It was the LAST caller of
+// `HeldKey::arm`, which is why `App::held_key` went with it.)
+
+// `key_move_focus` and `top_focus` (the D-pad-direction and shared-top-bar-focus dispatch for
+// Home/Library/Search) are retired: since the phase 8 Search cutover, every non-player route
+// reaching this file is an OWNED page whose directions and top-bar focus are taken by the
+// dispatcher/container tree before this ladder is ever consulted (see the retirement notes at
+// `run.rs`'s nav-direction arm and its former `top_focus` call site). Both were already
+// unconditional no-ops for those routes by the time main's copy above was written.
+/// The profile chip's activation, shared by the OK key and the pointer click — the top bar is one
+/// control on three screens and this is the one thing it does.
+///
+/// It deliberately does NOT go through `home_activate`'s `trail.reset()` the way Home's chip press
+/// used to: the account menu is a POPOVER over whatever page is showing, not a navigation, and on
+/// the Library or Search a reset would throw away history the user is still standing on. (At Home
+/// the reset was a no-op anyway — arriving at Home is itself the trail's reset, so the stack there
+/// is already just the root.)
+///
+/// **The popover is a SURFACE since phase 10, which is what finally makes that sentence
+/// structural.** `Route::Account` was a unit variant meaning "Home, plus the panel", so a press on
+/// the Library's chip swapped the page underneath to Home on the press frame and dropped the user
+/// there when they dismissed it; `Route::Account { over: BarHost }` fixed that by NAMING the host,
+/// and a `ModalStack` surface needs no name at all — the page it was presented over stays the top
+/// page and is never replaced. A route with no chip on it opens nothing.
+pub(crate) fn chip_activate(
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+) {
+    use plx_ui::screen::ScreenArg;
+    if pages.top_arg().map(|a| a.chrome()) != Some(plx_machine::machine::Chrome::TabBar) {
+        return;
+    }
+    // Search USED to need an explicit keyboard-dismissal nudge here (`BarHost::Search =>` the
+    // retired legacy screen's own `end_editing()`) for the one path that could still reach this
+    // function with the television's own keyboard up — a pointer click on the chip from inside
+    // the field.
+    // That path is retired (phase 7 Search cutover): `owns_input()` in `app/run.rs` now takes
+    // every Search click before it ever reaches `chip_activate`, and the owned
+    // path that replaces it (`content.rs`'s `SearchReq::Account`) does not call this function at
+    // all — the owned screen releases its own keyboard before emitting the request, and calling
+    // `end_editing` here a second time on an instance that already dismissed it would be the
+    // stale-request problem `an_old_search_keyboard_request_cannot_close_the_new_instances_keyboard`
+    // guards against.
+    super::bridge::open_account_menu(pages);
+}
+
+/// webOS BACK: this Magic Remote sends wcode 482 (0x1E2); 461 kept for others.
+///
+/// Back stack: player -> the PAGE STACK (detail/person, at any depth) -> library -> grid -> hero ->
+/// exit. Inside the Library, BACK first walks menu -> tab bar (library::back), THEN leaves to Home.
+/// The ORDER is unchanged; what changed is that detail/person pop the CONTAINER's own stack
+/// (`NavOp::Pop`, through `bridge::nav_pop`) instead of consulting two booleans that had one slot
+/// per screen KIND and so could not describe a detail page standing on another one. It was a
+/// second stack of the app's own (`ui::trail`) between those booleans and this; D1 deleted it,
+/// because two histories that must agree are one bug waiting to be found.
+///
+/// A BACK inside the page fade's 70 ms window WITHDRAWS the transition rather than acting on a
+/// screen that is already half gone: the request is at most four frames old and nothing has changed
+/// yet, so it can still be un-asked. `nav_cancel` refuses once the swap has happened, and then this
+/// is an ordinary BACK on the NEW screen — the press is never dropped, only ever spent on exactly
+/// one of the two. (It matters most at Home's root, where "what BACK would otherwise do" is hand
+/// the screen back to the television — see [`back_at_root`].)
+pub(crate) fn key_back(
+    player: &mut plx_media::player::machine::Player,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    repause_at: &mut i64,
+    refresh_hubs: &mut bool,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+) {
+    if super::bridge::nav_cancel(pages) {
+    } else if super::bridge::player(pages).is_some() {
+        exit_player(player, pa, repause_at, refresh_hubs, pages);
+    } else if matches!(pages.top_arg(), Some(AppArg::Content(_))) {
+        // The two stacking screens, through the page transition. All three
+        // halves of the pop — the outgoing page's teardown, the trail move and
+        // the re-entry — land together at the fade FLOOR (`nav_back`), because
+        // a pop is always all three and splitting them across the 70 ms window
+        // is how you get a page blanking during its own fade-out or a second
+        // BACK popping a node whose page is still on screen. Only the PEEK
+        // (does the page underneath wear the tab bar?) happens here.
+        //
+        // …but a panel the SCREEN has open takes the press first and the page
+        // stays: `back()` is `library::back()`'s shape one screen over ("Also
+        // available" is part of the detail page, so leaving the page must not
+        // be the way to close it).
+        //
+        // EACH ROUTE ANSWERS FOR ITS OWN PANELS. This was a bare
+        // `detail::back()` across both arms, resting on it answering false on
+        // Person — which was true only while Person had no panel of its own,
+        // and stopped being true when the bio alert landed. A page-owned modal
+        // BACK cannot close is a screen the user is stuck on.
+        // Content screens own BACK, including their page-local panels.
+    }
+    // `Route::Search` is deliberately absent here too (phase 7 Search cutover): BACK on Search —
+    // both closing the raised keyboard first and, once there is nothing left to close, leaving to
+    // Home — is fully handled inside the owned screen (`SearchReq::Back`, drained by
+    // `content::search_requests`) and, upstream of that, `tree_owns_key` in `app/run.rs`'s ingest
+    // already took the key before it could reach this function at all.
+}
+
+/// **BACK at a ROOT — the press that leaves the app's own navigation**, lifted out of [`key_back`]'s
+/// last `else` so a host test can press it.
+///
+/// It is one call and it is worth its own function for exactly one reason: this is where the app
+/// answers "there is nowhere further back to go", and the regression to guard is a future edit
+/// putting `running = false` — or a modal question — back where the platform call now goes.
+/// `key_back` itself is unreachable from a unit test (its Player arm calls `exit_player`, which
+/// pulls the Starfish/ACB seam into the link), so without this split the one branch that matters
+/// most could only be graded by reading it.
+///
+/// **It does not end the process, and nothing about a BACK press does any more.** The remote's own
+/// EXIT key still terminates (LG checklist item 38), and a script that wants the app closed uses
+/// SAM's `closeByAppId` exactly as `make kill`, `tests/run.py` and `tools/tv-session.sh` already do.
+/// That is why the old `/tmp/plxnative-noexitconfirm` bypass went with the alert: it existed to let
+/// a headless caller quit by pressing BACK, and BACK is no longer a quit for anybody.
+pub(crate) fn back_at_root() {
+    if plx_platform::tv::home::take_root_press() {
+        plx_platform::tv::home::go_home();
+    }
+}
+
+/// **Delete all local data, confirmed** — `LoopReq::DeleteAllLocalData`, the one Settings
+/// operation that outlives the screen that asked for it.
+///
+/// It was `commit_consent`'s tail: the legacy consent screen latched a delete REQUEST and the key
+/// ladder collected it on the next press, because the press and the sweep had no other way to meet.
+/// The owned screen's decision alert emits the request as an effect instead, so this is now
+/// reached from exactly one place — the loop's request drain — and does only the part that is
+/// genuinely the loop's: the file sweep, the report, and the route to sign-in.
+///
+/// The SURFACE is dismissed by the caller, not here: the screen under it is going, and there is no
+/// host left for a fade to run over (what `settings::hide()` used to say).
+pub(crate) fn delete_all_local_data_and_sign_out(pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>) {
+    super::bridge::execute_session_command(pages, plx_session::auth::SessionCmd::EraseLocal);
+}
+
+#[cfg(test)]
+mod mark_scope_tests {
+    use super::mark_scope;
+    use plx_data::viewstate::Scope;
+
+    /// The detail page's season tab has no catalog row, so the scope a Mark watched press
+    /// publishes comes from the season the menu carries: without it the write was `Leaf`, the
+    /// season's other episodes kept their ticks until a refetch, and the page's own tab counts
+    /// never moved. A card row still reads its scope off the row.
+    #[test]
+    fn a_season_tab_marks_its_season_and_a_card_its_own_row() {
+        let season = ("show-1".to_string(), 4);
+        assert_eq!(
+            mark_scope("season-9", None, Some(&season)),
+            Scope::Season { show_rk: "show-1".into(), index: 4 },
+            "the season strip's menu carries no row; its address is the scope"
+        );
+        let show = plx_data::pms::PmsMovie { rk: "show-1".into(), kind: 1, ..Default::default() };
+        assert_eq!(mark_scope("show-1", Some(&show), None), Scope::Show);
+        let ep = plx_data::pms::PmsMovie { rk: "e1".into(), kind: 3, ..Default::default() };
+        assert_eq!(mark_scope("e1", Some(&ep), None), Scope::Leaf);
+        assert_eq!(mark_scope("e1", None, None), Scope::Leaf, "the filmstrip: one leaf");
+    }
+}
+
+#[cfg(test)]
+mod click_is_ok_tests {
+    use super::click_is_ok;
+
+    /// Issue #642's set: arrows hid the pointer by the transparent cursor, so OK arrives as a
+    /// click — it is the OK key, including after the jiggle a press itself causes. Anywhere else a
+    /// click is a click: the pointer was moved on purpose (past the gate, or out of D-pad mode),
+    /// or LG's own hide made OK a real key already.
+    #[test]
+    fn a_click_in_dpad_mode_on_a_transparent_cursor_set_is_ok_unless_the_pointer_moved_onto_a_control() {
+        assert!(click_is_ok(true, 0.0, true, true));
+        assert!(click_is_ok(true, 6.0, true, true), "the jiggle of pressing OK is still OK");
+        assert!(click_is_ok(true, 600.0, false, true), "drift onto bare video is still OK");
+        for (dpad, motion, on_control, transparent) in [
+            (true, super::DPAD_MOTION_GATE, true, true),
+            (true, 500.0, true, true),
+            (false, 0.0, false, true),
+            (true, 0.0, false, false),
+        ] {
+            assert!(!click_is_ok(dpad, motion, on_control, transparent), "{dpad} {motion} {on_control} {transparent}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod edge_scroll_tests {
+    use super::{EdgeScroll, EDGE_BAND, EDGE_DWELL_MS, EDGE_RAMP_MS, EDGE_SIDE_BAND};
+    use plx_ui::consts::SCR_H;
+
+    /// The `dy` an `EdgeScroll` hands out on every 16 ms frame of `ms` from `t0`.
+    fn run(e: &mut EdgeScroll, on_control: bool, t0: u32, ms: u32) -> Vec<(u32, f32)> {
+        (0..=ms / 16).filter_map(|i| e.step(on_control, t0 + i * 16).map(|d| (t0 + i * 16, d))).collect()
+    }
+
+    /// The pointer near the TOP of a scrolled page moved nothing (a page rests its focused row at
+    /// the top, so nothing hoverable is left above it). Resting in the
+    /// top band over no control glides the page up after the dwell, on EVERY frame (continuous,
+    /// not a row at a time), easing in and then holding a steady speed.
+    #[test]
+    fn the_pointer_resting_at_the_top_edge_glides_up_every_frame() {
+        let mut e = EdgeScroll::IDLE;
+        e.moved(960.0, 40.0, false);
+        let out = run(&mut e, false, 1000, 2000);
+        assert!(out[0].0 >= 1000 + EDGE_DWELL_MS && out[0].0 < 1000 + EDGE_DWELL_MS + 32, "{out:?}");
+        // it times its own frames (the loop's `Frame::dt` is still 0 where it runs): 16 ms at
+        // y 40, two thirds into the band, is that share of the edge's speed
+        let share = super::EDGE_MIN_SHARE + (1.0 - super::EDGE_MIN_SHARE) * (1.0 - 40.0 / EDGE_BAND);
+        let last = out.last().unwrap().1;
+        assert!((last - super::EDGE_ROWS_PER_S * share * 0.016).abs() < 1e-5, "a 16 ms frame's glide: {last}");
+        assert!(out.iter().all(|&(_, d)| d > 0.0), "up is the wheel's +");
+        assert!(out.windows(2).all(|w| w[1].0 - w[0].0 == 16), "no frame without motion: {out:?}");
+        let steady: Vec<f32> = out.iter().filter(|(t, _)| *t > 1000 + EDGE_DWELL_MS + EDGE_RAMP_MS).map(|p| p.1).collect();
+        assert!(steady.len() > 50 && steady.iter().all(|&d| (d - steady[0]).abs() < 1e-6), "a steady glide: {steady:?}");
+        assert!(out[0].1 < steady[0], "it eases in");
+    }
+
+    #[test]
+    fn the_bottom_edge_glides_down_faster_nearer_the_edge_and_the_middle_not_at_all() {
+        let speed = |y: f32| {
+            let mut e = EdgeScroll::IDLE;
+            e.moved(960.0, y, false);
+            run(&mut e, false, 0, 1500).last().map(|p| p.1)
+        };
+        let (deep, shallow) = (speed(SCR_H - 5.0).unwrap(), speed(SCR_H - EDGE_BAND + 5.0).unwrap());
+        assert!(deep < 0.0 && shallow < 0.0 && deep < shallow, "{deep} {shallow}");
+        assert_eq!(speed(EDGE_BAND + 1.0), None);
+        assert_eq!(speed(SCR_H / 2.0), None);
+    }
+
+    /// Over a button of the navigation bar the bar's hover rules; a hidden pointer glides nothing.
+    #[test]
+    fn the_navigation_bar_under_a_resting_pointer_or_a_hidden_pointer_glides_nothing() {
+        let mut e = EdgeScroll::IDLE;
+        e.moved(960.0, 40.0, true);
+        assert!(run(&mut e, true, 0, 2000).is_empty());
+        assert!(!e.moved(960.0, 41.0, true), "no glide, so the move is hover");
+        e.stop();
+        assert!(run(&mut e, false, 0, 2000).is_empty(), "a pointer LG hid, or the D-pad took over, is gone");
+        let mut fresh = EdgeScroll::IDLE;
+        assert!(run(&mut fresh, false, 0, 2000).is_empty(), "no pointer yet");
+    }
+
+    /// The glide stops while the pointer is on the top bar's buttons (the profile
+    /// chip, Home / Movies / Watchlist / Search), even mid-glide, and goes on once it is off them.
+    #[test]
+    fn the_glide_stops_on_the_bar_buttons_and_goes_on_off_them() {
+        let mut e = EdgeScroll::IDLE;
+        e.moved(700.0, 40.0, false);
+        assert!(!run(&mut e, false, 0, 600).is_empty(), "gliding up between the buttons");
+        assert!(!e.moved(960.0, 40.0, true), "a move onto a button is the bar's hover");
+        assert!(run(&mut e, true, 616, 1000).is_empty(), "no glide while on the button");
+        e.moved(700.0, 40.0, false);
+        let again = run(&mut e, false, 1632, 1000);
+        assert!(!again.is_empty() && again.iter().all(|&(_, d)| d > 0.0), "off the button the glide goes on");
+        assert!(again[0].0 >= 1632 + EDGE_DWELL_MS, "easing back in after the dwell: {again:?}");
+    }
+
+    /// A glide that has started holds the pointer: cards sliding under it neither stop it nor take
+    /// hover; leaving the band ends it and the next move is hover again.
+    #[test]
+    fn a_running_glide_holds_the_band_until_the_pointer_leaves_it() {
+        let mut e = EdgeScroll::IDLE;
+        e.moved(960.0, 40.0, false);
+        assert!(!run(&mut e, false, 0, 600).is_empty());
+        assert!(e.moved(900.0, 60.0, false), "a move inside the band while gliding is not hover");
+        assert!(e.step(false, 616).is_some(), "a card sliding under the pointer does not stop it");
+        assert!(!e.moved(900.0, 400.0, false), "leaving the band ends the glide");
+        assert!(e.step(false, 632).is_none());
+        e.moved(900.0, 60.0, false);
+        assert!(run(&mut e, false, 648, EDGE_DWELL_MS - 20).is_empty(), "coming back starts the dwell again");
+    }
+
+    /// Resting at the right edge glides the row under the pointer to show more on the right, at
+    /// the left edge back; the corners belong to the vertical glide, the middle to nothing.
+    #[test]
+    fn the_pointer_resting_at_a_side_edge_pans_the_row_under_it() {
+        use plx_ui::consts::SCR_W;
+        let pan = |x: f32, y: f32| {
+            let mut e = EdgeScroll::IDLE;
+            e.moved(x, y, false);
+            (0..=1500 / 16).filter_map(|i| e.pan(false, i * 16)).collect::<Vec<_>>()
+        };
+        let right = pan(SCR_W - 10.0, 540.0);
+        assert!(right.len() > 60 && right.iter().all(|&dx| dx > 0.0), "right edge shows more on the right: {right:?}");
+        let last = *right.last().unwrap();
+        let share = super::EDGE_MIN_SHARE + (1.0 - super::EDGE_MIN_SHARE) * (1.0 - 10.0 / EDGE_SIDE_BAND);
+        assert!((last - super::EDGE_PAN_PX_PER_S * share * 0.016).abs() < 1e-3, "a 16 ms frame's pan: {last}");
+        assert!(pan(10.0, 540.0).iter().all(|&dx| dx < 0.0) && !pan(10.0, 540.0).is_empty(), "left edge goes back");
+        assert!(pan(10.0, 40.0).is_empty() && pan(SCR_W - 10.0, 1070.0).is_empty(), "the corners are the vertical glide's");
+        assert!(pan(960.0, 540.0).is_empty(), "the middle pans nothing");
+        let mut e = EdgeScroll::IDLE;
+        e.moved(SCR_W - 10.0, 540.0, false);
+        assert!(!e.moved(SCR_W - 12.0, 540.0, false), "a sideways glide never holds the pointer's hover");
+        assert!((0..100).filter_map(|i| e.pan(true, i * 16)).next().is_none(), "nor runs over a bar button");
+    }
+}

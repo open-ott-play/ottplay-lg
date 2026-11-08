@@ -1,0 +1,17 @@
+{
+  "ott.sleep_timer": {
+    "value": "Sleep timer",
+    "description": "Title of the native application sleep timer settings; does not mean TV hardware power-off."
+  },
+  "ott.sleep_idle": {
+    "value": "Standby after no input",
+    "description": "Label for the no-user-input delay before native application standby."
+  },
+  "ott.sleep_minutes": {
+    "value": "{minutes} min",
+    "args": {
+      "minutes": "i64"
+    },
+    "description": "Minute duration label for sleep settings choices (30, 60, 120 or 180); zero uses the shared Off label."
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "ott.interface_title": "Felület",
+  "ott.interface_classic": "Klasszikus",
+  "ott.interface_modern": "Modern",
+  "ott.interface_selected": "Kiválasztva",
+  "ott.interface_help": "A lejátszó megjelenésének kiválasztása",
+  "ott.interface_changed": "A beállítás megváltozott. Válaszd ki újra.",
+  "ott.interface_close_editor": "A felületváltás előtt zárd be a szerkesztőt"
+}

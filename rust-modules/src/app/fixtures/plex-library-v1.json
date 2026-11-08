@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "max_items": 500,
+  "max_libraries": 1000,
+  "max_title_bytes": 160,
+  "max_query_bytes": 256,
+  "max_result_bytes": 1048576,
+  "operations": ["list", "preview", "play"],
+  "errors": ["ambiguous_library", "library_not_found", "unsupported_library", "too_many_libraries", "too_many_items", "incomplete_library"],
+  "list_request": {"action":"plex_library","params":{"runtime":"page-123","op":"list"}},
+  "list_result": {"version":1,"runtime":"page-123","op":"list","state":"ready","libraries":[{"id":"16","title":"Три кота","type":"show"}]},
+  "preview_request": {"action":"plex_library","params":{"runtime":"page-123","op":"preview","query":"Три кота","shuffle":true}},
+  "preview_result": {"version":1,"runtime":"page-123","op":"preview","state":"ready","library":{"id":"16","title":"Три кота","type":"show"},"shuffled":true,"queue":{"version":1,"runtime":"page-123","state":"ready","ids":["78777","78776","78775"],"titles":["One","Two","Three"],"order":"listed"}},
+  "play_request": {"action":"plex_library","params":{"runtime":"page-123","op":"play","library_id":"16","shuffle":true}},
+  "play_result": {"version":1,"runtime":"page-123","op":"play","state":"ready","library":{"id":"16","title":"Три кота","type":"show"},"shuffled":true,"queue":{"version":1,"runtime":"page-123","active":true,"state":"preparing","ids":["78777","78776","78775"],"index":0,"repeat":"none","order":"listed"}},
+  "truncation_capability": {"plex_library_truncation":{"version":1}},
+  "truncation_request": {"action":"plex_library","params":{"runtime":"page-123","op":"play","library_id":"16","shuffle":true,"allow_truncate":true}},
+  "error_result": {"version":1,"runtime":"page-123","op":"play","state":"error","error":"ambiguous_library"}
+}

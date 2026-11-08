@@ -1,0 +1,82 @@
+{
+  "ott.usb_browser_title": {
+    "value": "USB folders",
+    "description": "Native USB folder picker: title."
+  },
+  "ott.usb_browser_use": {
+    "value": "Use this folder",
+    "description": "Native USB folder picker: use."
+  },
+  "ott.usb_browser_parent": {
+    "value": "Parent folder",
+    "description": "Native USB folder picker: parent."
+  },
+  "ott.usb_browser_root": {
+    "value": "Drive root",
+    "description": "Native USB folder picker: root."
+  },
+  "ott.usb_browser_previous": {
+    "value": "Previous page",
+    "description": "Native USB folder picker: previous."
+  },
+  "ott.usb_browser_next": {
+    "value": "Next page",
+    "description": "Native USB folder picker: next."
+  },
+  "ott.usb_browser_more": {
+    "value": "Load more",
+    "description": "Native USB folder picker: more."
+  },
+  "ott.usb_browser_browse_root": {
+    "value": "Browse drive root",
+    "description": "Native USB folder picker: browse_root."
+  },
+  "ott.usb_browser_choose": {
+    "value": "Choose a folder on this USB drive",
+    "description": "Native USB folder picker: choose."
+  },
+  "ott.usb_browser_reading": {
+    "value": "Reading folders…",
+    "description": "Native USB folder picker: reading."
+  },
+  "ott.usb_browser_cancelled": {
+    "value": "Folder loading cancelled",
+    "description": "Native USB folder picker: cancelled."
+  },
+  "ott.usb_browser_return": {
+    "value": "Return without changing the selected source",
+    "description": "Native USB folder picker: return."
+  },
+  "ott.usb_browser_more_help": {
+    "value": "Look for more folders in this directory",
+    "description": "Native USB folder picker: more_help."
+  },
+  "ott.usb_browser_limit": {
+    "value": "Folder list limit reached. Use this folder or enter an exact folder path in the profile.",
+    "description": "Native USB folder picker: limit."
+  },
+  "ott.usb_browser_partial": {
+    "value": "Partial folder list. Load more to look for additional folders.",
+    "description": "Native USB folder picker: partial."
+  },
+  "ott.usb_browser_unreadable": {
+    "value": "Some folder names could not be read. Refresh or choose an available folder.",
+    "description": "Native USB folder picker: unreadable."
+  },
+  "ott.usb_browser_empty": {
+    "value": "No subfolders. Use this folder to include its videos.",
+    "description": "Native USB folder picker: empty."
+  },
+  "ott.usb_browser_ready": {
+    "value": "Open a subfolder or use this folder.",
+    "description": "Native USB folder picker: ready."
+  },
+  "ott.usb_browser_checking": {
+    "value": "Checking selected USB folder…",
+    "description": "Native USB folder picker: checking."
+  },
+  "ott.usb_browser_changed": {
+    "value": "USB selection changed; close this picker",
+    "description": "Native USB folder picker: changed source context."
+  }
+}

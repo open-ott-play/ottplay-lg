@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Horas de arquivo",
+  "ott.archive_hours_prompt": "Horas de arquivo (0 usa os valores da lista)",
+  "ott.archive_hours_invalid": "Introduza um número inteiro de horas entre 0 e 8760",
+  "ott.archive_hours_changed": "As definições do arquivo mudaram; reabra o editor",
+  "ott.archive_hours_profile": "Selecione um perfil de televisão M3U"
+}
