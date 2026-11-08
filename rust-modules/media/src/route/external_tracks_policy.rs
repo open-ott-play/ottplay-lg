@@ -77,8 +77,15 @@ pub fn classify_hls_audio(
     {
         return TrackAvailability::Unsupported(TrackUnavailable::Transport);
     }
-    // HLS emits AAC/ADTS directly; unlike the ordinary demuxer it does not
-    // run the lossy-to-PCM decoder. A software-only admission would misconfigure Load.
+    if track.codec == "mp2" {
+        return if crate::ff::hls_mp2::supported(track, caps) {
+            TrackAvailability::Supported
+        } else {
+            TrackAvailability::Unsupported(TrackUnavailable::Codec)
+        };
+    }
+    // AAC remains compressed ADTS. Only the explicitly admitted embedded MP2
+    // branch above runs a PCM decoder; other software codecs remain refused.
     if caps.native_audio_track("aac", track.channels, track.sample_rate, mode == DirectPlayMode::Forced) {
         TrackAvailability::Supported
     } else {
@@ -310,6 +317,37 @@ mod tests {
                 Unsupported(TrackUnavailable::Codec)
             );
         }
+    }
+
+    #[test]
+    fn embedded_hls_mp2_requires_real_decoder_known_shape_and_pcm_capability() {
+        let mut row = track(TrackKind::Audio, "mp2");
+        row.ordinal = 0;
+        let mut caps = Caps::assumed();
+        let classify = |row: &InspectedTrack, caps: &Caps, mode| {
+            classify_hls_audio(&TrackInventory::from_partial(vec![row.clone()], vec![]), row, caps, mode)
+        };
+        assert_ne!(classify(&row, &caps, DirectPlayMode::Auto), Supported);
+        caps.audio.push_str(",pcm");
+        caps.audio_channels.insert("pcm".into(), 2);
+        assert!(!caps.audio_has("mp2"), "no native MPEG claim");
+        for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
+            for rate in [32_000, 44_100, 48_000] {
+                row.sample_rate = rate;
+                assert_eq!(classify(&row, &caps, mode), Supported);
+                assert_ne!(classify_audio(&row, &caps, mode, ExternalTrackTransport::Demux), Supported,
+                    "ordinary/Plex codec policy did not change");
+            }
+            for (channels, rate, decoder) in [(0, 48_000, true), (6, 48_000, true),
+                (2, 0, true), (2, 96_000, true), (2, 48_000, false)] {
+                let mut invalid = row.clone();
+                invalid.channels = channels; invalid.sample_rate = rate; invalid.decoder_available = decoder;
+                assert_ne!(classify(&invalid, &caps, mode), Supported);
+            }
+        }
+        caps.audio_channels.insert("pcm".into(), 0);
+        assert_ne!(classify(&row, &caps, DirectPlayMode::Forced), Supported,
+            "Force does not invent a PCM sink");
     }
 
     #[test]

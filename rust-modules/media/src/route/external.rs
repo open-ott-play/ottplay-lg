@@ -70,6 +70,20 @@ pub fn external_duration_ns(ps: &PlaybackSession) -> i64 {
     ps.external_duration_ns
 }
 
+/// Only an inspected, selected embedded MP2 track can declare the PCM HLS leg.
+/// Separate AUDIO presentations and ordinary/Plex media keep their own policy.
+pub(super) fn embedded_mp2_pcm(ps: &PlaybackSession) -> bool {
+    if !matches!(ps.external_source, Some(crate::ff::ExternalSource::Hls(_)))
+        || ps.external_hls.is_some() || ps.stream_acodec != "mp2"
+    { return false; }
+    let Some(tracks) = &ps.external_tracks else { return false; };
+    let Some(track) = tracks.inventory().audio.iter()
+        .find(|track| Some(track.ordinal) == tracks.selected_audio()) else { return false; };
+    ps.cur_audio.as_ref().is_some_and(|audio| audio.codec == track.codec
+        && audio.channels == track.channels && audio.sample_rate == track.sample_rate)
+        && crate::ff::hls_mp2::supported(track, &ps.attempt_caps())
+}
+
 pub fn external_tracks(ps: &PlaybackSession) -> Option<&ExternalTracks> {
     ps.external_source.as_ref()?;
     ps.external_tracks.as_ref()
@@ -414,9 +428,14 @@ fn install_external_source(
     next.src_fps = info.fps;
     next.src_dovi = info.dovi;
     next.src_dv_decision = next.stream_dv_decision;
+    let embedded_mp2 = matches!(&source, ExternalSource::Hls(_)) && info.hls_playback.is_none()
+        && info.audio_codec == "mp2" && info.tracks.audio.first()
+            .is_some_and(|track| crate::ff::hls_mp2::supported(track, &caps));
     if !info.audio_codec.is_empty() {
-        // The HLS segment reader emits compressed AAC; it has no PCM decode leg.
+        // AAC is native. Embedded MP2 is independently decoded to the admitted
+        // PCM sink; no native MPEG capability is inferred from decoder presence.
         if matches!(&source, ExternalSource::Hls(_))
+            && !embedded_mp2
             && !caps.native_audio_track(&info.audio_codec, info.audio_channels,
                 info.audio_sample_rate, next.direct_play_mode == DirectPlayMode::Forced)
         {
@@ -437,7 +456,7 @@ fn install_external_source(
             &info.audio_codec,
             info.audio_channels,
             info.audio_sample_rate,
-        ) && !matches!(stream_pcm(&next), Some(Ok(_)))
+        ) && !matches!(stream_pcm(&next), Some(Ok(_))) && !embedded_mp2
         {
             return Err(ExternalError::UnsupportedAudio);
         }
@@ -465,6 +484,7 @@ fn install_external_source(
         }
         if classify_audio(track, &caps, next.direct_play_mode, ExternalTrackTransport::Demux)
             != TrackAvailability::Supported
+            && !embedded_mp2
         {
             return Err(ExternalError::UnsupportedAudio);
         }
