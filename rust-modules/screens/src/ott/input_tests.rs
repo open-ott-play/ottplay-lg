@@ -1131,6 +1131,66 @@ fn modern_channel_footer_has_real_pointer_stop_and_dispatches_category_action() 
 }
 
 #[test]
+fn channel_list_entry_center_release_and_repeat_do_not_advance_selected_channel() {
+    let _guard = plx_base::testlock::serial();
+    let rows = (1..=3).map(|n| navigation_row(&format!("channel-{n}"), OttAction::Play(format!("channel-{n}"))))
+        .collect();
+    let snapshot = navigation_view("channels:all", 8, rows, Some("channel-2"));
+    let (mut d, mut rig) = mount_snapshot(snapshot);
+    assert_focus(&d, "item:channel-2");
+
+    // A center press opens this page from fullscreen. Its release may be delivered
+    // after the page transition; it must not become a list-navigation event.
+    frame(&mut d, &mut rig, 256, vec![key_up(Key::Ok, tick(256))]);
+    assert_focus(&d, "item:channel-2");
+    assert!(rig.actions.iter().all(|action| !matches!(action, OttAction::FocusAt { id, .. } if id == "channel-3")));
+
+    // Some remotes repeat the held center key across the transition. The repeat
+    // may activate the current item, but must never move focus to its neighbour.
+    frame(&mut d, &mut rig, 272, vec![key(Key::Ok, tick(272))]);
+    frame(&mut d, &mut rig, 336, vec![key_up(Key::Ok, tick(336))]);
+    assert_focus(&d, "item:channel-2");
+    assert!(rig.actions.iter().all(|action| !matches!(action, OttAction::FocusAt { id, .. } if id == "channel-3")));
+}
+
+#[test]
+fn focused_channel_selection_survives_play_and_return_without_focus_or_scroll_jump() {
+    let _guard = plx_base::testlock::serial();
+    let rows = (0..24).map(|n| navigation_row(&format!("channel-{n}"), OttAction::Play(format!("channel-{n}"))))
+        .collect();
+    let snapshot = navigation_view("channels:all", 20, rows, Some("channel-0"));
+    let (mut d, mut rig) = mount_snapshot(snapshot);
+    for step in 0..14u32 {
+        let at = 256 + step * 96;
+        frame(&mut d, &mut rig, at, vec![key(Key::Down, tick(at)), key_up(Key::Down, tick(at + 64))]);
+    }
+    assert_focus(&d, "item:channel-14");
+    // Let the original selection's scroll spring settle before saving its view.
+    for ms in (1600..=3200).step_by(16) { frame(&mut d, &mut rig, ms, vec![]); }
+    let (before_scroll, memory, instance) = {
+        let page = d.nav.top_page().unwrap();
+        let screen = page.inst.as_ref().unwrap().screen.as_any().unwrap().downcast_ref::<OttScreen>().unwrap();
+        (screen.form.table.scroll_pos(), Screen::<TestHost>::memory_at(screen, d.focus()), page.inst.as_ref().unwrap().id)
+    };
+    assert!(before_scroll > 0.0, "the selected item has scrolled into view");
+
+    frame(&mut d, &mut rig, 3300, vec![key(Key::Ok, tick(3300))]);
+    frame(&mut d, &mut rig, 3364, vec![key_up(Key::Ok, tick(3364))]);
+    for ms in (3380..=3900).step_by(16) { frame(&mut d, &mut rig, ms, vec![]); }
+    assert_eq!(rig.actions.iter().filter(|action| matches!(action, OttAction::Play(id) if id == "channel-14")).count(), 1);
+    d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance), Delivery::Screen(ScreenEvent::RestoreMemory(memory))));
+    let returned = navigation_view("channels:all", 21,
+        (0..24).map(|n| navigation_row(&format!("channel-{n}"), OttAction::Play(format!("channel-{n}")))).collect(),
+        Some("channel-14"));
+    publish_snapshot(&mut d, &mut rig, returned, 3920);
+    assert_focus(&d, "item:channel-14");
+    let page = d.nav.top_page().unwrap();
+    let screen = page.inst.as_ref().unwrap().screen.as_any().unwrap().downcast_ref::<OttScreen>().unwrap();
+    assert!((screen.form.table.scroll_pos() - before_scroll).abs() < 0.01,
+        "return preserves the selected row's scroll position: before={before_scroll} after={}", screen.form.table.scroll_pos());
+}
+
+#[test]
 fn restored_or_reconciled_focus_is_not_new_persistent_user_intent() {
     let _guard = plx_base::testlock::serial();
     for by in [plx_ui::screen::By::Restore, plx_ui::screen::By::Reconcile] {
