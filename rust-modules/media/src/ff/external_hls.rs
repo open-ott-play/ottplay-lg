@@ -409,7 +409,11 @@ pub(super) fn inspect(
                     segment.inner.resource.path
                 );
                 let mut info = super::inspect::raw(&ExternalSource::Http(url), cancelled)?;
-                if let Some(reason) = codec_refusal(&info.video_codec, &info.audio_codec) {
+                let mp2 = info.video_codec == "h264" && info.audio_codec == "mp2"
+                    && info.tracks.audio.first().is_some_and(|track|
+                        hls_mp2::format(&track.codec, track.channels, track.sample_rate)
+                            && track.decoder_available);
+                if let Some(reason) = codec_refusal(&info.video_codec, &info.audio_codec).filter(|_| !mp2) {
                     return Err(reason);
                 }
                 // This table describes one segment, not all variants/tracks in
@@ -445,6 +449,7 @@ pub(super) fn demux(
     let mut net = HlsNet { hs, curl: None };
     let mut next = None;
     let mut video_continuation: Option<VideoContinuation> = None;
+    let mut mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
     let mut timeline = crate::hls::SegmentTimeline::default();
     let mut last_progress = Instant::now();
     'refresh: loop {
@@ -460,6 +465,7 @@ pub(super) fn demux(
         let target = SHARED.seek_to_ns.swap(-1, Ordering::Acquire);
         if target >= 0 {
             video_continuation = None;
+            mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
             if media.ended {
                 let (index, start) = seek_start(&media, target).map_err(HlsExit::Failed)?;
                 next = Some(media.segments[index].inner.sequence);
@@ -495,11 +501,17 @@ pub(super) fn demux(
                 .map_err(|_| HlsExit::Failed("HLS timeline overflow"))?;
             let mut candidate = VideoContinuation::candidate(
                 video_continuation.as_ref(), &landed, segment, media.independent);
+            if video_continuation.as_ref().is_some_and(|previous|
+                previous.source != landed || previous.sequence.checked_add(1) != Some(segment.inner.sequence)
+                    || previous.discontinuity_sequence != segment.discontinuity_sequence)
+            {
+                mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
+            }
             let output = unsafe {
                 hls_demux_segment_path(
                     &segment.inner,
                     HlsSegmentRequest { path: &segment.inner.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(64 * 1024 * 1024), audio, rendition: None,
-                        video: HlsVideoEntry::External(&mut candidate) },
+                        video: HlsVideoEntry::External(&mut candidate), mp2: mp2.as_mut() },
                     &mut clock,
                     aq,
                     &mut net,
@@ -509,11 +521,13 @@ pub(super) fn demux(
             }?;
             if !hls_feed_segment_interruptible(&output, aq, aqa, true)? {
                 video_continuation = None;
+                mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
                 continue 'refresh;
             }
             if unsafe { crate::aq::aq_is_aborted(aq) } { return Err(HlsExit::Aborted); }
             if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 {
                 video_continuation = None;
+                mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
                 continue 'refresh;
             }
             // Commit references with the sequence/timeline, never on read success

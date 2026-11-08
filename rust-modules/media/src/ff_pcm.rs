@@ -298,9 +298,24 @@ impl PcmDecoder {
         let Some(entry) = plx_platform::devcaps::app_decoded_by_ffmpeg_name(&name) else {
             return Err(format!("{name} is not an app-decoded codec"));
         };
+        Self::open_shape(par, out, entry.lossy)
+    }
+
+    /// Closed embedded-HLS admission. The general app-decoded/Plex codec set is
+    /// unchanged; this caller has independently admitted the PCM device sink.
+    pub(crate) unsafe fn open_hls_mp2(par: *const AVCodecParameters, out: PcmOut) -> Result<PcmDecoder, String> {
+        let name = std::ffi::CStr::from_ptr(crate::ff::avcodec_get_name((*par).codec_id)).to_string_lossy();
+        if !crate::ff::hls_mp2::format(&name, i64::from((*par).ch_layout.nb_channels), i64::from((*par).sample_rate)) {
+            return Err("MP2 HLS requires known mono/stereo MPEG-1 audio".into());
+        }
+        Self::open_shape(par, out, true)
+    }
+
+    unsafe fn open_shape(par: *const AVCodecParameters, out: PcmOut, lossy: bool) -> Result<PcmDecoder, String> {
+        let name = std::ffi::CStr::from_ptr(crate::ff::avcodec_get_name((*par).codec_id)).to_string_lossy();
         // A lossless stream must be the declared shape (a wrong rate is wrong pitch); a lossy one
         // is converted to its one output shape whatever the source is.
-        if entry.lossy {
+        if lossy {
             if out != STEREO_48K {
                 return Err(format!("{name} is converted to stereo 48 kHz but the Load declared {out:?}"));
             }
@@ -330,7 +345,7 @@ impl PcmDecoder {
         }
         let r = crate::ff::avcodec_parameters_to_context(ctx, par);
         let mut core_only = false;
-        if r >= 0 && entry.lossy {
+        if r >= 0 && lossy {
             // DTS: the 5.1 core only. The extensions (XLL, XBR, X96) are costly and the output is
             // stereo anyway; best-effort, so an FFmpeg without the option still decodes the core.
             // MP3, Vorbis and TrueHD have no such option: `av_opt_set` fails, `core_only` stays false.
@@ -348,13 +363,13 @@ impl PcmDecoder {
             crate::ff::avcodec_free_context(&mut ctx);
             return Err("av_frame_alloc failed".into());
         }
-        let conv = if entry.lossy {
+        let conv = if lossy {
             Some(PcmConverter::lossy())
         } else {
             out.resamples().then(|| PcmConverter::resampled(out))
         };
         Ok(PcmDecoder {
-            ctx, frame, out, buf: Vec::new(), conv, lossy: entry.lossy, core_only, errors: ErrorBudget::default(),
+            ctx, frame, out, buf: Vec::new(), conv, lossy, core_only, errors: ErrorBudget::default(),
             packet_pts: None, stamp: None,
         })
     }
