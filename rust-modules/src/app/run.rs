@@ -511,6 +511,10 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
             }
         }
     }
+    // Notifications are passive clock-driven overlays on both skins and the player.
+    if super::ott_runtime::notifications_need_frame(app) {
+        plx_machine::idle::invalidate();
+    }
     // ---- whole-frame present gate (`plx_machine::idle`) --------------------------------------
     // A screen with nothing moving on it does not need to be re-sent to the panel. This
     // skips `glViewport`…`SDL_GL_SwapWindow` WHOLESALE — it is not dirty-RECTANGLE
@@ -3273,6 +3277,7 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                             );
                         }
                     }
+                    super::ott_runtime::draw_notifications(app);
                     plx_ui::anim::draw_overlay(); // dev diagnostic overlay (all routes)
                                                      // The lab upload read-out, over everything, on every route — including the
                                                      // player, where the two branches above diverge and this one must not.

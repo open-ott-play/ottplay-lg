@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "capability": {"version": 1, "operations": ["get", "set"]},
+  "errors": ["invalid_request", "runtime_mismatch", "storage_unavailable", "unsupported"],
+  "get_request": {"action": "notifications", "params": {"version": 1, "runtime": "page-123", "operation": "get"}},
+  "set_request": {"action": "notifications", "params": {"version": 1, "runtime": "page-123", "operation": "set", "enabled": false}},
+  "get_result": {"version": 1, "runtime": "page-123", "operation": "get", "enabled": true, "persisted": true},
+  "set_result": {"version": 1, "runtime": "page-123", "operation": "set", "enabled": false, "persisted": true},
+  "error_result": {"version": 1, "runtime": "page-123", "operation": "set", "error": "storage_unavailable"},
+  "poll_capabilities": {"enabled": true, "media": ["jpeg-v1"]},
+  "first_poll_query": "runtime=n-session-1&active=false",
+  "negotiated_poll_query": "runtime=n-session-2&active=false&enabled=false&media=jpeg-v1",
+  "storage_key": "sNotificationsEnabled",
+  "storage_default": true
+}
