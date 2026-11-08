@@ -9,7 +9,14 @@ fn binding(generation: u64) -> Arc<Binding> {
         kind: ProviderKind::VPortal,
         source: "portal::[key:private-token]https://private.invalid/path".into(),
         source_alias: String::new(), enabled: true,
-    }, request: PlaybackRequest::ordinary("private-item", 0) })
+    }, request: PlaybackRequest::ordinary("private-item", 0), scope: Scope::VPortal })
+}
+
+fn live_hls_binding(generation: u64) -> Arc<Binding> {
+    let mut owner = (*binding(generation)).clone();
+    owner.profile.kind = ProviderKind::M3u;
+    owner.scope = Scope::M3uLiveHlsCandidate;
+    Arc::new(owner)
 }
 fn value(state: &State, now: u64) -> Value {
     serde_json::to_value(state.snapshot(now)).unwrap()
@@ -141,4 +148,31 @@ fn quality_write_failure_keeps_retry_open_then_admission_is_terminal() {
     state.apply(event(&owner, Update::Cancelled(CancelReason::UserBack)), 50);
     assert_eq!(value(&state, 60)["phase"], "admitted");
     assert_eq!(value(&state, 60)["phase_elapsed_ms"], 5);
+}
+
+#[test]
+fn m3u_candidate_is_hidden_until_hls_and_reports_bounded_phase_durations() {
+    let owner = live_hls_binding(8);
+    let mut state = State::default();
+    state.begin(owner.clone(), 10);
+    assert_eq!(value(&state, 20)["phase"], "idle");
+
+    state.apply(event(&owner, Update::LiveHls), 20);
+    state.apply(event(&owner, Update::Phase(Phase::Inspecting)), 30);
+    state.apply(event(&owner, Update::Phase(Phase::Admitting)), 55);
+    state.apply(event(&owner, Update::Phase(Phase::Admitted)), 90);
+    assert_eq!(value(&state, 100), json!({
+        "version": 1,
+        "phase": "admitted",
+        "attempt_generation": 8,
+        "phase_elapsed_ms": 35,
+        "phase_durations_ms": {
+            "resolving_ms": 20,
+            "inspecting_ms": 25,
+            "admitting_ms": 35
+        },
+        "total_elapsed_ms": 80,
+        "last_failure": null,
+        "cancel_reason": null
+    }));
 }

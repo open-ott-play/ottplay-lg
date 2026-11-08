@@ -385,7 +385,17 @@ fn label(row: &super::OttRow, landscape: bool, policy: &plx_ui::caption_policy::
     // Favorite list ordinals are navigation labels, not part of Modern card titles.
     let title = card_title(row);
     if landscape {
-        return crate::registry::captions::still_block(title, &detail(row)).within_tile();
+        let programme = row.guide.as_ref().and_then(|guide| guide.at(guide.now_s).0)
+            .map(|programme| programme.title.as_str())
+            .or_else(|| row.current_programme.as_ref().map(|programme| programme.title.as_str()));
+        let programme = programme.filter(|title| !title.trim().is_empty());
+        let fact = match (programme, row.records_available) {
+            (Some(programme), true) => format!("{programme} · {}", plx_platform::i18n::msg::ott_records()),
+            (Some(programme), false) => programme.to_owned(),
+            (None, true) => plx_platform::i18n::msg::ott_records().to_owned(),
+            (None, false) => detail(row),
+        };
+        return crate::registry::captions::still_block(title, &fact).within_tile();
     }
     let kind = row.media.as_ref().map(|media| media.kind);
     let facts = plx_ui::caption_policy::CaptionFacts {
@@ -461,6 +471,27 @@ mod label_tests {
         assert_eq!(text(&label(&row, false, &CaptionPolicy { title: false, details: DetailsKind::YearLength })),
             vec!["7 Fixture One.mp4"]);
         assert_eq!(text(&label(&file(), true, &CaptionPolicy { title: false, details: DetailsKind::None }))[0], "7 Fixture One.mp4");
+    }
+
+    #[test]
+    fn live_landscape_cards_show_the_current_epg_title_and_archive_capability() {
+        let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let mut row = file();
+        row.media.as_mut().unwrap().kind = OttMediaKind::LiveChannel;
+        row.guide_available = true;
+        row.guide = Some(super::super::OttNowNext {
+            now_s: 15,
+            current: Some(plx_data::metadata::OttGuideProgramme {
+                title: "Current bulletin".into(), description: "Details".into(), start_s: 10, end_s: 20,
+            }),
+            next: None,
+        });
+        row.records_available = true;
+        assert_eq!(text(&label(&row, true, &CaptionPolicy { title: true, details: DetailsKind::None })),
+            vec!["7 Fixture One.mp4", "Current bulletin · Records"]);
+        row.guide = None;
+        assert_eq!(text(&label(&row, true, &CaptionPolicy { title: true, details: DetailsKind::None })),
+            vec!["7 Fixture One.mp4", plx_platform::i18n::msg::ott_records()]);
     }
 
     #[test]

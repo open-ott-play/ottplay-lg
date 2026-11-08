@@ -101,8 +101,6 @@ impl SegmentTimeline {
         Ok(SegmentClock {
             base_ns: self.next_start_ns,
             next_start_ns,
-            video_origin_ns: None,
-            audio_origin_ns: None,
         })
     }
 
@@ -126,8 +124,6 @@ impl SegmentTimeline {
 pub struct SegmentClock {
     base_ns: i64,
     next_start_ns: i64,
-    video_origin_ns: Option<i64>,
-    audio_origin_ns: Option<i64>,
 }
 
 impl SegmentClock {
@@ -135,22 +131,32 @@ impl SegmentClock {
         MediaTimeMs(self.next_start_ns / 1_000_000)
     }
 
-    fn normalize_from(base_ns: i64, origin: &mut Option<i64>, raw_ns: i64) -> MediaTimeMs {
-        let origin = *origin.get_or_insert(raw_ns);
-        let relative = raw_ns.saturating_sub(origin).max(0);
-        MediaTimeMs(base_ns.saturating_add(relative) / 1_000_000)
+    const PTS_WRAP_NS: i64 = 95_443_717_688_889;
+
+    fn relative_ns(raw_ns: i64, origin_ns: i64) -> i64 {
+        let wrap = Self::PTS_WRAP_NS;
+        let mut delta = raw_ns.saturating_sub(origin_ns);
+        if delta > wrap / 2 {
+            delta = delta.saturating_sub(wrap);
+        } else if delta < -wrap / 2 {
+            delta = delta.saturating_add(wrap);
+        }
+        delta
     }
 
-    /// Normalize video and audio independently to the segment boundary. MPEG-TS packets from the
-    /// two streams may be physically interleaved in either order, so anchoring both lanes to the
-    /// first packet observed makes the later-discovered lane inherit an arbitrary packet-order
-    /// offset. The controller consumes only this content timeline, never raw FFmpeg PTS.
-    pub fn normalize_video(&mut self, raw_ns: i64) -> MediaTimeMs {
-        Self::normalize_from(self.base_ns, &mut self.video_origin_ns, raw_ns)
+    /// Normalize both tracks against one segment-local PTS origin, preserving signed lead/lag.
+    pub fn normalize_shared_ns(&self, raw_ns: i64, origin_ns: i64) -> i64 {
+        self.base_ns.saturating_add(Self::relative_ns(raw_ns, origin_ns))
     }
 
-    pub fn normalize_audio(&mut self, raw_ns: i64) -> MediaTimeMs {
-        Self::normalize_from(self.base_ns, &mut self.audio_origin_ns, raw_ns)
+    pub fn common_origin_ns(video: Option<i64>, audio: Option<i64>) -> Option<i64> {
+        let mut origin = video.or(audio)?;
+        if let Some(pts) = audio {
+            if Self::relative_ns(pts, origin) < 0 {
+                origin = pts;
+            }
+        }
+        Some(origin)
     }
 }
 
@@ -1443,23 +1449,49 @@ mod tests {
     }
 
     #[test]
-    fn fresh_segment_clocks_form_one_normalized_millisecond_timeline() {
+    fn fresh_segment_clock_preserves_audio_video_lead_and_lag() {
         let mut timeline = SegmentTimeline::default();
-        let mut first = timeline.begin(Duration::new(2, 2_000_000)).unwrap();
-        assert_eq!(first.normalize_video(900_000_000_000), MediaTimeMs(0));
-        assert_eq!(first.normalize_video(901_125_900_000), MediaTimeMs(1_125));
-        // A later physically-arriving audio packet gets its own lane origin, rather than an
-        // arbitrary 1.1-second skew inherited from packet order.
-        assert_eq!(first.normalize_audio(899_980_000_000), MediaTimeMs(0));
-        assert_eq!(first.normalize_audio(900_000_000_000), MediaTimeMs(20));
+        let first = timeline.begin(Duration::new(2, 2_000_000)).unwrap();
+        let video = 900_000_000_000;
+        let leading_audio = 899_980_000_000;
+        let origin = SegmentClock::common_origin_ns(Some(video), Some(leading_audio)).unwrap();
+        assert_eq!(first.normalize_shared_ns(leading_audio, origin), 0);
+        assert_eq!(first.normalize_shared_ns(video, origin), 20_000_000);
+        let lagging_audio = 900_020_000_000;
+        let origin = SegmentClock::common_origin_ns(Some(video), Some(lagging_audio)).unwrap();
+        assert_eq!(first.normalize_shared_ns(video, origin), 0);
+        assert_eq!(first.normalize_shared_ns(lagging_audio, origin), 20_000_000);
         timeline.commit(first);
 
-        let mut second = timeline.begin(Duration::from_secs(2)).unwrap();
-        assert_eq!(second.normalize_video(7_000_000_000), MediaTimeMs(2_002));
-        assert_eq!(second.normalize_video(7_020_000_000), MediaTimeMs(2_022));
+        let second = timeline.begin(Duration::from_secs(2)).unwrap();
+        let origin = 7_000_000_000;
+        assert_eq!(second.normalize_shared_ns(origin, origin), 2_002_000_000);
+        assert_eq!(second.normalize_shared_ns(origin + 20_000_000, origin), 2_022_000_000);
         timeline.commit(second);
         assert_eq!(timeline.end(), MediaTimeMs(4_002));
         assert_eq!(timeline.end_ns(), 4_002_000_000);
+    }
+
+    #[test]
+    fn shared_segment_origin_handles_pts_wrap() {
+        let wrap = SegmentClock::PTS_WRAP_NS;
+        let video = wrap - 10_000_000;
+        let audio = 10_000_000;
+        let origin = SegmentClock::common_origin_ns(Some(video), Some(audio)).unwrap();
+        assert_eq!(origin, video);
+        assert_eq!(SegmentClock::relative_ns(audio, origin), 20_000_000);
+        assert_eq!(SegmentClock::relative_ns(video, audio), -20_000_000);
+    }
+
+    #[test]
+    fn synthesized_audio_clock_does_not_rebase_timestamped_video() {
+        let clock = SegmentTimeline::default().begin(Duration::from_secs(2)).unwrap();
+        let video = 900_000_000_000;
+        let audio_origin = 0;
+        let shared_origin = SegmentClock::common_origin_ns(Some(video), None).unwrap();
+        assert_eq!(clock.normalize_shared_ns(video, shared_origin), 0);
+        assert_eq!(clock.normalize_shared_ns(audio_origin, audio_origin), 0);
+        assert_eq!(clock.normalize_shared_ns(audio_origin + 23_000_000, audio_origin), 23_000_000);
     }
 
     #[test]
