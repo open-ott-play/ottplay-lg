@@ -2,8 +2,8 @@
   "schema": 1,
   "product": "ottplay-native",
   "application_id": "com.openottplay.player.native",
-  "version": "0.3.0",
-  "notes": "ci/ottplay-integration/release/notes/v0.3.0.md",
-  "audit": "ci/ottplay-integration/release/audits/v0.3.0.md",
+  "version": "0.3.1",
+  "notes": "ci/ottplay-integration/release/notes/v0.3.1.md",
+  "audit": "ci/ottplay-integration/release/audits/v0.3.1.md",
   "notes_contract": "standalone-native-v1"
 }
