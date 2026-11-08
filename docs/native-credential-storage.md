@@ -94,8 +94,11 @@ replace a State v2 record with a v1 record.
 Host and hostsim builds retain the original [application-side private
 writer][ott-writer] and [KeyManager adapter][app-keymanager]. On native ARM,
 reading legacy v1 Control or State still requires the old application-side
-decryption. Reading alone does not create v2: an explicit save first requires
-successful legacy decoding and retains the original ciphertext. A decryption
+decryption. The storage read operation alone does not create v2: a save first
+requires successful legacy decoding and retains the original ciphertext. This
+does not make application startup read-only: Favorites recovery and identity
+migration may schedule a save, and shutdown can save playback checkpoints.
+Take the appropriate state snapshot before launching a candidate. A decryption
 failure remains a failure, not an absent record. A new helper-owned key cannot
 recover an inaccessible application-owned legacy key.
 
@@ -119,6 +122,14 @@ without KeyManager encryption; "public" does
 not mean a publicly accessible database. A genuinely absent configuration can
 therefore establish a disabled, tokenless identity. Full private state and
 authenticated pairing still use their protected paths.
+
+## Local profile export is read-only
+
+`profile_export` returns the portable document previously persisted by
+`profile_save`. A configured Local profile without that document returns
+`Save this local profile before exporting it`. Export never allocates a binding
+identity, schedules a save or bypasses write admission. Repeated exports of a
+saved profile retain its binding identity and exclude private source paths.
 
 ## Installation and verification remain separate
 

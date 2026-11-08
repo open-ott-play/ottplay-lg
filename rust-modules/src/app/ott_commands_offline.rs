@@ -302,28 +302,13 @@ pub(super) fn request(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> 
             if let Some(doc) = document(&saved, n) {
                 return Some(ok(json!({"provider":"offline","number":n,"profile":doc})));
             }
-            let Some(index) = profile_index(&saved, ProviderKind::Local, n) else {
+            if profile_index(&saved, ProviderKind::Local, n).is_none() {
                 return Some(rejected("Configure this local profile before exporting it"));
-            };
-            let profile = &saved.profiles.profiles[index];
-            let doc = match capture(runtime, profile, inv, &profile.name) {
-                Ok(doc) => doc,
-                Err(e) => return Some(rejected(e)),
-            };
-            saved.settings.insert(
-                format!("offlineBinding:{}", doc["binding_id"].as_str().unwrap()),
-                json!({"root":profile.source,"sources":doc["sources"]}),
-            );
-            saved
-                .settings
-                .insert(format!("offlineProfile:{n}"), doc.clone());
-            return defer(
-                runtime,
-                inv,
-                saved,
-                false,
-                ok(json!({"provider":"offline","number":n,"profile":doc})),
-            );
+            }
+            // Export is admitted as read-only, including while writes are blocked.
+            // Only explicit profile_save may allocate and persist a binding identity;
+            // deriving one from this request would make repeated exports unstable.
+            return Some(rejected("Save this local profile before exporting it"));
         }
         "profile" => {
             if !fields(p, &["number"]) {
