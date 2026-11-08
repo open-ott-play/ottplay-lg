@@ -245,6 +245,9 @@ pub enum OttPlayerAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttPlayerOffer {
     pub source: plx_media::route::PlaybackIdentity,
+    /// An exact retained failed selection permits only physical channel steps.
+    /// The runner revalidates its source/list context; this grants no transport.
+    pub recovery_only: bool,
     pub seek_arrows: bool,
     pub accept: OttPlayerAction,
     pub guide: bool,

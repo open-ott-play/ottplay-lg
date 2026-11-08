@@ -671,10 +671,7 @@ impl OttScreen {
             else if torrent_catalogue { Form::new().section(content).section(torrent_controls) }
             else if classic_catalogue || classic_choices { Form::new().section(content) }
             else { Form::new().section(content).section(footer) };
-        let page_action = match snapshot.page_id.split(':').next().unwrap_or("") {
-            "profiles" | "usb-folders" => "nav:profiles", "channels" => "nav:catalog", "categories" => "nav:categories",
-            "favorites" => "nav:favorites", "settings" => "nav:settings", _ => "nav:providers",
-        };
+        let page_action = navigation::page_action(&snapshot.page_id);
         let selected = if self.browse { page_action.to_owned() } else { snapshot.rows.iter()
             .find(|row| row.enabled && snapshot.selected_row.as_ref() == Some(&row.id))
             .or_else(|| snapshot.rows.iter().find(|row| row.enabled))
@@ -692,7 +689,7 @@ impl OttScreen {
         // Header focus and selected media are independent. Keep the body selection
         // available beneath that header instead of substituting its first row.
         let restored_body = restore.as_ref().filter(|memory| memory.focus.as_deref().is_some_and(|id|
-            id == "nav:browse" || id == "nav:search" || id == "nav:description" || (self.classic_mode && navigation::is_context_control(id))))
+            id == "nav:browse" || id == "nav:search" || id == "nav:favorite" || id == "nav:description" || (self.classic_mode && navigation::is_context_control(id))))
             .and_then(|_| self.media.and_then(|index| snapshot.rows.get(index)))
             .map(|row| format!("item:{}", row.id));
         plx_base::diag::spans::span("ott_table", || {
@@ -868,17 +865,26 @@ impl OttScreen {
         // also appear under the same focus identity in the header group.
         let content = !self.snapshot.rows.is_empty();
         let search = (content && self.menu_visibility.navigation("nav:search") && self.snapshot.search.is_some()).then(|| self.keys.get("nav:search").copied()).flatten();
+        let favorite = (content && !self.browse).then(|| navigation::available_at(&self.snapshot,
+            self.media, self.menu_visibility, self.guide_clock.now_for(self.media
+                .and_then(|index| self.snapshot.rows.get(index)).and_then(|row| row.guide.as_ref())))
+            .into_iter().find(|item| item.id == "nav:favorite")
+            .map(|item| (self.keys["nav:favorite"], item.row.label))).flatten();
         let description = (content && self.menu_visibility.navigation("nav:description") && self.has_description()).then(|| self.keys.get("nav:description").copied()).flatten();
         let caption = if self.grid_active() { navigation::caption(&self.snapshot) } else { String::new() };
         let mut key = std::collections::hash_map::DefaultHasher::new();
-        (browse, search, description, self.browse, &caption).hash(&mut key);
+        (browse, search, &favorite, description, self.browse, &caption).hash(&mut key);
         measure.width_str(&caption, theme::size::BODY, false).to_bits().hash(&mut key);
+        if let Some((_, label)) = &favorite {
+            measure.width_str(label, theme::size::BODY, false).to_bits().hash(&mut key);
+        }
         for label in [msg::ott_browse_c(), msg::ott_search_c(), msg::ott_description_c()] {
             label.to_bytes().hash(&mut key);
             measure.width(label, theme::size::BODY, false).to_bits().hash(&mut key);
         }
         Some(self.header_cache.get(key.finish(), ||
-            navigation::header(measure, Rect::FULL.w, browse, search, description, self.browse, &caption)))
+            navigation::header(measure, Rect::FULL.w, browse, search,
+                favorite.as_ref().map(|(key, label)| (*key, label.as_str())), description, self.browse, &caption)))
     }
 
     /// Update only the row whose guide clock changed (label and progress interval); never rebuild or scan
@@ -1158,11 +1164,12 @@ impl OttScreen {
         }
         if self.editor.is_none() && !self.reading && !favorite {
             if self.keys.get("nav:browse") == Some(&key) { self.open_browse(fx); return; }
-            if !self.classic_mode && !self.browse && self.snapshot.search.is_some() && self.keys.get("nav:search") == Some(&key) {
-                self.send(OttAction::BeginSearch, fx); return;
-            }
-            if !self.classic_mode && !self.browse && self.has_description() && self.keys.get("nav:description") == Some(&key) {
-                self.show_details(fx); return;
+            if !self.classic_mode && !self.browse {
+                if let Some(id) = ["nav:search", "nav:favorite", "nav:description"].into_iter()
+                    .find(|id| self.keys.get(*id) == Some(&key)) {
+                    self.activate_context(id, fx);
+                    return;
+                }
             }
         }
         if self.classic_mode && !self.browse && !favorite {
@@ -2384,7 +2391,7 @@ mod menu_header_tests {
     struct Reset(Visibility);
     impl Drop for Reset { fn drop(&mut self) { menu_visibility::project(self.0); } }
     #[test]
-    fn live_hide_and_reset_removes_cached_header_search_and_description_stops() {
+    fn live_hide_and_reset_removes_cached_header_search_favorite_and_description_stops() {
         let _reset = Reset(menu_visibility::projected());
         menu_visibility::project(Default::default());
         let measure = plx_ui::fixture::FixtureMeasure;
@@ -2397,19 +2404,22 @@ mod menu_header_tests {
         screen.install(Arc::new(view.clone()));
         let search = screen.keys["nav:search"];
         let description = screen.keys["nav:description"];
+        let favorite = screen.keys["nav:favorite"];
         let before = screen.header(&measure).unwrap();
         assert!(before.stops.iter().any(|(key,_)| *key == search));
         assert!(before.stops.iter().any(|(key,_)| *key == description));
-        let mut hidden = Visibility::default(); hidden.hide(Item::Search); hidden.hide(Item::Description);
+        assert!(before.stops.iter().any(|(key,_)| *key == favorite));
+        let mut hidden = Visibility::default(); hidden.hide(Item::Search); hidden.hide(Item::Description); hidden.hide(Item::Favorite);
         menu_visibility::project(hidden); view.revision += 1;
         screen.install(Arc::new(view.clone()));
         let after = screen.header(&measure).unwrap();
-        assert!(!after.stops.iter().any(|(key,_)| *key == search || *key == description));
+        assert!(!after.stops.iter().any(|(key,_)| *key == search || *key == favorite || *key == description));
         menu_visibility::project(Default::default()); view.revision += 1;
         screen.install(Arc::new(view));
         let reset = screen.header(&measure).unwrap();
         assert!(reset.stops.iter().any(|(key,_)| *key == search));
         assert!(reset.stops.iter().any(|(key,_)| *key == description));
+        assert!(reset.stops.iter().any(|(key,_)| *key == favorite));
     }
 }
 

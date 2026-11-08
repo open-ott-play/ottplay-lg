@@ -6,6 +6,7 @@ pub(super) fn target(runtime: &Runtime, app: &App, offset: i64) -> Result<String
         .playing
         .as_ref()
         .filter(|playing| playing_matches(playing, app))
+        .or_else(|| failed_playback::admissible(runtime, app))
         .ok_or("The playing source is no longer current")?;
     if runtime.play_target.is_some() {
         return Err("Another video is already opening");
@@ -37,7 +38,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
 {
     if !matches!(offset, -1 | 1) { return Err("Invalid playback direction"); }
     input_policy::navigation(runtime)?;
-    if runtime.playing.is_none() {
+    if runtime.playing.is_none() && runtime.failed_playback.is_none() {
         let source = player_browse::native_identity(runtime, app)
             .ok_or("The playing source is no longer current")?;
         return player_browse::native_list_step(runtime, app, &source, offset);
