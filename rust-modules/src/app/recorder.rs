@@ -2870,6 +2870,27 @@ mod fixture_preflight_tests {
     }
 
     #[test]
+    fn pre_modern_shelves_recording_headers_remain_refused() {
+        // The reviewed unused-OTT migration updates only the committed anchor
+        // headers. It must not admit arbitrary recordings of the old OTT state.
+        const OLD: u64 = 0xf2e0_17b3_dfe9_1414;
+        assert_ne!(OLD, state_fp());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/replay");
+        for name in ["1-boot-home-chip-grid", "6-settings-family", "12-filmography-detail-return"] {
+            let dir = root.join(name);
+            let mut manifest: Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+            manifest["state_fp"] = json!(OLD);
+            let segment = std::fs::read(dir.join("rec-0000.jsonl")).unwrap();
+            assert_eq!(Recording::parse(&manifest.to_string(), &[segment.as_slice()], state_fp()).err(),
+                Some(RecError::StateShape { theirs: OLD, ours: state_fp() }), "{name}");
+            assert_eq!(Recording::parse(&manifest.to_string(), &[b"not a recording record\n"], state_fp()).err(),
+                Some(RecError::StateShape { theirs: OLD, ours: state_fp() }),
+                "old shape must be refused before segment parsing: {name}");
+        }
+    }
+
+    #[test]
     fn committed_recordings_keep_valid_page_requests_and_initial_hashes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/replay");
         for name in ["1-boot-home-chip-grid", "6-settings-family", "12-filmography-detail-return"] {

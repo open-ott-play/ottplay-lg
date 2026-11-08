@@ -26,6 +26,24 @@ fn step(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, now: &mut u32, directio
     for offset in (32..=240).step_by(16) { frame(d, rig, *now + offset, vec![]); }
     *now += 256;
 }
+fn selected_shelf_destination(d: &Dispatcher<TestHost>) -> (GroupId, u32, f32) {
+    let current = screen(d);
+    let key = d.focus().unwrap().elem;
+    let shelf = current.shelves.iter().find(|shelf| shelf.index.contains_key(&key)).unwrap();
+    let motion = current.card_stack.shelf(media::Section::Shelf(shelf.group.0)).unwrap();
+    (shelf.group, key, motion.scroll() - motion.settle_lag(shelf.keys.len(), shelf.index[&key]))
+}
+fn assert_scroll_positions_retained(actual: &[(media::Section, f32)], expected: &[(media::Section, f32)]) {
+    assert_eq!(actual.len(), expected.len());
+    for ((actual_id, actual), (expected_id, expected)) in actual.iter().zip(expected) {
+        assert_eq!(actual_id, expected_id);
+        // A snapshot/restore frame still advances the same scroll spring. The
+        // observed CI residual is <=0.0037 logical px; allow only 1/100 px here.
+        // The selected identity and shared scroller's destination are pinned
+        // exactly at the call site, and source-reset-to-zero remains exact.
+        assert!((actual - expected).abs() <= 0.01, "retained viewport: {actual} vs {expected}");
+    }
+}
 fn settle(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, now: &mut u32) {
     for offset in (0..=800).step_by(16) { frame(d, rig, *now + offset, vec![]); }
     *now += 816;
@@ -140,12 +158,14 @@ fn shelf_browse_return_and_navigation_memory_keep_occurrence_and_scroll() {
     step(&mut d, &mut rig, &mut now, Key::Back);
     assert_eq!(d.focus(), Some(expected));
     let saved = screen(&d).card_stack.memory();
+    let destination = selected_shelf_destination(&d);
     let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
     d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
         Delivery::Screen(ScreenEvent::RestoreMemory(PageMemory::Ott(memory)))));
     frame(&mut d, &mut rig, now, vec![]);
     assert_eq!(d.focus(), Some(expected));
-    assert_eq!(screen(&d).card_stack.memory().shelves, saved.shelves);
+    assert_eq!(selected_shelf_destination(&d), destination);
+    assert_scroll_positions_retained(&screen(&d).card_stack.memory().shelves, &saved.shelves);
 }
 
 #[test]
@@ -218,6 +238,8 @@ fn action_context_rotation_keeps_shelf_memory_but_source_replacement_retires_it(
     let focus = d.focus().unwrap();
     let memory = Memory::capture(screen(&d), Some(focus));
     let scroll = screen(&d).card_stack.memory();
+    let destination = selected_shelf_destination(&d);
+    assert!(scroll.shelves.iter().any(|(_, scroll)| *scroll > 1.0));
     assert_eq!(memory.source.as_deref(), Some("presentation-source"));
     let mut next = (*rig.snapshot).clone();
     next.revision += 1;
@@ -225,7 +247,8 @@ fn action_context_rotation_keeps_shelf_memory_but_source_replacement_retires_it(
     publish_snapshot(&mut d, &mut rig, Arc::new(next), now);
     now += 256;
     assert_eq!(d.focus(), Some(focus));
-    assert_eq!(screen(&d).card_stack.memory().shelves, scroll.shelves);
+    assert_eq!(selected_shelf_destination(&d), destination);
+    assert_scroll_positions_retained(&screen(&d).card_stack.memory().shelves, &scroll.shelves);
     rig.actions.clear();
     step(&mut d, &mut rig, &mut now, Key::Right);
     assert!(rig.actions.iter().any(|action| matches!(action,
@@ -304,10 +327,10 @@ fn shelf_key_capacity_accounts_for_group_offset_and_later_canonical_keys() {
     let mut next = (*screen.snapshot).clone();
     next.revision += 1;
     next.shelves[0].id = "replacement-category".into();
-    screen.next_key = u32::MAX - 2;
+    screen.next_key = crate::registry::BAND - 2;
     screen.install(Arc::new(next));
     assert!(screen.shelves.is_empty());
-    assert_eq!(screen.next_key, u32::MAX - 2);
+    assert_eq!(screen.next_key, crate::registry::BAND - 2);
     assert_eq!(screen.catalog_keys.len(), 16);
     assert!(!screen.keys.keys().any(|id| shelf_key(id)));
 
@@ -318,11 +341,11 @@ fn shelf_key_capacity_accounts_for_group_offset_and_later_canonical_keys() {
     let mut next = (*screen.snapshot).clone();
     next.revision += 1;
     next.shelves[0].rows.push(12);
-    screen.next_key = u32::MAX - 1;
+    screen.next_key = crate::registry::BAND - 1;
     screen.install(Arc::new(next));
     assert!(screen.shelves.is_empty());
-    assert_eq!(screen.keys["item:entry-0"], u32::MAX - 1);
-    assert_eq!(screen.next_key, u32::MAX);
+    assert_eq!(screen.keys["item:entry-0"], crate::registry::BAND - 1);
+    assert_eq!(screen.next_key, crate::registry::BAND);
     assert_eq!(screen.media_keys.len(), 16);
     assert!(!screen.keys.keys().any(|id| shelf_key(id)));
 }
