@@ -1119,6 +1119,18 @@ fn pointer_hover_records_intent_without_activating_video() {
 }
 
 #[test]
+fn modern_channel_footer_has_real_pointer_stop_and_dispatches_category_action() {
+    let _guard = plx_base::testlock::serial();
+    let snapshot = navigation_view("channels:all", 7,
+        vec![navigation_row("channel-one", OttAction::Play("channel-one".into()))], Some("channel-one"));
+    let (mut d, mut rig) = mount_snapshot(snapshot);
+    let rect = draw_pointer_map(&mut d, &rig, &["nav:categories"])[0];
+    assert!(rect.y > plx_ui::page_header::GRID_TOP, "the contextual actions sit at the bottom of Modern channel list");
+    click_header(&mut d, &mut rig, rect, 256);
+    assert_eq!(rig.actions, vec![OttAction::ShowCategories], "Magic Remote click follows the normal SDL pointer hit path");
+}
+
+#[test]
 fn restored_or_reconciled_focus_is_not_new_persistent_user_intent() {
     let _guard = plx_base::testlock::serial();
     for by in [plx_ui::screen::By::Restore, plx_ui::screen::By::Reconcile] {
