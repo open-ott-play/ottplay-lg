@@ -268,9 +268,13 @@ pub enum RemoteButton {
 /// an unrelated raw scancode. Physical Info is deliberately not guessed.
 pub fn remote_button(sym: c_uint, wcode: c_uint) -> Option<RemoteButton> {
     if classify(sym, wcode) != Key::Other { return None; }
+    if sym == SDLK_PAGEUP || wcode == WCODE_CH_UP_KEY {
+        return Some(RemoteButton::ChannelUp);
+    }
+    if sym == SDLK_PAGEDOWN || wcode == WCODE_CH_DOWN_KEY {
+        return Some(RemoteButton::ChannelDown);
+    }
     Some(match wcode {
-        WCODE_CH_UP_KEY => RemoteButton::ChannelUp,
-        WCODE_CH_DOWN_KEY => RemoteButton::ChannelDown,
         WCODE_RED => RemoteButton::Red,
         WCODE_GREEN => RemoteButton::Green,
         WCODE_YELLOW => RemoteButton::Yellow,
@@ -823,6 +827,14 @@ mod remote_button_tests {
         }
         assert_eq!(page_dir(0, 300), Some(-1), "paging direction is not playback stepping");
         assert_eq!(page_dir(0, 301), Some(1));
+    }
+
+    #[test]
+    fn page_key_symbols_are_channel_steps_on_the_player_and_still_page_the_library() {
+        assert_eq!(remote_button(SDLK_PAGEUP, 0), Some(RemoteButton::ChannelUp));
+        assert_eq!(remote_button(SDLK_PAGEDOWN, 0), Some(RemoteButton::ChannelDown));
+        assert_eq!(page_dir(SDLK_PAGEUP, 0), Some(-1));
+        assert_eq!(page_dir(SDLK_PAGEDOWN, 0), Some(1));
     }
 
     #[test]

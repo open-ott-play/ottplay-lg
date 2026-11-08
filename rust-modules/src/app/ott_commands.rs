@@ -3,10 +3,10 @@
 use super::*;
 #[path = "ott_catalog_remote.rs"]
 mod catalog_remote;
-#[path = "ott_media_tracks.rs"]
-pub(super) mod media_tracks;
 #[path = "ott_controls.rs"]
 mod controls;
+#[path = "ott_media_tracks.rs"]
+pub(super) mod media_tracks;
 #[path = "ott_video_evidence.rs"]
 mod video_evidence;
 
@@ -22,12 +22,18 @@ pub(super) fn restart_stream(runtime: &mut Runtime, app: &mut App) -> Result<(),
 pub(super) struct NumberedChannels(Vec<controls::Channel>);
 impl NumberedChannels {
     pub(super) fn from_numbered(rows: impl IntoIterator<Item = (usize, String, String)>) -> Self {
-        Self(rows.into_iter().map(|(number, id, name)| controls::Channel { id, name, number }).collect())
+        Self(
+            rows.into_iter()
+                .map(|(number, id, name)| controls::Channel { id, name, number })
+                .collect(),
+        )
     }
     /// The Classic list renders filtered positions, not remote API channel numbers.
     /// Keep this conversion explicit so command/Player callers stay canonical.
     pub(super) fn with_list_ordinals(mut self) -> Self {
-        for (index, row) in self.0.iter_mut().enumerate() { row.number = index + 1; }
+        for (index, row) in self.0.iter_mut().enumerate() {
+            row.number = index + 1;
+        }
         self
     }
     pub(super) fn resolve(&self, number: &str) -> Option<(String, String)> {
@@ -38,18 +44,23 @@ impl NumberedChannels {
 }
 pub(super) fn numbered_channels(runtime: &Runtime) -> NumberedChannels {
     let visible = runtime.search_filter();
-    NumberedChannels(controls::channels(runtime).into_iter().filter(|row| visible(&row.name)).collect())
+    NumberedChannels(
+        controls::channels(runtime)
+            .into_iter()
+            .filter(|row| visible(&row.name))
+            .collect(),
+    )
 }
+#[path = "ott_kiosk_commands.rs"]
+mod kiosk;
 #[path = "ott_commands_offline.rs"]
 mod offline;
 #[path = "ott_provider_settings.rs"]
 mod provider_adapters;
 #[path = "ott_settings.rs"]
 mod settings;
-#[path = "ott_kiosk_commands.rs"]
-mod kiosk;
-pub(super) use kiosk::Settlement as KioskSettlement;
 use crate::app::ott_remote::AfterReply;
+pub(super) use kiosk::Settlement as KioskSettlement;
 use plx_machine::machine::{Edge, InputEvent, InputKind, Key, Source, Tick};
 
 #[derive(Default)]
@@ -201,7 +212,10 @@ fn wire_provider(kind: ProviderKind) -> &'static str {
 /// Current in-memory Saved and source ownership, not a storage read or a new
 /// durability proof. Only closed provider names and presence flags leave here.
 fn provider_context(runtime: &Runtime) -> Value {
-    let selected = runtime.saved.settings.get("selectedProvider")
+    let selected = runtime
+        .saved
+        .settings
+        .get("selectedProvider")
         .and_then(Value::as_str)
         .and_then(provider_kind);
     json!({
@@ -272,8 +286,11 @@ fn unsupported(message: &str) -> Value {
     json!({"status":"unsupported","data":{"error":message}})
 }
 pub(super) fn profile_slot_number(saved: &Saved, profile: &ProviderProfile, ordinal: usize) -> u64 {
-    saved.settings.get(&format!("slot:{}", profile.id))
-        .and_then(Value::as_u64).unwrap_or((ordinal + 1) as u64)
+    saved
+        .settings
+        .get(&format!("slot:{}", profile.id))
+        .and_then(Value::as_u64)
+        .unwrap_or((ordinal + 1) as u64)
 }
 
 fn profile_index(saved: &Saved, kind: ProviderKind, number: usize) -> Option<usize> {
@@ -292,10 +309,16 @@ fn profile_index(saved: &Saved, kind: ProviderKind, number: usize) -> Option<usi
 
 /// Give a new UI profile an unused wire slot without shifting existing legacy
 /// ordinals or explicit remote slots. Called on the candidate before appending.
-pub(super) fn assign_profile_slot(saved: &mut Saved, profile: &ProviderProfile) -> Result<(), &'static str> {
-    let number = (1..=15).find(|number| profile_index(saved, profile.kind, *number).is_none())
+pub(super) fn assign_profile_slot(
+    saved: &mut Saved,
+    profile: &ProviderProfile,
+) -> Result<(), &'static str> {
+    let number = (1..=15)
+        .find(|number| profile_index(saved, profile.kind, *number).is_none())
         .ok_or("This provider already has 15 profiles")?;
-    saved.settings.insert(format!("slot:{}", profile.id), json!(number));
+    saved
+        .settings
+        .insert(format!("slot:{}", profile.id), json!(number));
     Ok(())
 }
 
@@ -683,8 +706,10 @@ fn provider_settings(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
         Ok(i) => i,
         Err(e) => return Some(rejected(e)),
     };
-    if kind == ProviderKind::M3u && !saved.profiles.profiles[index].source.is_empty()
-        && saved.profiles.active_profile.is_none() {
+    if kind == ProviderKind::M3u
+        && !saved.profiles.profiles[index].source.is_empty()
+        && saved.profiles.active_profile.is_none()
+    {
         saved.profiles.active_profile = Some(saved.profiles.profiles[index].id.clone());
     }
     let reload = !saved.profiles.profiles[index].source.is_empty()
@@ -822,10 +847,17 @@ pub(super) fn playback_ready(app: &App) -> bool {
     controls::transport_ready(app)
 }
 fn select_step(runtime: &Runtime, offset: i64) -> Option<String> {
-    if let Some(id)=super::transient::plex_remote::step_id(runtime,offset) { return id; }
+    if let Some(id) = super::transient::plex_remote::step_id(runtime, offset) {
+        return id;
+    }
     controls::step(&selected_ids(runtime), runtime.selected.as_deref(), offset)
 }
-fn play_reply(runtime: &mut Runtime, app: &mut App, id: &str, inv: &Invocation) -> Result<(), &'static str> {
+fn play_reply(
+    runtime: &mut Runtime,
+    app: &mut App,
+    id: &str,
+    inv: &Invocation,
+) -> Result<(), &'static str> {
     let channel = controls::channels(runtime)
         .into_iter()
         .find(|row| row.id == id)
@@ -833,7 +865,11 @@ fn play_reply(runtime: &mut Runtime, app: &mut App, id: &str, inv: &Invocation) 
     play_channel_reply(runtime, app, id, &channel, inv)
 }
 fn play_channel_reply(
-    runtime: &mut Runtime, app: &mut App, id: &str, channel: &controls::Channel, inv: &Invocation,
+    runtime: &mut Runtime,
+    app: &mut App,
+    id: &str,
+    channel: &controls::Channel,
+    inv: &Invocation,
 ) -> Result<(), &'static str> {
     let mut response = json!({"dispatched":true,"channel":channel});
     if inv.action == "playback" {
@@ -844,7 +880,7 @@ fn play_channel_reply(
     }
     supersede_deferred(runtime);
     runtime.command_receipts.catalog_play = None;
-    runtime.play_reply(app,id, inv)?;
+    runtime.play_reply(app, id, inv)?;
     runtime.command_receipts.play_response = Some((inv.id.clone(), ok(response)));
     Ok(())
 }
@@ -866,11 +902,21 @@ pub(super) fn play_response(runtime: &Runtime, inv: &Invocation) -> Value {
         .map(|(_, response)| response.clone())
         .unwrap_or_else(|| ok(json!({"dispatched":true})))
 }
-pub(super) fn kiosk_pending(runtime: &Runtime) -> bool { kiosk::pending(runtime) }
-pub(super) fn kiosk_settled(runtime: &mut Runtime, app: &mut App, invocation: &Invocation, outcome: KioskSettlement) -> Option<Value> {
+pub(super) fn kiosk_pending(runtime: &Runtime) -> bool {
+    kiosk::pending(runtime)
+}
+pub(super) fn kiosk_settled(
+    runtime: &mut Runtime,
+    app: &mut App,
+    invocation: &Invocation,
+    outcome: KioskSettlement,
+) -> Option<Value> {
     kiosk::settled(runtime, app, invocation, outcome)
 }
-pub(super) fn settings_after_saved(runtime: &mut Runtime, app: &mut App) -> Result<(), &'static str> {
+pub(super) fn settings_after_saved(
+    runtime: &mut Runtime,
+    app: &mut App,
+) -> Result<(), &'static str> {
     settings::after_saved(runtime, app)
 }
 fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
@@ -908,7 +954,7 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
         let Some(id) = select_step(runtime, offset.unwrap()) else {
             return Some(rejected("No channel is available"));
         };
-        return match play_reply(runtime, app,&id, inv) {
+        return match play_reply(runtime, app, &id, inv) {
             Ok(()) => None,
             Err(e) => Some(rejected(e)),
         };
@@ -959,20 +1005,40 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
         // a finite archive file. Broadcast-epoch seeking has a separate owner.
         // Source/decoder admission above remains native; the canonical core
         // decides the media position and preserves this contract's clamp policy.
-        let (source_id, channel_id) = runtime.playing.as_ref()
+        let (source_id, channel_id) = runtime
+            .playing
+            .as_ref()
             .filter(|playing| playing_matches(playing, app))
-            .map(|playing| (profile_fingerprint(&playing.profile), playing.entry.id.clone()))
-            .unwrap_or_else(|| (
-                format!("plex:{}", plx_media::route::cur_sid(&app.player.session).raw()),
-                format!("item:{}", plx_media::route::cur_rk(&app.player.session)),
-            ));
+            .map(|playing| {
+                (
+                    profile_fingerprint(&playing.profile),
+                    playing.entry.id.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    format!(
+                        "plex:{}",
+                        plx_media::route::cur_sid(&app.player.session).raw()
+                    ),
+                    format!("item:{}", plx_media::route::cur_rk(&app.player.session)),
+                )
+            });
         let target = plx_shared_core::SeekTarget {
-            source_id, channel_id, kind: plx_shared_core::PlaybackKind::Vod, archive_start: None,
+            source_id,
+            channel_id,
+            kind: plx_shared_core::PlaybackKind::Vod,
+            archive_start: None,
         };
         let request = plx_shared_core::SeekRequest::finite(
-            if operation == "seek" { plx_shared_core::SeekIntent::Absolute }
-                else { plx_shared_core::SeekIntent::Offset },
-            value, from, duration as f64 / 1e9,
+            if operation == "seek" {
+                plx_shared_core::SeekIntent::Absolute
+            } else {
+                plx_shared_core::SeekIntent::Offset
+            },
+            value,
+            from,
+            duration as f64 / 1e9,
         );
         let position = match plx_shared_core::seek_plan(Some(&target), &request) {
             Ok(plx_shared_core::SeekPlan::Seek { position }) => position,
@@ -1016,10 +1082,9 @@ fn media_tracks_failure(
     if inv.action != "media_tracks" {
         return None;
     }
-    let request = crate::app::ott_remote::media_tracks::Request::decode(
-        inv.media_tracks_projection()?,
-    )
-    .ok()?;
+    let request =
+        crate::app::ott_remote::media_tracks::Request::decode(inv.media_tracks_projection()?)
+            .ok()?;
     Some(request.error_response(reason).into_envelope())
 }
 
@@ -1027,18 +1092,21 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
     if inv.action == "plex_servers" {
         if let Some(raw) = inv.plex_servers_projection() {
             return match crate::app::ott_remote::plex_servers::Request::decode(raw) {
-                Ok(request) => request.correlation().rejected(crate::app::ott_remote::plex_servers::Error::Restricted),
+                Ok(request) => request
+                    .correlation()
+                    .rejected(crate::app::ott_remote::plex_servers::Error::Restricted),
                 Err(error) => error.response(),
             };
         }
     }
-    if let Some(response) = media_tracks_failure(
-        inv,
-        crate::app::ott_remote::media_tracks::Error::Restricted,
-    ) {
+    if let Some(response) =
+        media_tracks_failure(inv, crate::app::ott_remote::media_tracks::Error::Restricted)
+    {
         return response;
     }
-    if inv.action == favorites_items::ACTION { return favorites_items::error(inv, "policy_denied"); }
+    if inv.action == favorites_items::ACTION {
+        return favorites_items::error(inv, "policy_denied");
+    }
     if inv.action == "favorites_global_recovery" {
         return favorites_recovery::failure(inv, "policy_denied");
     }
@@ -1046,8 +1114,29 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
 }
 
 pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
-    if inv.action == "notifications" { return notification_settings::command(runtime, inv); }
-    if inv.action == "plex_servers" { return managed::command(runtime, app, inv); }
+    if inv.action == "native_playback_diagnostics" {
+        if runtime.now_ms() >= inv.deadline_ms {
+            return Some(super::native_playback_diagnostics::failure(
+                inv,
+                "invalid_request",
+            ));
+        }
+        if input_policy::remote(runtime, inv).is_err() {
+            return Some(super::native_playback_diagnostics::failure(
+                inv,
+                "policy_denied",
+            ));
+        }
+        return Some(super::native_playback_diagnostics::command(
+            runtime, app, inv,
+        ));
+    }
+    if inv.action == "notifications" {
+        return notification_settings::command(runtime, inv);
+    }
+    if inv.action == "plex_servers" {
+        return managed::command(runtime, app, inv);
+    }
     // This closed adapter is read-only; ACK is refused before IO. Its parser
     // supplies family-shaped expiry/runtime/schema errors as well.
     if inv.action == "favorites_global_recovery" {
@@ -1056,29 +1145,55 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
     if inv.action == "local_browser" && runtime.now_ms() >= inv.deadline_ms {
         return Some(runtime.usb_remote_failure(inv, "expired"));
     }
-    if inv.action == "local_media" && inv.params.get("source_handle").is_some() && runtime.now_ms() >= inv.deadline_ms {
-        return Some(crate::app::ott_local_session::handle_failure(&inv.params,runtime.remote.runtime(),crate::app::ott_local_session::LocalError::RuntimeChanged));
+    if inv.action == "local_media"
+        && inv.params.get("source_handle").is_some()
+        && runtime.now_ms() >= inv.deadline_ms
+    {
+        return Some(crate::app::ott_local_session::handle_failure(
+            &inv.params,
+            runtime.remote.runtime(),
+            crate::app::ott_local_session::LocalError::RuntimeChanged,
+        ));
     }
     if runtime.now_ms() >= inv.deadline_ms {
-        if inv.action == favorites_items::ACTION { return Some(favorites_items::error(inv, "expired")); }
-        return Some(category_select_rejection(runtime, inv, "unavailable")
-            .or_else(|| media_tracks_failure(inv, crate::app::ott_remote::media_tracks::Error::Unavailable))
-            .or_else(|| settings_failure(inv, "source_changed"))
-            .unwrap_or_else(|| rejected("Request expired")));
+        if inv.action == favorites_items::ACTION {
+            return Some(favorites_items::error(inv, "expired"));
+        }
+        return Some(
+            category_select_rejection(runtime, inv, "unavailable")
+                .or_else(|| {
+                    media_tracks_failure(
+                        inv,
+                        crate::app::ott_remote::media_tracks::Error::Unavailable,
+                    )
+                })
+                .or_else(|| settings_failure(inv, "source_changed"))
+                .unwrap_or_else(|| rejected("Request expired")),
+        );
     }
     if let Err(error) = super::input_policy::remote(runtime, inv) {
-        if inv.action == "local_browser" { return Some(runtime.usb_remote_failure(inv, "restricted")); }
-        if inv.action == "local_media" && inv.params.get("source_handle").is_some() { return Some(crate::app::ott_local_session::handle_failure(&inv.params,runtime.remote.runtime(),crate::app::ott_local_session::LocalError::Restricted)); }
-        return Some(category_select_rejection(runtime, inv, "restricted")
-            .unwrap_or_else(|| policy_rejection(inv, error)));
+        if inv.action == "local_browser" {
+            return Some(runtime.usb_remote_failure(inv, "restricted"));
+        }
+        if inv.action == "local_media" && inv.params.get("source_handle").is_some() {
+            return Some(crate::app::ott_local_session::handle_failure(
+                &inv.params,
+                runtime.remote.runtime(),
+                crate::app::ott_local_session::LocalError::Restricted,
+            ));
+        }
+        return Some(
+            category_select_rejection(runtime, inv, "restricted")
+                .unwrap_or_else(|| policy_rejection(inv, error)),
+        );
     }
     let p = &inv.params;
     match inv.action.as_str() {
         favorites_items::ACTION => favorites_items::command(runtime, app, inv),
         "kiosk" => kiosk::command(runtime, app, inv),
-        "media_tracks" => media_tracks::command(runtime,app,inv,Runtime::track_selection_kiosk),
+        "media_tracks" => media_tracks::command(runtime, app, inv, Runtime::track_selection_kiosk),
         "local_browser" => runtime.usb_remote_command(inv),
-        "local_media" => super::transient::command(runtime,app,inv),
+        "local_media" => super::transient::command(runtime, app, inv),
         "plex_queue" | "plex_library" => super::transient::plex_remote::command(runtime, app, inv),
         "state" | "status" => {
             let version = if fields(p, &[]) {
@@ -1090,7 +1205,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                     _ => return Some(rejected("playback_failure_version must be 2 or 3")),
                 }
             } else {
-                return Some(rejected("The state query accepts only playback_failure_version"));
+                return Some(rejected(
+                    "The state query accepts only playback_failure_version",
+                ));
             };
             let mut value = state(app, runtime);
             value["row_guide"] = runtime.row_guide_diagnostics();
@@ -1105,8 +1222,11 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             value["channels"] = json!(runtime.catalog.entries.len());
             value["performance"] = performance_snapshot(app, runtime);
             value["catalog"] = json!(runtime.catalog_diagnostics.snapshot(
-                runtime.generation, runtime.catalog_loading, runtime.catalog_complete,
-                runtime.catalog.entries.len()));
+                runtime.generation,
+                runtime.catalog_loading,
+                runtime.catalog_complete,
+                runtime.catalog.entries.len()
+            ));
             value["preplay"] = json!(runtime.preplay.snapshot(runtime.now_ms()));
             value["playback_failure"] = json!(match version {
                 playback_failure::Version::V2 => runtime.playback_failure.snapshot(),
@@ -1116,10 +1236,25 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             Some(ok(value))
         }
         "capabilities" => {
-            if !(fields(p, &[]) || subset(p, &["local_media_session", "local_media_progressive", "local_media_handles"]))
-                || ["local_media_session", "local_media_progressive", "local_media_handles"]
-                    .iter()
-                    .any(|key| p.get(*key).is_some_and(|value| value.as_bool() != Some(true)))
+            if !(fields(p, &[])
+                || subset(
+                    p,
+                    &[
+                        "local_media_session",
+                        "local_media_progressive",
+                        "local_media_handles",
+                    ],
+                ))
+                || [
+                    "local_media_session",
+                    "local_media_progressive",
+                    "local_media_handles",
+                ]
+                .iter()
+                .any(|key| {
+                    p.get(*key)
+                        .is_some_and(|value| value.as_bool() != Some(true))
+                })
             {
                 return Some(rejected("Capability probe flags must be true"));
             }
@@ -1133,17 +1268,21 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                     playback.push("seek");
                 }
             }
-            let mut data = json!({"version":1,"player":{"version":env!("CARGO_PKG_VERSION"),"platform":"webos-native","runtime":runtime.remote.runtime(),"standby":app.ott_standby},
+            let mut data = json!({"version":1,"player":{"version":env!("PLX_VERSION"),"build_sha":env!("PLX_BUILD_SHA"),"platform":"webos-native","runtime":runtime.remote.runtime(),"standby":app.ott_standby},
                 "input":["up","down","left","right","ok","back"],"playback":playback,"lifecycle":["exit_app","standby","wake"],
                 "vportal_settings":{"version":1},"player_settings":{"version":1,"operations":["schema","get","set"],"max_page_size":20},
                 "favorites_global":plx_data::ott::favorites_wire::Protocol::capability(),
                 "favorites_global_items":{"version":1}});
+            data["native_playback_capture"] = json!({"version":1,"operations":["start","status","read","stop"],
+                "default_duration_s":30,"min_duration_s":5,"max_duration_s":60,
+                "sample_interval_ms":1000,"max_records":64});
             data["playback_failure_versions"] = json!([2, 3]);
             data["notifications"] = json!({"version":1,"operations":["get","set"]});
             data["favorites_global_recovery"] = favorites_recovery::capability();
             if runtime.usb_remote_capable() {
                 data["local_browser"] = json!({"version":1,"operations":["roots","list","more","select"],"max_entries":64});
-                data["local_media_handles"] = json!({"version":1,"operations":["connect","play","shuffle"]});
+                data["local_media_handles"] =
+                    json!({"version":1,"operations":["connect","play","shuffle"]});
             }
             data["local_media"] = crate::app::ott_local_session::capability(true);
             data["local_media_session"] = crate::app::ott_local_session::extension_capability();
@@ -1157,7 +1296,8 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 data["media_tracks"] = json!({"version":1});
             }
             if catalog_remote::capability(runtime) {
-                data["categories"] = json!({"version":1,"operations":["list","select"],"maxPageSize":200});
+                data["categories"] =
+                    json!({"version":1,"operations":["list","select"],"maxPageSize":200});
             }
             if controls::transport_ready(app) && playback::dur() > 0 {
                 data["playback_seek_relative"] = json!({"version":1});
@@ -1258,7 +1398,11 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
         "play_catalog" => catalog_remote::play(runtime, app, inv),
         "channels" if !fields(p, &[]) && !fields(p, &["search"]) => {
             // Shared Unicode implementation is an explicit integration prerequisite.
-            Some(catalog_remote::channels(runtime, inv, plx_base::unicode::caseless_key))
+            Some(catalog_remote::channels(
+                runtime,
+                inv,
+                plx_base::unicode::caseless_key,
+            ))
         }
         "channels" => {
             if !fields(p, &[]) && !fields(p, &["search"]) {
@@ -1304,7 +1448,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             let Some(id) = controls::resolve(&controls::channels(runtime), &query) else {
                 return Some(rejected("Choose one unambiguous channel by name or number"));
             };
-            match play_reply(runtime, app,&id, inv) {
+            match play_reply(runtime, app, &id, inv) {
                 Ok(()) => None,
                 Err(e) => Some(rejected(e)),
             }
@@ -1404,7 +1548,9 @@ fn legacy_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Opt
         }
         _ => return Some(unsupported("Unsupported native legacy command")),
     }
-    if let Err(error)=super::input_policy::remote(runtime,&translated) {return Some(rejected(error));}
+    if let Err(error) = super::input_policy::remote(runtime, &translated) {
+        return Some(rejected(error));
+    }
     if translated.action == "play"
         && runtime.catalog_loading
         && controls::channels(runtime).is_empty()
@@ -1449,7 +1595,7 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
     runtime.usb_remote_poll();
     let now = runtime.now_ms();
     media_tracks::poll_pending(runtime, app, Runtime::track_selection_kiosk, Some(now));
-    media_tracks::retire_stale(runtime,app,Runtime::track_selection_kiosk);
+    media_tracks::retire_stale(runtime, app, Runtime::track_selection_kiosk);
     for effect in runtime.remote.take_effects() {
         match effect {
             AfterReply::Volume {
@@ -1457,7 +1603,10 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
                 muted,
                 last_input,
             } => {
-                if super::input_policy::navigation(runtime).is_ok() && app.last_input == last_input && controls::transport_ready(app) {
+                if super::input_policy::navigation(runtime).is_ok()
+                    && app.last_input == last_input
+                    && controls::transport_ready(app)
+                {
                     if let Some(desired) =
                         plx_media::player::volume::DesiredVolume::new(i32::from(level), muted)
                     {
@@ -1611,7 +1760,8 @@ mod tests {
 
     #[test]
     fn explicit_exit_retires_first_batch_channel_and_stale_play_receipt() {
-        let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        let mut runtime =
+            Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
         runtime.remote = Remote::disabled_for_test("dev_test", "runtime");
         let invocation = runtime.remote.request_for_test("play", json!({"query":1}));
         runtime.catalog_loading = true;
@@ -1621,21 +1771,40 @@ mod tests {
             last_input: 0,
             context: selection_context(&runtime),
         });
-        runtime.command_receipts.play_response = Some((invocation.id.clone(), ok(json!({
-            "dispatched":true,"channel":{"id":"old-channel","name":"Old channel","number":1}
-        }))));
+        runtime.command_receipts.play_response = Some((
+            invocation.id.clone(),
+            ok(json!({
+                "dispatched":true,"channel":{"id":"old-channel","name":"Old channel","number":1}
+            })),
+        ));
         let settings_receipt = runtime.command_receipts.record(
-            "settings", "signature".into(), "context".into(), 1, 100,
+            "settings",
+            "signature".into(),
+            "context".into(),
+            1,
+            100,
         );
 
         cancel_pending_play(&mut runtime);
         // A first batch would now make the old request executable. Explicit exit
         // has removed that intent rather than waiting for its original deadline.
-        assert_eq!(deferred_ready(invocation.deadline_ms, 100, true, true, true, false), Ok(true));
+        assert_eq!(
+            deferred_ready(invocation.deadline_ms, 100, true, true, true, false),
+            Ok(true)
+        );
         assert!(runtime.command_receipts.deferred_channel.is_none());
         assert!(runtime.command_receipts.play_response.is_none());
-        assert_eq!(play_response(&runtime, &invocation), ok(json!({"dispatched":true})));
-        assert!(runtime.command_receipts.consume(&settings_receipt, "signature", "context", 1, 101));
+        assert_eq!(
+            play_response(&runtime, &invocation),
+            ok(json!({"dispatched":true}))
+        );
+        assert!(runtime.command_receipts.consume(
+            &settings_receipt,
+            "signature",
+            "context",
+            1,
+            101
+        ));
 
         cancel_pending_play(&mut runtime);
         assert!(runtime.command_receipts.deferred_channel.is_none());
@@ -1686,7 +1855,8 @@ mod tests {
                 ProviderKind::M3u => "https://fixture.invalid/list.m3u".into(),
                 ProviderKind::Stalker => json!({
                     "portal": "https://fixture.invalid/c/", "mac": "02:00:00:00:00:01"
-                }).to_string(),
+                })
+                .to_string(),
                 _ => unreachable!("bounded M3U/Stalker slot fixture"),
             },
             source_alias: String::new(),
@@ -1697,9 +1867,17 @@ mod tests {
     #[test]
     fn ui_add_after_remote_sparse_slot_keeps_every_profile_addressable() {
         for kind in [ProviderKind::M3u, ProviderKind::Stalker] {
-            let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+            let mut runtime =
+                Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
             let source = ui_slot_profile(kind, 3).source;
-            insert_profile(&mut runtime.saved, kind, 3, source, Some("Remote fixture".into())).unwrap();
+            insert_profile(
+                &mut runtime.saved,
+                kind,
+                3,
+                source,
+                Some("Remote fixture".into()),
+            )
+            .unwrap();
             let remote_profile = runtime.saved.profiles.profiles[0].clone();
             for suffix in [1, 2] {
                 let profile = ui_slot_profile(kind, suffix);
@@ -1708,22 +1886,40 @@ mod tests {
                 // No writer, protected store, provider worker or decoder is started.
                 let candidate = runtime.profile_candidate(profile.clone(), None).unwrap();
                 assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
-                assert_eq!(candidate.profiles.active_profile.as_deref(), Some(profile.id.as_str()));
+                assert_eq!(
+                    candidate.profiles.active_profile.as_deref(),
+                    Some(profile.id.as_str())
+                );
                 runtime.saved = candidate;
             }
             assert_eq!(runtime.saved.profiles.profiles[0], remote_profile);
-            assert_eq!(runtime.saved.settings[&format!("slot:{}", remote_profile.id)], json!(3));
+            assert_eq!(
+                runtime.saved.settings[&format!("slot:{}", remote_profile.id)],
+                json!(3)
+            );
             assert_eq!(profile_index(&runtime.saved, kind, 3), Some(0));
-            let addressed: Vec<_> = (1..=15).filter_map(|number| {
-                profile_index(&runtime.saved, kind, number).map(|index| (number, index))
-            }).collect();
-            assert_eq!(addressed.len(), 3, "each saved profile must have a numbered address");
+            let addressed: Vec<_> = (1..=15)
+                .filter_map(|number| {
+                    profile_index(&runtime.saved, kind, number).map(|index| (number, index))
+                })
+                .collect();
+            assert_eq!(
+                addressed.len(),
+                3,
+                "each saved profile must have a numbered address"
+            );
             for (index, profile) in runtime.saved.profiles.profiles.iter().enumerate() {
-                let slots: Vec<_> = addressed.iter().filter(|(_, found)| *found == index).collect();
+                let slots: Vec<_> = addressed
+                    .iter()
+                    .filter(|(_, found)| *found == index)
+                    .collect();
                 assert_eq!(slots.len(), 1, "a profile must be represented exactly once");
                 let row = metadata(&runtime.saved, kind, slots[0].0);
                 assert_eq!(row["name"], json!(profile.name));
-                assert_eq!(row["active"], json!(Some(&profile.id) == runtime.saved.profiles.active_profile.as_ref()));
+                assert_eq!(
+                    row["active"],
+                    json!(Some(&profile.id) == runtime.saved.profiles.active_profile.as_ref())
+                );
             }
         }
     }
@@ -1731,14 +1927,22 @@ mod tests {
     #[test]
     fn ui_add_preserves_existing_legacy_and_explicit_slot_assignments() {
         for kind in [ProviderKind::M3u, ProviderKind::Stalker] {
-            let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+            let mut runtime =
+                Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
             let legacy = ui_slot_profile(kind, 1);
             runtime.saved.profiles.profiles.push(legacy.clone());
             let mut sparse = ui_slot_profile(kind, 3);
             sparse.name = "Existing sparse fixture".into();
-            runtime.saved.settings.insert(format!("slot:{}", sparse.id), json!(3));
+            runtime
+                .saved
+                .settings
+                .insert(format!("slot:{}", sparse.id), json!(3));
             runtime.saved.profiles.profiles.push(sparse.clone());
-            let other_kind = if kind == ProviderKind::M3u { ProviderKind::Stalker } else { ProviderKind::M3u };
+            let other_kind = if kind == ProviderKind::M3u {
+                ProviderKind::Stalker
+            } else {
+                ProviderKind::M3u
+            };
             let other = ui_slot_profile(other_kind, 1);
             runtime.saved.profiles.profiles.push(other.clone());
             let added = ui_slot_profile(kind, 2);
@@ -1746,23 +1950,38 @@ mod tests {
             assert_eq!(profile_index(&runtime.saved, kind, 1), Some(0));
             assert_eq!(profile_index(&runtime.saved, kind, 3), Some(1));
             assert_eq!(profile_index(&runtime.saved, other_kind, 1), Some(2));
-            let new_number = (1..=15).find(|number| profile_index(&runtime.saved, kind, *number) == Some(3))
+            let new_number = (1..=15)
+                .find(|number| profile_index(&runtime.saved, kind, *number) == Some(3))
                 .expect("new UI profile must remain independently addressable");
             assert_ne!(new_number, 1);
             assert_ne!(new_number, 3);
-            assert_eq!(&runtime.saved.profiles.profiles[..3], &[legacy, sparse, other]);
+            assert_eq!(
+                &runtime.saved.profiles.profiles[..3],
+                &[legacy, sparse, other]
+            );
             let before_edit = runtime.saved.settings.clone();
             let mut edited = added.clone();
             edited.name = "Renamed UI fixture".into();
-            runtime.saved = runtime.profile_candidate(edited.clone(), Some(&added)).unwrap();
-            assert_eq!(runtime.saved.settings, before_edit, "an edit must not reallocate numbered slots");
+            runtime.saved = runtime
+                .profile_candidate(edited.clone(), Some(&added))
+                .unwrap();
+            assert_eq!(
+                runtime.saved.settings, before_edit,
+                "an edit must not reallocate numbered slots"
+            );
             assert_eq!(profile_index(&runtime.saved, kind, new_number), Some(3));
-            assert_eq!(metadata(&runtime.saved, kind, new_number)["name"], json!(edited.name));
+            assert_eq!(
+                metadata(&runtime.saved, kind, new_number)["name"],
+                json!(edited.name)
+            );
             let before_invalid = serde_json::to_value(&runtime.saved).unwrap();
             let mut invalid = ui_slot_profile(kind, 4);
             invalid.source = "invalid provider source".into();
             assert!(runtime.profile_candidate(invalid, None).is_err());
-            assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before_invalid);
+            assert_eq!(
+                serde_json::to_value(&runtime.saved).unwrap(),
+                before_invalid
+            );
         }
     }
 
@@ -1833,15 +2052,23 @@ pub(super) fn restart_for_recovery(runtime: &mut Runtime, app: &mut App) -> bool
     controls::restart(runtime, app, true)["data"]["dispatched"].as_bool() == Some(true)
 }
 
-
-pub(super) fn category_select_rejection(runtime: &Runtime, inv: &Invocation, code: &'static str) -> Option<Value> {
+pub(super) fn category_select_rejection(
+    runtime: &Runtime,
+    inv: &Invocation,
+    code: &'static str,
+) -> Option<Value> {
     catalog_remote::select_rejection(runtime, inv, code)
 }
 pub(super) fn category_select_completion_allowed(runtime: &Runtime, inv: &Invocation) -> bool {
     catalog_remote::select_completion_allowed(runtime, inv)
 }
-pub(super) fn category_select_settled(runtime: &Runtime, inv: &Invocation, saved: bool,
-    applied: bool, response: Value) -> Value {
+pub(super) fn category_select_settled(
+    runtime: &Runtime,
+    inv: &Invocation,
+    saved: bool,
+    applied: bool,
+    response: Value,
+) -> Value {
     catalog_remote::select_settled(runtime, inv, saved, applied, response)
 }
 
