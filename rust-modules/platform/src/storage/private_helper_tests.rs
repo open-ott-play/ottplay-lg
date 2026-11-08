@@ -998,6 +998,35 @@ fn public_preference_save_works_without_private_crypto_and_retains_migration_obl
 }
 
 #[test]
+fn notification_policy_helper_cas_requires_readback_and_preserves_control_and_provider_slots() {
+    let mut helper = Helper::initialized();
+    let mut old = Old::empty();
+    let snapshot=helper.snapshot.as_mut().unwrap();
+    snapshot.control=Some(encode(Namespace::OttControl,&serde_json::json!({"token":"synthetic-pairing"}),seal).unwrap());
+    snapshot.state=Some(encode(Namespace::OttState,&serde_json::json!({"profile":"retained-profile"}),seal).unwrap());
+    snapshot.status.control_present=true; snapshot.status.state_present=true;
+    let before = helper.snapshot.clone().unwrap();
+    let permit = WritePermit::new();
+    let (off, receipt) = public_patch_with(&mut helper, &mut old,
+        ott::PublicPatch::NotificationsEnabled(false), &permit).unwrap();
+    assert_eq!(receipt, CommitReceipt::Durable);
+    assert_eq!(off.value.notifications_enabled, Some(false));
+    let readback = public_current(&mut helper, &mut old).unwrap().unwrap();
+    assert_eq!(readback.public_preferences.as_ref().unwrap().notifications_enabled,Some(false));
+    assert_eq!(readback.control,before.control); assert_eq!(readback.state,before.state);
+    assert_eq!(old.reads,0,"notification policy never opens provider or pairing secrets");
+    helper.lose_ack=true;
+    assert_eq!(public_patch_with(&mut helper,&mut old,ott::PublicPatch::NotificationsEnabled(true),&permit),
+        Err(public_preferences::SaveError::Uncertain));
+    // Even a visible candidate cannot turn a lost acknowledgement into success.
+    assert_eq!(helper.snapshot.as_ref().unwrap().public_preferences.as_ref().unwrap().notifications_enabled,Some(true));
+    permit.revoke(); let count=helper.mutations.len();
+    assert_eq!(public_patch_with(&mut helper,&mut old,ott::PublicPatch::NotificationsEnabled(false),&permit),
+        Err(public_preferences::SaveError::NotApplied(Error::Revoked)));
+    assert_eq!(helper.mutations.len(),count);
+}
+
+#[test]
 fn pending_private_import_preserves_preferences_and_refuses_locked_legacy() {
     let mut helper = Helper::default();
     let mut old = Old::empty();

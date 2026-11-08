@@ -332,9 +332,26 @@ fn select(runtime: &mut Runtime, app: &mut App, server_id: &str, context: &str,
 
 /// Any later accepted foreground intent retires a not-yet-applied selection.
 pub(super) fn remote_intent(runtime: &mut Runtime, inv: &Invocation) {
-    if inv.action != "plex_servers" && !input_policy::read_only(inv) {
+    if !matches!(inv.action.as_str(), "plex_servers" | "notifications") && !input_policy::read_only(inv) {
         navigation(&mut runtime.managed);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn notification_policy_is_not_a_managed_source_navigation_intent() {
+    let _serial=plx_base::testlock::serial();
+    let mut runtime=Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+    runtime.managed.automatic=true;
+    let mut inv=runtime.remote.request_for_test("notifications",json!({"operation":"get"}));
+    for operation in ["get","set"] {
+        inv.params=json!({"operation":operation});
+        remote_intent(&mut runtime,&inv);
+        assert!(runtime.managed.automatic,"receive policy must not cancel managed startup");
+    }
+    inv.action="input".into(); inv.params=json!({"key":"right"});
+    remote_intent(&mut runtime,&inv);
+    assert!(!runtime.managed.automatic,"ordinary viewer navigation still cancels startup");
 }
 /// Fence queued activation effects before this frame consumes new physical input.
 /// Key-up and pointer hover do not supersede a selection.

@@ -60,6 +60,12 @@ pub(super) fn validate_candidate(
     candidate: &Saved,
     patch: &Patch,
 ) -> Result<(), &'static str> {
+    if matches!(patch, Patch::NotificationsEnabled(_)) {
+        let before = serde_json::to_value(before).map_err(|_| "Invalid player state")?;
+        let candidate = serde_json::to_value(candidate).map_err(|_| "Invalid player state")?;
+        return if before == candidate { Ok(()) }
+            else { Err("A protected change cannot use player preferences") };
+    }
     if let Patch::ClassicBookmark(bookmark) = patch {
         bookmark.validate().map_err(|_| "Invalid Classic bookmark")?;
         let before = serde_json::to_value(before).map_err(|_| "Invalid player state")?;
@@ -114,6 +120,12 @@ pub(super) fn write_refusal(runtime: &Runtime) -> Option<&'static str> {
     runtime
         .saving
         .then_some("Another settings operation is in progress")
+}
+
+/// Missing/unreadable storage is distinct from the default enabled policy.
+pub(super) fn notifications_enabled(state: &State) -> Option<bool> {
+    (state.loaded && state.failure.is_none() && !state.uncertain).then(||
+        state.snapshot.as_ref().and_then(|s| s.value.notifications_enabled).unwrap_or(true))
 }
 
 /// None means not loaded/readable yet; Some(None) means no bookmark for this source.
@@ -189,12 +201,13 @@ pub(super) fn saved(
         return;
     }
     let bookmark_write = classic_bookmark::take_write(runtime);
+    let notification_write = invocation.as_ref().is_some_and(|inv| inv.action == "notifications");
     let success = result.is_ok();
     let mut error = match result {
         Ok(snapshot) => {
             runtime.public_preferences.accept(Some(snapshot));
             overlay(&runtime.public_preferences, &mut runtime.saved);
-            if bookmark_write.is_none() {
+            if bookmark_write.is_none() && !notification_write {
                 app.bridge.apply_ui_mode(runtime.interface_mode());
                 runtime.status.clear();
             }
@@ -207,7 +220,7 @@ pub(super) fn saved(
             Some("Preference write needs reconciliation; restart the player".into())
         }
     };
-    if let Some(message) = &error {
+    if let Some(message) = error.as_ref().filter(|_| !notification_write) {
         runtime.status = message.clone();
     }
     if let Some(sent) = bookmark_write {
@@ -235,8 +248,9 @@ pub(super) fn saved(
             commands::settings_public_saved(runtime, &invocation, &mut response);
         }
         let response = if let Some(error) = error {
-            commands::settings_failure(&invocation, "storage_failed")
-                .unwrap_or_else(|| rejected(&error))
+            if invocation.action == "notifications" { notification_settings::failure(&invocation.params, "storage_unavailable") }
+            else { commands::settings_failure(&invocation, "storage_failed")
+                .unwrap_or_else(|| rejected(&error)) }
         } else {
             response
         };
@@ -248,6 +262,26 @@ pub(super) fn saved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notifications_default_on_only_after_known_storage_and_never_enter_provider_state() {
+        let mut state = State::default();
+        assert_eq!(notifications_enabled(&state), None);
+        state.accept(None);
+        assert_eq!(notifications_enabled(&state), Some(true));
+        let before = Saved::default();
+        assert!(validate_candidate(&before, &before, &Patch::NotificationsEnabled(false)).is_ok());
+        let mut changed = before.clone();
+        changed.settings.insert("sNotificationsEnabled".into(), json!(false));
+        assert!(validate_candidate(&before, &changed, &Patch::NotificationsEnabled(false)).is_err());
+        let value = store::Preferences::default().apply(&Patch::NotificationsEnabled(false)).unwrap();
+        state.accept(Some(Snapshot { value, revision: 1, epoch: 1 }));
+        assert_eq!(notifications_enabled(&state), Some(false));
+        let mut saved = before.clone(); overlay(&state, &mut saved);
+        assert_eq!(serde_json::to_value(saved).unwrap(),serde_json::to_value(before).unwrap());
+        state.uncertain = true;
+        assert_eq!(notifications_enabled(&state), None);
+    }
 
     #[test]
     fn public_door_rejects_simultaneous_secret_or_provider_edits() {

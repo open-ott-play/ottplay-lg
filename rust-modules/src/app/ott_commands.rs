@@ -1046,6 +1046,7 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
 }
 
 pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
+    if inv.action == "notifications" { return notification_settings::command(runtime, inv); }
     if inv.action == "plex_servers" { return managed::command(runtime, app, inv); }
     // This closed adapter is read-only; ACK is refused before IO. Its parser
     // supplies family-shaped expiry/runtime/schema errors as well.
@@ -1138,6 +1139,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 "favorites_global":plx_data::ott::favorites_wire::Protocol::capability(),
                 "favorites_global_items":{"version":1}});
             data["playback_failure_versions"] = json!([2, 3]);
+            data["notifications"] = json!({"version":1,"operations":["get","set"]});
             data["favorites_global_recovery"] = favorites_recovery::capability();
             if runtime.usb_remote_capable() {
                 data["local_browser"] = json!({"version":1,"operations":["roots","list","more","select"],"max_entries":64});

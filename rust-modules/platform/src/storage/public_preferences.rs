@@ -99,6 +99,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn notification_policy_roundtrips_without_replacing_other_installation_preferences() {
+        let old = Preferences::default().apply(&Patch::EnsureDeviceId("stable-device".into())).unwrap()
+            .apply(&Patch::InterfaceMode(0)).unwrap();
+        assert_eq!(old.notifications_enabled,None);
+        let next = old.apply(&Patch::NotificationsEnabled(false)).unwrap();
+        assert_eq!(next.notifications_enabled,Some(false));
+        assert_eq!(next.device_id,old.device_id); assert_eq!(next.interface_mode,old.interface_mode);
+        let wire=serde_json::to_value(&next).unwrap();
+        assert_eq!(serde_json::from_value::<Preferences>(wire).unwrap(),next);
+        let legacy: Preferences=serde_json::from_str(r#"{"version":1}"#).unwrap();
+        assert_eq!(legacy.notifications_enabled,None);
+    }
+
+    #[test]
     fn public_host_record_rejects_secret_fields_and_revision_mismatch() {
         let valid = Snapshot { value: Preferences { interface_mode: Some(0),
             ..Preferences::default() }, revision: 3, epoch: 1 };
