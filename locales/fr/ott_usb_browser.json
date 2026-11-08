@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Dossiers USB",
+  "ott.usb_browser_use": "Utiliser ce dossier",
+  "ott.usb_browser_parent": "Dossier parent",
+  "ott.usb_browser_root": "Racine du lecteur",
+  "ott.usb_browser_previous": "Page précédente",
+  "ott.usb_browser_next": "Page suivante",
+  "ott.usb_browser_more": "Charger plus",
+  "ott.usb_browser_browse_root": "Ouvrir la racine du lecteur",
+  "ott.usb_browser_choose": "Choisissez un dossier sur ce lecteur USB",
+  "ott.usb_browser_reading": "Lecture des dossiers…",
+  "ott.usb_browser_cancelled": "Chargement des dossiers annulé",
+  "ott.usb_browser_return": "Revenir sans changer la source sélectionnée",
+  "ott.usb_browser_more_help": "Rechercher davantage de dossiers ici",
+  "ott.usb_browser_limit": "Limite de liste atteinte. Utilisez ce dossier ou saisissez le chemin exact dans le profil.",
+  "ott.usb_browser_partial": "Liste de dossiers partielle. Chargez plus pour rechercher d’autres dossiers.",
+  "ott.usb_browser_unreadable": "Certains noms sont illisibles. Actualisez ou choisissez un dossier disponible.",
+  "ott.usb_browser_empty": "Aucun sous-dossier. Utilisez ce dossier pour inclure ses vidéos.",
+  "ott.usb_browser_ready": "Ouvrez un sous-dossier ou utilisez ce dossier.",
+  "ott.usb_browser_checking": "Vérification du dossier USB sélectionné…",
+  "ott.usb_browser_changed": "La sélection USB a changé ; fermez ce sélecteur"
+}

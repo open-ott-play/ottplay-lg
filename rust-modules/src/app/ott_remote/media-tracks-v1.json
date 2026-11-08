@@ -1,0 +1,4195 @@
+{
+  "schema": 1,
+  "action": "media_tracks",
+  "synthetic": true,
+  "proposal_revision": 1,
+  "proposal_sha256": "013866d54679f27c2b79e6dd3f5ac9d1bdc3cf32bd378ad07f8ad79fad068a9d",
+  "capability": {
+    "media_tracks": {
+      "version": 1
+    }
+  },
+  "limits": {
+    "max_request_bytes": 2048,
+    "max_result_bytes": 65536,
+    "max_tracks": 128,
+    "max_tracks_per_kind": 64,
+    "max_label_utf8_bytes": 128,
+    "max_language_ascii_bytes": 32,
+    "max_codec_ascii_bytes": 32,
+    "max_age_ms": 9007199254740991,
+    "catalog_ttl_ms": 60000,
+    "max_runtime_ascii_bytes": 64,
+    "max_opaque_id_ascii_bytes": 64
+  },
+  "byte_limit_scopes": {
+    "max_request_bytes": "Complete action/params request object, not params alone.",
+    "max_result_bytes": "Complete result data object, excluding the transport envelope."
+  },
+  "lexical_types": {
+    "runtime": "^[a-z0-9-]{1,64}$; existing media RPC runtime alphabet, independent of optional diagnostics",
+    "opaque_id": "^[A-Za-z0-9_-]{1,64}$; exact case; generated opaque nonce, never a URL/path/provider ID",
+    "language": "null or ^[A-Za-z0-9-]{1,32}$",
+    "codec": "null or ^[A-Za-z0-9_.-]{1,32}$",
+    "age_ms": "integer 0..9007199254740991; bool/fraction/string are invalid"
+  },
+  "requests": {
+    "list": {
+      "action": "media_tracks",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      }
+    },
+    "audio_select": {
+      "action": "media_tracks",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    "subtitle_select": {
+      "action": "media_tracks",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "track",
+          "id": "s-example"
+        }
+      }
+    },
+    "subtitle_off": {
+      "action": "media_tracks",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        }
+      }
+    }
+  },
+  "errors": [
+    "invalid_request",
+    "runtime_mismatch",
+    "no_playback",
+    "playback_changed",
+    "catalog_changed",
+    "catalog_incomplete",
+    "track_not_found",
+    "not_selectable",
+    "restricted",
+    "unsupported",
+    "busy",
+    "unavailable"
+  ],
+  "status_rules": {
+    "ok": "Only list_result or select_requested_result/select_confirmed_result",
+    "unsupported": "Only error=unsupported",
+    "rejected": "Any listed error except unsupported",
+    "malformed_request": "Existing controller request rejection before player dispatch"
+  },
+  "valid": [
+    {
+      "name": "list-mixed",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-empty",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [],
+        "subtitle_off_supported": false,
+        "observed": {
+          "audio": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-unobserved",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": null,
+            "codec": null,
+            "selectable": false
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-subtitle-off",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "off",
+            "track_id": null,
+            "age_ms": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "list-subtitle-observed",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "track",
+            "track_id": "s-example",
+            "age_ms": 19
+          }
+        }
+      }
+    },
+    {
+      "name": "select-audio-requested",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-audio-confirmed",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "track",
+          "track_id": "a-other",
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "select-subtitle-requested",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "track",
+          "id": "s-example"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "track",
+          "id": "s-example"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-subtitle-confirmed",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "track",
+          "id": "s-example"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "track",
+          "id": "s-example"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "track",
+          "track_id": "s-example",
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "select-subtitle-off-requested",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-subtitle-off-confirmed",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "off",
+          "track_id": null,
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "list-scalar-boundaries",
+      "params": {
+        "op": "list",
+        "runtime": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "source_generation": "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+        "catalog": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+        "tracks": [
+          {
+            "id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "kind": "audio",
+            "label": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+            "language": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "codec": "cccccccccccccccccccccccccccccccc",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": false,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "age_ms": 9007199254740991
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-error-invalid-request",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "invalid_request"
+      }
+    },
+    {
+      "name": "select-error-invalid-request",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "invalid_request",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-runtime-mismatch",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "runtime_mismatch"
+      }
+    },
+    {
+      "name": "select-error-runtime-mismatch",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "runtime_mismatch",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-no-playback",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "no_playback"
+      }
+    },
+    {
+      "name": "select-error-no-playback",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "no_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-playback-changed",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "playback_changed"
+      }
+    },
+    {
+      "name": "select-error-playback-changed",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "playback_changed",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-catalog-changed",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "catalog_changed"
+      }
+    },
+    {
+      "name": "select-error-catalog-changed",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "catalog_changed",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-catalog-incomplete",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "catalog_incomplete"
+      }
+    },
+    {
+      "name": "select-error-catalog-incomplete",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "catalog_incomplete",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-track-not-found",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "track_not_found"
+      }
+    },
+    {
+      "name": "select-error-track-not-found",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "track_not_found",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-not-selectable",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "not_selectable"
+      }
+    },
+    {
+      "name": "select-error-not-selectable",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "not_selectable",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-restricted",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "restricted"
+      }
+    },
+    {
+      "name": "select-error-restricted",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "restricted",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-unsupported",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "unsupported",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "unsupported"
+      }
+    },
+    {
+      "name": "select-error-unsupported",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "unsupported",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "unsupported",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-busy",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "busy"
+      }
+    },
+    {
+      "name": "select-error-busy",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "busy",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-error-unavailable",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "unavailable"
+      }
+    },
+    {
+      "name": "select-error-unavailable",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "unavailable",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "list-label-benign-internal-slash",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "AC/DC",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    }
+  ],
+  "invalid_requests": [
+    {
+      "name": "list-unknown-key",
+      "params": {
+        "op": "list",
+        "runtime": "native-example",
+        "extra": true
+      }
+    },
+    {
+      "name": "list-missing-runtime",
+      "params": {
+        "op": "list"
+      }
+    },
+    {
+      "name": "request-version-not-in-v1-schema",
+      "params": {
+        "op": "list",
+        "runtime": "native-example",
+        "version": 1
+      }
+    },
+    {
+      "name": "runtime-uppercase",
+      "params": {
+        "op": "list",
+        "runtime": "Native-example"
+      }
+    },
+    {
+      "name": "runtime-underscore",
+      "params": {
+        "op": "list",
+        "runtime": "native_example"
+      }
+    },
+    {
+      "name": "runtime-too-long",
+      "params": {
+        "op": "list",
+        "runtime": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "runtime-null",
+      "params": {
+        "op": "list",
+        "runtime": null
+      }
+    },
+    {
+      "name": "unknown-operation",
+      "params": {
+        "op": "set",
+        "runtime": "native-example"
+      }
+    },
+    {
+      "name": "select-missing-source-generation",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "select-empty-catalog",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "select-id-too-long",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "name": "select-id-url",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "https://example.invalid/track"
+        }
+      }
+    },
+    {
+      "name": "select-id-path",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "/private/example/track"
+        }
+      }
+    },
+    {
+      "name": "select-id-not-string",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": 1
+        }
+      }
+    },
+    {
+      "name": "select-playback-not-opaque",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "provider:private-id",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "select-audio-off",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "off"
+        }
+      }
+    },
+    {
+      "name": "select-off-has-id",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off",
+          "id": "s-example"
+        }
+      }
+    },
+    {
+      "name": "select-track-missing-id",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track"
+        }
+      }
+    },
+    {
+      "name": "select-target-unknown-key",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other",
+          "persist": true
+        }
+      }
+    },
+    {
+      "name": "select-target-null",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": null
+      }
+    },
+    {
+      "name": "select-unknown-kind",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "video",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    }
+  ],
+  "invalid_results": [
+    {
+      "name": "list-unknown-field",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        },
+        "url": "https://example.invalid/private"
+      }
+    },
+    {
+      "name": "list-runtime-mismatch",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-other",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-runtime-too-long",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-wrong-scope",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "profile",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-missing-catalog",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-null-tracks",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": null,
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-duplicate-track-id",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "a-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-id-too-long",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-track-url-field",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true,
+            "url": "https://example.invalid/private"
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-track-id-url",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "https://example.invalid/track",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-too-long-utf8",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééa",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-language-too-long",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-language-not-ascii",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "日本語",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-codec-too-long",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-selectable-not-boolean",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": 1
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-missing-nullable-language",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "codec": null,
+            "selectable": false
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-off-support-not-boolean",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": null,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-observed-track-missing",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-missing",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-observed-wrong-kind",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "s-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-observed-track-case-mismatch",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "A-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-audio-off",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "off",
+            "track_id": null,
+            "age_ms": 0
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-not-observed-with-age",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": null,
+            "codec": null,
+            "selectable": false
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": 0
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-not-observed-with-track",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": null,
+            "codec": null,
+            "selectable": false
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "not_observed",
+            "track_id": "a-example",
+            "age_ms": null
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-track-age-null",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": null
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-age-boolean",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": true
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-age-fraction",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 0.5
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-age-string",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": "40"
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-age-negative",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": -1
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-age-overflow",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 9007199254740992
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "select-playback-mismatch",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-other",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-source-generation-mismatch",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-other",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-catalog-mismatch",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-other",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-target-mismatch",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-example"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-accepted-false",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": false,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-accepted-not-boolean",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": 1,
+        "outcome": "requested",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-requested-with-observation",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "requested",
+        "observed": {
+          "state": "track",
+          "track_id": "a-other",
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "select-confirmed-without-observation",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": null
+      }
+    },
+    {
+      "name": "select-confirmed-wrong-track",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "track",
+          "track_id": "a-example",
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "select-confirmed-not-observed",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "not_observed",
+          "track_id": null,
+          "age_ms": null
+        }
+      }
+    },
+    {
+      "name": "select-off-confirmed-with-track",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "track",
+          "track_id": "s-example",
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "select-off-confirmed-with-id",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off"
+        }
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "subtitle",
+          "mode": "off",
+          "id": "s-example"
+        },
+        "accepted": true,
+        "outcome": "confirmed",
+        "observed": {
+          "state": "off",
+          "track_id": null,
+          "age_ms": 0
+        }
+      }
+    },
+    {
+      "name": "error-unknown-code",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "backend_exception"
+      }
+    },
+    {
+      "name": "error-private-detail",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "unavailable",
+        "detail": "https://example.invalid/private"
+      }
+    },
+    {
+      "name": "error-select-missing-target",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "catalog_changed",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example"
+      }
+    },
+    {
+      "name": "error-select-context-mismatch",
+      "params": {
+        "op": "select",
+        "runtime": "native-example",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "select",
+        "state": "error",
+        "error": "catalog_changed",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-other",
+        "target": {
+          "kind": "audio",
+          "mode": "track",
+          "id": "a-other"
+        }
+      }
+    },
+    {
+      "name": "error-under-ok-status",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "unavailable"
+      }
+    },
+    {
+      "name": "unsupported-under-rejected-status",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "unsupported"
+      }
+    },
+    {
+      "name": "other-error-under-unsupported-status",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "unsupported",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "state": "error",
+        "error": "unavailable"
+      }
+    },
+    {
+      "name": "success-under-rejected-status",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "rejected",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "success-under-unsupported-status",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "unsupported",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "English - AC3 5.1",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-uri",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "https://example.invalid/private",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-absolute-path",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "/Users/example/movie.mkv",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-home-path",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "~/Movies/file.srt",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-windows-path",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "C:\\Movies\\file.srt",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-token",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "token=fixture-only",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-api-key",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "api_key=fixture-only",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-bidi",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "\u202e",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    },
+    {
+      "name": "list-label-private-or-control-control",
+      "params": {
+        "op": "list",
+        "runtime": "native-example"
+      },
+      "status": "ok",
+      "data": {
+        "version": 1,
+        "runtime": "native-example",
+        "op": "list",
+        "scope": "current_playback",
+        "playback": "p-example",
+        "source_generation": "s-example",
+        "catalog": "c-example",
+        "tracks": [
+          {
+            "id": "a-example",
+            "kind": "audio",
+            "label": "Track\nOne",
+            "language": "eng",
+            "codec": "ac3",
+            "selectable": true
+          },
+          {
+            "id": "a-other",
+            "kind": "audio",
+            "label": "Russian - AAC stereo",
+            "language": "rus",
+            "codec": "aac",
+            "selectable": true
+          },
+          {
+            "id": "s-example",
+            "kind": "subtitle",
+            "label": "English - SDH",
+            "language": "eng",
+            "codec": "srt",
+            "selectable": true
+          }
+        ],
+        "subtitle_off_supported": true,
+        "observed": {
+          "audio": {
+            "state": "track",
+            "track_id": "a-example",
+            "age_ms": 40
+          },
+          "subtitle": {
+            "state": "not_observed",
+            "track_id": null,
+            "age_ms": null
+          }
+        }
+      }
+    }
+  ],
+  "invariants": [
+    "Every illustrated wire object has exact keys; unknown keys, duplicate JSON keys, null/mistyped booleans, non-finite/fractional integers and oversized UTF-8 payloads are invalid.",
+    "All successful results have scope=current_playback. No default-language, profile, per-title/show track memory, Plex part selection, or other durable selection write is permitted.",
+    "List is passive and complete, without download, source resolution, playback start, selection, or provider HTTP requests. Unknown catalog returns catalog_incomplete; an actually known empty catalog returns tracks=[].",
+    "Track IDs are unique across both kinds within a catalog and never reused for a different row. The same metadata item may have a new ID after catalog invalidation.",
+    "Target mode=track requires exactly kind/mode/id, kind is audio|subtitle, and id must name a selectable row of that kind. Mode=off requires exactly kind=subtitle and mode=off; it has no id and requires subtitle_off_supported=true.",
+    "Playback token identifies the current logical play item, not its title or provider ID. Source generation identifies the current concrete pipeline/source binding; catalog identifies the complete immutable ID-to-track mapping and its selectable/off support policy.",
+    "Runtime, playback, source_generation and catalog are checked at admission and immediately before the initial effect. Changes to source binding or track mapping invalidate old receipts even if the visible item/title is unchanged. An operation's own fenced rebuild continuation follows the separate authority-transfer rule below.",
+    "A successful list renews the unchanged catalog receipt for 60000ms. A selection or rejection does not renew it. If context changes, list mints fresh IDs/catalog; old selections are rejected without fallback/remapping.",
+    "A native-owned selection-intent epoch is shared by manual and remote audio/subtitle choices. Every newly accepted intent, including an explicit no-op, advances it. At most one selection is pending across both kinds. A newer accepted intent supersedes and cancels all effects/continuations of the old intent even if runtime, source and catalog are unchanged. Invalid/rejected requests do not supersede valid work.",
+    "At admission capture an immutable monotonic authority deadline=min(request_expiry, catalog_lease_expiry_at_admission), the logical playback, selection-intent epoch and resolved native target. Expiry uses the original transport deadline, not ACK time. Later list renewal, ACK, queueing or rebuilding cannot extend it. Every effect and continuation checks deadline and intent; expired/superseded work has no further effects.",
+    "An operation may transfer authority to the concrete source generation produced by its own explicit rebuild handoff only while runtime, logical playback, captured selection-intent epoch, local policy and immutable deadline still match. The old source generation/catalog retire immediately. The continuation uses the already resolved native target and existing fenced handoff ownership; it never re-resolves the old track ID against a new catalog and never adopts an unrelated new source. Without proven handoff ownership it cancels.",
+    "observed state=track requires a same-kind listed track_id and integer age_ms. state=off is subtitle-only with null track_id and integer age_ms. state=not_observed requires null track_id and null age_ms.",
+    "Observation comes from current-source backend evidence, never a requested index, selected flag from provider metadata, route plan, queued action, generic playback progress or first video frame. Age is monotonic time since that evidence; invalidating its source clears it.",
+    "Select outcome=requested requires observed=null and means admission only. outcome=confirmed requires matching current-context backend evidence generated after admission and under the still-current selection-intent epoch, or a fresh post-admission authoritative read proving the requested target was already selected. Previously cached same-source observations and delayed old events cannot confirm. A subtitle-off confirmation requires positively known backend disabled state, not absent cues. It confirms backend selection, never physical audio audibility or subtitle pixels.",
+    "Accepted asynchronous selection may subsequently be superseded, fail or be cancelled. No implicit mutation replay occurs. Ordinary receipt id/status remain available. Follow-up list reports current facts, not proof that a particular past request caused them.",
+    "If a selection rebuilds/rebinds the source before confirmation, its result remains requested; old-context confirmation is prohibited. A fresh list may show the new context; v1 adds no correlated asynchronous job/status protocol.",
+    "Unsafe labels are replaced by Track N; no URL, filesystem path, token, raw provider identifier, internal stream object or error exception leaves the player. CLI applies its usual safe display projection again.",
+    "Capability remains absent until producer/controller/CLI fixtures and genuine native E2E cover list, both selections, subtitle off, stale receipts, no persistence and truthful evidence. Other clients keep old behavior."
+  ]
+}

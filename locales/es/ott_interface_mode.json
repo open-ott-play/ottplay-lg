@@ -1,0 +1,9 @@
+{
+  "ott.interface_title": "Interfaz",
+  "ott.interface_classic": "Clásica",
+  "ott.interface_modern": "Moderna",
+  "ott.interface_selected": "Seleccionada",
+  "ott.interface_help": "Elige el aspecto del reproductor",
+  "ott.interface_changed": "La selección cambió. Elige el modo de nuevo.",
+  "ott.interface_close_editor": "Cierra el editor antes de cambiar la interfaz"
+}

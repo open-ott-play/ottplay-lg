@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Pas du volume (%)",
+  "ott.volume_step_prompt": "Pas du volume (3–10 %)",
+  "ott.volume_step_invalid": "Saisissez un entier de 3 à 10",
+  "ott.info_timeout": "Durée d’affichage des informations (secondes)",
+  "ott.info_timeout_prompt": "Durée d’affichage des informations (3–20 secondes)",
+  "ott.info_timeout_invalid": "Saisissez un entier de 3 à 20"
+}

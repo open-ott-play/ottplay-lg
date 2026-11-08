@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Глыбіня архіва, г",
+  "ott.archive_hours_prompt": "Глыбіня архіва (0 — даныя плэйліста)",
+  "ott.archive_hours_invalid": "Увядзіце цэлы лік гадзін ад 0 да 8760",
+  "ott.archive_hours_changed": "Налады архіва змяніліся; адкрыйце рэдактар зноў",
+  "ott.archive_hours_profile": "Выберыце профіль тэлебачання M3U"
+}

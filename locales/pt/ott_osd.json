@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Nível do fundo dos menus no ecrã",
+  "ott.osd_clock": "Relógio permanente",
+  "ott.osd_level_help": "Escolha o nível do fundo dos menus no ecrã (predefinição: 7)",
+  "ott.osd_clock_help": "Mostrar sempre o relógio durante a reprodução",
+  "ott.osd_off": "Desativado",
+  "ott.osd_background": "Com fundo",
+  "ott.osd_transparent": "Transparente",
+  "ott.osd_changed": "As definições de apresentação mudaram; selecione a opção novamente",
+  "ott.osd_close_editor": "Feche o editor antes de alterar as definições de apresentação"
+}

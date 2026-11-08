@@ -1,0 +1,62 @@
+{
+  "ott.classic_rows": {
+    "value": "Classic list rows",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_side": {
+    "value": "Classic list side",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_arrows": {
+    "value": "Classic list arrows",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_seek": {
+    "value": "Seek step for 1/3 (seconds)",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_rows_help": {
+    "value": "Preferred rows per Classic page; large text and available space can reduce the count",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_side_help": {
+    "value": "Choose the side of the Classic list and its video preview",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_arrows_help": {
+    "value": "Choose Left/Right behavior in Classic lists; fullscreen controls stay unchanged",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_seek_help": {
+    "value": "Use 1/3 to skip during video or archive playback with controls hidden; live channels and Favorites keep number selection",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_right": {
+    "value": "Right",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_left": {
+    "value": "Left",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_paging": {
+    "value": "Paging",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_volume": {
+    "value": "Volume",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_context": {
+    "value": "Categories / details",
+    "description": "Classic list or numeric playback preference; applies after a successful save."
+  },
+  "ott.classic_show_progress": {
+    "value": "Show program progress",
+    "description": "Classic channel-list setting: show how far the current programme has progressed."
+  },
+  "ott.classic_show_progress_help": {
+    "value": "Show current-programme progress in Classic channel lists",
+    "description": "Help for the Classic channel-list programme-progress setting. This refers to the current programme, not a saved playback position."
+  }
+}

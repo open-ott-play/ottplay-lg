@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "operations": [
+    "sources",
+    "play",
+    "shuffle",
+    "connect"
+  ],
+  "max_sources": 32,
+  "max_items": 50000,
+  "max_result_bytes": 196608,
+  "errors": [
+    "invalid_request",
+    "runtime_changed",
+    "restricted",
+    "unsupported",
+    "source_not_found",
+    "source_ambiguous",
+    "source_unavailable",
+    "catalog_loading",
+    "catalog_unavailable",
+    "empty_source",
+    "too_many_items",
+    "operation_in_progress",
+    "native_error"
+  ],
+  "capability": {
+    "version": 1,
+    "operations": [
+      "sources",
+      "play",
+      "shuffle",
+      "connect"
+    ],
+    "absolute_paths": true,
+    "max_sources": 32,
+    "max_items": 50000
+  },
+  "sources_request": {
+    "action": "local_media",
+    "params": {
+      "op": "sources",
+      "runtime": "page-123"
+    }
+  },
+  "sources_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "sources",
+    "state": "ready",
+    "sources": [
+      {
+        "id": "source-123",
+        "name": "Movies",
+        "kind": "folder",
+        "available": true
+      }
+    ]
+  },
+  "play_request": {
+    "action": "local_media",
+    "params": {
+      "op": "play",
+      "runtime": "page-123",
+      "source": "Movies"
+    }
+  },
+  "play_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "play",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": false,
+    "accepted": true,
+    "playback_confirmed": false
+  },
+  "shuffle_request": {
+    "action": "local_media",
+    "params": {
+      "op": "shuffle",
+      "runtime": "page-123",
+      "source": "Movies"
+    }
+  },
+  "shuffle_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "shuffle",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": true,
+    "accepted": true,
+    "playback_confirmed": false
+  },
+  "connect_request": {
+    "action": "local_media",
+    "params": {
+      "op": "connect",
+      "runtime": "page-123",
+      "source": "Movies"
+    }
+  },
+  "connect_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "connect",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": false,
+    "accepted": true,
+    "playback_confirmed": false
+  },
+  "paths_request": {
+    "action": "local_media",
+    "params": {
+      "op": "sources",
+      "runtime": "page-123",
+      "include_paths": true
+    }
+  },
+  "paths_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "sources",
+    "state": "ready",
+    "sources": [
+      {
+        "id": "source-123",
+        "name": "Movies",
+        "kind": "folder",
+        "available": true,
+        "path": "/Volumes/data/Movies"
+      }
+    ]
+  },
+  "error_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "shuffle",
+    "state": "error",
+    "error": "source_ambiguous"
+  },
+  "lookup_request": {
+    "action": "local_media",
+    "params": {
+      "op": "sources",
+      "runtime": "page-123",
+      "path": "/var/media/Movies",
+      "include_paths": true
+    }
+  },
+  "lookup_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "sources",
+    "state": "ready",
+    "sources": [
+      {
+        "id": "source-123",
+        "name": "Movies",
+        "kind": "folder",
+        "available": true,
+        "path": "/private/var/media/Movies"
+      }
+    ]
+  },
+  "progressive_capability": {
+    "version": 1
+  },
+  "progressive_probe_request": {
+    "action": "capabilities",
+    "params": {
+      "local_media_progressive": true
+    }
+  },
+  "progressive_play_request": {
+    "action": "local_media",
+    "params": {
+      "op": "play",
+      "runtime": "page-123",
+      "source": "Movies",
+      "progressive": true
+    }
+  },
+  "progressive_play_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "play",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": false,
+    "accepted": true,
+    "playback_confirmed": false,
+    "scanning": true
+  },
+  "progressive_shuffle_request": {
+    "action": "local_media",
+    "params": {
+      "op": "shuffle",
+      "runtime": "page-123",
+      "source": "Movies",
+      "progressive": true
+    }
+  },
+  "progressive_shuffle_result": {
+    "version": 1,
+    "runtime": "page-123",
+    "op": "shuffle",
+    "state": "ready",
+    "source": {
+      "id": "source-123",
+      "name": "Movies",
+      "kind": "folder",
+      "available": true
+    },
+    "count": 3,
+    "shuffled": true,
+    "accepted": true,
+    "playback_confirmed": false,
+    "scanning": true
+  }
+}

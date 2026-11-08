@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "USB-Ordner",
+  "ott.usb_browser_use": "Diesen Ordner verwenden",
+  "ott.usb_browser_parent": "Übergeordneter Ordner",
+  "ott.usb_browser_root": "Laufwerkswurzel",
+  "ott.usb_browser_previous": "Vorherige Seite",
+  "ott.usb_browser_next": "Nächste Seite",
+  "ott.usb_browser_more": "Mehr laden",
+  "ott.usb_browser_browse_root": "Laufwerkswurzel öffnen",
+  "ott.usb_browser_choose": "Ordner auf diesem USB-Laufwerk wählen",
+  "ott.usb_browser_reading": "Ordner werden gelesen…",
+  "ott.usb_browser_cancelled": "Ordnerladen abgebrochen",
+  "ott.usb_browser_return": "Zurück ohne Änderung der gewählten Quelle",
+  "ott.usb_browser_more_help": "Weitere Ordner in diesem Verzeichnis suchen",
+  "ott.usb_browser_limit": "Listenlimit erreicht. Diesen Ordner verwenden oder im Profil den genauen Pfad eingeben.",
+  "ott.usb_browser_partial": "Unvollständige Ordnerliste. Mehr laden, um weitere Ordner zu finden.",
+  "ott.usb_browser_unreadable": "Einige Ordnernamen konnten nicht gelesen werden. Aktualisieren oder einen verfügbaren Ordner wählen.",
+  "ott.usb_browser_empty": "Keine Unterordner. Diesen Ordner verwenden, um seine Videos einzubeziehen.",
+  "ott.usb_browser_ready": "Einen Unterordner öffnen oder diesen Ordner verwenden.",
+  "ott.usb_browser_checking": "Gewählter USB-Ordner wird geprüft…",
+  "ott.usb_browser_changed": "USB-Auswahl geändert; diesen Dialog schließen"
+}

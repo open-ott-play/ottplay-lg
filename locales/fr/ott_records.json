@@ -1,0 +1,8 @@
+{
+  "ott.records": "Enregistrements",
+  "ott.records_empty": "Aucune émission dans le guide pour cette période d’archives",
+  "ott.records_unavailable": "Les enregistrements de cette chaîne sont indisponibles",
+  "ott.records_incomplete": "La liste des enregistrements est incomplète ou indisponible",
+  "ott.records_window": "Les enregistrements couvrent toute la période des archives",
+  "ott.records_order": "Les enregistrements sont classés par titre"
+}

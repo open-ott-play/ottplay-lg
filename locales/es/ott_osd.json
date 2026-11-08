@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Nivel del fondo del menú en pantalla",
+  "ott.osd_clock": "Reloj permanente",
+  "ott.osd_level_help": "Elige el nivel del fondo del menú en pantalla (predeterminado: 7)",
+  "ott.osd_clock_help": "Mostrar el reloj durante toda la reproducción",
+  "ott.osd_off": "Desactivado",
+  "ott.osd_background": "Con fondo",
+  "ott.osd_transparent": "Transparente",
+  "ott.osd_changed": "La configuración de pantalla cambió; selecciona la opción de nuevo",
+  "ott.osd_close_editor": "Cierra el editor antes de cambiar la configuración de pantalla"
+}

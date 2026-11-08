@@ -1,0 +1,10 @@
+{
+  "widgets.menu.pause_play": {
+    "value": "Pause / Play",
+    "description": "Playback Menu action toggling the current finite or archive playback between paused and playing; the two labels describe the same toggle."
+  },
+  "widgets.menu.reload_stream": {
+    "value": "Reload current stream",
+    "description": "Playback Menu action reloading the installed stream. Finite video keeps its position and paused state. This is neither Start over nor Restart app."
+  }
+}

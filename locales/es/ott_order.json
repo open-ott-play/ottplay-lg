@@ -1,0 +1,12 @@
+{
+  "ott.order_actions": "Acciones",
+  "ott.order_shuffle": "Mezclar",
+  "ott.order_reset": "Restablecer orden",
+  "ott.order_changed": "La lista ha cambiado; vuelve a abrir Acciones",
+  "ott.order_unavailable": "El orden de la lista no está disponible para esta fuente",
+  "ott.order_too_large": "La lista es demasiado grande para guardar su orden",
+  "ott.order_add_to_category": "Añadir a categoría",
+  "ott.order_choose_category": "Elegir categoría",
+  "ott.order_sort_alphabetical": "Ordenar alfabéticamente",
+  "ott.order_sort_as_is": "Orden guardado"
+}

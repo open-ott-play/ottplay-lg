@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Радкі спіса Classic",
+  "ott.classic_side": "Бок спіса Classic",
+  "ott.classic_arrows": "Стрэлкі ў спісе Classic",
+  "ott.classic_seek": "Крок перамоткі 1/3 (секунды)",
+  "ott.classic_rows_help": "Пажаданая колькасць радкоў Classic; буйны шрыфт і даступнае месца могуць зменшыць яе",
+  "ott.classic_side_help": "Выберыце бок спіса Classic і акна відэа",
+  "ott.classic_arrows_help": "Дзеянне ўлева/ўправа ў спісах Classic; кіраванне поўнаэкранным відэа не змяняецца",
+  "ott.classic_seek_help": "Пры схаваным кіраванні клавішы 1/3 перамотваюць відэа і архіў; у прамым эфіры і Абраным лічбы выбіраюць канал або запіс",
+  "ott.classic_right": "Справа",
+  "ott.classic_left": "Злева",
+  "ott.classic_paging": "Гартаць старонкі",
+  "ott.classic_volume": "Гучнасць",
+  "ott.classic_context": "Катэгорыі / апісанне",
+  "ott.classic_show_progress": "Паказваць прагрэс перадачы",
+  "ott.classic_show_progress_help": "Паказваць прагрэс бягучай перадачы ў спісах каналаў Classic"
+}

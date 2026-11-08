@@ -1,0 +1,6 @@
+{
+  "classic.player.menu": {
+    "value": "Menu",
+    "description": "Title of the Classic player action menu, shown above the existing full-page action list."
+  }
+}

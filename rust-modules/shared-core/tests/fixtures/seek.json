@@ -1,0 +1,585 @@
+[
+  {
+    "name": "finite relative forward",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 48
+    }
+  },
+  {
+    "name": "finite rewind to zero",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": -50,
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 0
+    }
+  },
+  {
+    "name": "finite default overshoot refuses",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 30,
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "finite explicit overshoot clamps",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 30,
+      "position": 38,
+      "duration": 60,
+      "overshoot": "clamp"
+    },
+    "expected": {
+      "action": "seek",
+      "position": 60
+    }
+  },
+  {
+    "name": "finite exact end is accepted",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 60,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 60
+    }
+  },
+  {
+    "name": "finite absolute fractional position",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 12.125,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 12.125
+    }
+  },
+  {
+    "name": "finite zero is measured",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 0,
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 0
+    }
+  },
+  {
+    "name": "finite absent duration does not invent a bound",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "position": 38
+    },
+    "expected": {
+      "action": "seek",
+      "position": 48
+    }
+  },
+  {
+    "name": "finite zero duration is unknown",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "position": 38,
+      "duration": 0
+    },
+    "expected": {
+      "action": "seek",
+      "position": 48
+    }
+  },
+  {
+    "name": "finite negative target clamps",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "absolute",
+      "value": -1,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 0
+    }
+  },
+  {
+    "name": "zero offset is no operation",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 0,
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "missing offset is no operation",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "missing position is no operation",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "duration": 60
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "negative observed position is unavailable",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "position": -1,
+      "duration": 60
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "finite beginning is zero",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "begin",
+      "position": 38,
+      "duration": 60
+    },
+    "expected": {
+      "action": "seek",
+      "position": 0
+    }
+  },
+  {
+    "name": "finite addition overflow refuses",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 1e+308,
+      "position": 1e+308
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "absent target is no operation",
+    "target": null,
+    "request": {
+      "intent": "absolute",
+      "value": 12
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "explicit restart",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "restart"
+    },
+    "expected": {
+      "action": "restart"
+    }
+  },
+  {
+    "name": "restart prohibited",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "restart",
+      "restartAllowed": false
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "live rewind opens archive",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "offset",
+      "value": -10,
+      "now": 1000,
+      "archiveAvailable": true,
+      "archiveEarliest": 500
+    },
+    "expected": {
+      "action": "open-archive",
+      "archiveStart": 990
+    }
+  },
+  {
+    "name": "live rewind respects retention",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "offset",
+      "value": -900,
+      "now": 1000,
+      "archiveAvailable": true,
+      "archiveEarliest": 500
+    },
+    "expected": {
+      "action": "open-archive",
+      "archiveStart": 500
+    }
+  },
+  {
+    "name": "live positive offset restarts",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10
+    },
+    "expected": {
+      "action": "restart"
+    }
+  },
+  {
+    "name": "live positive offset can refuse restart",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "restartAllowed": false
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "live unavailable archive refuses",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "offset",
+      "value": -10,
+      "now": 1000
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "live beginning requires retention",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "begin",
+      "now": 1000,
+      "archiveAvailable": true
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "live beginning uses retention",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "live"
+    },
+    "request": {
+      "intent": "begin",
+      "now": 1000,
+      "archiveAvailable": true,
+      "archiveEarliest": 500
+    },
+    "expected": {
+      "action": "open-archive",
+      "archiveStart": 500
+    }
+  },
+  {
+    "name": "archive relative adds epoch and position",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "archive",
+      "archiveStart": 800
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "position": 40,
+      "now": 1000,
+      "archiveAvailable": true
+    },
+    "expected": {
+      "action": "open-archive",
+      "archiveStart": 850
+    }
+  },
+  {
+    "name": "archive absolute is broadcast epoch",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "archive",
+      "archiveStart": 800
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 900,
+      "position": 40,
+      "now": 1000,
+      "archiveAvailable": true
+    },
+    "expected": {
+      "action": "open-archive",
+      "archiveStart": 900
+    }
+  },
+  {
+    "name": "archive reaching live edge",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "archive",
+      "archiveStart": 800
+    },
+    "request": {
+      "intent": "offset",
+      "value": 160,
+      "position": 40,
+      "now": 1000,
+      "archiveAvailable": true
+    },
+    "expected": {
+      "action": "go-live"
+    }
+  },
+  {
+    "name": "archive live edge tolerance",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "archive",
+      "archiveStart": 800
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 995,
+      "now": 1000,
+      "archiveAvailable": true,
+      "liveEdgeTolerance": 10
+    },
+    "expected": {
+      "action": "go-live"
+    }
+  },
+  {
+    "name": "archive explicit live",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "archive",
+      "archiveStart": 800
+    },
+    "request": {
+      "intent": "go-live"
+    },
+    "expected": {
+      "action": "go-live"
+    }
+  },
+  {
+    "name": "finite go live is no operation",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "go-live"
+    },
+    "expected": {
+      "action": "noop"
+    }
+  },
+  {
+    "name": "invalid empty source identity",
+    "target": {
+      "sourceId": "",
+      "channelId": "movie",
+      "kind": "vod"
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 12
+    },
+    "error": true
+  },
+  {
+    "name": "archive requires its epoch",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "channel",
+      "kind": "archive"
+    },
+    "request": {
+      "intent": "offset",
+      "value": 10,
+      "position": 40,
+      "now": 1000
+    },
+    "error": true
+  },
+  {
+    "name": "finite must not carry broadcast epoch",
+    "target": {
+      "sourceId": "fixture",
+      "channelId": "movie",
+      "kind": "vod",
+      "archiveStart": 800
+    },
+    "request": {
+      "intent": "absolute",
+      "value": 12
+    },
+    "error": true
+  }
+]

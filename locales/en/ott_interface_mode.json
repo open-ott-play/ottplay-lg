@@ -1,0 +1,30 @@
+{
+  "ott.interface_title": {
+    "value": "Interface mode",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  },
+  "ott.interface_classic": {
+    "value": "Classic",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  },
+  "ott.interface_modern": {
+    "value": "Modern",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  },
+  "ott.interface_selected": {
+    "value": "Selected",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  },
+  "ott.interface_help": {
+    "value": "Choose how the player looks",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  },
+  "ott.interface_changed": {
+    "value": "Interface selection changed; select the mode again",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  },
+  "ott.interface_close_editor": {
+    "value": "Close the editor before changing interface mode",
+    "description": "Native Classic/Modern interface selection; presentation only."
+  }
+}

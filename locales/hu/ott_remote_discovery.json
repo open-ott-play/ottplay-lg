@@ -1,0 +1,10 @@
+{
+  "ott.remote_find": "Vezérlőszerver keresése",
+  "ott.remote_unconfigured": "A keresés nincs beállítva",
+  "ott.remote_invalid_profile": "Hibás keresési beállítás",
+  "ott.remote_finding": "Vezérlőszerverek keresése…",
+  "ott.remote_choose": "Válasszon vezérlőszervert",
+  "ott.remote_empty": "Nincs találat. Próbálja újra.",
+  "ott.remote_failed": "Sikertelen keresés. Próbálja újra.",
+  "ott.remote_choice_expired": "A lista megváltozott. Keressen újra."
+}

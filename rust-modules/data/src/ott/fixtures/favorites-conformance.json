@@ -1,0 +1,882 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "portable-example",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"TV favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"TV\",\"subprofile\":null,\"sourceAlias\":\"Family channels\"},\"locator\":{\"kind\":\"channel\",\"channelId\":\"001\"}},{\"title\":\"Portal favorite\",\"origin\":{\"provider\":\"stalker\",\"profile\":\"Portal\",\"subprofile\":null,\"sourceAlias\":\"TV subscription\"},\"locator\":{\"kind\":\"channel\",\"channelId\":\"723\"}},{\"title\":\"Cinema favorite\",\"origin\":{\"provider\":\"plex\",\"profile\":\"Cinema\",\"subprofile\":null,\"sourceAlias\":\"Home PMS\"},\"locator\":{\"kind\":\"plex-media\",\"serverId\":\"PMS_1\",\"ratingKey\":\"42\"}},{\"title\":\"Movies favorite\",\"origin\":{\"provider\":\"local\",\"profile\":\"Movies\",\"subprofile\":null,\"sourceAlias\":\"Home files\"},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Movies\",\"relativePath\":\"Comedy/Film.mkv\"}},{\"title\":\"Portal cinema favorite\",\"origin\":{\"provider\":\"vportal\",\"profile\":\"Portal cinema\",\"subprofile\":\"Series\",\"sourceAlias\":\"Cinema subscription\"},\"locator\":{\"kind\":\"vportal-media\",\"idField\":\"episode_id\",\"id\":\"s18-e1\"}},{\"title\":\"News favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"TV\",\"subprofile\":null,\"sourceAlias\":\"Family channels\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\",\"group\":\"News\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"001\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"TV\",\"provider\":\"m3u\",\"sourceAlias\":\"Family channels\",\"subprofile\":null},\"title\":\"TV favorite\"},{\"locator\":{\"channelId\":\"723\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Portal\",\"provider\":\"stalker\",\"sourceAlias\":\"TV subscription\",\"subprofile\":null},\"title\":\"Portal favorite\"},{\"locator\":{\"kind\":\"plex-media\",\"ratingKey\":\"42\",\"serverId\":\"PMS_1\"},\"origin\":{\"profile\":\"Cinema\",\"provider\":\"plex\",\"sourceAlias\":\"Home PMS\",\"subprofile\":null},\"title\":\"Cinema favorite\"},{\"locator\":{\"kind\":\"local-media\",\"relativePath\":\"Comedy/Film.mkv\",\"rootAlias\":\"Movies\"},\"origin\":{\"profile\":\"Movies\",\"provider\":\"local\",\"sourceAlias\":\"Home files\",\"subprofile\":null},\"title\":\"Movies favorite\"},{\"locator\":{\"id\":\"s18-e1\",\"idField\":\"episode_id\",\"kind\":\"vportal-media\"},\"origin\":{\"profile\":\"Portal cinema\",\"provider\":\"vportal\",\"sourceAlias\":\"Cinema subscription\",\"subprofile\":\"Series\"},\"title\":\"Portal cinema favorite\"},{\"locator\":{\"group\":\"News\",\"kind\":\"channel-name\",\"name\":\"News HD\"},\"origin\":{\"profile\":\"TV\",\"provider\":\"m3u\",\"sourceAlias\":\"Family channels\",\"subprofile\":null},\"title\":\"News favorite\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"001\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"TV\",\"provider\":\"m3u\",\"sourceAlias\":\"Family channels\",\"subprofile\":null}}",
+        "{\"locator\":{\"channelId\":\"723\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Portal\",\"provider\":\"stalker\",\"sourceAlias\":\"TV subscription\",\"subprofile\":null}}",
+        "{\"locator\":{\"kind\":\"plex-media\",\"ratingKey\":\"42\",\"serverId\":\"PMS_1\"},\"origin\":{\"profile\":\"Cinema\",\"provider\":\"plex\",\"sourceAlias\":\"Home PMS\",\"subprofile\":null}}",
+        "{\"locator\":{\"kind\":\"local-media\",\"relativePath\":\"Comedy/Film.mkv\",\"rootAlias\":\"Movies\"},\"origin\":{\"profile\":\"Movies\",\"provider\":\"local\",\"sourceAlias\":\"Home files\",\"subprofile\":null}}",
+        "{\"locator\":{\"id\":\"s18-e1\",\"idField\":\"episode_id\",\"kind\":\"vportal-media\"},\"origin\":{\"profile\":\"Portal cinema\",\"provider\":\"vportal\",\"sourceAlias\":\"Cinema subscription\",\"subprofile\":\"Series\"}}",
+        "{\"locator\":{\"group\":\"News\",\"kind\":\"channel-name\",\"name\":\"News HD\"},\"origin\":{\"profile\":\"TV\",\"provider\":\"m3u\",\"sourceAlias\":\"Family channels\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "channel-name.fixtures.json/name-only",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\",\"group\":null}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"group\":null,\"kind\":\"channel-name\",\"name\":\"News HD\"},\"origin\":{\"profile\":\"Family\",\"provider\":\"m3u\",\"sourceAlias\":\"TV\",\"subprofile\":null},\"title\":\"Favorite\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"group\":null,\"kind\":\"channel-name\",\"name\":\"News HD\"},\"origin\":{\"profile\":\"Family\",\"provider\":\"m3u\",\"sourceAlias\":\"TV\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "channel-name.fixtures.json/with-group",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\",\"group\":\"World\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"group\":\"World\",\"kind\":\"channel-name\",\"name\":\"News HD\"},\"origin\":{\"profile\":\"Family\",\"provider\":\"m3u\",\"sourceAlias\":\"TV\",\"subprofile\":null},\"title\":\"Favorite\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"group\":\"World\",\"kind\":\"channel-name\",\"name\":\"News HD\"},\"origin\":{\"profile\":\"Family\",\"provider\":\"m3u\",\"sourceAlias\":\"TV\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "channel-name.fixtures.json/missing-group",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "channel-name.fixtures.json/empty-group",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\",\"group\":\"\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "channel-name.fixtures.json/lone-surrogate",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"\\ud800\",\"group\":null}}]}",
+      "accepted": false
+    },
+    {
+      "id": "channel-name.fixtures.json/private-index",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\",\"group\":null,\"index\":42}}]}",
+      "accepted": false
+    },
+    {
+      "id": "channel-name.fixtures.json/plex-no-name-fallback",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Favorite\",\"origin\":{\"provider\":\"plex\",\"profile\":\"Family\",\"subprofile\":null,\"sourceAlias\":\"TV\"},\"locator\":{\"kind\":\"channel-name\",\"name\":\"News HD\",\"group\":null}}]}",
+      "accepted": false
+    },
+    {
+      "id": "nested-m3u-vportal.fixtures.json/root",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Movie\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Main playlist\",\"subprofile\":null,\"sourceAlias\":\"Main playlist\"},\"locator\":{\"kind\":\"vportal-media\",\"idField\":\"id\",\"id\":\"42\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"id\":\"42\",\"idField\":\"id\",\"kind\":\"vportal-media\"},\"origin\":{\"profile\":\"Main playlist\",\"provider\":\"m3u\",\"sourceAlias\":\"Main playlist\",\"subprofile\":null},\"title\":\"Movie\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"id\":\"42\",\"idField\":\"id\",\"kind\":\"vportal-media\"},\"origin\":{\"profile\":\"Main playlist\",\"provider\":\"m3u\",\"sourceAlias\":\"Main playlist\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "nested-m3u-vportal.fixtures.json/folder",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Movie\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Main playlist\",\"subprofile\":\"Movies/Comedy\",\"sourceAlias\":\"Main playlist\"},\"locator\":{\"kind\":\"vportal-media\",\"idField\":\"episode_id\",\"id\":\"s18-e1\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"id\":\"s18-e1\",\"idField\":\"episode_id\",\"kind\":\"vportal-media\"},\"origin\":{\"profile\":\"Main playlist\",\"provider\":\"m3u\",\"sourceAlias\":\"Main playlist\",\"subprofile\":\"Movies/Comedy\"},\"title\":\"Movie\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"id\":\"s18-e1\",\"idField\":\"episode_id\",\"kind\":\"vportal-media\"},\"origin\":{\"profile\":\"Main playlist\",\"provider\":\"m3u\",\"sourceAlias\":\"Main playlist\",\"subprofile\":\"Movies/Comedy\"}}"
+      ]
+    },
+    {
+      "id": "nested-m3u-vportal.fixtures.json/unsafe-id",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Movie\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Main playlist\",\"subprofile\":null,\"sourceAlias\":\"Main playlist\"},\"locator\":{\"kind\":\"vportal-media\",\"idField\":\"id\",\"id\":\"http://secret\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "nested-m3u-vportal.fixtures.json/raw-command",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Movie\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Main playlist\",\"subprofile\":null,\"sourceAlias\":\"Main playlist\"},\"locator\":{\"kind\":\"vportal-media\",\"idField\":\"id\",\"id\":\"42\",\"cmd\":\"secret\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "nested-m3u-vportal.fixtures.json/invented-url-folder",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"Movie\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Main playlist\",\"subprofile\":\"http://portal/secret\",\"sourceAlias\":\"Main playlist\"},\"locator\":{\"kind\":\"vportal-media\",\"idField\":\"id\",\"id\":\"42\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/0",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"bestlist/stalker\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"bestlist/stalker\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"bestlist/stalker\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/1",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"d/maxtv\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"d/maxtv\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"d/maxtv\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/2",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"iptv-ott.ru\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"iptv-ott.ru\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"iptv-ott.ru\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/3",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"shara.club\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"shara.club\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"shara.club\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/4",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"bestlist-stalker\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"bestlist-stalker\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"bestlist-stalker\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/5",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"d-maxtv\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"d-maxtv\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"d-maxtv\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/6",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"iptv-ott-ru\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"iptv-ott-ru\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"iptv-ott-ru\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/7",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"shara-club\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"shara-club\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"shara-club\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/8",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/12",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"1provider\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"1provider\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"1provider\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/13",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/14",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"x..y\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"x..y\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"x..y\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "provider-id/15",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/16",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"/a\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/17",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a/\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/18",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a//b\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/19",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a/.\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/20",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a/..\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/21",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a/../b\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/22",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"../a\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/23",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\".a\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/24",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a/.hidden\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/25",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a/-b\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/26",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a\\\\b\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/27",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"http://host\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/28",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a?token=x\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/29",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a#fragment\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/30",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a%2fb\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/31",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"A\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/32",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"a\\n\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "provider-id/33",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/ascii",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Profile\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Profile\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Profile\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "text/astral_pair",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"A😀B\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"A😀B\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"A😀B\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "text/lone_high",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"\\ud800\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/lone_low",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"\\udfff\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/high_then_ascii",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"\\ud800A\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/nested_high",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"\\ud800\\ud800\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/high_at_end",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"A\\udbff\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/null",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"A\\u0000B\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/trim_bom",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"﻿Name\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/trim_nbsp",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Name \",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/trim_line_separator",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\" Name\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "text/not_js_trim_nel",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Name\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Name\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Name\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "text/not_js_trim_mongolian",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"᠎Name\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"᠎Name\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"᠎Name\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "text/internal_space",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"A B\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"A B\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"A B\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "text/limit_astral_valid",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "text/limit_astral_invalid",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/9/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"\\tRoot\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/9/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root\\t\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/10/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"\\nRoot\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/10/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root\\n\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/11/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"\\u000bRoot\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/11/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root\\u000b\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/12/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"\\fRoot\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/12/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root\\f\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/13/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"\\rRoot\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/13/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root\\r\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/32/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/32/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/160/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/160/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/5760/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/5760/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8192/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8192/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8193/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8193/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8194/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8194/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8195/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8195/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8196/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8196/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8197/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8197/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8198/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8198/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8199/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8199/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8200/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8200/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8201/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8201/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8202/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8202/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8232/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8232/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8233/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8233/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8239/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8239/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8287/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\" Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/8287/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root \",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/12288/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"　Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/12288/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root　\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/65279/before",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"﻿Root\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "trim/65279/after",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Root﻿\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "version/1",
+      "json": "{\"version\":1,\"entries\":[]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[],\"version\":1}",
+      "identities": []
+    },
+    {
+      "id": "version/1.0",
+      "json": "{\"version\":1.0,\"entries\":[]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[],\"version\":1}",
+      "identities": []
+    },
+    {
+      "id": "version/1e0",
+      "json": "{\"version\":1e0,\"entries\":[]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[],\"version\":1}",
+      "identities": []
+    },
+    {
+      "id": "version/1.000e+0",
+      "json": "{\"version\":1.000e+0,\"entries\":[]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[],\"version\":1}",
+      "identities": []
+    },
+    {
+      "id": "version-invalid/\"1\"",
+      "json": "{\"version\":\"1\",\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/true",
+      "json": "{\"version\":true,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/null",
+      "json": "{\"version\":null,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/0",
+      "json": "{\"version\":0,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/2",
+      "json": "{\"version\":2,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/1.1",
+      "json": "{\"version\":1.1,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/-1",
+      "json": "{\"version\":-1,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/256",
+      "json": "{\"version\":256,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "version-invalid/0.99999999999999994",
+      "json": "{\"version\":0.99999999999999994,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "duplicate-json-key",
+      "json": "{\"version\":1,\"version\":1,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "duplicate-escaped-json-key",
+      "json": "{\"version\":1,\"\\u0076ersion\":1,\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "trailing-json",
+      "json": "{\"version\":1,\"entries\":[]} null",
+      "accepted": false
+    },
+    {
+      "id": "unknown-document-field",
+      "json": "{\"version\":1,\"entries\":[],\"token\":\"synthetic\"}",
+      "accepted": false
+    },
+    {
+      "id": "missing-document-version",
+      "json": "{\"entries\":[]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-document-entries",
+      "json": "{\"version\":1}",
+      "accepted": false
+    },
+    {
+      "id": "duplicate-entry",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}},{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "duplicate-identity-renamed",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}},{\"title\":\"Renamed\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "same-channel-distinct-profile",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}},{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Away\",\"sourceAlias\":\"Away\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"},{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Away\",\"provider\":\"m3u\",\"sourceAlias\":\"Away\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null}}",
+        "{\"locator\":{\"channelId\":\"m3u-epg:news\",\"kind\":\"channel\"},\"origin\":{\"profile\":\"Away\",\"provider\":\"m3u\",\"sourceAlias\":\"Away\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "missing-origin/provider",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-origin/profile",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-origin/sourceAlias",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-origin/subprofile",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\"},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-entry/title",
+      "json": "{\"version\":1,\"entries\":[{\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-entry/origin",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "missing-entry/locator",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null}}]}",
+      "accepted": false
+    },
+    {
+      "id": "unexpected-url/entry",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"},\"url\":\"https://example.invalid/private\"}]}",
+      "accepted": false
+    },
+    {
+      "id": "unexpected-url/origin",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null,\"url\":\"https://example.invalid/private\"},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "unexpected-url/locator",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"m3u\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel\",\"channelId\":\"m3u-epg:news\",\"url\":\"https://example.invalid/private\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "local-path/Films/Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"Films/Example.mkv\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"kind\":\"local-media\",\"relativePath\":\"Films/Example.mkv\",\"rootAlias\":\"Films\"},\"origin\":{\"profile\":\"Offline\",\"provider\":\"local\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"kind\":\"local-media\",\"relativePath\":\"Films/Example.mkv\",\"rootAlias\":\"Films\"},\"origin\":{\"profile\":\"Offline\",\"provider\":\"local\",\"sourceAlias\":\"Films\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "local-path/../Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"../Example.mkv\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "local-path//Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"/Example.mkv\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "local-path/C:/Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"C:/Example.mkv\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "local-path/a//Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"a//Example.mkv\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "local-path/a/./Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"a/./Example.mkv\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "local-path/a\\Example.mkv",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"local\",\"profile\":\"Offline\",\"sourceAlias\":\"Films\",\"subprofile\":null},\"locator\":{\"kind\":\"local-media\",\"rootAlias\":\"Films\",\"relativePath\":\"a\\\\Example.mkv\"}}]}",
+      "accepted": false
+    },
+    {
+      "id": "name-fallback/xtream",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"xtream\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel-name\",\"name\":\"Documentary\",\"group\":\"Films\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"group\":\"Films\",\"kind\":\"channel-name\",\"name\":\"Documentary\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"xtream\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"group\":\"Films\",\"kind\":\"channel-name\",\"name\":\"Documentary\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"xtream\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    },
+    {
+      "id": "name-fallback/stalker",
+      "json": "{\"version\":1,\"entries\":[{\"title\":\"News\",\"origin\":{\"provider\":\"stalker\",\"profile\":\"Home\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"locator\":{\"kind\":\"channel-name\",\"name\":\"Documentary\",\"group\":\"Films\"}}]}",
+      "accepted": true,
+      "canonical": "{\"entries\":[{\"locator\":{\"group\":\"Films\",\"kind\":\"channel-name\",\"name\":\"Documentary\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"stalker\",\"sourceAlias\":\"Home\",\"subprofile\":null},\"title\":\"News\"}],\"version\":1}",
+      "identities": [
+        "{\"locator\":{\"group\":\"Films\",\"kind\":\"channel-name\",\"name\":\"Documentary\"},\"origin\":{\"profile\":\"Home\",\"provider\":\"stalker\",\"sourceAlias\":\"Home\",\"subprofile\":null}}"
+      ]
+    }
+  ]
+}

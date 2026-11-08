@@ -1,0 +1,219 @@
+{
+  "ott.brand": {
+    "value": "OTTPlay",
+    "description": "Application brand in the native OTT catalogue header. Keep the brand unchanged."
+  },
+  "ott.intro": {
+    "value": "Providers, profiles and Favorites",
+    "description": "Introduction to the native OTT catalogue while its first snapshot loads."
+  },
+  "ott.browse": {
+    "value": "Browse",
+    "description": "Heading of the native OTT navigation section."
+  },
+  "ott.providers": {
+    "value": "Providers",
+    "description": "Native OTT navigation action: choose a provider type."
+  },
+  "ott.profiles": {
+    "value": "Profiles",
+    "description": "Native OTT navigation action: choose a saved provider profile."
+  },
+  "ott.categories": {
+    "value": "Categories",
+    "description": "Native OTT navigation action: choose a content category."
+  },
+  "ott.favorites": {
+    "value": "Favorites",
+    "description": "Native OTT navigation action: open the shared Favorites list."
+  },
+  "ott.description": {
+    "value": "Description",
+    "description": "Native OTT action opening the selected media item’s complete description."
+  },
+  "ott.value": {
+    "value": "Value",
+    "description": "Native OTT setting editor section heading."
+  },
+  "ott.value_empty": {
+    "value": "Select to enter a value",
+    "description": "Native OTT setting editor button when the value is empty. Selecting it opens text entry."
+  },
+  "ott.save": {
+    "value": "Save",
+    "description": "Native OTT setting editor action committing the draft."
+  },
+  "ott.editor_help": {
+    "value": "Select the value to edit it. Save applies the change; Cancel keeps the previous value.",
+    "description": "Native OTT setting editor instructions. Save commits the draft; Cancel discards it."
+  },
+  "ott.channel_list": {
+    "value": "Channel list",
+    "description": "Back breadcrumb from the native OTT complete description to the channel list."
+  },
+  "ott.read_hint": {
+    "value": "Up / Down to read · Back to return",
+    "description": "Native OTT description reader hint. Up and Down scroll; Back returns to the channel list."
+  },
+  "ott.favorite_hint": {
+    "value": "Hold OK: Favorite",
+    "description": "Native OTT channel hint. Holding OK adds or removes the selected item from Favorites."
+  },
+  "ott.description_hint": {
+    "value": "Right: full description · Hold OK: Favorite",
+    "description": "Native OTT channel hint. Right opens the complete description; holding OK toggles Favorites."
+  },
+  "ott.standby": {
+    "value": "Standby",
+    "description": "Native application standby overlay. A key press or click wakes the player."
+  },
+  "ott.search": {
+    "value": "Search",
+    "description": "Native OTT search editor heading and action applying the temporary query."
+  },
+  "ott.search_this_list": {
+    "value": "Search this list",
+    "description": "Native OTT action searching only the currently loaded list, not external catalogues."
+  },
+  "ott.search_help": {
+    "value": "Enter a title to filter this list. An empty search shows the entire current list; Cancel keeps the previous search.",
+    "description": "Search applies only to the current profile, folder and category. Cancel preserves the committed query."
+  },
+  "ott.search_pending": {
+    "value": "Searching this list…",
+    "description": "Native OTT status while applying a list search."
+  },
+  "ott.search_empty": {
+    "value": "Empty: entire current list",
+    "description": "Empty search value: clearing the query shows the entire current list, retaining its profile, folder and category."
+  },
+  "ott.search_favorites": {
+    "value": "Search favorites",
+    "description": "Search action and editor title for the global Favorites list."
+  },
+  "ott.search_empty_favorites": {
+    "value": "Empty: all favorites",
+    "description": "Empty search value for Favorites; clearing the query shows all favorites without changing the active source."
+  },
+  "ott.search_help_favorites": {
+    "value": "Enter a title to filter favorites. An empty search shows all favorites; Cancel keeps the previous search.",
+    "description": "Search instructions scoped to Favorites. Cancel preserves its previous query."
+  },
+  "ott.search_scope_title": {
+    "value": "Search: {scope}",
+    "description": "Search action and editor title. Scope is the unchanged current profile/folder and optional category name.",
+    "args": {
+      "scope": "str"
+    }
+  },
+  "ott.favorite_add": {
+    "value": "Add to Favorites",
+    "description": "Native OTT action toggling the selected item in the shared Favorites list."
+  },
+  "ott.favorite_remove": {
+    "value": "Remove from Favorites",
+    "description": "Native OTT action toggling the selected item in the shared Favorites list."
+  },
+  "ott.loaded_count": {
+    "value": "Loaded: {loaded}",
+    "description": "Native OTT catalogue progress. A total appears only when the backend knows it.",
+    "args": {
+      "loaded": "i64"
+    }
+  },
+  "ott.loaded_total": {
+    "value": "Loaded: {loaded} / {total}",
+    "description": "Native OTT catalogue progress. A total appears only when the backend knows it.",
+    "args": {
+      "loaded": "i64",
+      "total": "i64"
+    }
+  },
+  "ott.cards_hint": {
+    "value": "Browse: details and Favorites",
+    "description": "Hint below selected native catalogue card. Browse opens details and Favorites actions."
+  },
+  "ott.guide": {
+    "value": "Programme guide",
+    "description": "Native programme guide or reminder UI: guide."
+  },
+  "ott.guide_watch_archive": {
+    "value": "Watch archive",
+    "description": "Native programme guide or reminder UI: guide watch archive."
+  },
+  "ott.guide_watch_live": {
+    "value": "Watch live",
+    "description": "Native programme guide or reminder UI: guide watch live."
+  },
+  "ott.guide_previous_day": {
+    "value": "Previous day",
+    "description": "Native programme guide or reminder UI: guide previous day."
+  },
+  "ott.guide_today": {
+    "value": "Today",
+    "description": "Native programme guide or reminder UI: guide today."
+  },
+  "ott.guide_next_day": {
+    "value": "Next day",
+    "description": "Native programme guide or reminder UI: guide next day."
+  },
+  "ott.guide_source_changed": {
+    "value": "Source changed. Reopen the guide.",
+    "description": "Native programme guide or reminder UI: guide source changed."
+  },
+  "ott.guide_loading": {
+    "value": "Loading programme guide…",
+    "description": "Native programme guide or reminder UI: guide loading."
+  },
+  "ott.guide_empty": {
+    "value": "No programmes available for this interval.",
+    "description": "Native programme guide or reminder UI: guide empty."
+  },
+  "ott.guide_short": {
+    "value": "This source supplies only a short programme guide.",
+    "description": "Native programme guide or reminder UI: guide short."
+  },
+  "ott.guide_current_next": {
+    "value": "Now and next",
+    "description": "Native programme guide or reminder UI: guide current next."
+  },
+  "ott.reminder_add": {
+    "value": "Add reminder",
+    "description": "Native programme guide or reminder UI: reminder add."
+  },
+  "ott.reminder_remove": {
+    "value": "Remove reminder",
+    "description": "Native programme guide or reminder UI: reminder remove."
+  },
+  "ott.reminder_title": {
+    "value": "Programme reminder",
+    "description": "Native programme guide or reminder UI: reminder title."
+  },
+  "ott.reminder_switch": {
+    "value": "Watch now",
+    "description": "Native programme guide or reminder UI: reminder switch."
+  },
+  "ott.reminder_starting": {
+    "value": "This programme is starting now.",
+    "description": "Native programme guide or reminder UI: reminder starting."
+  },
+  "ott.reminder_soon": {
+    "value": "Starts in {minutes} min.",
+    "description": "Native programme guide or reminder UI: reminder soon.",
+    "args": {
+      "minutes": "i64"
+    }
+  },
+  "ott.favorite_added": {
+    "value": "Added to Favorites",
+    "description": "Native fullscreen Favorites update result; success appears only after durable save."
+  },
+  "ott.favorite_removed": {
+    "value": "Removed from Favorites",
+    "description": "Native fullscreen Favorites update result; success appears only after durable save."
+  },
+  "ott.favorite_update_failed": {
+    "value": "Favorites could not be updated",
+    "description": "Native fullscreen Favorites update result; success appears only after durable save."
+  }
+}

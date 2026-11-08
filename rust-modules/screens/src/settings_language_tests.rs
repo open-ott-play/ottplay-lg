@@ -1,0 +1,311 @@
+//! Language selection is install-wide; the App reports durable and live publication separately.
+use super::*;
+use super::test_support::*;
+use plx_platform::i18n::Preference;
+use plx_ui::form::FormId;
+use crate::registry::LanguageApplyResult;
+use plx_machine::machine::{Edge, InputEvent, InputKind, Source};
+use plx_machine::present::Present;
+
+fn activate(page: &mut LanguagePage, row: u32) -> Vec<Stamped<InnerHost>> {
+    let mut out = Vec::new();
+    let mut present = Present::new();
+    let mut fx = Effects::new(&mut out, MachineId::Instance(InstanceId(0)), &mut present);
+    page.activate(row, &mut fx);
+    out
+}
+
+/// The focus element of a language's row — an identity, never its position.
+fn lang(preference: Preference) -> u32 { LangId::Choice(preference).key().0 }
+fn contribute() -> u32 { LangId::Contribute.key().0 }
+
+struct SavedLanguage(Preference);
+impl SavedLanguage {
+    fn new(value: Preference) -> Self { Self(plx_platform::i18n::saved_preference_for_test(value)) }
+}
+impl Drop for SavedLanguage {
+    fn drop(&mut self) { plx_platform::i18n::saved_preference_for_test(self.0); }
+}
+
+fn save_request(effects: Vec<Stamped<InnerHost>>) -> (Preference, std::sync::mpsc::Sender<LanguageApplyResult>) {
+    let mut requests = effects.into_iter().filter_map(|event| match event.fx {
+        Fx::App(AppFx::Preferences(super::super::registry::PreferenceCmd::Language { language, reply })) => Some((language, reply)),
+        _ => None,
+    });
+    let request = requests.next().expect("language save is an asynchronous application command");
+    assert!(requests.next().is_none(), "one activation submits one save");
+    request
+}
+
+#[test]
+fn language_selection_waits_for_live_receipt_and_never_publishes_from_the_screen() {
+    let _guard = plx_base::testlock::serial();
+    let _saved = SavedLanguage::new(Preference::System);
+    let running = plx_platform::i18n::current().language().tag();
+    let mut page = LanguagePage::new(EntryId(0));
+    let before = page.state.hash();
+    let (requested, reply) = save_request(activate(&mut page, lang(Preference::Be)));
+    assert_eq!(requested, Preference::Be);
+    assert!(page.state.busy);
+    assert_eq!(page.state.selected, Preference::System, "queue admission is not durable success");
+    assert_ne!(page.state.hash(), before, "pending saves belong to replay state");
+    assert!(!page.poll_save(), "waiting never blocks the frame thread");
+    assert!(activate(&mut page, lang(Preference::Es)).is_empty(), "repeated saves are suppressed until the receipt");
+    reply.send(LanguageApplyResult::LiveApplied).unwrap();
+    assert!(page.poll_save());
+    assert_eq!(page.state.selected, Preference::Be);
+    assert!(!page.state.busy && !page.state.failed);
+    assert_eq!(plx_platform::i18n::current().language().tag(), running);
+    assert_eq!(page.pending(), Preference::Be != plx_platform::i18n::current().preference());
+}
+
+#[test]
+fn choosing_system_default_saves_the_preference_instead_of_resolved_language() {
+    let _guard = plx_base::testlock::serial();
+    let _saved = SavedLanguage::new(Preference::Be);
+    let mut page = LanguagePage::new(EntryId(0));
+    let (requested, reply) = save_request(activate(&mut page, lang(Preference::System)));
+    assert_eq!(requested, Preference::System);
+    assert_eq!(page.state.selected, Preference::Be);
+    reply.send(LanguageApplyResult::LiveApplied).unwrap();
+    assert!(page.poll_save());
+    assert_eq!(page.state.selected, Preference::System);
+}
+
+#[test]
+fn language_entry_seats_the_engine_on_the_saved_preference() {
+    let _guard = plx_base::testlock::serial();
+    let _session = scratch_session("language-saved-seat");
+    for preference in LANGUAGES.iter().copied() {
+        let _saved = SavedLanguage::new(preference);
+        let entry = EntryId(7);
+        let mut surface = RouteSurface::new(
+            entry, InstanceId(0), Family::Settings, SettingsPage::Language
+        );
+        let effects = step(&mut surface, ScreenEvent::Mount, None);
+        let mut engine = plx_ui::focus::FocusEngine::new();
+        let owner = plx_machine::machine::InputOwner::Entry(entry);
+        // The modal lifecycle seats its generic group before draining queued mount effects.
+        // Merely remembering another row after this does not move the current focus.
+        engine.enter(owner, &surface, FocusTarget::ContainerGroup(GroupId(0)), None, &cx(None));
+        for effect in effects {
+            match effect.fx {
+                Fx::Remember { group, elem } => engine.remember_projected(entry, group, elem),
+                Fx::Deliver(_, Delivery::Screen(ScreenEvent::Enter(Enter::Fresh { focus }))) => {
+                    engine.enter(owner, &surface, focus, None, &cx(None));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(engine.read(owner).current.map(|key| key.elem), Some(lang(preference)),
+            "the first OK must address the saved language, {preference:?}");
+    }
+}
+
+#[test]
+fn failed_or_disconnected_language_save_keeps_confirmed_selection_and_can_retry() {
+    let _guard = plx_base::testlock::serial();
+    let _saved = SavedLanguage::new(Preference::En);
+    for disconnected in [false, true] {
+        let mut page = LanguagePage::new(EntryId(0));
+        let (_, reply) = save_request(activate(&mut page, lang(Preference::Es)));
+        if !disconnected { reply.send(LanguageApplyResult::Failed).unwrap(); }
+        drop(reply);
+        assert!(page.poll_save());
+        assert_eq!(page.state.selected, Preference::En);
+        assert!(page.state.failed && !page.state.busy);
+        let (preference, reply) = save_request(activate(&mut page, lang(Preference::Es)));
+        assert_eq!(preference, Preference::Es);
+        assert!(page.state.busy && !page.state.failed);
+        reply.send(LanguageApplyResult::LiveApplied).unwrap();
+        assert!(page.poll_save());
+        assert_eq!(page.state.selected, Preference::Es);
+    }
+}
+
+#[test]
+fn contribution_is_focusable_and_right_opens_the_guide() {
+    let _guard = plx_base::testlock::serial();
+    let _session = scratch_session("language-contribution");
+    let mut page = LanguagePage::new(EntryId(0));
+    let key = FocusKey { entry: EntryId(0), elem: contribute() };
+    let cx = cx(Some(key));
+    assert!(<LanguagePage as Focusable<InnerHost>>::place(&page, &key.elem, &cx, At::SpringTarget).is_some());
+    assert!(matches!(<LanguagePage as Focusable<InnerHost>>::neighbour(&page,
+        FocusKey { entry: key.entry, elem: lang(*Preference::SHIPPED.last().unwrap()) }, Dir::Down, &cx), Step::Move(next) if next == key));
+    let mut out = Vec::new();
+    let mut present = Present::new();
+    let mut fx = Effects::new(&mut out, MachineId::Instance(InstanceId(0)), &mut present);
+    page.step(&ScreenEvent::Input(InputEvent { at: Tick::default(), source: Source::Sdl,
+        kind: InputKind::Key { key: Key::Right, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true } }), &cx, &mut fx);
+    assert!(out.iter().any(|effect| matches!(effect.fx, Fx::Nav(NavOp::Push(SettingsPage::Contribute)))));
+    assert!(plx_ui::qr::QrCode::new(plx_platform::i18n::CONTRIBUTE_URL).is_ok());
+}
+
+#[test]
+fn signed_out_settings_reaches_language_and_back_restores_it_after_contribution() {
+    let _guard = plx_base::testlock::serial();
+    let _session = scratch_session("language-back");
+    let mut surface = RouteSurface::new(EntryId(0), InstanceId(0), Family::Settings, SettingsPage::Root);
+    step(&mut surface, ScreenEvent::Mount, None);
+    step(&mut surface, ScreenEvent::Activate(root_key(RootId::Language)), None);
+    assert_eq!(surface.inner.top().unwrap().arg, SettingsPage::Language);
+    settle(&mut surface);
+    let contribution = FocusKey { entry: EntryId(0), elem: contribute() };
+    step(&mut surface, ScreenEvent::Activate(contribute()), Some(contribution));
+    assert_eq!(surface.inner.top().unwrap().arg, SettingsPage::Contribute);
+    settle(&mut surface);
+    let effects = step(&mut surface, back_key(), None);
+    assert_eq!(surface.inner.top().unwrap().arg, SettingsPage::Language);
+    assert!(effects.iter().any(|effect| matches!(effect.fx,
+        Fx::Deliver(_, Delivery::Screen(ScreenEvent::Enter(Enter::Fresh {
+            focus: FocusTarget::Elem(key),
+        }))) if key == contribution)), "Back restores the contribution row, not the initial language seat");
+}
+
+#[test]
+fn language_page_row_keys_are_distinct_and_pinned_languages_keep_theirs() {
+    let mut keys: Vec<u32> = LANGUAGES.iter().map(|p| LangId::Choice(*p).key().0).collect();
+    keys.push(LangId::Contribute.key().0);
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), keys.len(), "two Language rows share a key: {keys:?}");
+    assert_eq!(LangId::Choice(Preference::System).key().0, 0);
+    assert_eq!(LangId::Contribute.key().0, 1000);
+    for (p, key) in [(Preference::En, 1), (Preference::Es, 2), (Preference::Be, 3), (Preference::Fr, 5)] {
+        assert_eq!(LangId::Choice(p).key().0, key, "{p:?}: a shipped language's row identity moved");
+    }
+}
+
+
+#[test]
+fn retired_inner_preference_emits_negative_metadata_without_sending_reply() {
+    use super::test_support::{cx, step};
+    use plx_machine::machine::{Effects, Fx, InstanceId, MachineId, NavOp};
+    use plx_machine::present::Present;
+    use std::sync::mpsc::{channel, TryRecvError};
+    use crate::registry::{AppFx, PreferenceCmd};
+
+    let _serial = plx_base::testlock::serial();
+    let _session = super::test_support::scratch_session("retired-native-preference");
+    let mut surface = super::RouteSurface::new(EntryId(9), InstanceId(20),
+        super::Family::Settings, super::SettingsPage::Language);
+    step(&mut surface, ScreenEvent::Mount, None);
+    let previous = surface.top().expect("mounted language page").id;
+    let mut navigation = Vec::new();
+    let mut navigation_present = Present::new();
+    {
+        let mut fx = Effects::<super::InnerHost>::new(&mut navigation,
+            MachineId::Instance(InstanceId(20)), &mut navigation_present);
+        surface.request(NavOp::Push(super::SettingsPage::About), &cx(None), &mut fx);
+    }
+    assert_ne!(surface.top().expect("replacement inner page").id, previous);
+    let (reply, receipt) = channel();
+    let mut inner = Vec::new();
+    let mut present = Present::new();
+    {
+        let mut fx = Effects::<super::InnerHost>::new(&mut inner, MachineId::Instance(previous), &mut present);
+        fx.push(Fx::App(AppFx::Preferences(PreferenceCmd::Language {
+            language: plx_platform::i18n::Preference::System, reply,
+        })));
+    }
+    let mut forwarded = Vec::new();
+    {
+        let mut fx = Effects::<super::InnerHost>::new(&mut forwarded, MachineId::Instance(InstanceId(20)), &mut present);
+        surface.forward(inner, &cx(None), &mut fx);
+    }
+    assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)),
+        "the screen must not execute a reply channel");
+    assert_eq!(forwarded.len(), 1);
+    let Fx::App(AppFx::Preferences(PreferenceCmd::Retired(command))) = forwarded.remove(0).fx else {
+        panic!("the App drain needs typed negative admission metadata");
+    };
+    assert!(matches!(&*command, PreferenceCmd::Language { .. }));
+    assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)),
+        "the original sender must remain alive until the App settles refusal");
+}
+
+
+#[test]
+fn durable_language_without_live_publication_keeps_the_choice_and_requests_restart() {
+    let _guard = plx_base::testlock::serial();
+    let _saved = SavedLanguage::new(Preference::En);
+    let mut page = LanguagePage::new(EntryId(0));
+    let (_, reply) = save_request(activate(&mut page, lang(Preference::Es)));
+    reply.send(LanguageApplyResult::RestartRequired).unwrap();
+    assert!(page.poll_save());
+    assert_eq!(page.state.selected, Preference::Es);
+    assert!(!page.state.failed && !page.state.busy);
+    assert!(page.state.restart_required && page.pending());
+}
+
+#[test]
+fn language_locale_notice_refreshes_rows_without_losing_pending_choice_or_focus() {
+    let _guard = plx_base::testlock::serial();
+    let _saved = SavedLanguage::new(Preference::En);
+    let mut page = LanguagePage::new(EntryId(0));
+    let (_, reply) = save_request(activate(&mut page, lang(Preference::Es)));
+    let focus = page.form.selected_key();
+    let before = page.state.hash();
+    page.locale_changed(1);
+    assert_eq!(page.state.hash(), before);
+    assert_eq!(page.form.selected_key(), focus);
+    reply.send(LanguageApplyResult::LiveApplied).unwrap();
+    assert!(page.poll_save());
+    assert_eq!(page.state.selected, Preference::Es);
+    assert!(!page.state.restart_required);
+}
+
+
+#[test]
+fn locale_refresh_relabels_language_rows_preserving_the_pending_request_and_selection() {
+    let _serial = plx_base::testlock::serial();
+    let _saved = SavedLanguage::new(Preference::System);
+    let mut page = {
+        let _lang = plx_platform::i18n::language_on_this_thread_for_test(Preference::En);
+        LanguagePage::new(EntryId(5))
+    };
+    let (_, reply) = save_request(activate(&mut page, lang(Preference::De)));
+    let before = page.state.hash();
+    let selection = page.form.selected_key();
+    let keys: Vec<_> = (0..page.form.table.n_rows() as usize).map(|i| page.form.key_at(i)).collect();
+    let english = page.form.table.sections[0].rows[0].label.clone();
+    let _lang = plx_platform::i18n::language_on_this_thread_for_test(Preference::Es);
+    page.locale_changed(1);
+    assert_ne!(page.form.table.sections[0].rows[0].label, english);
+    assert_eq!(page.form.table.sections[0].rows[0].label, plx_platform::i18n::msg::settings_language_system());
+    assert_eq!(page.state.hash(), before);
+    assert_eq!(page.form.selected_key(), selection);
+    assert_eq!((0..page.form.table.n_rows() as usize).map(|i| page.form.key_at(i)).collect::<Vec<_>>(), keys);
+    reply.send(LanguageApplyResult::LiveApplied).unwrap();
+    assert!(page.poll_save());
+    assert_eq!(page.state.selected, Preference::De);
+}
+
+#[test]
+fn root_locale_refresh_keeps_accepted_settings_and_child_return_reads_saved_language() {
+    let _serial = plx_base::testlock::serial();
+    let _session = scratch_session("locale-root-return");
+    let _saved = SavedLanguage::new(Preference::System);
+    let mut page = {
+        let _lang = plx_platform::i18n::language_on_this_thread_for_test(Preference::En);
+        RootPage::new(EntryId(8), cx(None).views.directory)
+    };
+    let before = page.state.hash();
+    let keys: Vec<_> = (0..page.form.table.n_rows() as usize).map(|i| page.form.key_at(i)).collect();
+    let _lang = plx_platform::i18n::language_on_this_thread_for_test(Preference::Es);
+    page.locale_changed(1);
+    assert_eq!(page.state.hash(), before, "presentation does not rewrite accepted preferences");
+    assert_eq!((0..page.form.table.n_rows() as usize).map(|i| page.form.key_at(i)).collect::<Vec<_>>(), keys);
+    assert!(page.form.table.sections.iter().flat_map(|s| &s.rows).any(|row|
+        row.label == plx_platform::i18n::msg::settings_language_title()));
+    plx_platform::i18n::saved_preference_for_test(Preference::De);
+    let mut out = Vec::new();
+    let mut present = Present::new();
+    let mut fx = Effects::new(&mut out, MachineId::Instance(InstanceId(8)), &mut present);
+    page.step(&ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::ContainerGroup(GroupId(0)) }), &cx(None), &mut fx);
+    assert_eq!(page.state.language, Preference::De);
+    assert_eq!(page.locale_inputs.as_ref().unwrap().language, Preference::De);
+    assert!(out.is_empty(), "return only refreshes the projection");
+}

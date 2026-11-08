@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Niveau du fond des menus à l’écran",
+  "ott.osd_clock": "Horloge permanente",
+  "ott.osd_level_help": "Choisir le niveau du fond des menus à l’écran (7 par défaut)",
+  "ott.osd_clock_help": "Afficher l’horloge en permanence pendant la lecture",
+  "ott.osd_off": "Désactivée",
+  "ott.osd_background": "Avec fond",
+  "ott.osd_transparent": "Transparente",
+  "ott.osd_changed": "Les réglages d’affichage ont changé ; sélectionnez à nouveau l’option",
+  "ott.osd_close_editor": "Fermez l’éditeur avant de modifier les réglages d’affichage"
+}

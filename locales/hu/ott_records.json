@@ -1,0 +1,8 @@
+{
+  "ott.records": "Felvételek",
+  "ott.records_empty": "Nincs műsor az EPG-ben ehhez az archív időszakhoz",
+  "ott.records_unavailable": "A csatorna felvételei nem érhetők el",
+  "ott.records_incomplete": "A felvételek listája hiányos vagy nem érhető el",
+  "ott.records_window": "A felvételek a teljes archív időszakot lefedik",
+  "ott.records_order": "A felvételek cím szerint vannak rendezve"
+}

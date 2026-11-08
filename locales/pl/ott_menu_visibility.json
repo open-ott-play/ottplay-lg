@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Elementy menu",
+  "ott.menu_visible": "Widoczny",
+  "ott.menu_hidden": "Ukryty",
+  "ott.menu_reset": "Zresetuj elementy menu",
+  "ott.menu_reset_help": "Pokaż wszystkie elementy menu",
+  "ott.menu_help": "Wybierz elementy wyświetlane w menu",
+  "ott.menu_favorite": "Dodaj lub usuń z ulubionych",
+  "ott.menu_audio": "Ścieżki dźwiękowe",
+  "ott.menu_subtitles": "Napisy i wygląd",
+  "ott.menu_changed": "Ustawienia menu zmieniły się; wybierz element ponownie",
+  "ott.menu_invalid": "Nieprawidłowe ustawienia widoczności menu"
+}

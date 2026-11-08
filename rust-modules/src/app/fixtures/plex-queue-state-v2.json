@@ -1,0 +1,36 @@
+{
+  "capability_name": "plex_queue_state_v2",
+  "capability": {
+    "version": 2,
+    "operations": [
+      "play",
+      "status",
+      "next",
+      "previous",
+      "stop"
+    ],
+    "max_write_items": 500,
+    "max_state_items": 1000,
+    "max_state_bytes": 32768
+  },
+  "advertisement": "disabled until upgraded producer and consumer are verified together",
+  "state_request_field": "state_version",
+  "status_request": {
+    "runtime": "page-123",
+    "op": "status",
+    "state_version": 2
+  },
+  "idle_response": {
+    "version": 2,
+    "runtime": "page-123",
+    "active": false,
+    "state": "idle",
+    "ids": [],
+    "index": null,
+    "repeat": "none",
+    "order": "listed"
+  },
+  "legacy_state_max_items": 500,
+  "legacy_state_max_bytes": 16384,
+  "preview_and_library_version": 1
+}

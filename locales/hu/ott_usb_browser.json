@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "USB-mappák",
+  "ott.usb_browser_use": "Mappa használata",
+  "ott.usb_browser_parent": "Szülőmappa",
+  "ott.usb_browser_root": "Meghajtó gyökere",
+  "ott.usb_browser_previous": "Előző oldal",
+  "ott.usb_browser_next": "Következő oldal",
+  "ott.usb_browser_more": "Továbbiak betöltése",
+  "ott.usb_browser_browse_root": "Meghajtó gyökerének megnyitása",
+  "ott.usb_browser_choose": "Válasszon mappát ezen az USB-meghajtón",
+  "ott.usb_browser_reading": "Mappák olvasása…",
+  "ott.usb_browser_cancelled": "Mappák betöltése megszakítva",
+  "ott.usb_browser_return": "Vissza a kiválasztott forrás módosítása nélkül",
+  "ott.usb_browser_more_help": "További mappák keresése ebben a könyvtárban",
+  "ott.usb_browser_limit": "A lista elérte a korlátot. Használja ezt a mappát, vagy adja meg a pontos útvonalat a profilban.",
+  "ott.usb_browser_partial": "Részleges mappalista. Töltsön be többet a további mappák kereséséhez.",
+  "ott.usb_browser_unreadable": "Néhány mappanév nem olvasható. Frissítsen, vagy válasszon elérhető mappát.",
+  "ott.usb_browser_empty": "Nincsenek almappák. Használja ezt a mappát a videói felvételéhez.",
+  "ott.usb_browser_ready": "Nyisson meg egy almappát, vagy használja ezt a mappát.",
+  "ott.usb_browser_checking": "A kiválasztott USB-mappa ellenőrzése…",
+  "ott.usb_browser_changed": "Az USB-kiválasztás megváltozott; zárja be ezt az ablakot"
+}

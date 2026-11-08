@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Ore di archivio",
+  "ott.archive_hours_prompt": "Ore di archivio (0 usa i valori della playlist)",
+  "ott.archive_hours_invalid": "Inserisci un numero intero di ore da 0 a 8760",
+  "ott.archive_hours_changed": "Le impostazioni dell’archivio sono cambiate; riapri l’editor",
+  "ott.archive_hours_profile": "Seleziona un profilo televisivo M3U"
+}

@@ -1,0 +1,9 @@
+{
+  "ott.interface_title": "Interfejs",
+  "ott.interface_classic": "Klasyczny",
+  "ott.interface_modern": "Nowoczesny",
+  "ott.interface_selected": "Wybrany",
+  "ott.interface_help": "Wybierz wygląd odtwarzacza",
+  "ott.interface_changed": "Wybór się zmienił. Wybierz tryb ponownie.",
+  "ott.interface_close_editor": "Zamknij edytor przed zmianą interfejsu"
+}

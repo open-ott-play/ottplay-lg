@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Pastas USB",
+  "ott.usb_browser_use": "Usar esta pasta",
+  "ott.usb_browser_parent": "Pasta superior",
+  "ott.usb_browser_root": "Raiz da unidade",
+  "ott.usb_browser_previous": "Página anterior",
+  "ott.usb_browser_next": "Página seguinte",
+  "ott.usb_browser_more": "Carregar mais",
+  "ott.usb_browser_browse_root": "Abrir a raiz da unidade",
+  "ott.usb_browser_choose": "Escolha uma pasta nesta unidade USB",
+  "ott.usb_browser_reading": "A ler pastas…",
+  "ott.usb_browser_cancelled": "Carregamento de pastas cancelado",
+  "ott.usb_browser_return": "Voltar sem alterar a fonte selecionada",
+  "ott.usb_browser_more_help": "Procurar mais pastas neste diretório",
+  "ott.usb_browser_limit": "Limite da lista atingido. Use esta pasta ou introduza o caminho exato no perfil.",
+  "ott.usb_browser_partial": "Lista parcial de pastas. Carregue mais para procurar outras pastas.",
+  "ott.usb_browser_unreadable": "Não foi possível ler alguns nomes. Atualize ou escolha uma pasta disponível.",
+  "ott.usb_browser_empty": "Sem subpastas. Use esta pasta para incluir os seus vídeos.",
+  "ott.usb_browser_ready": "Abra uma subpasta ou use esta pasta.",
+  "ott.usb_browser_checking": "A verificar a pasta USB selecionada…",
+  "ott.usb_browser_changed": "A seleção USB mudou; feche este seletor"
+}

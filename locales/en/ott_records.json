@@ -1,0 +1,26 @@
+{
+  "ott.records": {
+    "value": "Records",
+    "description": "Channel catch-up programmes; not a DVR recording service."
+  },
+  "ott.records_empty": {
+    "value": "No guide programmes for this archive window",
+    "description": "No eligible rows in supplied EPG; does not assert server archive storage is empty."
+  },
+  "ott.records_unavailable": {
+    "value": "Records are unavailable for this channel",
+    "description": "The channel cannot supply the supported direct M3U archive."
+  },
+  "ott.records_incomplete": {
+    "value": "Records response is incomplete or unavailable",
+    "description": "Incomplete or unavailable full-retention guide result."
+  },
+  "ott.records_window": {
+    "value": "Records use the complete archive window",
+    "description": "Reject a day action against the Records view."
+  },
+  "ott.records_order": {
+    "value": "Records are ordered by title",
+    "description": "Reject an order change against the fixed Classic Records projection."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Menüeinträge",
+  "ott.menu_visible": "Sichtbar",
+  "ott.menu_hidden": "Ausgeblendet",
+  "ott.menu_reset": "Menüeinträge zurücksetzen",
+  "ott.menu_reset_help": "Alle Menüeinträge anzeigen",
+  "ott.menu_help": "Wähle die Einträge, die in Menüs erscheinen",
+  "ott.menu_favorite": "Zu Favoriten hinzufügen oder entfernen",
+  "ott.menu_audio": "Audiospuren",
+  "ott.menu_subtitles": "Untertitel und Darstellung",
+  "ott.menu_changed": "Die Menüeinstellungen wurden geändert; wähle den Eintrag erneut",
+  "ott.menu_invalid": "Ungültige Einstellungen für die Menüsichtbarkeit"
+}

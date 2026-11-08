@@ -1,0 +1,22 @@
+{
+  "ott.usb_browser_title": "Папкі USB",
+  "ott.usb_browser_use": "Выкарыстаць гэту папку",
+  "ott.usb_browser_parent": "Бацькоўская папка",
+  "ott.usb_browser_root": "Корань дыска",
+  "ott.usb_browser_previous": "Папярэдняя старонка",
+  "ott.usb_browser_next": "Наступная старонка",
+  "ott.usb_browser_more": "Загрузіць яшчэ",
+  "ott.usb_browser_browse_root": "Адкрыць корань дыска",
+  "ott.usb_browser_choose": "Выберыце папку на USB-дыску",
+  "ott.usb_browser_reading": "Чытанне папак…",
+  "ott.usb_browser_cancelled": "Загрузка папак скасавана",
+  "ott.usb_browser_return": "Вярнуцца без змены выбранай крыніцы",
+  "ott.usb_browser_more_help": "Знайсці іншыя папкі ў гэтым каталогу",
+  "ott.usb_browser_limit": "Дасягнута мяжа спіса. Выкарыстайце гэту папку або ўкажыце дакладны шлях у профілі.",
+  "ott.usb_browser_partial": "Спіс папак няпоўны. Загрузіце яшчэ, каб знайсці іншыя папкі.",
+  "ott.usb_browser_unreadable": "Некаторыя імёны папак недаступныя. Абнавіце спіс або выберыце даступную папку.",
+  "ott.usb_browser_empty": "Падпапак няма. Выкарыстайце гэту папку, каб дадаць яе відэа.",
+  "ott.usb_browser_ready": "Адкрыйце падпапку або выкарыстайце гэту папку.",
+  "ott.usb_browser_checking": "Праверка выбранай папкі USB…",
+  "ott.usb_browser_changed": "Выбар USB змяніўся; закрыйце гэта акно"
+}

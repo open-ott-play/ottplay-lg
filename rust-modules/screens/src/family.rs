@@ -1,0 +1,396 @@
+//! **The Settings family's shared plumbing** (restructure spec §6.2 `SettingsSurface`, phase 5b):
+//! the surface's INNER host and its argument vocabulary ([`SettingsPage`]), the conversions a
+//! surface makes when it steps a page of its own stack under the outer dispatcher's context, and
+//! the two things every page in the family does the same way — seating a `TableView` on the
+//! engine's focus and naming its element keys.
+//!
+//! Not a screen: `screens/mod.rs`'s rule that a screen never names a sibling is what this module
+//! exists to satisfy — Legal pushes a document, Privacy pushes a preview, the root pushes all of
+//! them, and each names the destination through this vocabulary rather than through the module
+//! that implements it.
+
+use plx_ui::form::{Activation, FormTable, RowKey};
+use plx_machine::machine::{
+    Canon, Chrome, Cx, Effects, Fx, GroupId, Host, LogicalState, NavOp, ScreenId,
+};
+use plx_ui::screen::ScreenArg;
+use plx_ui::widgets::ControlPalette;
+
+use super::registry::{AppFx, AppMsg, DirectoryLike};
+
+/// A page of the surface's own stack (§6.2: root → Privacy | Legal | Favourites → Document).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettingsPage {
+    /// The Settings root (`ui::settings`'s table).
+    Root,
+    /// Install-wide language choice, applied next launch.
+    Language,
+    /// Settings > Libraries > Under posters: what the focused poster's caption band shows.
+    UnderPosters,
+    /// Settings > Libraries > Under posters > Details: the picker of the one details line.
+    UnderPostersDetails,
+    /// Translation contribution guide with an offline QR link.
+    Contribute,
+    /// Playback settings: each profile's own picks (a profile that has not chosen reads the install's older value). The page names the seated profile; while nobody is seated its rows are read-only.
+    Playback,
+    /// Plex account audio and subtitle preferences.
+    AudioSubtitles,
+    /// Favorite libraries — the onboard screen in Settings mode.
+    Favourites,
+    /// Privacy & data — the consent screen in Settings mode.
+    Privacy,
+    /// The Legal index.
+    Legal,
+    /// About PlxNative, a document pushed straight from the root.
+    About,
+    /// One Legal document, by index into `screens::legal`'s page list.
+    Document(u8),
+    /// One Privacy preview document (`screens::consent::Preview`).
+    Preview(u8),
+    /// The FIRST-RUN consent question: one stage per page, the second pushed over the first.
+    ConsentStage(u8),
+    /// One playback / account preference's choice list, pushed from Playback or Audio & Subtitles.
+    Picker(PickerKind),
+}
+
+/// Which preference a [`SettingsPage::Picker`] edits. The parent page (`Playback` for the local ones,
+/// `AudioSubtitles` for the account ones) and the page's own title/options live in `screens::preferences`;
+/// the NAME of the field lives here because the parent pushes it through this vocabulary rather
+/// than through the module that implements it (the module doc's rule).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickerKind {
+    Quality,
+    DirectPlay,
+    SubtitleSize,
+    SubtitlePosition,
+    HdrOverlay,
+    NextEpisode,
+    SkipInterval,
+    DeckPress,
+    AudioLanguage,
+    SubtitleMode,
+    SubtitleLanguage,
+    ForcedSubtitles,
+    /// Settings > System > Interface resolution (install-wide; pushed from the Settings root).
+    UiResolution,
+    /// Optional immediate D-pad jumps.
+    InstantDpadSeeking,
+}
+
+impl SettingsPage {
+    /// The pages a boot target opens the surface over, root first: `plxnative-settings=picker-…`
+    /// is reached as root → Playback → the picker (root → the picker for a root row's), so BACK from it
+    /// lands where an interactive visit would. Every other page is booted as the surface's root.
+    pub fn boot_trail(self) -> Vec<SettingsPage> {
+        match self {
+            SettingsPage::Picker(kind) if kind.parent() == SettingsPage::Root => vec![SettingsPage::Root, self],
+            SettingsPage::Picker(kind) => vec![SettingsPage::Root, kind.parent(), self],
+            page => vec![page],
+        }
+    }
+}
+
+impl PickerKind {
+    /// The page that lists this field (its picker is pushed from there and returns there).
+    pub fn parent(self) -> SettingsPage {
+        match self {
+            PickerKind::Quality | PickerKind::DirectPlay | PickerKind::SubtitleSize | PickerKind::SubtitlePosition | PickerKind::HdrOverlay | PickerKind::NextEpisode | PickerKind::DeckPress | PickerKind::SkipInterval | PickerKind::InstantDpadSeeking => SettingsPage::Playback,
+            PickerKind::AudioLanguage | PickerKind::SubtitleMode | PickerKind::SubtitleLanguage | PickerKind::ForcedSubtitles => SettingsPage::AudioSubtitles,
+            PickerKind::UiResolution => SettingsPage::Root,
+        }
+    }
+}
+
+impl ScreenArg for SettingsPage {
+    fn chrome(&self) -> Chrome {
+        Chrome::None
+    }
+    fn id(&self) -> ScreenId {
+        ScreenId(match self {
+            SettingsPage::Root => 100,
+            SettingsPage::Playback => 108,
+            SettingsPage::AudioSubtitles => 109,
+            SettingsPage::Language => 110,
+            SettingsPage::Contribute => 111,
+            SettingsPage::UnderPosters => 113,
+            SettingsPage::UnderPostersDetails => 114,
+            SettingsPage::Favourites => 101,
+            SettingsPage::Privacy => 102,
+            SettingsPage::Legal => 103,
+            SettingsPage::About => 104,
+            SettingsPage::Document(_) => 105,
+            SettingsPage::Preview(_) => 106,
+            SettingsPage::ConsentStage(_) => 107,
+            SettingsPage::Picker(_) => 112,
+        })
+    }
+    fn title(&self) -> Option<&str> {
+        None
+    }
+    fn same_instance(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+/// **A page's canonical encoding, for the surface's own logical state** (§5.4).
+///
+/// `screens::settings`'s `RouteSurface` hashes its inner stack entry by entry, and one entry is
+/// distinguished from its neighbour by WHICH page it is — so both halves have to be written, and
+/// they are written HERE rather than at the hash site so that a variant added to this enum is
+/// answered by a census `match` beside its own declaration. A `_ =>` arm at a distant call site
+/// would silently hash two different documents as one, which is exactly the class of miss the
+/// recorder exists to catch.
+///
+/// The kind is [`ScreenArg::id`]'s number rather than a second numbering of the same question —
+/// that is already the id the container keys page KIND on. The index is written for EVERY variant,
+/// `0` where there is none, so a payload-less variant that later grows one cannot keep hashing
+/// identically to its old self.
+impl LogicalState for SettingsPage {
+    fn write(&self, w: &mut Canon) {
+        w.discriminant(ScreenArg::id(self).0);
+        w.u8(match self {
+            SettingsPage::Root
+            | SettingsPage::Language
+            | SettingsPage::UnderPosters
+            | SettingsPage::UnderPostersDetails
+            | SettingsPage::Contribute
+            | SettingsPage::Playback
+            | SettingsPage::AudioSubtitles
+            | SettingsPage::Favourites
+            | SettingsPage::Privacy
+            | SettingsPage::Legal
+            | SettingsPage::About => 0,
+            SettingsPage::Document(i) | SettingsPage::Preview(i) | SettingsPage::ConsentStage(i) => *i,
+            SettingsPage::Picker(kind) => *kind as u8,
+        });
+    }
+    fn probe(&self, out: &mut String) {
+        out.push_str(match self {
+            SettingsPage::Root => "root",
+            SettingsPage::Language => "language",
+            SettingsPage::Contribute => "contribute",
+            SettingsPage::UnderPosters => "under-posters",
+            SettingsPage::UnderPostersDetails => "under-posters-details",
+            SettingsPage::Playback => "playback",
+            SettingsPage::AudioSubtitles => "audio-subtitles",
+            SettingsPage::Favourites => "favourites",
+            SettingsPage::Privacy => "privacy",
+            SettingsPage::Legal => "legal",
+            SettingsPage::About => "about",
+            SettingsPage::Document(_) => "document",
+            SettingsPage::Preview(_) => "preview",
+            SettingsPage::ConsentStage(_) => "stage",
+            SettingsPage::Picker(_) => "picker",
+        });
+        if let SettingsPage::Document(i) | SettingsPage::Preview(i) | SettingsPage::ConsentStage(i) = self {
+            out.push_str(&format!("[{i}]"));
+        }
+        if let SettingsPage::Picker(kind) = self {
+            out.push_str(&format!("[{}]", *kind as u8));
+        }
+    }
+}
+
+/// The inner host: the same bundle, the family's own argument, and the retained Browse directory
+/// its Onboard child reads. It has no initial conditions of its own (the surface's `LogicalState`
+/// covers its pages).
+pub struct InnerHost;
+
+/// The family retains the outer frame's mode alongside its existing Browse read.
+#[derive(Clone, Copy)]
+pub struct InnerViews<'a> {
+    pub directory: plx_data::stores::browse::DirectoryView<'a>,
+    pub ui_mode: plx_machine::machine::UiMode,
+}
+impl<'a> From<plx_data::stores::browse::DirectoryView<'a>> for InnerViews<'a> {
+    fn from(directory: plx_data::stores::browse::DirectoryView<'a>) -> Self {
+        Self { directory, ui_mode: plx_machine::machine::UiMode::Modern }
+    }
+}
+
+#[derive(Default)]
+pub struct NoInit;
+
+impl LogicalState for NoInit {
+    fn write(&self, _w: &mut Canon) {}
+    fn probe(&self, _out: &mut String) {}
+}
+
+impl Host for InnerHost {
+    type Arg = SettingsPage;
+    type Fx = AppFx;
+    type Msg = AppMsg;
+    type Elem = u32;
+    type Views<'a> = InnerViews<'a>;
+    type Init = NoInit;
+    // No family page remembers anything on its own `ReturnState` today (`machine/src/machine.rs`'s
+    // `Host::Memory` doc) — the surface's own `NavStack<InnerHost>` restores its child pages by
+    // focus alone.
+    type Memory = ();
+    fn ui_mode(views: &Self::Views<'_>) -> plx_machine::machine::UiMode { views.ui_mode }
+}
+
+impl DirectoryLike for InnerHost {
+    fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a> {
+        cx.views.directory
+    }
+}
+
+/// The outer context as the inner pages see it, carrying the same retained Browse directory the
+/// outer host published for this frame.
+/// The output lifetime is FREE (`'o`, bounded by the measure's): `Cx` is invariant in its
+/// lifetime through the `Views` projection, so a caller must be able to shape one to a local
+/// borrow to hand it to a `DrawFrame`.
+pub fn inner_cx<'o, 'a: 'o, H: DirectoryLike>(cx: &Cx<'a, H>) -> Cx<'o, InnerHost> {
+    Cx {
+        views: InnerViews { directory: H::directory(cx), ui_mode: H::ui_mode(&cx.views) },
+        tick: cx.tick,
+        measure: cx.measure,
+        press: cx.press,
+        focus: cx.focus.clone(),
+        owner: cx.owner,
+    }
+}
+
+/// Seat a form-backed page's table on the engine's focus: a row key parks the selection on that row
+/// and lights the list; the elem is a row's [`RowKey`] number, not its index. A key the form does
+/// not know (the band, the alert, a row that left) dims the list. Every page answers `FocusMoved`
+/// with this, so the drawn selection and the engine never disagree.
+pub fn form_focus<Id, A, Dest>(form: &mut FormTable<Id, A, Dest>, elem: u32)
+where
+    Id: PartialEq + Clone,
+    A: Clone,
+    Dest: Clone,
+{
+    let on_table = form.index_of_key(RowKey(elem)).filter(|_| elem < super::registry::BAND);
+    form.note_engine_key(on_table.map(|_| RowKey(elem)));
+    match on_table {
+        Some(i) => {
+            form.table.sel = i as i32;
+            form.table.list_focused = true;
+        }
+        None => form.table.list_focused = false,
+    }
+}
+
+/// The band's group in every page of the family; the table is `GroupId(0)`, an alert `GroupId(2)`.
+pub const TABLE_GROUP: GroupId = GroupId(0);
+pub const BAND_GROUP: GroupId = GroupId(1);
+pub const ALERT_GROUP: GroupId = GroupId(2);
+
+/// **The ONE activation path of every form page in the family** (docs/settings-form.md,
+/// "Navigation"): resolve the focus key to its row and either push the row's destination — a
+/// `Nav` item emits `Fx::Nav(NavOp::Push(dest))` itself and answers `None` — or hand back the
+/// row's action for the page's own `match`. No page pushes through a private path, and no page
+/// owns a `RoutePush`: the surface is the only stack executor.
+pub fn form_activate<Id, A>(
+    form: &FormTable<Id, A, SettingsPage>,
+    key: u32,
+    fx: &mut Effects<'_, InnerHost>,
+) -> Option<A>
+where
+    Id: PartialEq + Clone,
+    A: Clone,
+{
+    let index = form.index_of_key(RowKey(key))?;
+    match form.activate(index)? {
+        Activation::Push(dest) => {
+            fx.push(Fx::Nav(NavOp::Push(dest)));
+            None
+        }
+        Activation::Action(action) => Some(action),
+    }
+}
+
+/// Rule 8 (RIGHT on a row that opens nested content enters it, exactly as OK does): the focus key
+/// of the row RIGHT should activate, if the focused row opens something.
+pub fn form_right_target<Id, A, Dest>(form: &FormTable<Id, A, Dest>, key: u32) -> Option<u32>
+where
+    Id: PartialEq + Clone,
+    A: Clone,
+    Dest: Clone,
+{
+    let i = form.index_of_key(RowKey(key))?;
+    form.table.row_opens(i as i32).then_some(key)
+}
+
+thread_local! {
+    /// The surface's ground palette, published for the frame so the pages' controls are keyed to
+    /// the ground they sit on (what `settings::control_palette` answered). RENDER state: set by
+    /// the surface at draw, read by the pages' draws, never hashed.
+    static PALETTE: std::cell::Cell<Option<ControlPalette>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_palette(p: ControlPalette) {
+    PALETTE.with(|c| c.set(Some(p)));
+}
+
+pub fn palette() -> ControlPalette {
+    PALETTE.with(|c| c.get()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nested_settings_context_retains_the_outer_interface_mode() {
+        use plx_machine::machine::{EntryId, FocusRead, InputOwner, PressRead, Tick, UiMode};
+        let measure = plx_ui::fixture::FixtureMeasure;
+        for mode in [UiMode::Classic, UiMode::Modern] {
+            let outer: Cx<'_, InnerHost> = Cx {
+                views: InnerViews {
+                    directory: plx_data::stores::browse::DirectoryView::empty_for_test(),
+                    ui_mode: mode,
+                },
+                tick: Tick::default(), measure: &measure, press: PressRead::default(),
+                focus: FocusRead::default(), owner: InputOwner::Entry(EntryId(0)),
+            };
+            let nested = inner_cx(&outer);
+            assert_eq!(InnerHost::ui_mode(&nested.views), mode);
+            assert_eq!(nested.owner, outer.owner);
+        }
+    }
+
+    /// [`super::SettingsPage`]'s `ScreenId`s are what a `NavStack` uses to decide whether two
+    /// requests name "the same instance" (`same_instance` is bare equality here, but `NavOp::Root`
+    /// elsewhere in the library also keys eviction bookkeeping off `id()`) — two variants sharing
+    /// one id by a copy-paste slip would let the container conflate two different pages.
+    #[test]
+    fn every_settings_page_variant_has_its_own_screen_id() {
+        let pages = [
+            SettingsPage::Root,
+            SettingsPage::Language,
+            SettingsPage::UnderPosters,
+            SettingsPage::UnderPostersDetails,
+            SettingsPage::Contribute,
+            SettingsPage::Playback,
+            SettingsPage::AudioSubtitles,
+            SettingsPage::Favourites,
+            SettingsPage::Privacy,
+            SettingsPage::Legal,
+            SettingsPage::About,
+            SettingsPage::Document(0),
+            SettingsPage::Preview(0),
+            SettingsPage::ConsentStage(0),
+            SettingsPage::Picker(PickerKind::Quality),
+        ];
+        let mut ids: Vec<u32> = pages.iter().map(|p| plx_ui::screen::ScreenArg::id(p).0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), pages.len(), "two SettingsPage variants must not share a ScreenId");
+    }
+
+    /// `Document`/`Preview`/`ConsentStage` carry an index that does not change WHICH kind of page
+    /// they are — the id is the variant's, not the index's — so two different documents still
+    /// name the same `ScreenId` (which is exactly right: `NavStack::apply`'s `NavOp::Root` arm
+    /// compares `same_instance`, not `id()`, for identity, and `id()` alone is only ever a KIND).
+    #[test]
+    fn an_indexed_variant_s_id_does_not_vary_with_its_index() {
+        use plx_ui::screen::ScreenArg;
+        assert_eq!(SettingsPage::Document(0).id(), SettingsPage::Document(5).id());
+        assert_eq!(SettingsPage::Preview(0).id(), SettingsPage::Preview(3).id());
+        assert_eq!(SettingsPage::ConsentStage(0).id(), SettingsPage::ConsentStage(1).id());
+        // …but `same_instance` still tells them apart, since it is bare equality here:
+        assert!(!SettingsPage::Document(0).same_instance(&SettingsPage::Document(1)));
+    }
+}

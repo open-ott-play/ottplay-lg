@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Hintergrundstufe der Bildschirmanzeige",
+  "ott.osd_clock": "Uhr dauerhaft anzeigen",
+  "ott.osd_level_help": "Hintergrundstufe der Bildschirmanzeige wählen (Standard 7)",
+  "ott.osd_clock_help": "Uhr während der Wiedergabe dauerhaft anzeigen",
+  "ott.osd_off": "Aus",
+  "ott.osd_background": "Mit Hintergrund",
+  "ott.osd_transparent": "Transparent",
+  "ott.osd_changed": "Anzeigeeinstellungen geändert; Option erneut wählen",
+  "ott.osd_close_editor": "Editor vor dem Ändern der Anzeigeeinstellungen schließen"
+}

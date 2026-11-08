@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Wiedergabeliste laden",
+  "ott.profile_edit": "{name} bearbeiten",
+  "ott.m3u_media_links": "Mediathek-Links…",
+  "ott.m3u_media_link": "Mediathek-Link",
+  "ott.m3u_media_changed": "Die M3U-Medieneinstellungen wurden geändert. Öffne den Editor erneut.",
+  "ott.m3u_media_invalid": "Der verknüpfte VPortal-Link ist ungültig"
+}

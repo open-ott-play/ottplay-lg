@@ -1,0 +1,11 @@
+{
+  "ott.osd_level": "Képernyőmenü hátterének szintje",
+  "ott.osd_clock": "Állandó óra",
+  "ott.osd_level_help": "Válassza ki a képernyőmenü hátterének szintjét (alapérték: 7)",
+  "ott.osd_clock_help": "Óra folyamatos megjelenítése lejátszás közben",
+  "ott.osd_off": "Kikapcsolva",
+  "ott.osd_background": "Háttérrel",
+  "ott.osd_transparent": "Átlátszó",
+  "ott.osd_changed": "A megjelenítési beállítások módosultak; válassza ki újra a lehetőséget",
+  "ott.osd_close_editor": "A megjelenítési beállítások módosítása előtt zárja be a szerkesztőt"
+}

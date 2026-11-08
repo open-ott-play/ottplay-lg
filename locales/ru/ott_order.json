@@ -1,0 +1,12 @@
+{
+  "ott.order_actions": "Действия",
+  "ott.order_shuffle": "Перемешать",
+  "ott.order_reset": "Сбросить порядок",
+  "ott.order_changed": "Список изменился; откройте «Действия» снова",
+  "ott.order_unavailable": "Для этого источника изменение порядка списка недоступно",
+  "ott.order_too_large": "Список слишком велик для сохранения порядка",
+  "ott.order_add_to_category": "Добавить в категорию",
+  "ott.order_choose_category": "Выбрать категорию",
+  "ott.order_sort_alphabetical": "Сортировать по алфавиту",
+  "ott.order_sort_as_is": "Сохранённый порядок"
+}

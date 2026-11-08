@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Hangerő lépésköze (%)",
+  "ott.volume_step_prompt": "Hangerő lépésköze (3–10%)",
+  "ott.volume_step_invalid": "Adj meg egy egész számot 3 és 10 között",
+  "ott.info_timeout": "Információ megjelenítési ideje (másodperc)",
+  "ott.info_timeout_prompt": "Információ megjelenítési ideje (3–20 másodperc)",
+  "ott.info_timeout_invalid": "Adj meg egy egész számot 3 és 20 között"
+}

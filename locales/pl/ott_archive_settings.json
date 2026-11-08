@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Liczba godzin archiwum",
+  "ott.archive_hours_prompt": "Archiwum (0 używa wartości z listy odtwarzania)",
+  "ott.archive_hours_invalid": "Wpisz całkowitą liczbę godzin od 0 do 8760",
+  "ott.archive_hours_changed": "Ustawienia archiwum się zmieniły; otwórz edytor ponownie",
+  "ott.archive_hours_profile": "Wybierz profil telewizji M3U"
+}

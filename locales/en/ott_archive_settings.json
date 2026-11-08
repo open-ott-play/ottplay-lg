@@ -1,0 +1,22 @@
+{
+  "ott.archive_hours": {
+    "value": "Archive hours",
+    "description": "M3U per-profile archive fallback editor."
+  },
+  "ott.archive_hours_prompt": {
+    "value": "Archive hours (0 uses playlist values)",
+    "description": "M3U per-profile archive fallback editor."
+  },
+  "ott.archive_hours_invalid": {
+    "value": "Use whole archive hours from 0 to 8760",
+    "description": "M3U per-profile archive fallback editor."
+  },
+  "ott.archive_hours_changed": {
+    "value": "Archive settings changed; reopen the editor",
+    "description": "M3U per-profile archive fallback editor."
+  },
+  "ott.archive_hours_profile": {
+    "value": "Select an M3U television profile",
+    "description": "M3U per-profile archive fallback editor."
+  }
+}

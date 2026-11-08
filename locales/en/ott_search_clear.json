@@ -1,0 +1,6 @@
+{
+  "ott.search_clear": {
+    "value": "Clear search",
+    "description": "Clear the current list filter without reloading its source."
+  }
+}

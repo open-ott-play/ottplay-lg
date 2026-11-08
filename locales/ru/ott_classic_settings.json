@@ -1,0 +1,17 @@
+{
+  "ott.classic_rows": "Строки списка Classic",
+  "ott.classic_side": "Сторона списка Classic",
+  "ott.classic_arrows": "Стрелки в списке Classic",
+  "ott.classic_seek": "Шаг перемотки 1/3 (секунды)",
+  "ott.classic_rows_help": "Желаемое число строк Classic; крупный шрифт и доступное место могут уменьшить число строк",
+  "ott.classic_side_help": "Выберите сторону списка Classic и окна видео",
+  "ott.classic_arrows_help": "Действие влево/вправо в списках Classic; управление полноэкранным видео не меняется",
+  "ott.classic_seek_help": "При скрытом управлении клавиши 1/3 перематывают видео и архив; в прямом эфире и Избранном цифры выбирают канал или запись",
+  "ott.classic_right": "Справа",
+  "ott.classic_left": "Слева",
+  "ott.classic_paging": "Листать страницы",
+  "ott.classic_volume": "Громкость",
+  "ott.classic_context": "Категории / описание",
+  "ott.classic_show_progress": "Показывать прогресс передачи",
+  "ott.classic_show_progress_help": "Показывать прогресс текущей передачи в списках каналов Classic"
+}

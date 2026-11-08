@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Menüpontok",
+  "ott.menu_visible": "Látható",
+  "ott.menu_hidden": "Rejtett",
+  "ott.menu_reset": "Menüpontok visszaállítása",
+  "ott.menu_reset_help": "Minden menüpont megjelenítése",
+  "ott.menu_help": "Válaszd ki a menükben megjelenő elemeket",
+  "ott.menu_favorite": "Hozzáadás a kedvencekhez vagy eltávolítás",
+  "ott.menu_audio": "Hangsávok",
+  "ott.menu_subtitles": "Feliratok és megjelenés",
+  "ott.menu_changed": "A menübeállítások megváltoztak; válaszd ki újra az elemet",
+  "ott.menu_invalid": "Érvénytelen menüláthatósági beállítások"
+}

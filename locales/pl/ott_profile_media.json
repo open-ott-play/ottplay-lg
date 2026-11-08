@@ -1,0 +1,8 @@
+{
+  "ott.profile_load_playlist": "Wczytaj listę odtwarzania",
+  "ott.profile_edit": "Edytuj {name}",
+  "ott.m3u_media_links": "Linki do biblioteki multimediów…",
+  "ott.m3u_media_link": "Link do biblioteki multimediów",
+  "ott.m3u_media_changed": "Ustawienia multimediów M3U uległy zmianie. Otwórz edytor ponownie.",
+  "ott.m3u_media_invalid": "Powiązany link VPortal jest nieprawidłowy"
+}

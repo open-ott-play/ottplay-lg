@@ -1,0 +1,26 @@
+{
+  "ott.volume_step": {
+    "value": "Volume step (%)",
+    "description": "Application volume increment setting, in percentage points."
+  },
+  "ott.volume_step_prompt": {
+    "value": "Volume step (3–10%)",
+    "description": "Prompt for integer volume increment from 3 to 10."
+  },
+  "ott.volume_step_invalid": {
+    "value": "Enter an integer from 3 to 10",
+    "description": "Validation error for the addressed volume increment editor."
+  },
+  "ott.info_timeout": {
+    "value": "Information display time (seconds)",
+    "description": "Information overlay display time setting, in seconds."
+  },
+  "ott.info_timeout_prompt": {
+    "value": "Information display time (3–20 seconds)",
+    "description": "Prompt for integer information display time from 3 to 20 seconds."
+  },
+  "ott.info_timeout_invalid": {
+    "value": "Enter an integer from 3 to 20",
+    "description": "Validation error for the addressed information display time editor."
+  }
+}

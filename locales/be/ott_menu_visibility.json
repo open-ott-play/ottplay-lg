@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Пункты меню",
+  "ott.menu_visible": "Бачны",
+  "ott.menu_hidden": "Схаваны",
+  "ott.menu_reset": "Скінуць пункты меню",
+  "ott.menu_reset_help": "Паказаць усе пункты меню",
+  "ott.menu_help": "Выберыце, якія пункты паказваць у меню",
+  "ott.menu_favorite": "Дадаць або выдаліць абранае",
+  "ott.menu_audio": "Аўдыядарожкі",
+  "ott.menu_subtitles": "Субцітры і афармленне",
+  "ott.menu_changed": "Налады меню змяніліся; выберыце пункт яшчэ раз",
+  "ott.menu_invalid": "Няправільныя налады бачнасці меню"
+}

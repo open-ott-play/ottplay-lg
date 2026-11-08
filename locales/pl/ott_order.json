@@ -1,0 +1,12 @@
+{
+  "ott.order_actions": "Działania",
+  "ott.order_shuffle": "Pomieszaj",
+  "ott.order_reset": "Przywróć kolejność",
+  "ott.order_changed": "Lista się zmieniła; otwórz ponownie Działania",
+  "ott.order_unavailable": "Kolejność listy jest niedostępna dla tego źródła",
+  "ott.order_too_large": "Lista jest za duża, aby zapisać jej kolejność",
+  "ott.order_add_to_category": "Dodaj do kategorii",
+  "ott.order_choose_category": "Wybierz kategorię",
+  "ott.order_sort_alphabetical": "Sortuj alfabetycznie",
+  "ott.order_sort_as_is": "Zapisana kolejność"
+}

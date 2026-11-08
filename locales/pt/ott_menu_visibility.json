@@ -1,0 +1,13 @@
+{
+  "ott.menu_items": "Itens do menu",
+  "ott.menu_visible": "Visível",
+  "ott.menu_hidden": "Oculto",
+  "ott.menu_reset": "Repor itens do menu",
+  "ott.menu_reset_help": "Mostrar todos os itens do menu",
+  "ott.menu_help": "Escolha os itens a apresentar nos menus",
+  "ott.menu_favorite": "Adicionar ou remover dos Favoritos",
+  "ott.menu_audio": "Faixas de áudio",
+  "ott.menu_subtitles": "Legendas e aparência",
+  "ott.menu_changed": "As definições do menu mudaram; selecione o item novamente",
+  "ott.menu_invalid": "Definições de visibilidade do menu inválidas"
+}

@@ -1,0 +1,12 @@
+{
+  "ott.order_actions": "Дзеянні",
+  "ott.order_shuffle": "Перамяшаць",
+  "ott.order_reset": "Скінуць парадак",
+  "ott.order_changed": "Спіс змяніўся; адкрыйце «Дзеянні» зноў",
+  "ott.order_unavailable": "Змена парадку недаступная для гэтай крыніцы",
+  "ott.order_too_large": "Спіс занадта вялікі для захавання парадку",
+  "ott.order_add_to_category": "Дадаць у катэгорыю",
+  "ott.order_choose_category": "Выбраць катэгорыю",
+  "ott.order_sort_alphabetical": "Сартаваць паводле алфавіта",
+  "ott.order_sort_as_is": "Захаваны парадак"
+}

@@ -1,0 +1,8 @@
+{
+  "ott.volume_step": "Шаг громкости (%)",
+  "ott.volume_step_prompt": "Шаг громкости (3–10%)",
+  "ott.volume_step_invalid": "Введите целое число от 3 до 10",
+  "ott.info_timeout": "Время показа информации (секунды)",
+  "ott.info_timeout_prompt": "Время показа информации (3–20 секунд)",
+  "ott.info_timeout_invalid": "Введите целое число от 3 до 20"
+}

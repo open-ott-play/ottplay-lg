@@ -1,0 +1,5 @@
+{
+  "ott.random_play": "Reproducir elemento aleatorio",
+  "ott.random_changed": "La lista cambió; selecciona de nuevo la reproducción aleatoria",
+  "ott.random_unavailable": "La reproducción aleatoria no está disponible para esta lista"
+}

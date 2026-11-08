@@ -1,0 +1,8 @@
+{
+  "ott.records": "Записи",
+  "ott.records_empty": "В EPG нет передач за этот период",
+  "ott.records_unavailable": "Записи этого канала недоступны",
+  "ott.records_incomplete": "Список записей неполон или недоступен",
+  "ott.records_window": "Записи охватывают весь срок хранения архива",
+  "ott.records_order": "Записи отсортированы по названию"
+}

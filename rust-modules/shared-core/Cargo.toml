@@ -1,0 +1,27 @@
+[package]
+name = "plx_shared_core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Typed native adapter for the canonical OttPlay shared-core distribution"
+publish = false
+
+[package.metadata.plx]
+mount = "shared_core"
+
+[dependencies]
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The 0.14 distribution's ARM32 snapshot predates its ArrayBuffer ABI. Generate
+# this target's bindings from the exact C headers compiled by rquickjs-sys.
+[target.'cfg(all(target_arch = "arm", target_os = "linux"))'.dependencies]
+rquickjs = { version = "=0.14.0", default-features = false, features = ["bindgen"] }
+
+[build-dependencies]
+sha2 = "0.10"
+serde_json = "1"
+
+[lints]
+workspace = true

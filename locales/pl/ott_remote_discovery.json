@@ -1,0 +1,10 @@
+{
+  "ott.remote_find": "Znajdź serwer sterowania",
+  "ott.remote_unconfigured": "Wyszukiwanie nieskonfigurowane",
+  "ott.remote_invalid_profile": "Błędna konfiguracja wyszukiwania",
+  "ott.remote_finding": "Wyszukiwanie serwerów sterowania…",
+  "ott.remote_choose": "Wybierz serwer sterowania",
+  "ott.remote_empty": "Nie znaleziono serwerów. Spróbuj ponownie.",
+  "ott.remote_failed": "Wyszukiwanie nieudane. Spróbuj ponownie.",
+  "ott.remote_choice_expired": "Lista się zmieniła. Wyszukaj ponownie."
+}

@@ -1,0 +1,9 @@
+{
+  "ott.interface_title": "Вид интерфейса",
+  "ott.interface_classic": "Классический",
+  "ott.interface_modern": "Современный",
+  "ott.interface_selected": "Выбран",
+  "ott.interface_help": "Выберите вид плеера",
+  "ott.interface_changed": "Настройка интерфейса изменилась; выберите режим снова",
+  "ott.interface_close_editor": "Закройте редактор перед сменой интерфейса"
+}

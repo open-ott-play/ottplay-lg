@@ -1,0 +1,7 @@
+{
+  "ott.archive_hours": "Archívum hossza órában",
+  "ott.archive_hours_prompt": "Archívum hossza (0: lejátszólista adatai)",
+  "ott.archive_hours_invalid": "Adjon meg egész óraszámot 0 és 8760 között",
+  "ott.archive_hours_changed": "Az archívum beállításai megváltoztak; nyissa meg újra a szerkesztőt",
+  "ott.archive_hours_profile": "Válasszon M3U televíziós profilt"
+}

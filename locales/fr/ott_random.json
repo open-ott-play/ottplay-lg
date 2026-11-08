@@ -1,0 +1,5 @@
+{
+  "ott.random_play": "Lire un élément au hasard",
+  "ott.random_changed": "La liste a changé ; sélectionnez de nouveau la lecture aléatoire",
+  "ott.random_unavailable": "La lecture aléatoire est indisponible pour cette liste"
+}

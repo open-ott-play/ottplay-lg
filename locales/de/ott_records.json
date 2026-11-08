@@ -1,0 +1,8 @@
+{
+  "ott.records": "Aufzeichnungen",
+  "ott.records_empty": "Keine EPG-Sendungen für diesen Archivzeitraum",
+  "ott.records_unavailable": "Aufzeichnungen sind für diesen Kanal nicht verfügbar",
+  "ott.records_incomplete": "Die Aufzeichnungsliste ist unvollständig oder nicht verfügbar",
+  "ott.records_window": "Aufzeichnungen umfassen den gesamten Archivzeitraum",
+  "ott.records_order": "Aufzeichnungen sind nach Titel sortiert"
+}
