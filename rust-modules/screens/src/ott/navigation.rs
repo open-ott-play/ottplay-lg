@@ -14,8 +14,8 @@ pub(super) const FOOTER_GROUP: GroupId = GroupId(2);
 
 /// Modern channel/category pages expose the same contextual actions at the bottom edge.
 pub(super) fn modern_footer(measure: &dyn Measure, width: f32, actions: &[Action],
-    keys: &std::collections::HashMap<String, u32>, snapshot: &OttView) -> Option<HeaderRow> {
-    let controls: Vec<(u32, String)> = if matches!(snapshot.page_id.split(':').next(), Some("channels" | "favorites")) {
+    keys: &std::collections::HashMap<String, u32>, snapshot: &OttView, header_keys: &[u32]) -> Option<HeaderRow> {
+    let mut controls: Vec<(u32, String)> = if matches!(snapshot.page_id.split(':').next(), Some("channels" | "favorites")) {
         classic_controls(snapshot, actions, keys)
     } else if snapshot.page_id.split(':').next() == Some("categories") {
         ["nav:categories", "nav:actions", "nav:description", "nav:search"].iter().filter_map(|id| {
@@ -23,6 +23,7 @@ pub(super) fn modern_footer(measure: &dyn Measure, width: f32, actions: &[Action
             Some((*keys.get(*id)?, action.row.label.clone()))
         }).collect()
     } else { return None; };
+    controls.retain(|(key, _)| !header_keys.contains(key));
     if controls.is_empty() { return None; }
     let left = controls.iter().map(|(_, label)| HeaderItem { label: label.clone(), focusable: true, ..Default::default() }).collect();
     let page = PageHeader::new(PageHeaderSpec { left, ..Default::default() }, &[], measure);
