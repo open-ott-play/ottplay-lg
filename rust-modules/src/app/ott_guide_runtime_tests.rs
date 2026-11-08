@@ -25,6 +25,7 @@ fn fixture() -> Runtime {
     runtime.catalog_done.store(false, Ordering::Release);
     runtime.resolver_busy = true;
     runtime.catalog.entries.push(CatalogEntry {
+        synopsis: None,
         id: "channel-one".into(),
         title: "Live channel".into(),
         category: String::new(),

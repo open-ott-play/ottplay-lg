@@ -21,6 +21,7 @@ fn profile(id: &str) -> ProviderProfile {
 
 fn tv_entry() -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         live: None,
         id: "tv-row".into(),
         title: "Current TV channel".into(),

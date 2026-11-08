@@ -19,14 +19,14 @@ const ENTRY: EntryId = EntryId(9);
 struct Harness { screen: OttScreen, focus: Option<FocusKey<u32>>, press: f32, ms: u32 }
 pub(crate) fn mount(n: usize) -> Box<dyn CardHarness> { Box::new(Harness::new(n)) }
 fn item(id: String) -> OttRow {
-    OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: Some(OttMedia { kind: OttMediaKind::Movie, duration_ms: None, progress: None }),
+    OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: Some(OttMedia { kind: OttMediaKind::Movie, duration_ms: None, progress: None, synopsis: None }),
         title: id.clone(), action: OttAction::Play(id.clone()), id,
         detail: String::new(), description: String::new(), poster: None, enabled: true, favorite: false }
 }
 impl Harness {
     fn new(n: usize) -> Self {
         let mut h = Self { screen: OttScreen::new(ENTRY, InstanceId(9)), focus: None, press: 1.0, ms: 0 };
-        h.step(ScreenEvent::App(AppMsg::OttSnapshot(Arc::new(OttView { status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
+        h.step(ScreenEvent::App(AppMsg::OttSnapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
             preview_context: Some("source-fixture".into()), random_context: None, order_context: None,
             page_id: "channels:fixture".into(), revision: 1, title: msg::ott_channel_list().into(),
             description: String::new(), status: String::new(), selected_row: None,

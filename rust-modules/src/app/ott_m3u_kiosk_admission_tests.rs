@@ -9,6 +9,7 @@ const LINK: &str = "portal::[key:fixture-secret]https://portal.fixture.invalid/a
 
 fn tv_entry() -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         live: None,
         id: "home-channel".into(),
         title: "Existing TV".into(),
@@ -510,6 +511,7 @@ fn install_attached_playing(runtime: &mut Runtime, app: &mut App, favorite: &Fav
     let receipt = runtime.play_attachment.clone().unwrap();
     let effective = receipt.effective_profile().unwrap();
     let entry = CatalogEntry {
+        synopsis: None,
         live: None, id: format!("{}:film:42", effective.id), title: "Resolved film title".into(),
         category: "Films/Family".into(), description: String::new(), poster: String::new(),
         media: MediaLocator::VPortal { request: json!({"id":"42"}) },

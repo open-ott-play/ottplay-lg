@@ -70,11 +70,13 @@ fn facts(kind: OttMediaKind, duration: Option<u64>, id: &str, resume: Option<(&s
         (target == id && position_ms > 0 && position_ms < duration_ms)
             .then_some(OttMediaProgress { position_ms, duration_ms })
     });
-    OttMedia { kind, duration_ms, progress }
+    OttMedia { kind, duration_ms, progress, synopsis: None }
 }
 
 pub(super) fn entry(entry: &CatalogEntry, id: &str, resume: Option<(&str, u64)>) -> Option<OttMedia> {
-    Some(facts(kind(&entry.media)?, entry.duration_ms, id, resume))
+    let mut media = facts(kind(&entry.media)?, entry.duration_ms, id, resume);
+    media.synopsis = entry.synopsis.as_ref().and_then(|span| span.validated_for(&entry.description));
+    Some(media)
 }
 
 pub(super) fn favorite(favorite: &Favorite, preview: Option<&CatalogEntry>, id: &str,
@@ -86,8 +88,11 @@ pub(super) fn favorite(favorite: &Favorite, preview: Option<&CatalogEntry>, id: 
         Locator::Local { .. } => OttMediaKind::LocalVideo,
         _ => OttMediaKind::Video,
     };
-    facts(preview.and_then(|entry| kind(&entry.media)).unwrap_or(fallback),
-        preview.and_then(|entry| entry.duration_ms), id, resume)
+    let mut media = facts(preview.and_then(|entry| kind(&entry.media)).unwrap_or(fallback),
+        preview.and_then(|entry| entry.duration_ms), id, resume);
+    media.synopsis = preview.and_then(|entry| entry.synopsis.as_ref()
+        .and_then(|span| span.validated_for(&entry.description)));
+    media
 }
 
 pub(super) fn catalog(page: &str, loaded: usize, loading: bool, complete: bool) -> Option<OttCatalogProgress> {

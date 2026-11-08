@@ -179,6 +179,7 @@ fn back_to_profiles_fences_an_earlier_save_reload_and_its_first_batch() {
             runtime.generation,
             Catalog { hierarchy: None,
                 entries: vec![CatalogEntry {
+                    synopsis: None,
                     id: "first".into(),
                     title: "first.mp4".into(),
                     category: "Fixture folder".into(),

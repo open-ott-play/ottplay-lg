@@ -14,7 +14,7 @@ The library is still being discovered while later pages arrive. An incomplete sc
 
 ## Descriptions and pictures
 
-For a film or episode, the information comes from VPortal rather than a television EPG. The source carries the supplied description, artwork, title, year and duration. Episodes can inherit missing metadata from their parent title. A short preview may show only part of a description; open **Description** for the full text available from the provider.
+For a film or episode, the information comes from VPortal rather than a television EPG. The source carries the supplied description, artwork, title, year and duration. Episodes can inherit missing metadata from their parent title. Recognised formatting markup is converted to plain text. The preview starts at the source-owned synopsis boundary, while **Description** retains the generated facts and full admitted text. See [Modern provider browsing](modern-provider-browsing.md) for navigation and verification details.
 
 A picture requires both a supplied artwork address and a successful image fetch. A screenshot of an empty picture area does not establish that the provider omitted it. Native UI display and image loading must be checked on the exact build in addition to the parser tests.
 

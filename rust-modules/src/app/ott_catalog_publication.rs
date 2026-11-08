@@ -12,6 +12,7 @@ pub(super) struct UnchangedAll {
 
 fn eligible(runtime: &Runtime, app: &App) -> bool {
     runtime.page == "channels"
+        && !modern_shelves::eligible(runtime)
         && runtime.view_selection() == ("", false)
         && runtime.loaded && !runtime.persistence_uncertain && !runtime.saving
         && runtime.catalog_loading && !runtime.catalog_complete

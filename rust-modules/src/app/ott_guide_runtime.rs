@@ -709,7 +709,7 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         Query::CurrentNext { .. } => msg::ott_guide_current_next().into(),
         Query::Records { .. } => String::new(),
     };
-    Some(OttView { status_working: current && state.error.is_none() && state.result.is_none(), classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None,
+    Some(OttView { shelf_context: None, shelves: Vec::new(), status_working: current && state.error.is_none() && state.result.is_none(), classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None,
         catalog_progress: None,
         search: None,
         page_id: format!("{}:{}", runtime.page, generation),

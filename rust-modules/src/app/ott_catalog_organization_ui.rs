@@ -113,7 +113,7 @@ fn build(view: &View, revision: u64, status: &str) -> OttView {
     };
     let category = view.category.as_ref().map_or("", |category| category.id.as_str());
     let item = view.item.as_ref().map_or("", |item| item.id.as_str());
-    OttView { status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
+    OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
         preview_context: None,
         page_id: format!("organization:{mode}:{category}:{item}"), revision, title, description,
         status: status.into(), selected_row: rows.first().map(|row| row.id.clone()),

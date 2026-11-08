@@ -288,7 +288,8 @@ impl<K: Copy + Eq + Hash> FocusEngine<K> {
             },
             Seat::RememberedFirst => {
                 let entry = entry_of(projected);
-                match self.remembered_in(entry, spec.id) {
+                match self.remembered_in(entry, spec.id)
+                    .filter(|elem| f.group_of(elem, cx) == Some(spec.id)) {
                     Some(elem) => FocusKey { entry, elem },
                     None => f.seat(spec.id, head_of(spec.extent), cx),
                 }
@@ -1111,6 +1112,22 @@ mod tests {
             panic!("a move");
         };
         assert_eq!(split(to.elem), (2, 35), "the remembered row, however far");
+    }
+
+    #[test]
+    fn remembered_first_keeps_current_members_and_rejects_removed_or_other_group_keys() {
+        rig!(m, v, cx);
+        for remembered in [key(E, 2, 2), key(E, 2, 5), key(E, 1, 2)] {
+            let mut current = Tree::new(E);
+            current.row(1, 3, 60.0, 100.0, 220.0, 100.0, 240.0);
+            current.row(2, 3, 60.0, 400.0, 220.0, 100.0, 240.0).spec.seat = Seat::RememberedFirst;
+            let mut engine = FocusEngine::new();
+            engine.set(OWNER, remembered, Some(GroupId(2)), By::Restore);
+            engine.set(OWNER, key(E, 1, 1), Some(GroupId(1)), By::Restore);
+            let Outcome::Moved { to, .. } = engine.move_dir(OWNER, &current, &[], Dir::Down, &cx)
+                else { panic!("enter current shelf"); };
+            assert_eq!(to, if remembered == key(E, 2, 2) { remembered } else { key(E, 2, 0) });
+        }
     }
 
     /// `RememberedNear{rows}` chases the cursor only within `rows`; beyond that it is Nearest.

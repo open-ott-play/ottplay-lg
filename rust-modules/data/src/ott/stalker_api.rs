@@ -137,6 +137,7 @@ pub fn catalog(
         // Validate the advertised URL now, but retain provider identity and resolve afresh at play time.
         stream_url(config, row, &id)?;
         catalogue.entries.push(CatalogEntry {
+            synopsis: None,
             id: identity(&profile.id, &format!("stalker:api:live:{id}")),
             title: text(title, 1024),
             category: text(group, 1024),

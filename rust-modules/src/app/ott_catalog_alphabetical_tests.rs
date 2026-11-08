@@ -25,7 +25,7 @@ fn fixture(kind: ProviderKind, titles: &[&str]) -> (ProviderProfile, Catalog) {
             ProviderKind::Local => MediaLocator::Local { relative_path: format!("video-{index}.mp4") },
             ProviderKind::Plex => MediaLocator::Plex { server_id: profile.source.clone(), rating_key: key.clone() },
         };
-        CatalogEntry { id: format!("{}:{key}", profile.id), title: (*title).into(),
+        CatalogEntry { synopsis: None, id: format!("{}:{key}", profile.id), title: (*title).into(),
             category: if index < 2 { "Z first" } else { "A second" }.into(),
             description: String::new(), poster: String::new(), media, duration_ms: None,
             provider_id: Some(key), provider_id_field: None, live: None }

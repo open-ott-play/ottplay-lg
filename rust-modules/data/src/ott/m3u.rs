@@ -93,6 +93,7 @@ impl M3uParser {
             title,
             category: pending.group,
             description: String::new(),
+            synopsis: None,
             poster: resolve_http_url(&self.profile.source, &pending.logo).unwrap_or_default(),
             media: MediaLocator::Http { url },
             duration_ms: pending.duration_ms,

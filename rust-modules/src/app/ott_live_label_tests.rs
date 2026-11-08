@@ -6,7 +6,7 @@ fn profile() -> ProviderProfile {
         source: "https://example.invalid/a.m3u".into(), source_alias: String::new(), enabled: true }
 }
 fn entry(id: &str) -> CatalogEntry {
-    CatalogEntry { id: id.into(), title: format!("Title {id}"), category: "Group".into(),
+    CatalogEntry { synopsis: None, id: id.into(), title: format!("Title {id}"), category: "Group".into(),
         description: String::new(), poster: String::new(),
         media: MediaLocator::Http { url: format!("https://example.invalid/{id}.ts") },
         duration_ms: None, provider_id: None, provider_id_field: None, live: None }

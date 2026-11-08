@@ -268,6 +268,24 @@ enum Body {
     Plain,
 }
 
+/// Consume the first remaining body with this key. Stable order and appended
+/// sections walk the old list once; reordered keys retain the original search
+/// semantics, including the first occurrence of a duplicated key.
+fn take_matching<K: Eq, V>(old: &mut [Option<(K, V)>], cursor: &mut usize, key: &K) -> Option<(K, V)> {
+    while *cursor < old.len() && old[*cursor].is_none() {
+        *cursor += 1;
+    }
+    let first = old.get(*cursor)?.as_ref()?;
+    let index = if &first.0 == key {
+        *cursor
+    } else {
+        let start = *cursor + 1;
+        start + old[start..].iter().position(|entry|
+            entry.as_ref().is_some_and(|(candidate, _)| candidate == key))?
+    };
+    old[index].take()
+}
+
 /// What a Back restores: the page scroll and each shelf's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StackMemory<K> {
@@ -548,10 +566,11 @@ impl<K: Copy + Eq> Stack<K> {
         p.sections(cx, &mut specs);
         let mut old: Vec<Option<(K, Body)>> =
             std::mem::take(&mut self.specs).into_iter().zip(std::mem::take(&mut self.bodies)).map(|(s, b)| Some((s.key, b))).collect();
+        let mut cursor = 0;
         self.bodies = specs
             .iter()
             .map(|s| {
-                let kept = old.iter_mut().find(|o| o.as_ref().is_some_and(|(k, _)| *k == s.key)).and_then(Option::take);
+                let kept = take_matching(&mut old, &mut cursor, &s.key);
                 match (s.kind, kept) {
                     (Kind::Shelf { .. }, Some((_, b @ Body::Shelf(_)))) => b,
                     (Kind::Grid { .. }, Some((_, b @ Body::Grid(_)))) => b,
@@ -935,6 +954,53 @@ impl<K: Copy + Eq> Stack<K> {
     /// The page's view: `Focusable` and `Part`.
     pub fn view<'a, P>(&'a self, p: &'a P) -> StackView<'a, K, P> {
         StackView { stack: self, page: p }
+    }
+}
+
+#[cfg(test)]
+mod refresh_matching_tests {
+    use super::take_matching;
+    use std::cell::Cell;
+
+    struct CountKey<'a> {
+        id: usize,
+        comparisons: &'a Cell<usize>,
+    }
+    impl PartialEq for CountKey<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.comparisons.set(self.comparisons.get() + 1);
+            self.id == other.id
+        }
+    }
+    impl Eq for CountKey<'_> {}
+
+    #[test]
+    fn ten_thousand_stable_or_appended_sections_compare_each_old_key_once() {
+        for appended in [0, 100] {
+            let comparisons = Cell::new(0);
+            let key = |id| CountKey { id, comparisons: &comparisons };
+            let mut old: Vec<_> = (0..10_000).map(|id| Some((key(id), id))).collect();
+            let mut cursor = 0;
+            for id in 0..10_000 + appended {
+                let kept = take_matching(&mut old, &mut cursor, &key(id)).map(|(_, body)| body);
+                assert_eq!(kept, (id < 10_000).then_some(id));
+            }
+            assert_eq!(comparisons.get(), 10_000);
+            assert!(old.iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn reordered_new_removed_and_duplicate_keys_keep_first_match_semantics() {
+        let mut old = vec![Some((2, "two")), Some((1, "first one")),
+            Some((1, "second one")), Some((3, "three")), Some((4, "removed"))];
+        let mut cursor = 0;
+        let kept: Vec<_> = [1, 9, 3, 1, 2, 1].into_iter()
+            .map(|key| take_matching(&mut old, &mut cursor, &key).map(|(_, body)| body))
+            .collect();
+        assert_eq!(kept, [Some("first one"), None, Some("three"),
+            Some("second one"), Some("two"), None]);
+        assert_eq!(old.into_iter().flatten().collect::<Vec<_>>(), [(4, "removed")]);
     }
 }
 

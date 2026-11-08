@@ -13,6 +13,7 @@ impl Drop for Reset {
 }
 fn entry(id: &str) -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: id.into(),
         title: id.into(),
         category: "Videos".into(),

@@ -103,6 +103,8 @@ mod reminders;
 mod search;
 #[path = "ott_ui_projection.rs"]
 mod ui_projection;
+#[path = "ott_modern_shelves.rs"]
+mod modern_shelves;
 #[path = "ott_remote_settings.rs"]
 mod remote_settings;
 #[path = "ott_public_preferences.rs"]
@@ -2755,7 +2757,9 @@ impl Runtime {
         } else {
             self.search_page_id().unwrap_or_else(|| self.page.into())
         };
-        OttView { status_working: false, classic_preferences: self.classic_preferences(), volume_available: self.playing.is_some(), category_label: self.category_label(),
+        let shelves = modern_shelves::project(self, &rows);
+        let shelf_context = (!shelves.is_empty()).then(|| modern_shelves::context(self));
+        OttView { shelf_context, shelves, status_working: false, classic_preferences: self.classic_preferences(), volume_available: self.playing.is_some(), category_label: self.category_label(),
             preview_context: preview::context(self),
             order_context: self.local_order_key(),
             random_context: random::context(self, &rows),
