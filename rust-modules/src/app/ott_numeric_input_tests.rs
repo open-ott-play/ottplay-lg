@@ -169,8 +169,8 @@ fn numeric_channel_uses_canonical_resolver_at_deadline_exactly_once() {
     let epoch = app.ott.as_ref().unwrap().playback_epoch;
     number_tick(&mut app, start + 9_000);
     assert_eq!(app.ott.as_ref().unwrap().playback_epoch, epoch);
-    assert!(app.ott.as_ref().unwrap().play_target.as_ref().unwrap().advance_on_failure,
-        "numeric selection must retain the ordinary UI Play continuation policy");
+    assert!(!app.ott.as_ref().unwrap().play_target.as_ref().unwrap().advance_on_failure,
+        "a failed live channel must stay selected instead of silently advancing");
 }
 
 #[test]
