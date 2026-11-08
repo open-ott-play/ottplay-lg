@@ -96,3 +96,71 @@ fn native_private_save_contains_proof_but_favorites_and_profile_exports_do_not()
     let profile_export = response.to_string();
     assert!(!profile_export.contains("local_favorite_proofs") && !profile_export.contains("fingerprint"));
 }
+
+#[test]
+fn first_and_repeated_profile_export_require_an_explicit_save_without_starting_a_writer() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = app_fixture();
+    let mut runtime = app.ott.take().unwrap();
+    runtime.provider = ProviderKind::Local;
+    runtime.saved.profiles.profiles = vec![local_profile()];
+    runtime.persistence_uncertain = true;
+    runtime.write_permit.revoke();
+    let before = serde_json::to_value(&runtime.saved).unwrap();
+    let request = runtime.remote.request_for_test("profile_export", json!({"number":1}));
+    for request_id in ["0123456789abcdef0123456789abcdef", "1123456789abcdef0123456789abcdef"] {
+        let mut inv = request.clone();
+        inv.id = request_id.into();
+        inv.deadline_ms = u64::MAX;
+        assert!(crate::app::ott_runtime::input_policy::read_only(&inv));
+        let response = commands::command(&mut runtime, &mut app, &inv)
+            .expect("export must finish synchronously without a storage worker");
+        assert_eq!(response, rejected("Save this local profile before exporting it"));
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+        assert!(!runtime.saving);
+        assert!(runtime.persistence_uncertain);
+        assert!(runtime.rx.try_recv().is_err());
+    }
+}
+
+#[test]
+fn saved_profile_exports_keep_the_binding_identity_without_storage_or_private_paths() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = app_fixture();
+    let mut runtime = app.ott.take().unwrap();
+    runtime.provider = ProviderKind::Local;
+    runtime.saved.profiles.profiles = vec![local_profile()];
+    let document = json!({"version":1,"provider":"offline","name":"Home",
+        "binding_id":"01234567-89ab-4def-8123-456789abcdef",
+        "sources":[{"key":"s0","kind":"folder","name":"Movies"}],
+        "selected":{"source_key":"s0","name":"Nested/Clip.mp4"}});
+    runtime.saved.settings.insert("offlineProfile:1".into(), document.clone());
+    runtime.saved.settings.insert("offlineBinding:01234567-89ab-4def-8123-456789abcdef".into(),
+        json!({"root":"/fixture/Movies","sources":document["sources"]}));
+    runtime.persistence_uncertain = true;
+    runtime.write_permit.revoke();
+    let before = serde_json::to_value(&runtime.saved).unwrap();
+    let request = runtime.remote.request_for_test("profile_export", json!({"number":1}));
+    for request_id in ["0123456789abcdef0123456789abcdef", "1123456789abcdef0123456789abcdef"] {
+        let mut inv = request.clone();
+        inv.id = request_id.into();
+        inv.deadline_ms = u64::MAX;
+        let response = commands::command(&mut runtime, &mut app, &inv)
+            .expect("saved export must not defer to persistence");
+        assert_eq!(response, ok(json!({"provider":"offline","number":1,"profile":document})));
+        let text = response.to_string();
+        assert!(!text.contains("/fixture/") && !text.contains("offlineBinding"));
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+        assert!(!runtime.saving);
+        assert!(runtime.persistence_uncertain);
+        assert!(runtime.rx.try_recv().is_err());
+
+        // The exported document still enters the existing receiving-device binder.
+        // Binding supplies that device's own path without changing portable identity.
+        let mut receiver = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        receiver.saved.settings.insert("offlineProfile:15".into(), response["data"]["profile"].clone());
+        let bound = commands::bind_local(&receiver, 15, "/receiver/OtherFolder").unwrap();
+        assert_eq!(bound.settings["offlineProfile:15"], document);
+        assert!(bound.validate().is_ok());
+    }
+}
