@@ -163,6 +163,9 @@ fn plex_remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'static s
     }
 }
 pub(super) fn remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'static str> {
+    // Installation consent remains available in standby and strict kiosk. Its
+    // closed parser admits no navigation or source-changing operation.
+    if inv.action == "notifications" { return Ok(()); }
     if inv.action == "plex_servers" {
         // The strict raw parser and shared UI/Remote selection handler own this
         // family's policy. No lossy op projection may bypass its restrictions.

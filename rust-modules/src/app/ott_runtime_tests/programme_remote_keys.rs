@@ -578,3 +578,23 @@ mod menu_input;
 
 #[path = "programme_menu_pointer.rs"]
 mod menu_pointer;
+
+#[test]
+fn notifications_overlay_preserves_physical_channel_dispatch_and_normal_selection() {
+    let _serial=plx_base::testlock::serial();
+    let _globals=Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for visible in [false,true] {
+        let mut app=remote_app();
+        let runtime=app.ott.as_mut().unwrap(); runtime.selected=Some("b".into());
+        if visible {let now=runtime.now_ms();runtime.remote.show_notification_for_test(now);
+            assert!(runtime.remote.notifications_need_frame(now));}
+        let owner=app.pages.top_page();
+        let identity=route::playback_identity(&app.player.session);
+        native_edge(&mut app,0,300,Edge::Down);
+        assert_eq!(queued(&app),Some("a"));
+        assert_eq!(app.ott.as_ref().unwrap().selected.as_deref(),Some("a"),
+            "banner must preserve the ordinary channel-step selection");
+        assert_eq!(app.pages.top_page(),owner);
+        assert_eq!(route::playback_identity(&app.player.session),identity);
+    }
+}

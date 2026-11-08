@@ -136,12 +136,14 @@ pub struct PublicPreferences {
     pub remote_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_mode: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub classic_bookmarks: Vec<ClassicBookmark>,
 }
 impl Default for PublicPreferences {
     fn default() -> Self {
-        Self { version: 1, device_id: None, remote_address: None, interface_mode: None,
+        Self { version: 1, device_id: None, remote_address: None, interface_mode: None, notifications_enabled: None,
             classic_bookmarks: Vec::new() }
     }
 }
@@ -151,6 +153,7 @@ pub enum PublicPatch {
     EnsureDeviceId(String),
     RemoteAddress(String),
     InterfaceMode(u8),
+    NotificationsEnabled(bool),
     ClassicBookmark(ClassicBookmark),
 }
 impl std::fmt::Debug for PublicPreferences {
@@ -185,6 +188,7 @@ impl PublicPreferences {
             PublicPatch::EnsureDeviceId(id) => { next.device_id.get_or_insert_with(|| id.clone()); }
             PublicPatch::RemoteAddress(address) => next.remote_address = Some(address.clone()),
             PublicPatch::InterfaceMode(mode) => next.interface_mode = Some(*mode),
+            PublicPatch::NotificationsEnabled(enabled) => next.notifications_enabled = Some(*enabled),
             PublicPatch::ClassicBookmark(bookmark) => {
                 next.classic_bookmarks.retain(|previous| previous.source != bookmark.source);
                 next.classic_bookmarks.push(bookmark.clone());
@@ -200,6 +204,7 @@ impl PublicPatch {
             Self::EnsureDeviceId(id) => valid_device(id),
             Self::RemoteAddress(address) => public_address(address),
             Self::InterfaceMode(mode) => *mode <= 1,
+            Self::NotificationsEnabled(_) => true,
             Self::ClassicBookmark(bookmark) => bookmark.validate().is_ok(),
         };
         if valid { Ok(()) } else { Err(ErrorCode::Invalid) }

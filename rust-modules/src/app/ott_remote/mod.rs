@@ -1,5 +1,6 @@
 //! Outbound native OTT control. No listening socket, browser, or debug FIFO.
-//! Models in protocol are pure; this app adapter owns one bounded IO task.
+//! Models in protocol are pure. Command delivery, notification polling and image
+//! loading each retain one bounded IO task, including canceled workers.
 pub(crate) use protocol::favorites_rejection;
 mod protocol;
 mod discovery;
@@ -9,6 +10,7 @@ mod display;
 pub(super) mod media_tracks;
 pub(super) mod plex_servers;
 mod ingress;
+mod notifications;
 pub(crate) use protocol::{Config, Invocation};
 use protocol::{Delivery, PairResult, Pairing, Request, SendKind};
 use serde_json::{json, Value};
@@ -88,6 +90,7 @@ struct Flight {
 }
 
 pub(crate) struct Remote {
+    notifications: Box<notifications::State>,
     config: Config,
     write_permit: plx_platform::storage::private::WritePermit,
     runtime: String,
@@ -134,6 +137,7 @@ impl Remote {
 
     /// Revoke disk authority before dropping any asynchronous control work.
     pub(crate) fn retire_for_erasure(&mut self) {
+        self.notifications.suspend();
         self.write_permit.revoke();
         self.clear_discovery();
         self.flight.take();
@@ -149,6 +153,7 @@ impl Remote {
     pub fn from_install(device_id: &str, runtime: &str) -> Self {
         let config = Config::disabled(device_id.to_owned());
         Self {
+            notifications: Box::default(),
             config,
             write_permit: plx_platform::storage::private::WritePermit::new(),
             runtime: runtime.into(),
@@ -507,6 +512,7 @@ impl Remote {
         self.find_diagnostic.clear();
     }
     fn invalidate(&mut self) {
+        self.notifications.suspend();
         self.clear_discovery();
         self.network_diagnostic.clear();
         self.generation = self.generation.wrapping_add(1);
@@ -523,6 +529,7 @@ impl Remote {
         self.failures = 0;
     }
     fn apply(&mut self, config: Config, persisted: bool) {
+        self.notifications.suspend();
         self.clear_discovery();
         self.network_diagnostic.clear();
         self.config = config;
@@ -683,6 +690,20 @@ impl Remote {
         }
         actions
     }
+    pub(crate) fn tick_notifications(&mut self, now: u64, enabled: bool, active: bool) {
+        let config = (self.persisted && !self.loading && self.pending_save.is_none()
+            && !matches!(self.flight.as_ref().map(|flight| &flight.kind), Some(Kind::Save(_)))
+            && self.write_permit.is_valid() && self.config.enabled)
+            .then_some(&self.config);
+        self.notifications.tick(config, self.generation, &self.runtime, enabled, active, now);
+    }
+    pub(crate) fn suspend_notifications(&mut self) { self.notifications.suspend(); }
+    pub(crate) fn notifications_need_frame(&self, now: u64) -> bool { self.notifications.needs_frame(now) }
+    pub(crate) fn draw_notifications(&mut self, now: u64, opacity: f32) {
+        self.notifications.draw(now, opacity, false, &plx_ui::widgets::LegacyMeasure);
+    }
+    #[cfg(all(test, feature = "hostsim"))]
+    pub(crate) fn show_notification_for_test(&mut self, now: u64) { self.notifications.show_for_test(now); }
     pub fn invocation_is_current(&self, invocation: &Invocation) -> bool {
         invocation.generation == self.generation
     }
