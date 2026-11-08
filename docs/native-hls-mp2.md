@@ -27,3 +27,11 @@ samples and timeline changes. Host tests establish those boundaries; successful
 playback and audio/video synchronization on a particular TV require a separate
 device observation. A failed playlist request occurs before codec handling and
 still needs its own network/source diagnosis.
+
+Playlist acquisition distinguishes a request deadline, cancellation, an HTTP
+rejection and a network transport failure. Deadline messages identify the initial
+or selected playlist, or a stalled response body. Local diagnostics contain only
+the fixed stage, nesting depth, elapsed milliseconds and numeric transport/status
+codes; source URLs, headers and response bodies are excluded. Acquisition keeps
+the existing 15-second request limit, cancellation and size bounds, with no added
+retry. A failed cold start alone does not establish that the timeout is too short.
