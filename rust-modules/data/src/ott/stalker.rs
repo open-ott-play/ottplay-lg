@@ -468,6 +468,7 @@ pub fn rows(
             title,
             category,
             description: text(row["description"].as_str().unwrap_or(""), 128 * 1024),
+            synopsis: None,
             poster,
             media: MediaLocator::Stalker {
                 cmd,

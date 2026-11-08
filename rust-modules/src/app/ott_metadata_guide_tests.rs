@@ -42,6 +42,7 @@ fn fixture(outer_selection: &str, resolved_id: &str) -> Guide {
         profile_id: "profile-a".into(),
         entry_id: outer_selection.into(),
         entry: CatalogEntry {
+            synopsis: None,
             id: resolved_id.into(),
             title: "Channel A".into(),
             category: "News".into(),

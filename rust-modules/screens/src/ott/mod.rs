@@ -35,7 +35,7 @@ use plx_ui::table_screen::{DocumentFocus, DocumentPart};
 use plx_ui::{theme, Rect};
 use plx_ui::widgets::{CtlPop, TabStrip};
 
-pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
+pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
 
 /// Presentation order for the already loaded single-channel guide window.
 /// This does not request or claim a complete archive/recordings history.
@@ -210,6 +210,7 @@ pub struct OttMedia {
     pub kind: OttMediaKind,
     pub duration_ms: Option<u64>,
     pub progress: Option<OttMediaProgress>,
+    pub synopsis: Option<plx_data::ott::SynopsisSpan>,
 }
 
 /// Read-only progress. Backends append through the same catalogue snapshot;
@@ -287,6 +288,15 @@ impl std::fmt::Debug for OttSearch {
     }
 }
 
+/// A real provider category, referencing the one canonical row table. Repeated
+/// membership does not duplicate metadata or create another playback identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OttShelf {
+    pub id: String,
+    pub title: String,
+    pub rows: Vec<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttView {
     pub classic_preferences: plx_appkit::classic_settings::Preferences,
@@ -309,6 +319,12 @@ pub struct OttView {
     /// The status describes pending work; accounted only where its text is drawn.
     pub status_working: bool,
     pub rows: Vec<OttRow>,
+    /// Empty preserves the flat catalogue presentation. Runtime supplies these
+    /// only for its unfiltered All list; Classic continues to use `rows`.
+    pub shelves: Vec<OttShelf>,
+    /// Presentation-only source identity for RAM shelf memory. Never authorizes
+    /// an action and deliberately survives navigation/action-token rotation.
+    pub shelf_context: Option<String>,
     pub selected_row: Option<String>,
     pub search: Option<OttSearch>,
 }
@@ -317,7 +333,7 @@ impl Default for OttView {
     fn default() -> Self {
         Self { classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None, catalog_progress: None, page_id: "loading".into(), revision: 0, title: msg::ott_brand().into(),
             description: msg::ott_intro().into(), status: String::new(), status_working: false,
-            rows: Vec::new(), selected_row: None, search: None }
+            rows: Vec::new(), shelves: Vec::new(), shelf_context: None, selected_row: None, search: None }
     }
 }
 
@@ -339,6 +355,9 @@ pub struct OttScreen {
     status: String,
     card_stack: plx_ui::cards::Stack<media::Section>,
     card_presentation: Option<bool>,
+    shelves: Vec<media::Shelf>,
+    shelf_index: HashMap<u32, usize>,
+    card_focus: Option<u32>,
     catalog_keys: Vec<u32>,
     restore_memory: Option<Memory>,
     search_return: search_return::State,
@@ -438,7 +457,7 @@ impl OttScreen {
             form: FormTable::new_hashed(crate::registry::BAND), keys: HashMap::new(), next_key: 1,
             copy: String::new(), status: String::new(),
             card_stack: plx_ui::cards::Stack::new(entry).clipped(navigation::route().content),
-            card_presentation: None, catalog_keys: Vec::new(), restore_memory: None, search_return: Default::default(), editor: None, editing: false, browse: false, browse_return: None,
+            card_presentation: None, shelves: Vec::new(), shelf_index: HashMap::new(), card_focus: None, catalog_keys: Vec::new(), restore_memory: None, search_return: Default::default(), editor: None, editing: false, browse: false, browse_return: None,
             menu_visibility: Default::default(), focus_request: None, header_cache: plx_ui::page_header::SharedRow::new(), header_capsules: TabStrip::new(), header_pop: CtlPop::new(), media: None,
             media_keys: HashMap::new(), reading: false, reader: DocumentReader::new(), read_target: 0,
             preview: None, preview_token: None, previewed: None, preview_dwell: 0.0,
@@ -473,23 +492,30 @@ impl OttScreen {
     }
 
     fn install_restoring_measured(&mut self, snapshot: Arc<OttView>, return_to: Option<(&str, Option<&String>)>) {
-        let changed_source = self.snapshot.preview_context.is_some()
-            && self.snapshot.preview_context != snapshot.preview_context;
-        let restore = self.restore_memory.take().filter(|memory| memory.page_id == snapshot.page_id && !changed_source)
+        let changed_source = if self.snapshot.shelf_context.is_some() && !self.classic_mode {
+            self.snapshot.shelf_context != snapshot.shelf_context
+        } else {
+            // Existing flat/Classic source admission stays independent of shelf memory.
+            self.snapshot.preview_context.is_some() && self.snapshot.preview_context != snapshot.preview_context
+        };
+        let restore = self.restore_memory.take().filter(|memory| memory.page_id == snapshot.page_id
+            && memory.source.as_ref().is_none_or(|source| snapshot.shelf_context.as_ref() == Some(source))
+            && !changed_source)
             .or_else(|| {
-                let changed_source = self.snapshot.page_id != snapshot.page_id
-                    || self.snapshot.preview_context != snapshot.preview_context;
+                let changed_source = self.snapshot.page_id != snapshot.page_id || changed_source
+                    || (self.snapshot.shelf_context.is_none() && self.snapshot.preview_context != snapshot.preview_context);
                 let id = snapshot.selected_row.as_ref()?;
                 if !changed_source || !snapshot.catalog_progress.is_some_and(|progress| progress.loading && !progress.complete)
                     || snapshot.rows.iter().any(|row| row.id == *id) { return None; }
                 // Reuse navigation memory's progressive restore and explicit-input
                 // cancellation; the temporary first row is not a new user choice.
-                Some(Memory { page_id: snapshot.page_id.clone(), focus: Some(format!("item:{id}")),
+                Some(Memory { page_id: snapshot.page_id.clone(), source: (!self.classic_mode).then(|| snapshot.shelf_context.clone()).flatten(), shelves: Vec::new(), focus: Some(format!("item:{id}")),
                     selected: Some(id.clone()), scroll: 0.0, keys: self.keys.clone(), next_key: self.next_key })
             });
         if let Some(memory) = &restore {
             self.keys = memory.keys.clone();
-            self.next_key = memory.next_key;
+            // Retired shelf identities must never be issued again after a RAM restore.
+            self.next_key = self.next_key.max(memory.next_key);
         }
         let awaiting_restore = restore.as_ref().is_some_and(|memory| {
             let missing = |id: &str| !snapshot.rows.iter().any(|row| row.id == id);
@@ -498,6 +524,7 @@ impl OttScreen {
                     || memory.selected.as_deref().is_some_and(missing))
         });
         let previous_presentation = self.card_presentation;
+        let previous_shelves = !self.shelves.is_empty();
         let same_page = !changed_source && return_to.map_or(self.snapshot.page_id == snapshot.page_id,
             |(page, _)| page == snapshot.page_id);
         if self.snapshot.preview_context != snapshot.preview_context {
@@ -541,10 +568,12 @@ impl OttScreen {
             self.reading = false; self.reader.reset(); self.read_target = 0;
             self.preview = None; self.preview_token = None; self.previewed = None; self.preview_dwell = 0.0;
         }
+        if !same_page { self.card_focus = None; }
         self.media_keys.clear();
         self.catalog_keys.clear();
         self.card_presentation = media::presentation(&snapshot);
-        let reset_cards = (restore.is_some() && !awaiting_restore) || !same_page || self.card_presentation != previous_presentation;
+        self.install_shelves(&snapshot);
+        let reset_cards = (restore.is_some() && !awaiting_restore) || !same_page || self.card_presentation != previous_presentation || previous_shelves != !self.shelves.is_empty();
         if reset_cards {
             self.card_stack = plx_ui::cards::Stack::new(self.entry).clipped(navigation::route().content);
         }
@@ -705,9 +734,10 @@ impl OttScreen {
         }
         if let Some(memory) = &restore {
             if self.card_presentation.is_some() && !awaiting_restore {
-                self.card_stack.restore(&plx_ui::cards::StackMemory { scroll: memory.scroll, shelves: Vec::new() });
+                self.card_stack.restore(&plx_ui::cards::StackMemory { scroll: memory.scroll, shelves: memory.shelves.clone() });
             }
-            self.focus_request = memory.focus.as_ref().filter(|id| id.starts_with("nav:") && visible.navigation(id))
+            self.focus_request = memory.focus.as_ref().filter(|id|
+                (id.starts_with("nav:") && visible.navigation(id)) || id.starts_with("shelf-item:"))
                 .and_then(|id| self.keys.get(id)).copied()
                 .or_else(|| self.form.selected_key().map(|key| key.0));
             if awaiting_restore {
@@ -724,6 +754,9 @@ impl OttScreen {
             self.copy.push_str(&self.status);
         }
         self.snapshot = snapshot;
+        if !self.classic_mode && !self.browse {
+            self.focus_request = self.focus_request.map(|key| self.card_target(key));
+        }
         self.form.table.set_classic_catalogue(classic_catalogue);
         self.form.table.set_classic_choices(classic_choices);
         if let Some(draft) = self.classic_settings_draft_footer() {
@@ -750,7 +783,7 @@ impl OttScreen {
     fn grid_view(&self) -> media::View<'_> {
         media::View { stack: &self.card_stack, page: media::Page {
             presentation: self.card_presentation, snapshot: &self.snapshot,
-            keys: &self.catalog_keys, index: &self.media_keys,
+            keys: &self.catalog_keys, index: &self.media_keys, shelves: &self.shelves, shelf_index: &self.shelf_index,
         } }
     }
 
@@ -758,7 +791,7 @@ impl OttScreen {
         -> Option<plx_ui::cards::CardEvent<u32>> {
         if self.classic_mode || self.editor.is_some() { return None; }
         let page = media::Page { presentation: self.card_presentation, snapshot: &self.snapshot,
-            keys: &self.catalog_keys, index: &self.media_keys };
+            keys: &self.catalog_keys, index: &self.media_keys, shelves: &self.shelves, shelf_index: &self.shelf_index };
         match self.card_stack.on(&page, ev, cx, fx) {
             Some(plx_ui::cards::StackEvent::Card(_, card)) if self.grid_active() => Some(card),
             _ => None,
@@ -926,7 +959,7 @@ impl OttScreen {
         self.browse = true;
         self.preview = None; self.preview_token = None; self.preview_dwell = 0.0;
         self.install(self.snapshot.clone());
-        self.focus_request = self.form.selected_key().map(|key| key.0);
+        self.focus_request = self.form.selected_key().map(|key| self.card_target(key.0));
         fx.invalidate(plx_machine::present::Provenance::Input);
     }
 
@@ -935,7 +968,7 @@ impl OttScreen {
         let return_focus = self.browse_return.take();
         let page = self.snapshot.page_id.clone();
         self.install_restoring(self.snapshot.clone(), Some((&page, return_focus.as_ref())));
-        self.focus_request = self.form.selected_key().map(|key| key.0);
+        self.focus_request = self.form.selected_key().map(|key| self.card_target(key.0));
         fx.invalidate(plx_machine::present::Provenance::Input);
     }
 
@@ -1179,6 +1212,7 @@ impl OttScreen {
                 return;
             }
         }
+        let key = self.canonical_card_key(key);
         if let Some(Activation::Action(action)) = self.form.index_of_key(RowKey(key)).and_then(|i| self.form.activate(i)) {
             if self.classic_mode && favorite && !self.browse && matches!(&action, FormAction::Forward(OttAction::Play(_))) {
                 self.open_browse(fx);
@@ -1440,8 +1474,10 @@ impl OttScreen {
                     }
                 }
                 self.preview_focus(to.elem);
-                self.form.note_engine_key(Some(RowKey(to.elem)));
-                if let Some(index) = self.form.index_of_key(RowKey(to.elem)) { self.form.table.sel = index as i32; }
+                if self.shelves.iter().any(|shelf| shelf.index.contains_key(&to.elem)) { self.card_focus = Some(to.elem); }
+                let canonical = self.canonical_card_key(to.elem);
+                self.form.note_engine_key(Some(RowKey(canonical)));
+                if let Some(index) = self.form.index_of_key(RowKey(canonical)) { self.form.table.sel = index as i32; }
                 if had_description != self.has_description() { self.install(self.snapshot.clone()); }
                 Handled::Yes
             }
@@ -1510,7 +1546,10 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
         if self.reading { Focusable::<H>::groups(&self.document_focus(), cx, out); }
         else if self.grid_active() { Focusable::<H>::groups(&self.grid_view(), cx, out); }
         else { Focusable::<H>::groups(&self.view(cx.measure), cx, out); }
-        for group in &mut out[first..] { group.edge[2] = EdgeRule::Screen; group.edge[3] = EdgeRule::Screen; }
+        for group in &mut out[first..] {
+            let edge = if self.grid_active() && !self.shelves.is_empty() { EdgeRule::Stop } else { EdgeRule::Screen };
+            group.edge[2] = edge; group.edge[3] = edge;
+        }
         if let Some(header) = self.header(cx.measure) {
             if let Some(group) = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).group_spec() {
                 out.push(group);
@@ -1548,6 +1587,7 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, H>) -> FocusKey<u32> {
         if let Some(key) = self.exit.prompt.reconcile(want) { return key; }
         let want = self.focus_request.map_or(want, |elem| FocusKey { entry: self.entry, elem });
+        let want = if self.grid_active() { FocusKey { elem: self.card_target(want.elem), ..want } } else { want };
         if let Some(header) = self.header(cx.measure) {
             if let Some(key) = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).reconcile(want) { return key; }
         }
@@ -1579,6 +1619,13 @@ impl LogicalState for OttScreen {
         out.bool(self.snapshot.volume_available);
         out.str(&self.snapshot.page_id).u64(self.snapshot.revision).seq(self.snapshot.rows.len());
         for row in &self.snapshot.rows { out.str(&row.id).bool(row.enabled).bool(row.favorite).bool(row.guide_available).bool(row.records_available); }
+        out.seq(self.snapshot.shelves.len());
+        for shelf in &self.snapshot.shelves {
+            out.str(&shelf.id).seq(shelf.rows.len());
+            for &row in &shelf.rows { out.u64(row as u64); }
+        }
+        out.option(self.snapshot.shelf_context.as_ref(), |out, source| { out.str(source); });
+        out.option(self.card_focus, |out, key| { out.u32(key); });
         out.option(self.snapshot.preview_context.as_ref(), |out, context| { out.str(context); });
         out.option(self.snapshot.random_context.as_ref(), |out, context| { out.str(context); });
         out.option(self.snapshot.order_context.as_ref(), |out, context| { out.str(context); });
@@ -1742,8 +1789,15 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
     fn links(&self, out: &mut Vec<Link>) {
         if self.exit.prompt.visible() { return; }
         if self.editor.is_none() && !self.reading {
-            out.push(Link { from: GroupId(0), dir: Dir::Up, to: navigation::GROUP });
-            out.push(Link { from: navigation::GROUP, dir: Dir::Down, to: GroupId(0) });
+            let first = if self.grid_active() { self.shelves.first().map_or(GroupId(0), |shelf| shelf.group) } else { GroupId(0) };
+            out.push(Link { from: first, dir: Dir::Up, to: navigation::GROUP });
+            out.push(Link { from: navigation::GROUP, dir: Dir::Down, to: first });
+            if self.grid_active() {
+                for pair in self.shelves.windows(2) {
+                    out.push(Link { from: pair[0].group, dir: Dir::Down, to: pair[1].group });
+                    out.push(Link { from: pair[1].group, dir: Dir::Up, to: pair[0].group });
+                }
+            }
         }
     }
     fn render(&self) -> RenderStrategy { RenderStrategy::Page }
@@ -1770,6 +1824,9 @@ pub fn draw_standby(painter: plx_ui::Painter) {
 
 #[cfg(test)]
 mod input_tests;
+
+#[cfg(test)]
+mod synopsis_tests;
 
 #[cfg(test)]
 pub(crate) mod cards_harness;
@@ -1879,7 +1936,7 @@ mod tests {
             kind: InputKind::Key { key, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true } })
     }
     fn snapshot(revision: u64, ids: &[&str]) -> Arc<OttView> {
-        Arc::new(OttView { status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
+        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
             description: String::new(), status: String::new(), selected_row: None, search: None,
             rows: ids.iter().map(|id| OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: id.to_string(), title: id.to_string(), detail: String::new(),
                 description: "Complete description. A second sentence remains available.".into(), poster: None,

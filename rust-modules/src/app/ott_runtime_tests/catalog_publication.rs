@@ -114,6 +114,21 @@ fn nodes_only_with_twenty_thousand_rows_keeps_view_and_emits_no_full_snapshot() 
 }
 
 #[test]
+fn modern_all_publishes_category_node_changes_for_shelf_projection() {
+    let _lock = plx_base::testlock::serial();
+    let mut app = Box::new(mounted(3));
+    app.bridge.apply_ui_mode(UiMode::Modern);
+    let runtime = app.ott.as_mut().unwrap();
+    runtime.saved.settings.insert("interfaceMode".into(), json!(1));
+    runtime.changed();
+    tick(&mut app);
+    assert!(tick(&mut app).is_empty(), "presentation switch must settle first");
+    send(&app, node("new-folder"));
+    assert_eq!(tick(&mut app).len(), 1, "Modern category shape must be republished");
+    assert!(tick(&mut app).is_empty(), "one source update must not cause continuous publication");
+}
+
+#[test]
 fn nodes_only_preserves_catalog_receipt_and_rendered_numeric_and_preview_admission() {
     let _lock = plx_base::testlock::serial();
     let mut app = Box::new(mounted(3));

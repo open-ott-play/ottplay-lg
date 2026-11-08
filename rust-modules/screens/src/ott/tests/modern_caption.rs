@@ -10,7 +10,7 @@ fn catalog() -> OttScreen {
     view.category_label = Some("News / World".into());
     for row in &mut view.rows {
         row.media = Some(OttMedia { kind: OttMediaKind::LiveChannel,
-            duration_ms: None, progress: None });
+            duration_ms: None, progress: None, synopsis: None });
     }
     screen.install(Arc::new(view));
     screen.refresh_presentation(UiMode::Modern, &plx_ui::fixture::FixtureMeasure);

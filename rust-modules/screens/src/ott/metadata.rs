@@ -27,6 +27,14 @@ pub(super) fn description(row: &OttRow, now: Option<i64>) -> &str {
     else { &row.description }
 }
 
+/// Only source-attested synopsis bytes can omit generated facts in a preview.
+/// Guide rollovers use their current programme; the full reader uses `description`.
+pub(super) fn preview_description(row: &OttRow, now: Option<i64>) -> &str {
+    if row.guide.is_some() { return description(row, now); }
+    row.media.as_ref().and_then(|media| media.synopsis.as_ref())
+        .and_then(|span| span.get(&row.description)).unwrap_or(&row.description)
+}
+
 /// One measured narrative flow serves both eligibility and painting. The
 /// optional video is a lease on the existing player, never selected-item art.
 #[derive(Clone, Copy)]
@@ -151,7 +159,8 @@ pub(super) fn paint(p:Painter,measure:&dyn Measure,row:&OttRow,status:&str,statu
             widgets::progress_bar(p,rect,0.0,rect.h,progress);
         }
     }
-    let description=description(row,now);
+    let has_description=!description(row,now).is_empty();
+    let description=preview_description(row,now);
     let mut body=Rect::new(flow.body.x,flow.body.y,flow.body.w,flow.body.h.max(0.0));
     if let Some(poster)=row.poster.as_ref().filter(|_| body.h>0.0) {
         let frame=Rect::new(area.x,body.y,plx_ui::consts::CARD_W,plx_ui::consts::CARD_H.min(body.h));
@@ -169,7 +178,7 @@ pub(super) fn paint(p:Painter,measure:&dyn Measure,row:&OttRow,status:&str,statu
         TextView::new(description,theme::size::LABEL,plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY)).max_lines(lines.max(1))
             .with_measure(measure).fade_last(theme::space::XL).draw(p,body);
     }
-    let hint=if reading {msg::ott_read_hint()} else if cards {msg::ott_cards_hint()} else if description.is_empty() {msg::ott_favorite_hint()}
+    let hint=if reading {msg::ott_read_hint()} else if cards {msg::ott_cards_hint()} else if !has_description {msg::ott_favorite_hint()}
         else {msg::ott_description_hint()};
     TextView::new(hint,theme::size::CAPTION,plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_TERTIARY)).with_measure(measure)
         .draw(p,Rect::new(area.x,layout.action.y,area.w,layout.action.h));

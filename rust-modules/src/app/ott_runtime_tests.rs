@@ -4,6 +4,8 @@
 
 #[path = "ott_runtime_tests/notifications.rs"]
 mod notifications;
+#[path = "ott_runtime_tests/modern_shelves.rs"]
+mod modern_shelves;
 
 #[path = "ott_runtime_tests/favorites_items_capability.rs"]
 mod favorites_items_capability;
@@ -131,6 +133,7 @@ fn synthetic_profile() -> ProviderProfile {
 
 fn synthetic_entry() -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: "late-fixture".into(),
         title: "MUST NOT BE INSTALLED AFTER EXIT".into(),
         category: String::new(),

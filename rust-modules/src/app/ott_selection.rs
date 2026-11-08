@@ -771,6 +771,7 @@ mod tests {
     }
     fn entry(media: MediaLocator) -> CatalogEntry {
         CatalogEntry {
+            synopsis: None,
             id: "receiver-row".into(),
             title: "Film".into(),
             category: "Series / Season 2".into(),

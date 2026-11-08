@@ -21,6 +21,7 @@ impl OttScreen {
     }
 
     pub(super) fn remote_page_key(&self, key: u32, direction: i32) -> Option<u32> {
+        if self.grid_active() && !self.shelves.is_empty() { return self.shelf_page_key(key, direction); }
         let current = self.catalog_keys.iter().position(|candidate| *candidate == key)?;
         let target = if self.grid_active() {
             plx_ui::screen::grid_page_index(current, self.catalog_keys.len(),

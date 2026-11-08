@@ -428,7 +428,7 @@ mod managed_profile_tests {
             kind: ProviderKind::Plex, source: source.into(), source_alias: String::new(), enabled: true }
     }
     fn entry(source: &str) -> CatalogEntry {
-        CatalogEntry { id: "managed:42".into(), title: "Film".into(), category: String::new(),
+        CatalogEntry { synopsis: None, id: "managed:42".into(), title: "Film".into(), category: String::new(),
             description: String::new(), poster: String::new(),
             media: MediaLocator::Plex { server_id: source.into(), rating_key: "42".into() },
             duration_ms: None, provider_id: None, provider_id_field: None, live: None }

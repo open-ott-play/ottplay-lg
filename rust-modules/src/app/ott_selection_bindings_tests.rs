@@ -16,6 +16,7 @@ fn root(id: &str, name: &str, authority: u64) -> BoundSource {
 
 fn media(path: &str) -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: "receiver-row".into(),
         title: "Film".into(),
         category: String::new(),

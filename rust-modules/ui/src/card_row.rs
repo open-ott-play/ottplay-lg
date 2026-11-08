@@ -29,6 +29,9 @@ pub struct RowStyle {
     pub h: f32,
     pub gap: f32,
     pub margin_x: f32,
+    /// A contained shelf may use an asymmetric content column. None retains
+    /// the native full-width row's symmetric margins.
+    pub viewport_width: Option<f32>,
     pub radius: f32,
     pub focus_scale: f32,
     pub k_scale: f32,
@@ -51,10 +54,17 @@ pub struct RowStyle {
     pub right_reserve: f32,
 }
 impl RowStyle {
+    /// Finite, positive visible width, bounded by the remaining logical panel.
+    pub fn viewport_width(&self) -> f32 {
+        let remaining = (SCR_W - self.margin_x).clamp(1.0, SCR_W);
+        self.viewport_width.filter(|width| width.is_finite() && *width > 0.0)
+            .unwrap_or(SCR_W - 2.0 * self.margin_x).clamp(1.0, remaining)
+    }
+
     /// The furthest a row of `n` cells scrolls: the content past the viewport, 0 for a row that
     /// fits whole.
     pub fn max_scroll(&self, n: usize) -> f32 {
-        let viewport = SCR_W - 2.0 * self.margin_x;
+        let viewport = self.viewport_width();
         (n as f32 * (self.w + self.gap) - self.gap - viewport).max(0.0)
     }
 
@@ -76,6 +86,7 @@ impl RowStyle {
         h: CARD_H,
         gap: GAP,
         margin_x: MARGIN_X,
+        viewport_width: None,
         radius: theme::CARD_RING_RAD,
         focus_scale: 1.09,
         k_scale: K_SCALE,
@@ -102,6 +113,7 @@ impl RowStyle {
         h: 236.0,
         gap: 28.0,
         margin_x: MARGIN_X,
+        viewport_width: None,
         radius: theme::CARD_RING_RAD,
         focus_scale: 1.09,
         k_scale: K_SCALE,
@@ -123,6 +135,7 @@ impl RowStyle {
         h: 190.0,
         gap: 40.0, // w+gap = 230 = detail CAST_SLOT (per-member pitch)
         margin_x: MARGIN_X,
+        viewport_width: None,
         radius: 95.0, // = w/2 (circle); draw_* recomputes per-rect anyway when `circular`
         focus_scale: 1.13,
         k_scale: K_SCALE,
@@ -143,6 +156,7 @@ impl RowStyle {
         h: 220.0,
         gap: 72.0,
         margin_x: MARGIN_X,
+        viewport_width: None,
         radius: 110.0,
         focus_scale: 1.18,
         k_scale: K_SCALE,
@@ -383,7 +397,7 @@ impl CardRow {
     /// The scroll offset [`scroll_into_view`] wants for `focused` — what `update` steers the
     /// spring to and `settle_lag` measures the live offset against.
     fn scroll_target(&self, focused: usize, n: usize, sty: &RowStyle) -> f32 {
-        let vw = SCR_W - 2.0 * sty.margin_x;
+        let vw = sty.viewport_width();
         scroll_into_view(self.scroll_x.pos, focused, n, sty.w, sty.gap, vw)
     }
     /// Cell `i`'s live focus-pop scale. Cells inside the spring array own a spring each; every cell
@@ -3687,5 +3701,36 @@ mod sort_caption_review_tests {
         let plain_cold = measure.widths.get();
         draw_label(Painter::recording(), rect, 1.0, &style, &plain, &measure);
         assert_eq!(measure.widths.get(), plain_cold);
+    }
+}
+
+#[cfg(test)]
+mod contained_viewport_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_viewport_keeps_both_aspects_visible_at_the_end_of_a_right_column() {
+        for base in [RowStyle::HOME, RowStyle::EPISODE] {
+            let style = RowStyle { margin_x: 900.0, viewport_width: Some(924.0), ..base };
+            let mut row = CardRow::new();
+            for focus in [0, 8, 19] {
+                for _ in 0..180 { row.update(20, Some(focus), &style, 1.0 / 60.0); }
+                let left = style.margin_x + focus as f32 * (style.w + style.gap) - row.scroll_x();
+                assert!(left >= style.margin_x - 0.01);
+                assert!(left + style.w <= style.margin_x + style.viewport_width() + 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn default_viewport_preserves_native_geometry_and_bounds_invalid_overrides() {
+        for base in [RowStyle::HOME, RowStyle::EPISODE, RowStyle::CAST, RowStyle::PROFILES] {
+            assert_eq!(base.viewport_width(), SCR_W - 2.0 * base.margin_x);
+            assert_eq!(base.max_scroll(20), (20.0 * (base.w + base.gap) - base.gap - (SCR_W - 2.0 * base.margin_x)).max(0.0));
+            for invalid in [f32::NAN, f32::INFINITY, 0.0, -10.0] {
+                assert_eq!(RowStyle { viewport_width: Some(invalid), ..base }.viewport_width(), base.viewport_width());
+            }
+        }
+        assert_eq!(RowStyle { margin_x: 900.0, viewport_width: Some(50_000.0), ..RowStyle::HOME }.viewport_width(), SCR_W - 900.0);
     }
 }

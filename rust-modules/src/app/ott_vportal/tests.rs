@@ -14,6 +14,7 @@ fn profile() -> ProviderProfile {
 }
 fn entry() -> CatalogEntry {
     CatalogEntry {
+        synopsis: None,
         id: "x".into(),
         title: "X".into(),
         category: String::new(),
