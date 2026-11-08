@@ -5365,11 +5365,13 @@ unsafe fn hls_demux_segment_path(
     };
     let external = external_state.is_some();
     let mut seen_vcl = false;
-    let mut trim_audio_before_ns = None;
+    let mut trim_audio_before_raw_ns = None;
     let mut aubuf = Vec::with_capacity(4 * 1024 * 1024);
     let mut video_packets = 0usize;
     let mut audio_packets = 0usize;
     let mut audio_stamps = Vec::new();
+    let mut video_stamps = Vec::new();
+    let mut first_video_raw_pts = None;
     let mut first_au_at = None;
     let mut aus = Vec::new();
     let mut au_bytes = 0u64;
@@ -5405,6 +5407,8 @@ unsafe fn hls_demux_segment_path(
                 av_packet_unref(input.pkt);
                 return Err(HlsExit::Failed("HLS video packet has no timestamp"));
             };
+            // Preserve the source clock even if the external H.264 entry prefix is skipped.
+            first_video_raw_pts.get_or_insert(raw_pts);
             let info = ts_h264_access_unit_info(
                 std::slice::from_raw_parts((*input.pkt).data, (*input.pkt).size.max(0) as usize),
                 &mut params,
@@ -5416,16 +5420,13 @@ unsafe fn hls_demux_segment_path(
                 av_packet_unref(input.pkt);
                 return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
             }
-            // Keep the segment's original video clock even when its entry prefix
-            // is discarded. Starting normalization at the IDR would move it to 0.
-            let pts = clock.normalize_video(raw_pts).0.saturating_mul(1_000_000);
             if external {
                 match external_h264_entry(&mut needs_entry, &mut seen_vcl, &info) {
                     H264EntryDecision::Skip => {
                         av_packet_unref(input.pkt);
                         continue;
                     }
-                    H264EntryDecision::Start => trim_audio_before_ns = Some(pts),
+                    H264EntryDecision::Start => trim_audio_before_raw_ns = Some(raw_pts),
                     H264EntryDecision::Continue => {}
                 }
             }
@@ -5433,13 +5434,14 @@ unsafe fn hls_demux_segment_path(
             if body_limit.is_some_and(|limit| au_bytes > limit) {
                 return Err(HlsExit::Failed("HLS access units exceed size limit"));
             }
+            let au = aus.len();
             aus.push(HlsAu {
                 data: aubuf.clone(),
-                pts_ns: pts,
+                pts_ns: 0,
                 key: if is_key { 1 } else { 0 },
                 es: 1,
             });
-            video_tail_ns = video_tail_ns.max(pts);
+            video_stamps.push((au, raw_pts));
             video_packets += 1;
             first_au_at.get_or_insert_with(std::time::Instant::now);
             av_packet_unref(input.pkt);
@@ -5558,12 +5560,31 @@ unsafe fn hls_demux_segment_path(
         }
     }
     let synthesized_audio = resolve_audio_stamps(&mut audio_stamps).map_err(HlsExit::Failed)?;
+    let first_audio_raw_pts = audio_stamps.first().and_then(|stamp| stamp.raw_ns);
+    // When every audio PTS was synthesized from AAC frame durations, its zero is
+    // segment-local rather than on the transport clock. Keep that lane anchored
+    // to the segment boundary without using it to shift the timestamped video.
+    let audio_has_transport_clock = synthesized_audio < audio_stamps.len();
+    let origin = crate::hls::SegmentClock::common_origin_ns(
+        first_video_raw_pts,
+        audio_has_transport_clock.then_some(first_audio_raw_pts).flatten(),
+    );
+    let audio_origin = if audio_has_transport_clock { origin } else { first_audio_raw_pts };
+    if let Some(origin) = origin {
+        for (au, raw) in &video_stamps {
+            let pts = clock.normalize_shared_ns(*raw, origin);
+            aus[*au].pts_ns = pts;
+            video_tail_ns = video_tail_ns.max(pts);
+        }
+    }
+    let trim_audio_before_ns = origin.and_then(|origin| {
+        trim_audio_before_raw_ns.map(|raw| clock.normalize_shared_ns(raw, origin))
+    });
     for stamp in &audio_stamps {
         let raw = stamp.raw_ns.expect("audio stamps resolved");
-        let segment_pts = clock
-            .normalize_audio(raw)
-            .0
-            .saturating_mul(1_000_000);
+        let segment_pts = audio_origin
+            .map(|origin| clock.normalize_shared_ns(raw, origin))
+            .unwrap_or_else(|| clock.end().0.saturating_mul(1_000_000));
         let pts = if let Some(decoder) = mp2.as_deref_mut() {
             decoder.map_stamp(raw, segment_pts).map_err(HlsExit::Failed)?
         } else { segment_pts };
@@ -5571,7 +5592,7 @@ unsafe fn hls_demux_segment_path(
         audio_tail_ns = Some(audio_tail_ns.map_or(pts, |tail: i64| tail.max(pts)));
     }
     if let Some(entry_ns) = trim_audio_before_ns {
-        // Both clocks were normalized from their original first packet. Discard
+        // Both clocks share the same segment origin. Discard
         // only audio preceding the retained random-access entry, never an entire
         // continuation segment merely because it contains no IDR.
         aus.retain(|au| au.es != 2 || au.pts_ns >= entry_ns);
