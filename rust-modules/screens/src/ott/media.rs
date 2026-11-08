@@ -71,7 +71,10 @@ impl super::OttScreen {
                 next = next.checked_add(1)?;
                 key
             };
-            if group { key.checked_add(3)?; }
+            // FormTable reserves the upper key band for controls. Both the
+            // occurrence key and its offset group must stay in the lower band.
+            if key >= crate::registry::BAND { return None; }
+            if group { key.checked_add(3).filter(|group| *group < crate::registry::BAND)?; }
             live.insert(id);
             Some(())
         };
@@ -92,7 +95,9 @@ impl super::OttScreen {
                 remaining = remaining.checked_add(1)?;
             }
         }
-        next.checked_add(remaining)?;
+        // `next` may equal the exclusive ceiling only after allocating the
+        // last legal key. Keep all later canonical/control keys below it too.
+        next.checked_add(remaining).filter(|next| *next <= crate::registry::BAND)?;
         Some(live)
     }
 
