@@ -6081,6 +6081,7 @@ pub fn stream_pcm(ps: &PlaybackSession) -> Option<Result<PcmFormat, String>> {
 /// stereo only: a surround track, and one whose width is unknown, is not mixed down
 /// (`Caps::app_may_mix_down`), so this reads false there and the Load stays native.
 pub fn stream_pcm_is_lossy(ps: &PlaybackSession) -> bool {
+    if external::embedded_mp2_pcm(ps) { return true; }
     let (channels, rate) = carried_audio_of_stream(ps).map_or((0, 0), |a| (a.channels, a.sample_rate));
     ps.attempt_caps().app_decodes_lossy_track(&ps.stream_acodec, channels, rate, forced_direct_play(ps))
 }

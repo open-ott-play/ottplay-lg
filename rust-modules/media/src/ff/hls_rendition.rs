@@ -332,7 +332,7 @@ pub(super) unsafe fn read_segment(
     let output = hls_demux_segment_path(
         segment,
         HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(BODY_LIMIT),
-            audio: None, rendition: Some(&mut capture), video: HlsVideoEntry::Independent },
+            audio: None, rendition: Some(&mut capture), video: HlsVideoEntry::Independent, mp2: None },
         &mut clock, aq, net, "aac", acquisition,
     )?;
     if output.aus.len() != capture.timing.len() {

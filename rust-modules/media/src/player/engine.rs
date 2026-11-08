@@ -8059,6 +8059,19 @@ mod pcm_info_tests {
     const BASE: &str = r#"{"contents":{"codec":{"audio":"PCM"},"provider":"plxnative"}}"#;
 
     #[test]
+    fn embedded_mp2_declares_only_its_admitted_pcm_shape() {
+        let shape = PcmFormat::STEREO_48K;
+        assert_eq!(audio_declaration("mp2", None), None, "no native MPEG passthrough claim");
+        let (audio, _) = audio_declaration("mp2", Some(&shape)).unwrap();
+        assert_eq!(audio, "PCM");
+        let payload: serde_json::Value = serde_json::from_str(&with_pcm_info(BASE, audio, Some(shape))).unwrap();
+        assert_eq!(payload["contents"]["codec"]["audio"], "PCM");
+        assert_eq!(payload["contents"]["pcmInfo"], serde_json::json!({
+            "format":"S16LE", "channelMode":"stereo", "layout":"interleaved", "sampleRate":48, "bitsPerSample":16
+        }));
+    }
+
+    #[test]
     fn a_pcm_load_states_the_shape_the_decoder_produces() {
         let f = PcmFormat { sample_rate: 48_000, bits: 16, channels: 2, source_rate: 48_000 };
         let p = with_pcm_info(BASE, "PCM", Some(f));

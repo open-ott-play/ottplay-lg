@@ -24,6 +24,7 @@ use std::sync::Once;
 
 pub mod inspect;
 pub mod hls_audio;
+pub(crate) mod hls_mp2;
 mod hls_rendition;
 mod adts_timing;
 mod hls_pdt;
@@ -5129,7 +5130,7 @@ unsafe fn hls_demux_segment(
     let path = auth
         .request_path(&segment.resource)
         .map_err(|_| HlsExit::Failed("segment credential rejected"))?;
-    hls_demux_segment_path(segment, HlsSegmentRequest { path: &path, transport: HlsSegmentTransport::Pms, body_limit: None, audio: None, rendition: None, video: HlsVideoEntry::Independent }, clock, aq, net, acodec, acquisition)
+    hls_demux_segment_path(segment, HlsSegmentRequest { path: &path, transport: HlsSegmentTransport::Pms, body_limit: None, audio: None, rendition: None, video: HlsVideoEntry::Independent, mp2: None }, clock, aq, net, acodec, acquisition)
 }
 
 struct HlsSegmentRequest<'a> {
@@ -5142,6 +5143,8 @@ struct HlsSegmentRequest<'a> {
     /// Private transport prerequisite. Never feed its normalized output directly.
     rendition: Option<&'a mut hls_rendition::Capture>,
     video: HlsVideoEntry<'a>,
+    /// External embedded MP2 only; PMS and separate renditions never supply it.
+    mp2: Option<&'a mut hls_mp2::Decoder>,
 }
 
 /// Shared MPEG-TS decoder; callers own authentication and pass the exact request path.
@@ -5155,8 +5158,11 @@ unsafe fn hls_demux_segment_path(
     acodec: &str,
     acquisition: SegmentAcquisition,
 ) -> Result<HlsSegmentOutput, HlsExit> {
-    let HlsSegmentRequest { path, transport, body_limit, audio, mut rendition, video } = request;
+    let HlsSegmentRequest { path, transport, body_limit, audio, mut rendition, video, mut mp2 } = request;
     let lane = rendition.as_ref().map(|capture| capture.lane);
+    if mp2.is_some() && (!matches!(transport, HlsSegmentTransport::External) || lane.is_some() || acodec != "mp2") {
+        return Err(HlsExit::Failed("Invalid MP2 HLS transport declaration"));
+    }
     if lane.is_some() && audio.is_some() {
         return Err(HlsExit::Failed("Conflicting HLS track selection modes"));
     }
@@ -5333,10 +5339,18 @@ unsafe fn hls_demux_segment_path(
     let ast = if ai >= 0 { *streams.add(ai as usize) } else { std::ptr::null_mut() };
     let aac_adts = if ai >= 0 {
         let acp = stream_codecpar(ast);
+        if let Some(decoder) = mp2.as_deref_mut() {
+            if !hls_mp2::format(&std::ffi::CStr::from_ptr(avcodec_get_name((*acp).codec_id)).to_string_lossy(),
+                i64::from((*acp).ch_layout.nb_channels), i64::from((*acp).sample_rate))
+            { return Err(HlsExit::Failed("MP2 HLS segment audio format changed")); }
+            if FEED_AUDIO.load(Ordering::Relaxed) { decoder.prepare(acp).map_err(HlsExit::Failed)?; }
+            None
+        } else {
         if (*acp).codec_id != AV_CODEC_ID_AAC {
             return Err(HlsExit::Failed("HLS segment audio is not AAC"));
         }
         adts_params(acp)
+        }
     } else {
         None
     };
@@ -5450,10 +5464,19 @@ unsafe fn hls_demux_segment_path(
             });
             let raw =
                 std::slice::from_raw_parts((*input.pkt).data, (*input.pkt).size.max(0) as usize);
-            let duration_ns = packet_duration
+            let mut duration_ns = packet_duration
                 .or_else(|| adts_duration_ns(raw))
                 .or(aac_duration);
-            let data = if packet_has_adts(raw) {
+            let mut raw_pts = raw_pts;
+            let data = if let Some(decoder) = mp2.as_deref_mut() {
+                let pts = raw_pts.ok_or(HlsExit::Failed("MP2 HLS packet has no timestamp"))?;
+                let (stamp, pcm) = decoder.decode(input.pkt, pts).map_err(HlsExit::Failed)?;
+                if pcm.is_empty() { av_packet_unref(input.pkt); continue; }
+                if pcm.len() % 4 != 0 { return Err(HlsExit::Failed("MP2 HLS decoder produced unaligned PCM")); }
+                raw_pts = Some(stamp);
+                duration_ns = Some((pcm.len() / 4) as i64 * 1_000_000_000 / 48_000);
+                pcm
+            } else if packet_has_adts(raw) {
                 raw.to_vec()
             } else if let Some((freq_idx, chan_cfg)) = aac_adts {
                 let mut framed = Vec::with_capacity(7 + raw.len());
@@ -5536,10 +5559,14 @@ unsafe fn hls_demux_segment_path(
     }
     let synthesized_audio = resolve_audio_stamps(&mut audio_stamps).map_err(HlsExit::Failed)?;
     for stamp in &audio_stamps {
-        let pts = clock
-            .normalize_audio(stamp.raw_ns.expect("audio stamps resolved"))
+        let raw = stamp.raw_ns.expect("audio stamps resolved");
+        let segment_pts = clock
+            .normalize_audio(raw)
             .0
             .saturating_mul(1_000_000);
+        let pts = if let Some(decoder) = mp2.as_deref_mut() {
+            decoder.map_stamp(raw, segment_pts).map_err(HlsExit::Failed)?
+        } else { segment_pts };
         aus[stamp.au].pts_ns = pts;
         audio_tail_ns = Some(audio_tail_ns.map_or(pts, |tail: i64| tail.max(pts)));
     }

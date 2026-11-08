@@ -17,8 +17,10 @@ parental checks.
 
 A destination can also be refused before the decoder is replaced. In that case,
 the previous channel can keep playing. Direct multiplexed MPEG-TS HLS currently
-requires H.264 video with AAC audio (or no audio); a refusal names common known
-codec pairs. This is a limitation of the application's HLS segment handling,
+requires H.264 video with AAC audio, qualified embedded MP2 audio, or no audio;
+a refusal names common known codec pairs. [Embedded MP2](native-hls-mp2.md)
+uses the existing PCM audio pipeline after device capability checks.
+This is a limitation of the application's HLS segment handling,
 not a statement about the television's decoder capabilities. Playback of the
 same codecs from progressive files follows a different path.
 
