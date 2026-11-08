@@ -11,6 +11,7 @@ use std::sync::{
 use std::time::Duration;
 
 pub(super) enum Outcome {
+    NotificationMedia(Option<super::notifications::LoadedImage>),
     LanDiscovery(Result<Vec<plx_net::control_discovery::ControlServer>, plx_net::control_discovery::Error>),
     Loaded(Result<(Config, bool, String), &'static str>),
     Saved(Result<(), &'static str>),
@@ -90,6 +91,17 @@ pub(super) fn send_bounded(request: Request, body_limit: usize) -> Option<Task> 
             response,
             elapsed_ms: u64::try_from(budget.spent(worker).as_millis()).unwrap_or(u64::MAX),
         }
+    })
+}
+
+pub(super) fn notification_media(request: Request, session: String,
+    descriptor: super::notifications::MediaDescriptor) -> Option<Task> {
+    launch(move |_, canceled| {
+        let headers = [format!("Authorization: Bearer {}", request.token)];
+        let result = http_request(&request, &headers, super::notifications::MEDIA_LIMIT).ok()
+            .filter(|response| response.status == 200 && !canceled.load(Ordering::Acquire))
+            .and_then(|response| super::notifications::decode_media(&response.body, &session, &descriptor));
+        Outcome::NotificationMedia(result)
     })
 }
 

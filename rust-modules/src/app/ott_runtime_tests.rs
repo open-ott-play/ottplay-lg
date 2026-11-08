@@ -2,6 +2,9 @@
 //! No boot loader, protected state, network, renderer or decoder is started.
 #![cfg(feature = "hostsim")]
 
+#[path = "ott_runtime_tests/notifications.rs"]
+mod notifications;
+
 #[path = "ott_runtime_tests/favorites_items_capability.rs"]
 mod favorites_items_capability;
 

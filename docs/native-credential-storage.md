@@ -110,8 +110,12 @@ managed path is considered.
 ## Public preferences already separated in this source
 
 The [closed preference schema][preferences] permits the installation device ID,
-normalized HTTPS controller address, Classic/Modern selection and bounded
+normalized HTTPS controller address, Classic/Modern selection, the optional
+installation-wide notification preference, and bounded
 browse bookmarks for temporary native-Plex sources, plus its format version.
+An absent notification preference defaults to enabled only after a successful
+read. It never enters provider/profile exports. Older application/service pairs
+may reject the added field: a binary downgrade alone is not a state rollback.
 Each bookmark holds source/category fingerprints and an optional focus key;
 at most 16 source bookmarks are retained. Reuse requires current account and
 source authorization: a bookmark cannot select a provider, start playback or

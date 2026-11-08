@@ -107,6 +107,8 @@ mod ui_projection;
 mod remote_settings;
 #[path = "ott_public_preferences.rs"]
 mod public_preferences;
+#[path = "ott_notification_settings.rs"]
+mod notification_settings;
 #[path = "ott_ui_text.rs"]
 mod ui_text;
 #[path = "ott_native_controls.rs"]
@@ -1667,6 +1669,7 @@ impl Runtime {
         self.suspend_with_retry_reason(app, continuity_diagnostics::Reason::Suspend);
     }
     fn suspend_with_retry_reason(&mut self, app: &mut App, reason: continuity_diagnostics::Reason) {
+        self.remote.suspend_notifications();
         self.failed_playback = None;
         // Reset at the actual lifecycle edge, even if no frame is rendered
         // between background/Standby and the next foreground input.
@@ -3558,6 +3561,20 @@ pub(super) fn reconcile_classic_navigation(app: &mut App) -> bool {
     changed
 }
 
+/// Presentation uses the receiver's monotonic clock; it never changes input ownership.
+pub(super) fn notifications_need_frame(app: &App) -> bool {
+    app.running && playback_allowed(app) && app.ott.as_ref().is_some_and(|runtime|
+        runtime.clock_sample.is_some_and(|sample| runtime.remote.notifications_need_frame(sample.unix_ms())))
+}
+pub(super) fn draw_notifications(app: &mut App) {
+    if !app.running || !playback_allowed(app) { return; }
+    if let Some(runtime) = app.ott.as_mut() {
+        let Some(now) = runtime.clock_sample.map(|sample| sample.unix_ms()) else { return; };
+        let opacity = runtime.osd_preferences().0.background_alpha(0.70);
+        runtime.remote.draw_notifications(now, opacity);
+    }
+}
+
 pub(super) fn playback_allowed(app: &App) -> bool {
     app.window_activity.allow_present(true) && !app.ott_standby
 }
@@ -3643,6 +3660,9 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
     let Some(mut runtime) = app.ott.take() else {
         return;
     };
+    // Release overlay textures on the owning thread while the GL context is
+    // still alive, and cancel ephemeral feed/media before the bounded drain.
+    runtime.remote.suspend_notifications();
     // This sample belongs to post-loop IO, not to a machine step. Projection
     // through steady_from keeps wall-clock adjustments from extending cleanup.
     let started = ClockSample::capture_main(app.adapters.player.mt()).ok();
@@ -4852,6 +4872,9 @@ fn tick_with_start(
     }
     let now = runtime.now_ms();
     runtime.favorites.expire(now);
+    let notification_policy = public_preferences::notifications_enabled(&runtime.public_preferences);
+    runtime.remote.tick_notifications(now, notification_policy.unwrap_or(false),
+        app.running && runtime.loaded && playback_allowed(app));
     let state = state(app, &runtime);
     for invocation in runtime.remote.tick(now, state) {
         let response = if let Err(error) = input_policy::remote(&mut runtime, &invocation) {

@@ -6,7 +6,7 @@ fn bookmark(source: u8) -> ClassicBookmark {
 }
 fn preferences() -> PublicPreferences {
     PublicPreferences { version: 1, device_id: Some("existing-device".into()),
-        remote_address: Some("https://control.invalid:443/team".into()), interface_mode: Some(1),
+        remote_address: Some("https://control.invalid:443/team".into()), interface_mode: Some(1), notifications_enabled: None,
         classic_bookmarks: Vec::new() }
 }
 
