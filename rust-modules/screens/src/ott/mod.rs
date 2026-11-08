@@ -510,7 +510,7 @@ impl OttScreen {
                 // Reuse navigation memory's progressive restore and explicit-input
                 // cancellation; the temporary first row is not a new user choice.
                 Some(Memory { page_id: snapshot.page_id.clone(), source: (!self.classic_mode).then(|| snapshot.shelf_context.clone()).flatten(), shelves: Vec::new(), focus: Some(format!("item:{id}")),
-                    selected: Some(id.clone()), scroll: 0.0, keys: self.keys.clone(), next_key: self.next_key })
+                    selected: Some(id.clone()), table_scroll: 0.0, scroll: 0.0, keys: self.keys.clone(), next_key: self.next_key })
             });
         if let Some(memory) = &restore {
             self.keys = memory.keys.clone();
@@ -722,7 +722,7 @@ impl OttScreen {
             .and_then(|_| self.media.and_then(|index| snapshot.rows.get(index)))
             .map(|row| format!("item:{}", row.id));
         plx_base::diag::spans::span("ott_table", || {
-            if let Some(memory) = &restore { self.form.open(form, restored_body.as_ref().or(memory.focus.as_ref()).or(Some(&selected))); }
+            if let Some(memory) = &restore { self.form.restore(form, restored_body.as_ref().or(memory.focus.as_ref()).or(Some(&selected)), memory.table_scroll); }
             else if same_page {
                 if let Some((_, focus)) = return_to { self.form.refresh_with(form, focus, Some(&selected)); }
                 else { self.form.refresh_with(form, None, Some(&selected)); }
