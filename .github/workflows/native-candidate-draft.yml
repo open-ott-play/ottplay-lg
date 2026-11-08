@@ -1,0 +1,151 @@
+name: Draft native webOS release from candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Native webOS candidate workflow run ID
+        required: true
+        type: string
+      candidate_run_attempt:
+        description: Candidate run attempt (normally 1)
+        required: true
+        default: '1'
+        type: string
+      source_sha:
+        description: Exact source commit recorded by the candidate
+        required: true
+        type: string
+      version:
+        description: Numeric package version recorded by the candidate (X.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-candidate-draft-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: Verify candidate and prepare draft only
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Validate dispatch inputs
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+      - name: Check out trusted release tooling from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm candidate run succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          run_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")
+          RUN_JSON="$run_json" python3 - "$RUN_ID" "$RUN_ATTEMPT" "$SOURCE_SHA" <<'PY'
+          import json, sys
+          import os
+          run = json.loads(os.environ["RUN_JSON"])
+          expected_id = int(sys.argv[1])
+          expected_attempt = int(sys.argv[2])
+          expected_sha = sys.argv[3]
+          assert run["id"] == expected_id, "run ID mismatch"
+          assert run["path"] == ".github/workflows/native-candidate.yml", "wrong workflow"
+          assert run["event"] == "workflow_dispatch", "candidate was not manually dispatched"
+          assert run["status"] == "completed" and run["conclusion"] == "success", "candidate run did not succeed"
+          assert run["head_branch"] == "main", "candidate workflow did not run from main"
+          assert run["head_sha"] == expected_sha, "candidate run commit does not match requested source SHA"
+          assert run["run_attempt"] == expected_attempt, "candidate run attempt does not match requested attempt"
+          PY
+
+      - name: Download the exact immutable candidate artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: webos-native-candidate-${{ inputs.source_sha }}-${{ inputs.candidate_run_id }}-${{ inputs.candidate_run_attempt }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/native-candidate
+
+      - name: Verify package bytes, receipt and link evidence
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          python3 ci/verify-native-candidate.py \
+            --artifact-dir "$CANDIDATE_DIR" --source-sha "$SOURCE_SHA" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --version "$VERSION"
+          python3 ci/check-packaged-elf.py \
+            "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            "$CANDIDATE_DIR/link-evidence"
+
+      - name: Require a pre-existing tag at the exact candidate commit
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+          test "$(git rev-parse "$tag^{commit}")" = "$SOURCE_SHA"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::a release already exists for $tag"; exit 1
+          fi
+
+      - name: Create a draft release from the verified candidate bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          ipk="$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk"
+          notes="$RUNNER_TEMP/draft-notes.md"
+          package_sha=$(awk 'NR == 1 {print $1}' "$CANDIDATE_DIR/ottplay-lg-${VERSION}.sha256")
+          cat > "$notes" <<EOF
+          Draft release prepared from the already-verified native candidate.
+
+          - Source commit: $SOURCE_SHA
+          - Candidate workflow run: $RUN_ID
+          - Package SHA-256: $package_sha
+
+          This is a draft for maintainer review. Publishing it remains a manual action. The version
+          tag was required to exist beforehand and to point at the exact candidate source commit.
+          EOF
+          gh release create "$tag" --draft --verify-tag --title "OTTPlay LG $VERSION (draft)" \
+            --notes-file "$notes" \
+            "$ipk" \
+            "$CANDIDATE_DIR/ottplay-lg-${VERSION}.sha256" \
+            "$CANDIDATE_DIR/candidate-provenance.json"

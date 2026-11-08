@@ -1,0 +1,115 @@
+name: Native webOS candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact commit to build from this repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-candidate-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build stable IPK from exact source
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Validate source SHA
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::source_sha must be a full 40-character commit SHA"; exit 1;
+          }
+          [[ "$SOURCE_SHA" == "$DISPATCH_SHA" ]] || {
+            echo "::error::source_sha must equal the exact commit that dispatched this workflow"; exit 1;
+          }
+
+      - name: Check out the requested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm the selected source contains the candidate build tooling
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          for path in .github/actions/apt-install/action.yml \
+                      .github/actions/rust-toolchain/action.yml \
+                      .github/actions/webos-ndk/action.yml \
+                      ci/make-native-candidate-receipt.py; do
+            git cat-file -e "HEAD:$path" || {
+              echo "::error::selected source predates required candidate tooling: $path"; exit 1;
+            }
+          done
+
+      - name: Install pinned host build tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config libclang-18-dev cmake ninja-build meson autoconf automake libtool nasm yasm bzip2 xz-utils libssl-dev curl
+
+      - name: Verify source and dependency pins
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --quiet HEAD --
+          test -z "$(git status --porcelain --untracked-files=all)"
+          python3 ci/deps.py check
+          python3 ci/check-package.py --selftest
+          python3 -m unittest ci.test_native_candidate_receipt -v
+
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+
+      - name: Install and verify pinned webOS SDK
+        id: sdk
+        uses: ./.github/actions/webos-ndk
+        with:
+          install-root: ${{ runner.temp }}/webos-ndk
+
+      - name: Build and verify stable release package
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        run: make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk
+
+      - name: Assemble immutable candidate and provenance receipt
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          OUTPUT_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          python3 ci/make-native-candidate-receipt.py \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --sdk "$WEBOS_SDK" \
+            --ipk "$(find pkg -maxdepth 1 -type f -name 'com.openottplay.player.native_*_arm.ipk' -print -quit)" \
+            --output-dir "$OUTPUT_DIR"
+
+      - name: Upload immutable candidate artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: webos-native-candidate-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-candidate/
+          if-no-files-found: error
+          retention-days: 90

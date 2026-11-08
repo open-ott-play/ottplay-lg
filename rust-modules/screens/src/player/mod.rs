@@ -1299,8 +1299,9 @@ impl PlayerScreen {
         let direction_or_ok = matches!(key, Key::Up | Key::Down | Key::Left { alt: false }
             | Key::Right { alt: false } | Key::Ok);
         let remote = (key == Key::Other).then(|| consts::remote_button(sym, wcode)).flatten();
+        let channel_step = matches!(remote, Some(RemoteButton::ChannelUp | RemoteButton::ChannelDown));
         let recovery_channel = offer.recovery_only
-            && matches!(remote, Some(RemoteButton::ChannelUp | RemoteButton::ChannelDown));
+            && channel_step;
         if offer.recovery_only && !recovery_channel { return None; }
         if !offer.recovery_only && !plx_media::route::playback_identity_matches(ps, &offer.source) {
             // A captured OTT command is not permission to control a replacement
@@ -1324,7 +1325,15 @@ impl PlayerScreen {
         // dismissal by this point and must not turn a bare press into HUD input.
         let info_cycle = mode == plx_machine::machine::UiMode::Classic
             && live_channel && !offer.seek_arrows && key == (Key::Right { alt: false });
-        if direction_or_ok && self.hud.visible_at_press && !info_cycle { return None; }
+        // On a live channel, the center/OK button is the channel-list command. Keep
+        // that action available while the transport HUD is visible too: otherwise
+        // the first press only reveals the footer and every later press is consumed
+        // by its default focus, leaving no remote path from fullscreen to channels.
+        let open_catalog_on_ok = key == Key::Ok && live_channel
+            && offer.accept == Action::OpenCatalog;
+        if direction_or_ok && self.hud.visible_at_press && !info_cycle && !open_catalog_on_ok {
+            return None;
+        }
         let action = match key {
             Key::Up => Action::Next,
             Key::Down => Action::Previous,
