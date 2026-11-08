@@ -40,8 +40,10 @@ fn hold_slots(r: &mut Runtime) {
     r.resolver_busy = true;
 }
 
-fn loaded(saved: Saved) -> (App, Runtime) {
-    let mut app = app();
+fn loaded(saved: Saved) -> (Box<App>, Runtime) {
+    // App embeds the runtime owner. Keep it off the libtest thread stack while
+    // Loaded/Restore/Saved helpers retain their own runtime and receipt values.
+    let mut app = Box::new(app());
     let runtime = load_into(&mut app, saved);
     (app, runtime)
 }
@@ -460,7 +462,7 @@ fn failed_cold_saved_ack_keeps_the_selected_attempt_terminal_without_all_root_fa
     let _lock = plx_base::testlock::serial();
     let _reset = NativeReset;
     let directory = Directory::new();
-    let (app, mut r) = loaded(saved_intent());
+    let (mut app, mut r) = loaded(saved_intent());
     let before = serde_json::to_value(&r.saved).unwrap();
     let checkpoints = r.checkpoints.clone();
     let task = take_restore(&mut r);
@@ -476,7 +478,7 @@ fn failed_cold_saved_ack_keeps_the_selected_attempt_terminal_without_all_root_fa
     assert!(r.local_inventory.usb.install.is_some());
     hold_slots(&mut r);
     arm_writer(&mut r);
-    let mut app = deliver(app, r, Err("Synthetic current protected writer refusal"));
+    deliver_into(&mut app, r, Err("Synthetic current protected writer refusal"));
     let mut r = app.ott.take().unwrap();
     assert!(r.local_inventory.usb.install.is_none());
     assert!(r.local_inventory.sources.is_empty());
@@ -696,7 +698,7 @@ fn cold_result_and_saved_admission_recheck_context_before_another_selector_tick(
             if let Some(candidate) = candidate {
                 let durable = serde_json::to_value(&candidate).unwrap();
                 hold_slots(&mut r);
-                let app = deliver(app, r, Ok(candidate));
+                deliver_into(&mut app, r, Ok(candidate));
                 let r = app.ott.as_ref().unwrap();
                 assert_eq!(
                     serde_json::to_value(&r.saved).unwrap(),
