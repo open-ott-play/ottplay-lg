@@ -21,6 +21,13 @@ pub(in crate::ff) struct Timeline {
     cache: Mutex<Option<Cache>>,
 }
 impl Timeline {
+    pub(in crate::ff) fn invalidate(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.0 = state.0.saturating_add(1);
+        state.1 = None;
+        drop(state);
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
     pub(in crate::ff) fn revision(&self) -> Option<u64> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).1.as_ref().map(|a| a.revision)
     }
@@ -92,7 +99,7 @@ pub(in crate::ff) fn prepare(master: &str, reference: &str, timeline: &Timeline,
     // Timestamp maps and matching discontinuity epochs establish the relation.
     // Retain a bounded rolling interval around the decoder cursor, including
     // nearby future cues; filter old playlist cues before assembling output.
-    let window = Window { start_ns: anchor.clock.presentation_ns.saturating_sub(60 * 1_000_000_000),
+    let window = Window { start_ns: anchor.end_ns.saturating_sub(60 * 1_000_000_000),
         end_ns: anchor.end_ns.saturating_add(60 * 1_000_000_000) };
     for segment in &cache.segments {
         check(&cancelled, deadline)?;

@@ -79,6 +79,7 @@ struct HlsPresentation {
     subtitles: Vec<SubtitleRendition>,
     video_clock: Option<super::hls_join::LaneClock>,
     live: Option<super::hls_webvtt::live::Timeline>,
+    live_video: Option<live_audio::Window>,
 }
 
 #[derive(Clone)]
@@ -87,6 +88,7 @@ pub struct HlsPlayback {
     selected: RenditionId,
     pub(super) audio: Vod,
     pub(super) audio_binding: Binding,
+    live_audio: Option<(live_audio::Window, live_audio::Window)>,
 }
 impl std::fmt::Debug for HlsPlayback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,9 +98,13 @@ impl std::fmt::Debug for HlsPlayback {
 }
 impl HlsPlayback {
     /// Multiplexed live playback carries subtitle metadata, not an audio rendition switch.
+    pub fn is_live_renditions(&self) -> bool { self.presentation.live_video.is_some() }
     pub fn is_live_subtitles(&self) -> bool { self.presentation.live.is_some() }
     pub fn live_subtitle_revision(&self) -> Option<u64> {
         self.presentation.live.as_ref().and_then(|live| live.revision())
+    }
+    pub(super) fn invalidate_live_clock(&self) {
+        if let Some(live) = &self.presentation.live { live.invalidate(); }
     }
     pub(super) fn commit_live_clock(&self, source: &str, epoch: u64,
         clock: Option<super::hls_webvtt::Clock>, end_ns: i64)
@@ -191,9 +197,16 @@ impl HlsPlayback {
         let row = self.presentation.renditions.iter().find(|r| r.id == id)
             .ok_or("HLS rendition choice is not in this presentation")?;
         let url = super::external_hls::uri(&self.presentation.master_url, &row.url)?;
+        if self.is_live_renditions() {
+            let video = live_audio::fetch_window(&self.presentation.variant_url, &cancelled)?;
+            let (window, binding) = live_audio::prepare_audio(&url, cancelled)?;
+            live_audio::validate_pair(&video, &window)?;
+            return Ok(Self { presentation: Arc::clone(&self.presentation), selected: id,
+                audio: window.media.clone(), audio_binding: binding, live_audio: Some((video, window)) });
+        }
         let (audio, binding) = prepare_audio(&url, cancelled)?;
         validate_window(&self.presentation.video, &audio)?;
-        Ok(Self { presentation: Arc::clone(&self.presentation), selected: id, audio, audio_binding: binding })
+        Ok(Self { presentation: Arc::clone(&self.presentation), selected: id, audio, audio_binding: binding, live_audio: None })
     }
 }
 
@@ -346,7 +359,12 @@ pub(super) fn inspect_master(source_url: &str, master_url: &str, text: &str,
     cancelled: Arc<AtomicBool>) -> Result<super::inspect::MediaInfo, &'static str>
 {
     let master = parse_master(master_url, text)?;
-    let video = fetch_vod(&master.variant_url, &cancelled)?;
+    let (landed, video_text) = super::external_hls::fetch(&master.variant_url,
+        &mut super::external_hls::Owner::Inspect(&cancelled))?;
+    if !video_text.lines().any(|line| line.trim() == "#EXT-X-ENDLIST") {
+        return live_audio::inspect(source_url, master_url, master, &landed, &video_text, cancelled);
+    }
+    let video = parse_vod(&landed, &video_text)?;
     let (mut info, video_clock) = if !master.subtitles.iter().any(|row| row.reference.is_ok()) {
         (super::inspect::raw_lane(&source_of(&video.segments[0]), Arc::clone(&cancelled), Lane::Video)?, None)
     } else {
@@ -371,8 +389,8 @@ pub(super) fn inspect_master(source_url: &str, master_url: &str, text: &str,
     info.resolved_source = Some(ExternalSource::Hls(source_url.into()));
     let presentation = HlsPresentation { source_url: source_url.into(), master_url: master_url.into(),
         variant_url: master.variant_url, video_binding: Binding::Video { width: info.width.into(), height: info.height.into() },
-        video, renditions: master.renditions, subtitles: master.subtitles, video_clock, live: None };
-    info.hls_playback = Some(HlsPlayback { presentation: Arc::new(presentation), selected: master.default, audio, audio_binding });
+        video, renditions: master.renditions, subtitles: master.subtitles, video_clock, live: None, live_video: None };
+    info.hls_playback = Some(HlsPlayback { presentation: Arc::new(presentation), selected: master.default, audio, audio_binding, live_audio: None });
     Ok(info)
 }
 
@@ -404,8 +422,8 @@ impl HlsPlayback {
                 name: name.into(), language: lang.into(), url: format!("https://example.invalid/{lang}.m3u8"), default: i == 0 }).collect();
         Self { presentation: Arc::new(HlsPresentation { source_url: source.clone(), master_url: source,
             variant_url: video.url.clone(), video, video_binding: Binding::Video { width: 160, height: 90 }, renditions,
-            subtitles: Vec::new(), video_clock: None, live: None }),
-            selected: RenditionId(1), audio, audio_binding: Binding::Audio(track) }
+            subtitles: Vec::new(), video_clock: None, live: None, live_video: None }),
+            selected: RenditionId(1), audio, audio_binding: Binding::Audio(track), live_audio: None }
     }
     /// Synthetic menu/route contract only: no network and no real decoder proof.
     pub fn fixture_with_subtitles_for_test() -> Self {
@@ -482,6 +500,9 @@ pub(super) fn live_presentation(source_url: &str, master_url: &str, text: &str,
         source_url: source_url.into(), master_url: master_url.into(), variant_url: variant_url.into(),
         video: empty.clone(), video_binding: Binding::Video { width: info.width.into(), height: info.height.into() },
         renditions: Vec::new(), subtitles, video_clock: None,
-        live: Some(super::hls_webvtt::live::Timeline::default()),
-    }), selected: RenditionId(0), audio: empty, audio_binding }))
+        live: Some(super::hls_webvtt::live::Timeline::default()), live_video: None,
+    }), selected: RenditionId(0), audio: empty, audio_binding, live_audio: None }))
 }
+
+#[path = "hls_live_audio.rs"]
+pub(super) mod live_audio;

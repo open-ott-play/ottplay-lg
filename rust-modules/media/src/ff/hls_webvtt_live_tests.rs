@@ -182,3 +182,16 @@ fn live_http_cancel_during_body_returns_no_snapshot_or_cache() {
     assert!(prepare(&server.url, "subs.m3u8", &timeline, cancel).is_err());
     assert!(timeline.cache.lock().unwrap().is_none());
 }
+
+#[test]
+fn live_explicit_restart_invalidates_same_source_epoch_mapping_and_cache() {
+    let timeline = Timeline::default();
+    timeline.commit("source", 4, Some(clock(0)), 1_000_000_000);
+    let previous = timeline.revision();
+    timeline.invalidate();
+    assert_eq!(timeline.revision(), None);
+    assert!(timeline.snapshot().is_none());
+    assert!(timeline.cache.lock().unwrap().is_none());
+    timeline.commit("source", 4, Some(Clock { pts_90k: 1_800_000, presentation_ns: 0 }), 2_000_000_000);
+    assert!(timeline.revision() > previous);
+}
