@@ -622,8 +622,14 @@ impl OttScreen {
             let title = if channel_item { classic::catalogue_title(row, snapshot.classic_preferences) }
                 else if catalogue_item { classic::list_label(row, snapshot.classic_preferences, row_now) }
                 else { row.title.clone() };
-            let mut presentation = Row::new(title).server_label()
-                .detail(detail.clone()).server_detail().checked(row.favorite);
+            let presentation_row = Row::new(title);
+            let mut presentation = if channel_item && !snapshot.classic_preferences.show_name() {
+                // catalogue_title supplies an app-owned localized fallback
+                // when the user hides provider channel names.
+                presentation_row
+            } else {
+                presentation_row.server_label()
+            }.detail(detail.clone()).server_detail().checked(row.favorite);
             if row.favorite && matches!(&row.action, OttAction::GuideProgramme { .. }) {
                 // Guide rows use the accepted checked state as a timer marker,
                 // before their date rather than in the title's checkbox slot.
@@ -2676,6 +2682,16 @@ mod catalogue_projection_regression_tests {
                 plx_appkit::classic_settings::Preferences::default()
                     .with_channel_display(0, 0, 1, 1).unwrap()).is_empty(),
                 "hidden-name fallback for {}", preference.tag());
+
+            let view = OttView { page_id: "channels".into(), rows: vec![live_row("station", "Station")],
+                classic_preferences: plx_appkit::classic_settings::Preferences::default()
+                    .with_channel_display(0, 0, 1, 1).unwrap(), ..Default::default() };
+            let screen = classic_screen(view);
+            let rendered = &rows(&screen)[0];
+            assert_eq!(rendered.label_origin, plx_ui::table::Origin::App,
+                "localized fallback remains app-owned for {}", preference.tag());
+            assert!(screen.form.table.app_fit_failures(RouteLayout::screen().sectioned_table().w, preference.tag()).is_empty(),
+                "Classic hidden-name catalogue label fits for {}", preference.tag());
         }
     }
 
