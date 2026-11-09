@@ -632,7 +632,9 @@ impl OttScreen {
             }
             if catalogue_item {
                 catalogue_number += 1;
-                presentation = presentation.catalogue_number(catalogue_number.to_string());
+                if snapshot.classic_preferences.show_number() {
+                    presentation = presentation.catalogue_number(catalogue_number.to_string());
+                }
                 if channel_item {
                     let art = row.poster.as_ref().map(|poster| match poster {
                         OttPoster::Local { key } => RowArt::Local(*key),
