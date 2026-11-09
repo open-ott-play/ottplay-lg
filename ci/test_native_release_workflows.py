@@ -18,6 +18,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertRegex(body, r"(?m)^  workflow_dispatch:")
         self.assertNotRegex(body, r"(?m)^  (?:push|schedule|pull_request):")
         self.assertIn("options: [beta, rc, stable]", body)
+        self.assertRegex(body, r"(?m)^      sequence:\n        description: Positive beta or RC sequence; leave empty for stable promotion\n        type: string$")
         self.assertIn('test "$GITHUB_REF" = refs/heads/main', body)
         self.assertIn("group: native-release-${{ inputs.version }}", body)
         self.assertIn("cancel-in-progress: false", body)
@@ -65,6 +66,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertIn("git merge-base --is-ancestor", body)
         self.assertIn("cmp \"$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk\"", stable)
         self.assertIn('cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/stable-public/$asset"', stable)
+        self.assertIn('cmp "ci/ottplay-integration/release/qualifications/v${VERSION}.json"', stable)
         self.assertIn('"published stable release metadata is incorrect"', stable)
         self.assertNotIn("make FLAVOR=stable", stable)
 

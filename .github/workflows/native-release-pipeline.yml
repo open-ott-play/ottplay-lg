@@ -19,7 +19,7 @@ on:
         required: false
       sequence:
         description: Positive beta or RC sequence; leave empty for stable promotion
-        type: number
+        type: string
         required: false
       rc_tag:
         description: Exact accepted vX.Y.Z-rc.N tag; stable promotion only
@@ -579,10 +579,11 @@ jobs:
             candidate-provenance.json \
             candidate-provenance.json.sha256 \
             native-release-plan.json \
-            link-evidence.tar.gz \
-            "v${VERSION}.json"; do
+            link-evidence.tar.gz; do
             cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/stable-public/$asset"
           done
+          cmp "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
+            "$RUNNER_TEMP/stable-public/v${VERSION}.json"
           stable_release=$(gh release view "v$VERSION" --json tagName,isDraft,isPrerelease)
           STABLE_RELEASE_JSON="$stable_release" python3 - <<'PY'
           import json, os
