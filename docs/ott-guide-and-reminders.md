@@ -1,6 +1,6 @@
 # Programme guide, archives and reminders
 
-This describes the native OTT implementation prepared for integration. It is not a claim that an existing IPK contains these changes or that a television has passed playback validation. See [native delivery](ott-native-delivery.md) for package and installation evidence.
+This describes the native OTT guide/reminder implementation included in the source of `v0.3.3-beta.1`. Source and host-test coverage do not establish physical television playback validation. See [native delivery](ott-native-delivery.md) for package and installation evidence and [capability status](native-capability-status.md) for current limits.
 
 ## Open the guide
 
