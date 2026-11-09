@@ -9488,6 +9488,8 @@ fn demux_inner(
                     Some(HlsTrackSelection::Live { playback, audio }) if playback.matches_source(url) && playback.is_live_subtitles() =>
                         external_hls::demux(url, &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback)),
                     Some(HlsTrackSelection::Live { .. }) => Err(HlsExit::Failed("HLS live presentation source changed")),
+                    Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_renditions() =>
+                        hls_presentation::live_audio::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_subtitles() =>
                         external_hls::demux(url, &acodec, None, aq_p, aqa_p, hs_p, Some(playback)),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) =>

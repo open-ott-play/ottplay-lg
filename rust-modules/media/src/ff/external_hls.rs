@@ -530,6 +530,7 @@ pub(super) fn demux(
     hs: *mut HttpStream,
     presentation: Option<&super::hls_presentation::HlsPlayback>,
 ) -> Result<(), HlsExit> {
+    if let Some(presentation) = presentation { presentation.invalidate_live_clock(); }
     let mut net = HlsNet { hs, curl: None };
     let mut next = None;
     let mut video_continuation: Option<VideoContinuation> = None;
@@ -846,5 +847,16 @@ pub(super) fn subtitle_window(base: &str, text: &str)
         Playlist::Media(media) => Ok(media.segments.into_iter()
             .map(|s| (s.inner, s.discontinuity_sequence)).collect()),
         _ => Err("HLS subtitle address became a master playlist"),
+    }
+}
+
+/// Bounded full-segment window for paired live single-lane scheduling.
+pub(super) fn rendition_window(base: &str, text: &str)
+    -> Result<(Vec<(crate::hls::Segment, u64)>, Duration, bool), &'static str>
+{
+    match parse_with_limits(base, text, 256, Some(1024 * 1024))? {
+        Playlist::Media(media) => Ok((media.segments.into_iter()
+            .map(|s| (s.inner, s.discontinuity_sequence)).collect(), media.target, media.ended)),
+        _ => Err("HLS rendition address became a master playlist"),
     }
 }
