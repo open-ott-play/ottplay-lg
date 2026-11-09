@@ -963,7 +963,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                         let focused = cx.focus.current.map(|k| k.elem)
                             .filter(|elem| !self.hidden_classic_control(cx, *elem));
                         if let Some(handled) = self.handle_ott_key(
-                            ps, H::ott_player_offer(cx, input.source), H::ui_mode(&cx.views),
+                            ps, H::ott_player_offer(cx, input.source), focused, H::ui_mode(&cx.views),
                             plx_appkit::info_panel::live_channel(H::metadata(cx)), *key, *sym, *wcode,
                             *edge, *at_edge, fx,
                         ) { return handled; }
@@ -1011,6 +1011,29 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
 /// accumulate into one target.
 fn continues_seek_burst(key: consts::Key, command: Option<player_hud::command::HudCommand>) -> bool {
     key == consts::Key::Ok && matches!(command, Some(player_hud::command::HudCommand::Seek(_)))
+}
+
+/// Whether OK currently belongs to an enabled control in the transport row.
+/// A live-channel catalog shortcut may use OK only when the HUD has no such
+/// focused target; otherwise the focused control keeps its normal activation.
+fn actionable_hud_target_focused(slot: ControlSlot, focused: Option<u32>) -> bool {
+    focused.is_some_and(|elem| {
+        player_hud::row_index(elem).is_some_and(|index| slot.enabled(index))
+            || (player_hud::ELEM_TAB_BASE..player_hud::ELEM_FAILURE_BASE).contains(&elem)
+    })
+}
+
+fn live_catalog_shortcut_on_ok(
+    key: consts::Key,
+    live_channel: bool,
+    accept: crate::registry::OttPlayerAction,
+    hud_visible: bool,
+    actionable_control_focused: bool,
+) -> bool {
+    key == consts::Key::Ok
+        && live_channel
+        && accept == crate::registry::OttPlayerAction::OpenCatalog
+        && !(hud_visible && actionable_control_focused)
 }
 
 impl PlayerScreen {
@@ -1283,6 +1306,7 @@ impl PlayerScreen {
         &mut self,
         ps: &plx_media::route::PlaybackSession,
         offer: Option<crate::registry::OttPlayerOffer>,
+        focused: Option<u32>,
         mode: plx_machine::machine::UiMode,
         live_channel: bool,
         canonical: plx_machine::machine::Key,
@@ -1329,8 +1353,13 @@ impl PlayerScreen {
         // that action available while the transport HUD is visible too: otherwise
         // the first press only reveals the footer and every later press is consumed
         // by its default focus, leaving no remote path from fullscreen to channels.
-        let open_catalog_on_ok = key == Key::Ok && live_channel
-            && offer.accept == Action::OpenCatalog;
+        let open_catalog_on_ok = live_catalog_shortcut_on_ok(
+            key,
+            live_channel,
+            offer.accept,
+            self.hud.visible_at_press,
+            actionable_hud_target_focused(self.slot, focused),
+        );
         if direction_or_ok && self.hud.visible_at_press && !info_cycle && !open_catalog_on_ok {
             return None;
         }
@@ -3514,6 +3543,39 @@ mod step_ladder_tests {
         assert!(!continues_seek_burst(consts::Key::Up, seek));
         assert!(!continues_seek_burst(consts::Key::Ok, Some(HudCommand::Next)));
         assert!(!continues_seek_burst(consts::Key::Ok, None));
+    }
+
+    #[test]
+    fn live_catalog_ok_yields_to_focused_audio_subtitles_and_more_controls() {
+        use player_hud::{control_elem, Controls, ControlSlot, BTN_AUDIO, BTN_MORE, BTN_SUBTITLES};
+        use crate::registry::OttPlayerAction;
+        let slot = ControlSlot::Discs(Controls::NONE);
+        for index in [BTN_AUDIO, BTN_SUBTITLES, BTN_MORE] {
+            assert!(
+                actionable_hud_target_focused(slot, Some(control_elem(index))),
+                "focused actionable control {index} must retain OK"
+            );
+        }
+        assert!(!actionable_hud_target_focused(slot, None));
+        assert!(!actionable_hud_target_focused(slot, Some(player_hud::ELEM_SCRUB)));
+        for tab in [player_hud::ELEM_TAB_BASE, player_hud::ELEM_TAB_BASE + 1] {
+            let tab_focused = actionable_hud_target_focused(slot, Some(tab));
+            assert!(tab_focused, "focused tab {tab} is actionable");
+            assert!(!live_catalog_shortcut_on_ok(
+                consts::Key::Ok, true, OttPlayerAction::OpenCatalog, true, tab_focused,
+            ), "visible focused tab {tab} owns OK");
+        }
+
+        let focused_audio = actionable_hud_target_focused(slot, Some(control_elem(BTN_AUDIO)));
+        assert!(!live_catalog_shortcut_on_ok(
+            consts::Key::Ok, true, OttPlayerAction::OpenCatalog, true, focused_audio,
+        ), "visible focused control owns OK");
+        assert!(live_catalog_shortcut_on_ok(
+            consts::Key::Ok, true, OttPlayerAction::OpenCatalog, false, focused_audio,
+        ), "hidden HUD leaves OK available to open the catalogue");
+        assert!(live_catalog_shortcut_on_ok(
+            consts::Key::Ok, true, OttPlayerAction::OpenCatalog, true, false,
+        ), "OK opens the catalogue without a focused actionable control");
     }
 
     /// A segment offer moves the ring (`PlayerScreen::raise_for_offer` writes `nav`, with no effect to

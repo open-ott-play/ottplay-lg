@@ -54,6 +54,9 @@ ares-launch --device living-room com.openottplay.player.native.debug
 ```
 
 LG documents the CLI install and launch flow in its [CLI Developer Guide](https://webostv.developer.lge.com/develop/tools/cli-dev-guide).
+For the detailed pairing, install verification, SSH diagnostics, and the
+version-specific `ares-install` callback failure observed during installation,
+see [LG CLI installation and troubleshooting](lg-cli-install-troubleshooting.md).
 
 ## Build and release candidates
 

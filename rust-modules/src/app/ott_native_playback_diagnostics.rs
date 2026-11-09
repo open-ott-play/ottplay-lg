@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 pub(super) const SAMPLE_INTERVAL_MS: u32 = 1_000;
 pub(super) const MAX_DURATION_MS: u32 = 60_000;
 pub(super) const MAX_RECORDS: usize = 64;
+const DEFAULT_DURATION_S: u64 = 30;
 
 #[derive(Default)]
 pub(super) struct Capture {
@@ -90,6 +91,13 @@ fn clamp_u64(value: i64) -> u64 {
 
 fn clamp_u16(value: i32) -> u16 {
     value.max(0).min(u16::MAX as i32) as u16
+}
+
+fn requested_duration_s(value: Option<&Value>) -> Option<u64> {
+    match value {
+        None => Some(DEFAULT_DURATION_S),
+        Some(value) => value.as_u64().filter(|seconds| (5..=60).contains(seconds)),
+    }
 }
 
 pub(super) fn playback_owner(
@@ -292,18 +300,14 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
     match operation {
         "start" => {
             if p.as_object().is_none_or(|object| {
-                object.len() != 4
+                !(3..=4).contains(&object.len())
                     || object.keys().any(|key| {
                         !["version", "runtime", "operation", "duration_s"].contains(&key.as_str())
                     })
             }) {
                 return error(operation, "invalid_request");
             }
-            let Some(duration_s) = p
-                .get("duration_s")
-                .and_then(Value::as_u64)
-                .filter(|value| (5..=60).contains(value))
-            else {
+            let Some(duration_s) = requested_duration_s(p.get("duration_s")) else {
                 return error(operation, "invalid_request");
             };
             if runtime
@@ -407,5 +411,26 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             }
         }
         _ => error(operation, "unsupported"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requested_duration_s;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn omitted_capture_duration_defaults_to_thirty_seconds() {
+        assert_eq!(requested_duration_s(None), Some(30));
+    }
+
+    #[test]
+    fn explicit_capture_duration_accepts_only_five_through_sixty_seconds() {
+        for seconds in [5, 30, 60] {
+            assert_eq!(requested_duration_s(Some(&json!(seconds))), Some(seconds));
+        }
+        for invalid in [json!(4), json!(61), Value::Null, json!(-1), json!(5.5), json!("30")] {
+            assert_eq!(requested_duration_s(Some(&invalid)), None, "{invalid}");
+        }
     }
 }

@@ -121,28 +121,65 @@ jobs:
             echo "::error::a release already exists for $tag"; exit 1
           fi
 
+      - name: Require authored release notes for this version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          notes="ci/ottplay-integration/release/notes/v${VERSION}.md"
+          test -s "$notes" || {
+            echo "::error::missing authored release notes: $notes"; exit 1;
+          }
+
       - name: Create a draft release from the verified candidate bytes
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           VERSION: ${{ inputs.version }}
           RUN_ID: ${{ inputs.candidate_run_id }}
+          RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
           CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
         run: |
           set -euo pipefail
           tag="v$VERSION"
           ipk="$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk"
+          notes_source="ci/ottplay-integration/release/notes/v${VERSION}.md"
+          test -s "$notes_source" || {
+            echo "::error::missing authored release notes: $notes_source"; exit 1;
+          }
           notes="$RUNNER_TEMP/draft-notes.md"
           package_sha=$(awk 'NR == 1 {print $1}' "$CANDIDATE_DIR/ottplay-lg-${VERSION}.sha256")
-          cat > "$notes" <<EOF
-          Draft release prepared from the already-verified native candidate.
+          [[ "$package_sha" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::candidate package checksum is malformed"; exit 1;
+          }
+          python3 - "$notes_source" "$notes" "$package_sha" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          source = Path(sys.argv[1])
+          target = Path(sys.argv[2])
+          digest = sys.argv[3]
+          if not re.fullmatch(r"[0-9a-f]{64}", digest):
+              raise SystemExit("candidate package checksum is malformed")
+          body = source.read_text()
+          sentinel = "__IPK_SHA256__"
+          if body.count(sentinel) != 1:
+              raise SystemExit("authored release note must contain exactly one __IPK_SHA256__ sentinel")
+          target.write_text(body.replace(sentinel, digest))
+          PY
+          cat >> "$notes" <<EOF
+
+          ## Candidate provenance
 
           - Source commit: $SOURCE_SHA
-          - Candidate workflow run: $RUN_ID
+          - Candidate workflow run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT
           - Package SHA-256: $package_sha
+          - Attached provenance receipt: \`candidate-provenance.json\`
 
-          This is a draft for maintainer review. Publishing it remains a manual action. The version
-          tag was required to exist beforehand and to point at the exact candidate source commit.
+          This draft was assembled from the already-verified candidate artifact. Publishing remains
+          a manual action. The version tag was required to exist beforehand and to point at the
+          exact candidate source commit.
           EOF
           gh release create "$tag" --draft --verify-tag --title "OTTPlay LG $VERSION (draft)" \
             --notes-file "$notes" \
