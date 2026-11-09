@@ -60,21 +60,23 @@ see [LG CLI installation and troubleshooting](lg-cli-install-troubleshooting.md)
 
 ## Build and release candidates
 
-The native candidate workflow builds a stable ARM IPK from one exact `main`
-commit on an ARM runner. Dispatch it with that same full commit SHA; the workflow
-rejects any other SHA. It verifies pinned dependencies and SDK, package/link
-contracts, then uploads the IPK, checksums, linker evidence, and a provenance
-receipt as one immutable artifact. The receipt records the source tree, package
-hash, build configuration, and toolchain identities.
+The current beta, RC, stable-promotion, and physical-TV qualification process is
+documented in [Native release process](native-release-process.md). The entry
+point is `.github/workflows/native-release-pipeline.yml`, dispatched manually
+from `main` with `channel=beta|rc|stable`. Beta/RC require the exact source SHA,
+committed numeric version, and positive sequence; stable requires the exact
+accepted RC tag. The pipeline freezes that identity, runs the required CI gate
+(including **Release contracts**), and calls
+`.github/workflows/native-candidate.yml` as a reusable stable-flavor ARM IPK
+builder. Beta and RC are published as `vX.Y.Z-beta.N` and `vX.Y.Z-rc.N`.
 
-`Draft native webOS release from candidate` consumes a candidate by run ID and
-attempt. It verifies the workflow run, source SHA, package version, checksums,
-and linker evidence, and never rebuilds the IPK. It only creates a GitHub draft
-from the already-built bytes, and only when a version tag already points to the
-candidate's exact source commit. It does not create tags or publish a release;
-maintainer review and publication remain manual. Candidates cannot be promoted
-until the version's release audit/notes are present (or release configuration
-explicitly routes those checks), and the ARM candidate workflow has passed.
+Stable promotion uses the protected GitHub environment `release`, requires the
+matching physical-TV record at
+`ci/ottplay-integration/release/qualifications/vX.Y.Z.json`, and republishes the
+accepted RC IPK without rebuilding. Source, run, provenance, qualification, and
+hashes are checked; the workflow compares stable package bytes with the RC
+package. No release has been run or qualified by this change, and no device
+results are asserted here.
 
 The existing host CI is not a substitute for this ARM package candidate. A
 successful host/hostsim build alone does not qualify an IPK for TV installation

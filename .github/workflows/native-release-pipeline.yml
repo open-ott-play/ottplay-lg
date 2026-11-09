@@ -1,0 +1,593 @@
+name: Native webOS release pipeline
+run-name: "Native webOS ${{ inputs.channel }} ${{ inputs.version }} from ${{ github.sha }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release stage
+        type: choice
+        options: [beta, rc, stable]
+        required: true
+      version:
+        description: Numeric package version already committed to main (X.Y.Z)
+        type: string
+        required: true
+      source_sha:
+        description: Exact main SHA for beta or RC; leave empty for stable promotion
+        type: string
+        required: false
+      sequence:
+        description: Positive beta or RC sequence; leave empty for stable promotion
+        type: number
+        required: false
+      rc_tag:
+        description: Exact accepted vX.Y.Z-rc.N tag; stable promotion only
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Freeze and validate release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      channel: ${{ steps.identity.outputs.channel }}
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      sequence: ${{ steps.identity.outputs.sequence }}
+      run_id: ${{ steps.identity.outputs.run_id }}
+      run_attempt: ${{ steps.identity.outputs.run_attempt }}
+      ipk_sha256: ${{ steps.identity.outputs.ipk_sha256 }}
+      plan_artifact: ${{ steps.identity.outputs.plan_artifact }}
+    steps:
+      - name: Audit workflow network egress
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+
+      - name: Check out trusted main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+
+      - name: Validate committed package identity and reserve a unique channel tag
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SEQUENCE: ${{ inputs.sequence }}
+          RC_TAG: ${{ inputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main || {
+            echo "::error::dispatch this workflow from the protected main branch"; exit 1;
+          }
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(python3 -c 'import json; print(json.load(open("pkg/appinfo.json"))["version"])')" = "$VERSION"
+          test "$(python3 -c 'import json; print(json.load(open("ci/ottplay-integration/release/product.json"))["version"])')" = "$VERSION"
+          notes="ci/ottplay-integration/release/notes/v${VERSION}.md"
+          test -s "$notes" || { echo "::error::missing authored release notes $notes"; exit 1; }
+
+          case "$CHANNEL" in
+            beta|rc)
+              [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              test "$SOURCE_SHA" = "$GITHUB_SHA" || {
+                echo "::error::dispatch the exact current main SHA; source_sha must equal github.sha"; exit 1;
+              }
+              [[ "$SEQUENCE" =~ ^[1-9][0-9]*$ ]]
+              test -z "$RC_TAG"
+              PLAN_ARTIFACT="native-release-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              python3 ci/native_release.py plan \
+                --repository "$GITHUB_REPOSITORY" --channel "$CHANNEL" \
+                --version "$VERSION" --sequence "$SEQUENCE" \
+                --source-sha "$SOURCE_SHA" --run-id "$GITHUB_RUN_ID" \
+                --run-attempt "$GITHUB_RUN_ATTEMPT" \
+                --output "$RUNNER_TEMP/native-release-plan.json"
+              TAG=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag"])' \
+                "$RUNNER_TEMP/native-release-plan.json")
+              if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+                echo "::error::release tag already exists: $TAG"; exit 1
+              fi
+              if gh release view "$TAG" >/dev/null 2>&1; then
+                echo "::error::a release already exists for $TAG"; exit 1
+              fi
+              refs=$(git ls-remote --tags origin "refs/tags/v${VERSION}-${CHANNEL}.*" | awk '{print $2}')
+              max=$(MAX_SEQUENCE_REFS="$refs" python3 - "$VERSION" "$CHANNEL" <<'PY'
+          import os, re, sys
+          version, channel = sys.argv[1:]
+          maximum = 0
+          for ref in os.environ["MAX_SEQUENCE_REFS"].splitlines():
+              name = ref.strip().removeprefix("refs/tags/").removesuffix("^{}")
+              match = re.fullmatch(rf"v{re.escape(version)}-{re.escape(channel)}\.([1-9][0-9]*)", name)
+              if match:
+                  maximum = max(maximum, int(match.group(1)))
+          print(maximum)
+          PY
+              )
+              (( SEQUENCE > max )) || {
+                echo "::error::sequence $SEQUENCE must be greater than the existing $CHANNEL sequence $max"; exit 1;
+              }
+              mkdir -p "$RUNNER_TEMP/native-release-plan"
+              cp "$RUNNER_TEMP/native-release-plan.json" "$RUNNER_TEMP/native-release-plan/native-release-plan.json"
+              echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+              echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+              echo "sequence=$SEQUENCE" >> "$GITHUB_OUTPUT"
+              echo "run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+              echo "run_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+              echo "plan_artifact=$PLAN_ARTIFACT" >> "$GITHUB_OUTPUT"
+              echo "ipk_sha256=" >> "$GITHUB_OUTPUT"
+              ;;
+            stable)
+              test -z "$SOURCE_SHA" && test -z "$SEQUENCE" || {
+                echo "::error::stable promotion uses rc_tag and must not supply source_sha or sequence"; exit 1;
+              }
+              [[ "$RC_TAG" =~ ^v${VERSION}-rc\.[1-9][0-9]*$ ]] || {
+                echo "::error::rc_tag must be v${VERSION}-rc.N"; exit 1;
+              }
+              if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+                echo "::error::stable tag already exists: v$VERSION"; exit 1
+              fi
+              if gh release view "v$VERSION" >/dev/null 2>&1; then
+                echo "::error::a stable release already exists for v$VERSION"; exit 1
+              fi
+              git fetch --no-tags origin "refs/tags/$RC_TAG:refs/tags/$RC_TAG"
+              rc_source=$(git rev-parse "$RC_TAG^{commit}")
+              git fetch --no-tags origin main
+              git merge-base --is-ancestor "$rc_source" origin/main || {
+                echo "::error::RC source is not an ancestor of current main"; exit 1;
+              }
+              release=$(gh release view "$RC_TAG" --json isDraft,isPrerelease,tagName)
+              RELEASE_JSON="$release" python3 - <<'PY'
+          import json, os, sys
+          release = json.loads(os.environ["RELEASE_JSON"])
+          if release.get("tagName") != os.environ["RC_TAG"] or release.get("isDraft") or not release.get("isPrerelease"):
+              raise SystemExit("selected tag is not a published RC prerelease")
+          PY
+              RC_DIR="$RUNNER_TEMP/rc-assets"
+              mkdir -p "$RC_DIR"
+              gh release download "$RC_TAG" --dir "$RC_DIR"
+              python3 ci/native_release_artifacts.py verify-rc \
+                --artifact-dir "$RC_DIR" --repository "$GITHUB_REPOSITORY" \
+                --version "$VERSION" --tag "$RC_TAG" \
+                --output-json "$RUNNER_TEMP/rc-identity.json"
+              RC_SOURCE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_sha"])' "$RUNNER_TEMP/rc-identity.json")
+              RC_RUN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$RUNNER_TEMP/rc-identity.json")
+              RC_ATTEMPT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_attempt"])' "$RUNNER_TEMP/rc-identity.json")
+              RC_HASH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ipk_sha256"])' "$RUNNER_TEMP/rc-identity.json")
+              test "$RC_SOURCE" = "$rc_source" || { echo "::error::RC tag does not point to its receipt source"; exit 1; }
+              candidate_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RC_RUN")
+              CANDIDATE_RUN_JSON="$candidate_run" python3 - "$RC_SOURCE" "$RC_ATTEMPT" <<'PY'
+          import json, os, sys
+          run = json.loads(os.environ["CANDIDATE_RUN_JSON"])
+          source, attempt = sys.argv[1], int(sys.argv[2])
+          if (run.get("path") != ".github/workflows/native-release-pipeline.yml"
+                  or run.get("event") != "workflow_dispatch"
+                  or run.get("head_branch") != "main" or run.get("head_sha") != source
+                  or run.get("run_attempt") != attempt or run.get("status") != "completed"
+                  or run.get("conclusion") != "success"):
+              raise SystemExit("RC-producing release run identity or result is not valid")
+          PY
+              qualification="ci/ottplay-integration/release/qualifications/v${VERSION}.json"
+              python3 ci/native_release.py verify-qualification \
+                --qualification "$qualification" --repository "$GITHUB_REPOSITORY" \
+                --version "$VERSION" --rc-tag "$RC_TAG" --source-sha "$RC_SOURCE" \
+                --ipk-sha256 "$RC_HASH"
+              echo "channel=stable" >> "$GITHUB_OUTPUT"
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+              echo "source_sha=$RC_SOURCE" >> "$GITHUB_OUTPUT"
+              echo "sequence=" >> "$GITHUB_OUTPUT"
+              echo "run_id=$RC_RUN" >> "$GITHUB_OUTPUT"
+              echo "run_attempt=$RC_ATTEMPT" >> "$GITHUB_OUTPUT"
+              echo "ipk_sha256=$RC_HASH" >> "$GITHUB_OUTPUT"
+              echo "plan_artifact=" >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo "::error::unsupported release channel: $CHANNEL"; exit 1 ;;
+          esac
+
+      - name: Download the immutable artifact from the RC-producing run
+        if: inputs.channel == 'stable'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: webos-native-candidate-${{ steps.identity.outputs.source_sha }}-${{ steps.identity.outputs.run_id }}-${{ steps.identity.outputs.run_attempt }}
+          run-id: ${{ steps.identity.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/original-rc-candidate
+
+      - name: Verify RC release assets against the original immutable run artifact
+        if: inputs.channel == 'stable'
+        env:
+          RC_TAG: ${{ inputs.rc_tag }}
+          VERSION: ${{ inputs.version }}
+          ORIGINAL_DIR: ${{ runner.temp }}/original-rc-candidate
+          RC_DIR: ${{ runner.temp }}/rc-assets
+        run: |
+          python3 ci/native_release_artifacts.py verify-rc \
+            --artifact-dir "$RC_DIR" --candidate-artifact-dir "$ORIGINAL_DIR" \
+            --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RC_TAG" \
+            --output-json "$RUNNER_TEMP/rc-identity-verified.json"
+
+      - name: Preserve the frozen release plan
+        if: inputs.channel != 'stable'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ${{ steps.identity.outputs.plan_artifact }}
+          path: ${{ runner.temp }}/native-release-plan/native-release-plan.json
+          if-no-files-found: error
+          retention-days: 90
+
+  quality:
+    name: Required native quality gates
+    needs: preflight
+    if: inputs.channel != 'stable'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  candidate:
+    name: Build candidate from frozen plan
+    needs: [preflight, quality]
+    if: inputs.channel != 'stable'
+    uses: ./.github/workflows/native-candidate.yml
+    with:
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
+      version: ${{ needs.preflight.outputs.version }}
+      channel: ${{ needs.preflight.outputs.channel }}
+      sequence: ${{ fromJSON(needs.preflight.outputs.sequence) }}
+      tag: ${{ needs.preflight.outputs.tag }}
+      plan_artifact_name: ${{ needs.preflight.outputs.plan_artifact }}
+    permissions:
+      contents: read
+
+  publish-candidate:
+    name: Publish beta or RC prerelease
+    needs: [preflight, quality, candidate]
+    if: inputs.channel != 'stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Audit workflow network egress
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+
+      - name: Check out exact source for release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+
+      - name: Download and verify frozen plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ needs.preflight.outputs.plan_artifact }}
+          path: ${{ runner.temp }}/native-release-plan
+
+      - name: Verify release plan identity
+        env:
+          CHANNEL: ${{ needs.preflight.outputs.channel }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SEQUENCE: ${{ needs.preflight.outputs.sequence }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RUN_ID: ${{ needs.preflight.outputs.run_id }}
+          RUN_ATTEMPT: ${{ needs.preflight.outputs.run_attempt }}
+        run: |
+          python3 ci/native_release.py verify-plan \
+            --plan "$RUNNER_TEMP/native-release-plan/native-release-plan.json" \
+            --repository "$GITHUB_REPOSITORY" --channel "$CHANNEL" --version "$VERSION" \
+            --sequence "$SEQUENCE" --tag "$TAG" --source-sha "$SOURCE_SHA" \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT"
+
+      - name: Download the candidate produced by this release run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: webos-native-candidate-${{ needs.preflight.outputs.source_sha }}-${{ needs.preflight.outputs.run_id }}-${{ needs.preflight.outputs.run_attempt }}
+          path: ${{ runner.temp }}/native-candidate
+
+      - name: Verify package bytes and linker evidence
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          RUN_ID: ${{ needs.preflight.outputs.run_id }}
+          RUN_ATTEMPT: ${{ needs.preflight.outputs.run_attempt }}
+          CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          python3 ci/verify-native-candidate.py --artifact-dir "$CANDIDATE_DIR" \
+            --source-sha "$SOURCE_SHA" --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" --version "$VERSION"
+          python3 ci/check-packaged-elf.py \
+            "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            "$CANDIDATE_DIR/link-evidence"
+          cp "$RUNNER_TEMP/native-release-plan/native-release-plan.json" "$CANDIDATE_DIR/"
+          tar -C "$CANDIDATE_DIR" -czf "$CANDIDATE_DIR/link-evidence.tar.gz" link-evidence
+
+      - name: Prepare prerelease notes
+        env:
+          CHANNEL: ${{ needs.preflight.outputs.channel }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RUN_ID: ${{ needs.preflight.outputs.run_id }}
+          RUN_ATTEMPT: ${{ needs.preflight.outputs.run_attempt }}
+          CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" "$CHANNEL" "$TAG" "$SOURCE_SHA" "$RUN_ID" "$RUN_ATTEMPT" "$CANDIDATE_DIR" "$RUNNER_TEMP/prerelease-notes.md" <<'PY'
+          from pathlib import Path
+          import hashlib, re, sys
+          version, channel, tag, source_sha, run_id, attempt, candidate, output = sys.argv[1:]
+          notes_path = Path(f"ci/ottplay-integration/release/notes/v{version}.md")
+          body = notes_path.read_text(encoding="utf-8")
+          package = Path(candidate) / f"com.openottplay.player.native_{version}_arm.ipk"
+          digest = hashlib.sha256(package.read_bytes()).hexdigest()
+          sentinel = "__IPK_SHA256__"
+          if body.count(sentinel) != 1 or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+              raise SystemExit("release notes or source identity failed validation")
+          body = body.replace(sentinel, digest)
+          prefix = (f"# OTTPlay LG {version} {channel.upper()}\n\n"
+                    "This is a prerelease for testing. The package keeps the numeric webOS version; "
+                    "the channel and sequence are recorded in its tag and provenance.\n\n"
+                    f"Tag: `{tag}`  \nSource commit: `{source_sha}`  \n"
+                    f"Candidate run: https://github.com/{__import__('os').environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}/attempts/{attempt}\n\n")
+          Path(output).write_text(prefix + body, encoding="utf-8")
+          PY
+
+      - name: Publish immutable prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          CHANNEL: ${{ needs.preflight.outputs.channel }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::tag appeared after preflight: $TAG"; exit 1
+          fi
+          gh release create "$TAG" --target "$SOURCE_SHA" --prerelease \
+            --title "OTTPlay LG $VERSION ${CHANNEL^^} $(echo "$TAG" | sed -E 's/^.*\.([0-9]+)$/\1/')" \
+            --notes-file "$RUNNER_TEMP/prerelease-notes.md" \
+            "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk.sha256" \
+            "$CANDIDATE_DIR/ottplay-lg-${VERSION}.sha256" \
+            "$CANDIDATE_DIR/candidate-provenance.json" \
+            "$CANDIDATE_DIR/candidate-provenance.json.sha256" \
+            "$CANDIDATE_DIR/native-release-plan.json" \
+            "$CANDIDATE_DIR/link-evidence.tar.gz"
+
+      - name: Verify published prerelease identity and bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CANDIDATE_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          release=$(gh release view "$TAG" --json tagName,isDraft,isPrerelease)
+          RELEASE_JSON="$release" python3 - <<'PY'
+          import json, os
+          release = json.loads(os.environ["RELEASE_JSON"])
+          if (release.get("tagName") != os.environ["TAG"] or release.get("isDraft")
+                  or not release.get("isPrerelease")):
+              raise SystemExit("published candidate is not the expected prerelease")
+          PY
+          gh release download "$TAG" --dir "$RUNNER_TEMP/published-candidate"
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          test "$(git rev-parse "$TAG^{commit}")" = "$SOURCE_SHA"
+          for asset in \
+            "com.openottplay.player.native_${VERSION}_arm.ipk" \
+            "com.openottplay.player.native_${VERSION}_arm.ipk.sha256" \
+            "ottplay-lg-${VERSION}.sha256" \
+            candidate-provenance.json \
+            candidate-provenance.json.sha256 \
+            native-release-plan.json \
+            link-evidence.tar.gz; do
+            cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/published-candidate/$asset"
+          done
+
+  promote-stable:
+    name: Promote qualified RC bytes to stable
+    needs: preflight
+    if: inputs.channel == 'stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Audit workflow network egress
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+
+      - name: Check out current main and qualification record
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+
+      - name: Recheck main ancestry and qualification after environment approval
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          IPK_SHA256: ${{ needs.preflight.outputs.ipk_sha256 }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          python3 ci/native_release.py verify-qualification \
+            --qualification "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
+            --repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --rc-tag "$RC_TAG" --source-sha "$SOURCE_SHA" --ipk-sha256 "$IPK_SHA256"
+
+      - name: Download the original immutable artifact from the RC run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: webos-native-candidate-${{ needs.preflight.outputs.source_sha }}-${{ needs.preflight.outputs.run_id }}-${{ needs.preflight.outputs.run_attempt }}
+          run-id: ${{ needs.preflight.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/original-rc-candidate
+
+      - name: Verify the exact RC release assets against the original run artifact
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          ORIGINAL_DIR: ${{ runner.temp }}/original-rc-candidate
+          VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          EXPECTED_RUN_ID: ${{ needs.preflight.outputs.run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ needs.preflight.outputs.run_attempt }}
+          EXPECTED_IPK_SHA256: ${{ needs.preflight.outputs.ipk_sha256 }}
+        run: |
+          set -euo pipefail
+          RC_DIR="$RUNNER_TEMP/rc-assets"
+          mkdir -p "$RC_DIR"
+          gh release download "$RC_TAG" --dir "$RC_DIR"
+          python3 ci/native_release_artifacts.py verify-rc \
+            --artifact-dir "$RC_DIR" --candidate-artifact-dir "$ORIGINAL_DIR" \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION" --tag "$RC_TAG" \
+            --output-json "$RUNNER_TEMP/rc-identity.json"
+          python3 - "$RUNNER_TEMP/rc-identity.json" <<'PY'
+          import json, os, sys
+          actual = json.load(open(sys.argv[1]))
+          expected = {
+              "source_sha": os.environ["EXPECTED_SOURCE_SHA"],
+              "run_id": int(os.environ["EXPECTED_RUN_ID"]),
+              "run_attempt": int(os.environ["EXPECTED_RUN_ATTEMPT"]),
+              "version": os.environ["VERSION"],
+              "ipk_sha256": os.environ["EXPECTED_IPK_SHA256"],
+          }
+          if actual != expected:
+              raise SystemExit("RC asset identity changed after preflight")
+          PY
+          run_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ needs.preflight.outputs.run_id }}")
+          CANDIDATE_RUN_JSON="$run_json" python3 - "${{ needs.preflight.outputs.source_sha }}" "${{ needs.preflight.outputs.run_attempt }}" <<'PY'
+          import json, os, sys
+          run = json.loads(os.environ["CANDIDATE_RUN_JSON"])
+          source, attempt = sys.argv[1], int(sys.argv[2])
+          if (run.get("path") != ".github/workflows/native-release-pipeline.yml"
+                  or run.get("event") != "workflow_dispatch"
+                  or run.get("head_branch") != "main" or run.get("head_sha") != source
+                  or run.get("run_attempt") != attempt or run.get("status") != "completed"
+                  or run.get("conclusion") != "success"):
+              raise SystemExit("RC-producing release run identity or result is not valid")
+          PY
+          echo "ipk_sha256=${{ needs.preflight.outputs.ipk_sha256 }}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify stable tag is still unused and prepare stable notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::stable tag already exists: v$VERSION"; exit 1
+          fi
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::stable release already exists: v$VERSION"; exit 1
+          fi
+          git show "$SOURCE_SHA:ci/ottplay-integration/release/notes/v${VERSION}.md" > "$RUNNER_TEMP/stable-notes-source.md"
+          python3 - "$RUNNER_TEMP/stable-notes-source.md" "$RUNNER_TEMP/stable-notes.md" "$VERSION" "${{ needs.preflight.outputs.ipk_sha256 }}" "$SOURCE_SHA" "$RC_TAG" <<'PY'
+          from pathlib import Path
+          import re, sys
+          source, output, version, digest, sha, tag = sys.argv[1:]
+          body = Path(source).read_text(encoding="utf-8")
+          if body.count("__IPK_SHA256__") != 1:
+              raise SystemExit("authored stable notes must contain exactly one package hash sentinel")
+          if not re.fullmatch(r"[0-9a-f]{64}", digest):
+              raise SystemExit("promoted IPK SHA-256 is malformed")
+          body = body.replace("__IPK_SHA256__", digest)
+          prefix = (f"# OTTPlay LG {version}\n\n"
+                    "Stable release promoted without rebuilding or repackaging the accepted RC.\n\n"
+                    f"Promoted RC: `{tag}`  \nSource commit: `{sha}`  \nPackage SHA-256: `{digest}`\n\n")
+          Path(output).write_text(prefix + body, encoding="utf-8")
+          PY
+
+      - name: Publish stable from the exact RC package bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" --target "$SOURCE_SHA" --title "OTTPlay LG $VERSION" \
+            --notes-file "$RUNNER_TEMP/stable-notes.md" \
+            "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk.sha256" \
+            "$CANDIDATE_DIR/ottplay-lg-${VERSION}.sha256" \
+            "$CANDIDATE_DIR/candidate-provenance.json" \
+            "$CANDIDATE_DIR/candidate-provenance.json.sha256" \
+            "$CANDIDATE_DIR/native-release-plan.json" \
+            "$CANDIDATE_DIR/link-evidence.tar.gz" \
+            "ci/ottplay-integration/release/qualifications/v${VERSION}.json"
+          git fetch --no-tags origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
+          test "$(git rev-parse "v$VERSION^{commit}")" = "$SOURCE_SHA"
+          gh release download "v$VERSION" --dir "$RUNNER_TEMP/stable-public"
+          cmp "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            "$RUNNER_TEMP/stable-public/com.openottplay.player.native_${VERSION}_arm.ipk"
+          for asset in \
+            "com.openottplay.player.native_${VERSION}_arm.ipk.sha256" \
+            "ottplay-lg-${VERSION}.sha256" \
+            candidate-provenance.json \
+            candidate-provenance.json.sha256 \
+            native-release-plan.json \
+            link-evidence.tar.gz \
+            "v${VERSION}.json"; do
+            cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/stable-public/$asset"
+          done
+          stable_release=$(gh release view "v$VERSION" --json tagName,isDraft,isPrerelease)
+          STABLE_RELEASE_JSON="$stable_release" python3 - <<'PY'
+          import json, os
+          release = json.loads(os.environ["STABLE_RELEASE_JSON"])
+          if (release.get("tagName") != f"v{os.environ['VERSION']}" or release.get("isDraft")
+                  or release.get("isPrerelease")):
+              raise SystemExit("published stable release metadata is incorrect")
+          PY
