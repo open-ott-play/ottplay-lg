@@ -24,11 +24,31 @@ fn read_pcm(
     selected: &hls_audio::Selection,
     seek: i64,
 ) -> (Vec<(i64, usize)>, Vec<u8>, usize) {
+    read_pcm_with_capacity(http, name, selected, seek, 4 * 1024 * 1024, 4 * 1024 * 1024)
+}
+
+fn read_pcm_with_capacity(
+    http: &HttpFixture, name: &str, selected: &hls_audio::Selection, seek: i64,
+    video_bytes: libc::c_long, audio_bytes: libc::c_long,
+) -> (Vec<(i64, usize)>, Vec<u8>, usize) {
+    let (audio, pcm, video) = read_pcm_full(http, name, selected, seek, video_bytes, audio_bytes);
+    let count = video.len();
+    (audio, pcm, count)
+}
+
+fn read_pcm_full(
+    http: &HttpFixture,
+    name: &str,
+    selected: &hls_audio::Selection,
+    seek: i64,
+    video_bytes: libc::c_long,
+    audio_bytes: libc::c_long,
+) -> (Vec<(i64, usize)>, Vec<u8>, Vec<i64>) {
     SHARED.reset_session();
     SHARED.seek_to_ns.store(seek, Ordering::Release);
     let _pcm = PcmRestore::install();
-    let mut video = crate::aq::aq_new(4 * 1024 * 1024);
-    let mut audio = crate::aq::aq_new(4 * 1024 * 1024);
+    let mut video = crate::aq::aq_new(video_bytes);
+    let mut audio = crate::aq::aq_new(audio_bytes);
     let mut hs = plx_net::stream::http_stream_boxed();
     let result = external_hls::demux(
         &format!("{}/{name}", http.url),
@@ -41,7 +61,7 @@ fn read_pcm(
     );
     let mut stamps = Vec::new();
     let mut pcm = Vec::new();
-    let mut videos = 0;
+    let mut videos = Vec::new();
     for queue in [&mut *video, &mut *audio] {
         loop {
             let node = crate::aq::aq_pop(queue, std::ptr::null_mut());
@@ -55,7 +75,7 @@ fn read_pcm(
                     stamps.push((pts, len as usize / 4));
                     pcm.extend_from_slice(std::slice::from_raw_parts(data, len as usize));
                 } else if es == 1 {
-                    videos += 1;
+                    videos.push(pts);
                 }
                 libc::free(node.cast());
             }
@@ -66,10 +86,37 @@ fn read_pcm(
     crate::aq::aq_destroy(&mut *audio);
     assert!(result.is_ok(), "MP2 embedded HLS failed: {result:?}");
     assert!(
-        videos > 5 && !stamps.is_empty(),
+        videos.len() > 5 && !stamps.is_empty(),
         "both lanes must reach real queues"
     );
     (stamps, pcm, videos)
+}
+
+#[test]
+#[ignore = "requires an explicitly provided private H264/MP2 recovery-point TS and host FFmpeg"]
+fn private_zero_recovery_hls_mp2_reaches_both_playback_queues() {
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let fixture = std::env::var_os("OTTPLAY_HLS_RECOVERY_TS")
+        .expect("set OTTPLAY_HLS_RECOVERY_TS to an authorized local TS fixture");
+    let size = std::fs::metadata(&fixture).unwrap().len();
+    assert!(size > 0 && size <= 24 * 1024 * 1024, "bounded private fixture");
+    let dir = Scratch::new();
+    std::fs::hard_link(&fixture, dir.0.join("part.ts")).unwrap();
+    std::fs::write(dir.0.join("one.m3u8"),
+        "#EXTM3U\n#EXT-X-TARGETDURATION:30\n#EXTINF:30,\npart.ts\n#EXT-X-ENDLIST\n").unwrap();
+    let http = HttpFixture::start(dir.0.clone());
+    let info = inspect::http(&format!("{}/one.m3u8", http.url), Arc::new(AtomicBool::new(false))).unwrap();
+    assert_eq!((&*info.video_codec, &*info.audio_codec), ("h264", "mp2"));
+    let selected = hls_audio::Selection::new(&info.tracks, 0).unwrap();
+    // The finite captured segment is buffered before these queues are drained.
+    // Reserve enough bounded space to avoid manufacturing a backpressure hang.
+    let (stamps, pcm, videos) = read_pcm_with_capacity(
+        &http, "one.m3u8", &selected, -1, 32 * 1024 * 1024, 16 * 1024 * 1024);
+    assert!(videos > 5 && pcm.len() > 48_000 * 4);
+    assert!(stamps.windows(2).all(|w| w[1].0 >= w[0].0));
 }
 
 #[test]
@@ -212,7 +259,23 @@ fn embedded_hls_mp2_decodes_pcm_with_continuity_discontinuity_and_seek() {
         assert!(crate::route::stream_pcm_is_lossy(&session));
         crate::route::reset_player_control_for_test(&crate::route::PlaybackSession::IDLE);
 
-        let (stamps, pcm, _) = read_pcm(&http, "all.m3u8", &selected, -1);
+        let (stamps, pcm, video_pts) = read_pcm_full(&http, "all.m3u8", &selected, -1,
+            4 * 1024 * 1024, 4 * 1024 * 1024);
+        // Same transport bytes, deliberately rounded/inaccurate playlist durations.
+        // Decoded PCM AND video timestamps must remain identical across segment boundaries.
+        let inaccurate: String = std::fs::read_to_string(dir.0.join("all.m3u8")).unwrap()
+            .lines().map(|line| {
+                if let Some(raw) = line.strip_prefix("#EXTINF:") {
+                    let duration: f64 = raw.split(',').next().unwrap().parse().unwrap();
+                    format!("#EXTINF:{:.6},\n", duration + 0.1)
+                } else { format!("{line}\n") }
+            }).collect();
+        std::fs::write(dir.0.join("inaccurate.m3u8"), inaccurate).unwrap();
+        let (shifted_stamps, shifted_pcm, shifted_video) = read_pcm_full(
+            &http, "inaccurate.m3u8", &selected, -1, 4 * 1024 * 1024, 4 * 1024 * 1024);
+        assert_eq!(shifted_pcm, pcm, "continuous MP2 decoder/sample history must survive boundaries");
+        assert_eq!(shifted_stamps, stamps, "EXTINF cannot retime decoded PCM");
+        assert_eq!(shifted_video, video_pts, "EXTINF cannot move video independently of PCM");
         assert!(
             stamps.windows(2).all(|w| w[1].0 >= w[0].0),
             "continuous audio time regressed"

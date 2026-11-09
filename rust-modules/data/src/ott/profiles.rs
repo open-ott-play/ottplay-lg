@@ -2,35 +2,44 @@ use super::{http_url, parse_vportal_link, CatalogError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProviderKind {
-    M3u,
-    Xtream,
-    Stalker,
-    #[serde(rename = "vportal")]
-    VPortal,
-    #[serde(alias = "offline")]
-    Local,
-    Plex,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderKind { M3u, Xtream, Edem, Stalker, VPortal, Local, Plex, Operator(super::OperatorId) }
+impl Serialize for ProviderKind {
+    fn serialize<S:serde::Serializer>(&self,serializer:S)->Result<S::Ok,S::Error>{ serializer.serialize_str(self.canonical_id()) }
+}
+impl<'de> Deserialize<'de> for ProviderKind {
+    fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error>{
+        let value=String::deserialize(deserializer)?;
+        Self::from_id(&value).ok_or_else(||serde::de::Error::custom("Unsupported provider"))
+    }
 }
 
 impl ProviderKind {
+    pub fn from_id(value:&str)->Option<Self> { match value {
+        "m3u"=>Some(Self::M3u), "xtream"=>Some(Self::Xtream), "stalker"=>Some(Self::Stalker),
+        "edem"|"ilook"|"ilooktv"=>Some(Self::Edem), "vportal"=>Some(Self::VPortal),
+        "local"|"offline"=>Some(Self::Local), "plex"=>Some(Self::Plex),
+        _=>super::OperatorId::from_id(value).map(Self::Operator),
+    }}
+    pub fn all()->Vec<Self> { let mut kinds=vec![Self::M3u,Self::Xtream,Self::Stalker,Self::VPortal,Self::Local,Self::Plex,Self::Edem]; kinds.extend(super::OperatorId::ALL.iter().copied().map(Self::Operator)); kinds }
+
     pub const fn canonical_id(self) -> &'static str {
         match self {
             Self::M3u => "m3u",
             Self::Xtream => "xtream",
+            Self::Edem => "edem",
             Self::Stalker => "stalker",
             Self::VPortal => "vportal",
             Self::Local => "local",
             Self::Plex => "plex",
+            Self::Operator(id) => id.canonical_id(),
         }
     }
 }
 
 // Existing version-1 profile-format limits, shared by loading and creation.
 const MAX_PROFILES_PER_PROVIDER: usize = 15;
-const MAX_PROFILES: usize = 90;
+const MAX_PROFILES: usize = (7 + super::OperatorId::ALL.len()) * MAX_PROFILES_PER_PROVIDER;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileCapacityError {
@@ -41,7 +50,7 @@ impl ProfileCapacityError {
     pub const fn message(self) -> &'static str {
         match self {
             Self::Provider => "This provider already has 15 profiles",
-            Self::Total => "There are already 90 profiles",
+            Self::Total => "This installation has reached its profile limit",
         }
     }
 }
@@ -132,6 +141,7 @@ impl ProviderProfile {
         let valid = match self.kind {
             ProviderKind::M3u => self.source.is_empty() || m3u_source_kind(&self.source).is_ok(),
             ProviderKind::Xtream => super::xtream::Config::parse(&self.source).is_ok(),
+            ProviderKind::Edem => super::edem::Config::parse(&self.source).is_ok(),
             ProviderKind::Stalker => super::stalker::Config::parse(&self.source).is_ok(),
             ProviderKind::VPortal => self.source.is_empty() || parse_vportal_link(&self.source).is_ok(),
             ProviderKind::Local => {
@@ -141,6 +151,7 @@ impl ProviderProfile {
                         && !self.source.split('/').any(|s| s == ".."))
             }
             ProviderKind::Plex => !self.source.is_empty() && self.source.len() <= 256,
+            ProviderKind::Operator(id) => super::operators::Config::parse(id,&self.source).is_ok(),
         };
         if valid {
             Ok(())
@@ -201,14 +212,7 @@ impl ProviderProfiles {
         if self.version != 1 {
             return Err(CatalogError::InvalidProfile);
         }
-        for kind in [
-            ProviderKind::M3u,
-            ProviderKind::Xtream,
-            ProviderKind::Stalker,
-            ProviderKind::VPortal,
-            ProviderKind::Local,
-            ProviderKind::Plex,
-        ] {
+        for kind in ProviderKind::all() {
             self.check_capacity(kind, 0)
                 .map_err(|_| CatalogError::InvalidProfile)?;
         }
@@ -287,28 +291,20 @@ mod tests {
     }
 
     #[test]
-    fn independent_provider_slots_allow_ninety_profiles_but_not_sixteen_per_kind() {
+    fn independent_provider_slots_allow_all_registered_kinds_but_not_sixteen_per_kind() {
         let mut profiles = ProviderProfiles::default();
-        for (kind, source) in [
-            (ProviderKind::M3u, "https://fixture.invalid/list.m3u"),
-            (
-                ProviderKind::Xtream,
-                r#"{"server":"https://fixture.invalid","username":"fixture","password":"fixture"}"#,
-            ),
-            (
-                ProviderKind::Stalker,
-                r#"{"portal":"https://fixture.invalid","mac":"00:1A:79:00:00:01"}"#,
-            ),
-            (
-                ProviderKind::VPortal,
-                "portal::[key:fixture]https://fixture.invalid/portal",
-            ),
-            (ProviderKind::Local, "/media/videos"),
-            (ProviderKind::Plex, "fixture-server"),
-        ] {
+        for kind in ProviderKind::all() {
+            let source=match kind {
+                ProviderKind::M3u=>"https://fixture.invalid/list.m3u",
+                ProviderKind::Xtream=>r#"{"server":"https://fixture.invalid","username":"fixture","password":"fixture"}"#,
+                ProviderKind::Stalker=>r#"{"portal":"https://fixture.invalid","mac":"00:1A:79:00:00:01"}"#,
+                ProviderKind::VPortal=>"portal::[key:fixture]https://fixture.invalid/portal",
+                ProviderKind::Local=>"/media/videos",ProviderKind::Plex=>"fixture-server",
+                ProviderKind::Edem|ProviderKind::Operator(_)=>r#"{"key":"fixture"}"#,
+            };
             for slot in 1..=15 {
                 profiles.profiles.push(ProviderProfile {
-                    id: format!("{}-{slot}", kind.canonical_id()),
+                    id: format!("{}-{slot}", kind.canonical_id().replace('/', "_")),
                     name: format!("Fixture {slot}"),
                     kind,
                     source: source.into(),
@@ -317,13 +313,14 @@ mod tests {
                 });
             }
         }
-        assert_eq!(profiles.profiles.len(), 90);
+        assert_eq!(profiles.profiles.len(), ProviderKind::all().len()*15);
         assert!(profiles.validate().is_ok());
         assert_eq!(
             profiles.check_addition(ProviderKind::Plex),
             Err(ProfileCapacityError::Total)
         );
-        profiles.profiles.pop();
+        let plex=profiles.profiles.iter().position(|profile|profile.kind==ProviderKind::Plex).unwrap();
+        profiles.profiles.remove(plex);
         assert!(profiles.check_addition(ProviderKind::Plex).is_ok());
         assert_eq!(
             profiles.check_addition(ProviderKind::M3u),

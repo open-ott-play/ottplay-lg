@@ -15,6 +15,7 @@ enum FailedContinuation {
     None,
     Discovery,
     Cooldown { not_before_ms: u64 },
+    SameCooldown { not_before_ms: u64 },
     Halted,
 }
 
@@ -206,7 +207,7 @@ impl Continuity {
         // A newly discovered bookmark is an automatic start too. Neither that
         // path nor another catalogue page may bypass the failed-start budget.
         match self.failed_continuation {
-            FailedContinuation::Cooldown { .. } => return Decision::Wait,
+            FailedContinuation::Cooldown { .. } | FailedContinuation::SameCooldown { .. } => return Decision::Wait,
             FailedContinuation::Halted => return Decision::Idle,
             _ => {}
         }
@@ -333,7 +334,7 @@ impl Continuity {
 
     fn cancel_failed_continuation(&mut self) {
         if matches!(self.failed_continuation,
-            FailedContinuation::Discovery | FailedContinuation::Cooldown { .. }) {
+            FailedContinuation::Discovery | FailedContinuation::Cooldown { .. } | FailedContinuation::SameCooldown { .. }) {
             // A later catalogue page or wake must not recreate the cancelled
             // attempt. Preserve the budget and any unrelated bookmark data.
             self.failed_continuation = FailedContinuation::Halted;
@@ -432,6 +433,29 @@ impl Continuity {
         }
     }
 
+    /// A live EOF is a disconnected source, never completion of a TV channel.
+    /// Reuse the failure budget and frame deadline without selecting a successor.
+    pub fn live_disconnected(&mut self, generation: u64, id: &str, now_ms: u64) -> Decision {
+        if !self.accepts_end(generation, id) { return Decision::Idle; }
+        self.issued_restore = None;
+        self.waiting_after = Some(id.into());
+        let delay = FAILURE_DELAYS_MS.get(self.consecutive_failures).copied();
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        match delay {
+            Some(delay) => {
+                self.failed_continuation = FailedContinuation::SameCooldown {
+                    not_before_ms: now_ms.saturating_add(delay.max(1_000)),
+                };
+                Decision::Wait
+            }
+            None => {
+                self.failed_continuation = FailedContinuation::Halted;
+                self.waiting_after = None;
+                Decision::Idle
+            }
+        }
+    }
+
     /// The existing frame runner supplies its monotonic clock projection after
     /// handling viewer commands. No worker, wall-clock read or queued callback
     /// belongs to this policy; cancellation removes its only pending deadline.
@@ -439,19 +463,27 @@ impl Continuity {
         if !self.accepts(generation) {
             return Decision::Idle;
         }
-        let FailedContinuation::Cooldown { not_before_ms } = self.failed_continuation else {
-            return Decision::Idle;
+        let (not_before_ms, same) = match self.failed_continuation {
+            FailedContinuation::Cooldown { not_before_ms } => (not_before_ms, false),
+            FailedContinuation::SameCooldown { not_before_ms } => (not_before_ms, true),
+            _ => return Decision::Idle,
         };
-        if now_ms < not_before_ms {
-            return Decision::Wait;
+        if now_ms < not_before_ms { return Decision::Wait; }
+        if same {
+            let Some(id) = self.waiting_after.clone().filter(|id| ids.contains(&id.as_str())) else {
+                self.failed_continuation = FailedContinuation::Halted;
+                return Decision::Idle;
+            };
+            return self.start(&id, 0, Reason::Next);
         }
         self.failed_continuation = FailedContinuation::Discovery;
         self.catalog_updated(generation, ids, complete)
     }
 
     pub fn pending_retry(&self) -> Option<PendingRetry<'_>> {
-        let FailedContinuation::Cooldown { not_before_ms } = self.failed_continuation else {
-            return None;
+        let not_before_ms = match self.failed_continuation {
+            FailedContinuation::Cooldown { not_before_ms } | FailedContinuation::SameCooldown { not_before_ms } => not_before_ms,
+            _ => return None,
         };
         if !self.accepts(self.generation) { return None; }
         Some(PendingRetry {
@@ -465,7 +497,7 @@ impl Continuity {
     /// Avoid rebuilding a large catalogue's filtered order on every idle frame.
     pub fn retry_due(&self, generation: u64, now_ms: u64) -> bool {
         self.accepts(generation) && matches!(self.failed_continuation,
-            FailedContinuation::Cooldown { not_before_ms } if now_ms >= not_before_ms)
+            FailedContinuation::Cooldown { not_before_ms } | FailedContinuation::SameCooldown { not_before_ms } if now_ms >= not_before_ms)
     }
 
     fn accepts(&self, generation: u64) -> bool {
@@ -1332,3 +1364,29 @@ mod selection_domain_tests;
 #[cfg(test)]
 #[path = "ott_continuity_anchor_tests.rs"]
 mod canonical_anchor_tests;
+
+#[cfg(test)]
+mod live_recovery_tests {
+    use super::*;
+    #[test]
+    fn live_eof_retries_exact_channel_with_bounded_cancelable_budget() {
+        let mut policy = Continuity::new(7, None);
+        policy.user_selected(7, "third");
+        let ids = ["third", "fourth", "fifth"];
+        let mut now = 100;
+        for _ in 0..4 {
+            assert_eq!(policy.live_disconnected(7, "third", now), Decision::Wait);
+            let due = policy.pending_retry().unwrap().not_before_ms;
+            assert_eq!(policy.tick(7, due - 1, &ids, true), Decision::Wait);
+            assert!(matches!(policy.tick(7, due, &ids, true),
+                Decision::Start { entry_id, .. } if entry_id == "third"));
+            now = due + 1;
+        }
+        assert_eq!(policy.live_disconnected(7, "third", now), Decision::Idle);
+        assert_eq!(policy.tick(7, u64::MAX, &ids, true), Decision::Idle);
+        policy.user_selected(7, "fourth");
+        assert_eq!(policy.live_disconnected(7, "fourth", now), Decision::Wait);
+        policy.stop(7);
+        assert_eq!(policy.tick(7, u64::MAX, &ids, true), Decision::Idle);
+    }
+}

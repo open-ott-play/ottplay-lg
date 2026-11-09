@@ -90,7 +90,13 @@ pub(super) fn rearm_player(runtime: &mut Runtime, app: &App) {
 /// Returns true only for a live source. Finite media/archive keep their existing
 /// collection, confirmed start and next-file projection.
 pub(super) fn publish(runtime: &mut Runtime, app: &mut App, changed: bool) -> bool {
-    let Some(playing) = runtime.playing.as_ref().filter(|p| playing_matches(p, app)) else {
+    // The normal path borrows only the playing field. A retained failure needs
+    // a whole-runtime authority check, so own that exceptional fallback before
+    // mutating presentation state; never clone healthy playback per frame.
+    let failed = if runtime.playing.as_ref().is_some_and(|playing| playing_matches(playing, app)) { None }
+        else if failed_playback::ready(runtime, app) { failed_playback::current(runtime, app).cloned() }
+        else { None };
+    let Some(playing) = runtime.playing.as_ref().filter(|p| playing_matches(p, app)).or(failed.as_ref()) else {
         runtime.live_hud = State::default();
         return false;
     };
@@ -105,30 +111,22 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App, changed: bool) -> bo
     }
     runtime.programme_leaf = None;
     let start = playing.identity.as_ref().and_then(|id| app.player.programme.started_at(id));
-    if start.is_none() {
-        // The new source has not presented a frame; do not inherit an old HUD.
-        runtime.live_hud.published = None;
-        if let Some(mut now) = app.bridge.metadata_view().now_playing()
-            .filter(|now| now.ott.is_some()).cloned() {
-            now.ott = None;
-            app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::SetNowPlaying(Some(now)));
-            runtime.programme_metadata_generation = Some(app.bridge.metadata_mut().gen());
-        }
-        return true;
-    }
+    // Accepted source identity is enough for an honest channel header. Decoder
+    // presentation only authorizes its start time and broadcast programme facts;
+    // loading must not erase the channel name, ordinal or logo.
     let current = app.bridge.metadata_view().now_playing();
     let pending = runtime.live_hud.pending.filter(|(generation, _)|
         *generation == runtime.metadata_generation && runtime.live_hud.request.as_ref()
             .is_some_and(|request| request.matches_playing(playing)));
     if !changed && same && pending.is_none() && current.is_some_and(|n|
-        n.ott.as_ref().is_some_and(|o| o.live.is_some())) { return true; }
+        n.ott.as_ref().is_some_and(|o| o.live.is_some() && o.confirmed_start_unix_ms == start)) { return true; }
     let previous_guide = current.filter(|_| same).and_then(|n| n.ott.as_ref())
         .and_then(|o| o.live.as_ref()).and_then(|live| live.guide.clone());
-    let guide = match pending {
+    let guide = if start.is_none() { None } else { match pending {
         Some((_, true)) => None,
         Some((_, false)) => runtime.playing_row_guide(playing).unwrap_or(previous_guide),
         None => previous_guide,
-    };
+    }};
     let catalog = runtime.effective_profile().map(|profile| live_label::CatalogSource {
         profile, entries: &runtime.catalog.entries,
         transient_owner: runtime.transient.accepted.as_ref().map(transient::TransientMedia::owner),
@@ -148,7 +146,7 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App, changed: bool) -> bo
     let unchanged = current.is_some_and(|old| old.title == title && old.summary == summary
         && old.dur_ms == 0 && old.ott.as_ref().is_some_and(|old| same_programme(old, &projection)));
     runtime.live_hud.published = capture(playing, runtime.metadata_generation, now_s);
-    runtime.live_hud.pending = None;
+    if start.is_some() { runtime.live_hud.pending = None; }
     if !unchanged {
         let now = NowPlaying { ott: Some(projection), is_episode: false, is_real_episode: false,
             title, ep_title: String::new(), season: 0, index: 0, summary, year: 0, dur_ms: 0,

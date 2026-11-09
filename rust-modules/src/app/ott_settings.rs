@@ -10,6 +10,7 @@ use plx_appkit::menu_visibility::{Item as MenuItem, Change as MenuChange};
 mod appearance;
 #[path = "ott_settings_geometry.rs"]
 mod geometry;
+use super::super::subtitle_settings::selection;
 #[path = "ott_settings_osd.rs"]
 mod osd;
 #[path = "ott_settings_classic.rs"]
@@ -17,6 +18,8 @@ mod classic;
 
 #[derive(Clone, Copy)]
 enum Setting {
+    NativeInputProbe,
+    HostedEpg,
     InfoTimeout,
     FontScale,
     UiColors,
@@ -25,6 +28,7 @@ enum Setting {
     Interface,
     Appearance(appearance::Field),
     Geometry(geometry::Field),
+    SubtitleSelection(selection::Field),
     Osd(osd::Field),
     Classic(classic::Field),
     Menu(MenuItem),
@@ -33,7 +37,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Self; 41] = [Self::FontScale, Self::Player, Self::Interface,
+    const ALL: [Self; 45] = [Self::FontScale, Self::Player, Self::Interface,
         Self::Appearance(appearance::Field::ALL[0]), Self::Appearance(appearance::Field::ALL[1]),
         Self::Appearance(appearance::Field::ALL[2]), Self::Appearance(appearance::Field::ALL[3]),
         Self::Menu(MenuItem::Providers), Self::Menu(MenuItem::Profiles), Self::Menu(MenuItem::Catalog),
@@ -48,7 +52,8 @@ impl Setting {
         Self::Classic(classic::Field::ALL[2]), Self::Classic(classic::Field::ALL[3]),
         Self::Classic(classic::Field::ALL[4]), Self::Classic(classic::Field::ALL[5]),
         Self::Classic(classic::Field::ALL[6]), Self::Classic(classic::Field::ALL[7]),
-        Self::Classic(classic::Field::ALL[8]), Self::UiColors];
+        Self::Classic(classic::Field::ALL[8]), Self::UiColors,
+        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe];
 
     fn find(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|setting| setting.id() == if id == "sUiColorConfig" { "uiColorConfig" } else { id })
@@ -61,6 +66,8 @@ impl Setting {
 
     fn id(self) -> &'static str {
         match self {
+            Self::NativeInputProbe => "nativeInputProbeV1",
+            Self::HostedEpg => "nativeEpgApiV1",
             Self::InfoTimeout => "infoTimeout",
             Self::FontScale => "uiFontScale",
             Self::UiColors => plx_ui::palette::KEY,
@@ -70,6 +77,7 @@ impl Setting {
             Self::Sleep => "sleepTimeout",
             Self::Appearance(field) => field.id(),
             Self::Geometry(field) => field.id(),
+            Self::SubtitleSelection(field) => field.id(),
             Self::Osd(field) => field.id(),
             Self::Classic(field) => field.id(),
             Self::Menu(item) => item.setting(),
@@ -79,11 +87,12 @@ impl Setting {
 
     fn default(self) -> Value {
         match self {
-            Self::UiColors => json!(""),
+            Self::NativeInputProbe | Self::HostedEpg | Self::UiColors => json!(""),
             Self::InfoTimeout => json!(plx_screens::player::input::InfoTimeout::DEFAULT.seconds()),
             Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(1),
             Self::Appearance(field) => field.default_value(),
             Self::Geometry(field) => field.default_value(),
+            Self::SubtitleSelection(field) => field.default_value(),
             Self::Osd(field) => field.default_value(),
             Self::Classic(field) => field.default_value(),
             Self::Menu(_) => json!(1),
@@ -95,11 +104,14 @@ impl Setting {
     }
     fn valid(self, value: &Value) -> bool {
         match self {
+            Self::NativeInputProbe => value.as_str().is_some_and(|text|text.len()<=4096),
+            Self::HostedEpg => hosted_epg_settings::parse(value).is_ok(),
             Self::UiColors => value.as_str().is_some_and(|text| plx_ui::palette::Config::parse(text).is_ok()),
             Self::M3uMedia => value.as_str().is_some_and(|value| value.len() <= 4096
                 && (value.trim().is_empty() || plx_data::ott::parse_vportal_link(value).is_ok())),
             Self::Appearance(field) => field.merge(Default::default(), value).is_ok(),
             Self::Geometry(field) => field.edit(value).is_ok(),
+            Self::SubtitleSelection(field) => field.valid(value),
             Self::Osd(field) => field.valid(value),
             Self::Classic(field) => field.valid(value),
             Self::Menu(_) => value.as_u64().is_some_and(|value| value <= 1),
@@ -111,23 +123,36 @@ impl Setting {
                 Self::Player => number == 0,
                 Self::Interface => plx_machine::machine::UiMode::from_index(number).is_some(),
                 Self::Sleep => super::super::sleep_timer::Choice::from_index(number).is_some(),
-                Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
+                Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
             }),
         }
     }
 
     fn writable(self) -> bool {
-        matches!(self, Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
+        matches!(self, Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
     }
 
     fn reason(self) -> &'static str {
         match self {
-            Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
+            Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
+            Self::NativeInputProbe => "unsupported",
             Self::Player => "device_forced_auto",
         }
     }
 
     fn descriptor(self) -> Value {
+        if matches!(self, Self::NativeInputProbe) {
+            return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
+                "access":{"read":true,"write":false,"reason":"unsupported"},"default_value":"","apply":"immediate",
+                "constraints":{"max_utf8_bytes":4096},
+                "description":"Last 16 nonprintable physical SDL keys from the existing bounded native playback capture. Empty without a capture; no text or persistent telemetry."});
+        }
+        if matches!(self, Self::HostedEpg) {
+            return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
+                "access":{"read":true,"write":true},"default_value":"","apply":"immediate",
+                "constraints":{"max_utf8_bytes":4096},
+                "description":"Optional hosted guide fallback. Empty disables it; otherwise enter JSON with version 1, url ending /epg/v1 and source epg-one. Provider-advertised guides keep priority."});
+        }
         if matches!(self, Self::UiColors) {
             return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
                 "access":{"read":true,"write":true},"default_value":"","apply":"immediate",
@@ -136,6 +161,7 @@ impl Setting {
         }
         if let Self::Appearance(field) = self { return field.descriptor(); }
         if let Self::Geometry(field) = self { return field.descriptor(); }
+        if let Self::SubtitleSelection(field) = self { return field.descriptor(); }
         if let Self::Osd(field) = self { return field.descriptor(); }
         if let Self::Classic(field) = self { return field.descriptor(); }
         if let Self::Menu(item) = self { return menus::descriptor(item); }
@@ -187,7 +213,7 @@ impl Setting {
                     .map(|choice| json!({"value":choice.index(),"label":choice.label(),"aliases":[]})).collect::<Vec<_>>());
                 result["description"] = json!("Standby after no input. Disabled by kiosk; a new session starts a fresh interval.");
             }
-            Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
+            Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
         }
         result
     }
@@ -247,6 +273,9 @@ fn media_scope(context: &mut Value, revision: u64, navigation_epoch: u64) {
 }
 
 fn stored(saved: &Saved, setting: Setting) -> Value {
+    if matches!(setting, Setting::NativeInputProbe) {
+        return json!({"id":setting.id(),"storage":"default","value":""});
+    }
     if matches!(setting, Setting::UiColors) {
         let raw = saved.settings.get(setting.id());
         let decoded = raw.and_then(Value::as_str).and_then(|text| plx_ui::palette::Config::decode(text).ok());
@@ -332,7 +361,7 @@ fn signature(saved: &Saved, setting: Setting) -> String {
 
 fn revision_key(setting: Setting) -> String {
     match setting {
-        Setting::Appearance(_) | Setting::Geometry(_) => super::super::subtitle_settings::REVISION.into(),
+        Setting::Appearance(_) | Setting::Geometry(_) | Setting::SubtitleSelection(_) => super::super::subtitle_settings::REVISION.into(),
         Setting::Menu(_) => menus::KEY.into(),
         _ => format!("settingRevision:{}", setting.id()),
     }
@@ -502,7 +531,11 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             false,
             now,
         );
-        if matches!(setting, Setting::FontScale) {
+        if matches!(setting, Setting::NativeInputProbe) {
+            result["setting"]["effective_value"] = json!(runtime.native_input_probe());
+        } else if matches!(setting, Setting::HostedEpg) {
+            result["setting"]["effective_value"] = stored(&runtime.saved, setting)["value"].clone();
+        } else if matches!(setting, Setting::FontScale) {
             result["setting"]["effective_value"] = json!(app.bridge.ui_font_scale_percent());
         } else if matches!(setting, Setting::UiColors) {
             result["setting"]["effective_value"] = json!(plx_ui::palette::current().encode());
@@ -523,6 +556,11 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             result["setting"]["effective_value"] = field.value(runtime.osd_preferences());
         } else if let Setting::Classic(field) = setting {
             result["setting"]["effective_value"] = field.value(runtime.classic_preferences());
+        } else if let Setting::SubtitleSelection(field) = setting {
+            if plx_media::route::external_source(&app.player.session).is_some() {
+                result["setting"]["effective_value"] = field.value(
+                    &plx_media::route::hls_subtitle_policy(&app.player.session));
+            }
         } else if let Setting::Geometry(field) = setting {
             // Plex geometry belongs to its profile; do not invent an effective
             // external-source value when that consumer is absent.
@@ -569,6 +607,10 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             visible: params["value"].as_u64().expect("validated menu integer") == 1 }) {
             Ok(candidate) => candidate, Err(_) => return fail("storage_failed"),
         }
+    } else if let Setting::SubtitleSelection(field) = setting {
+        match field.candidate(&runtime.saved, &params["value"]) {
+            Ok(candidate) => candidate, Err(_) => return fail("storage_failed"),
+        }
     } else if let Setting::Geometry(field) = setting {
         if super::super::subtitle_settings::Stored::read(&runtime.saved).is_err() {
             return fail("storage_failed");
@@ -598,7 +640,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
         result["changed"] = json!(media_attachment(&candidate) != media_attachment(&runtime.saved));
     }
     // The shared subtitle revision is prepared by every local and remote Edit.
-    if !matches!(setting, Setting::Appearance(_) | Setting::Geometry(_) | Setting::Menu(_)) {
+    if !matches!(setting, Setting::Appearance(_) | Setting::Geometry(_) | Setting::SubtitleSelection(_) | Setting::Menu(_)) {
         candidate.settings.insert(revision_key_for(setting, wire_provider(runtime.provider)), json!(hash(&json!(inv.id))));
     }
     if matches!(setting,Setting::M3uMedia) {
@@ -625,7 +667,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
         true,
         now,
     );
-    if matches!(setting, Setting::FontScale | Setting::UiColors | Setting::InfoTimeout | Setting::VolumeStep | Setting::Interface | Setting::Sleep | Setting::Osd(_) | Setting::Classic(_) | Setting::Menu(_)) {
+    if matches!(setting, Setting::HostedEpg | Setting::FontScale | Setting::UiColors | Setting::InfoTimeout | Setting::VolumeStep | Setting::Interface | Setting::Sleep | Setting::Osd(_) | Setting::Classic(_) | Setting::Menu(_)) {
         result["setting"]["effective_value"] = params["value"].clone();
     }
     let saving = if matches!(setting, Setting::Interface) {
@@ -833,6 +875,7 @@ impl Runtime {
 /// committed. Typography changes invalidate shared measurement and paint caches
 /// without touching the foreground player or its standby state.
 pub(super) fn after_saved(runtime: &mut Runtime, app: &mut App) -> Result<(), &'static str> {
+    runtime.sync_hosted_epg_config()?;
     let subtitles = super::super::subtitle_settings::Stored::read(&runtime.saved)?;
     let menu = menus::Stored::read(&runtime.saved)?;
     let percent = stored(&runtime.saved, Setting::FontScale)["value"]
@@ -857,8 +900,7 @@ pub(super) fn after_saved(runtime: &mut Runtime, app: &mut App) -> Result<(), &'
     runtime.classic_preferences = classic::preferences(&runtime.saved);
     // Capture every provider before an uncertain visible Saved image can replace
     // the raw document. Browsing another provider or slot still uses its accepted flags.
-    runtime.classic_display = [ProviderKind::M3u, ProviderKind::Xtream, ProviderKind::Stalker,
-        ProviderKind::VPortal, ProviderKind::Local, ProviderKind::Plex].into_iter().map(|provider| {
+    runtime.classic_display = ProviderKind::all().into_iter().map(|provider| {
             let key = wire_provider(provider);
             let display = classic::with_provider_display(runtime.classic_preferences, &runtime.saved, key);
             (key, [u8::from(display.show_number()), u8::from(display.show_name()),
@@ -1131,7 +1173,11 @@ mod menu_tests {
     }
     #[test]
     fn menu_fields_extend_existing_paginated_schema_without_reordering_it() {
-        assert_eq!(Setting::ALL.len(), 26 + MenuItem::ALL.len());
+        assert_eq!(Setting::ALL.len(), 30 + MenuItem::ALL.len());
+        assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
+        assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");
+        assert_eq!(Setting::ALL[41..43].iter().map(|setting| setting.id()).collect::<Vec<_>>(),
+            ["nativeSubtitleMode", "nativeSubtitleLanguage"]);
         assert_eq!(Setting::ALL[35..40].iter().map(|setting| setting.id()).collect::<Vec<_>>(),
             ["showNumber", "showName", "showProgram", "showDescription", "showProgress"]);
         assert_eq!(Setting::ALL[40].id(), "uiColorConfig");
@@ -1262,4 +1308,69 @@ mod color_tests {
             assert!(!canonical.valid(&value));
         }
     }
+}
+
+#[cfg(test)]
+mod subtitle_selection_tests {
+    use super::*;
+    #[test]
+    fn native_selection_descriptors_and_cas_share_the_native_subtitle_revision() {
+        let before = Saved::default();
+        let mode = Setting::find("nativeSubtitleMode").unwrap();
+        let language = Setting::find("nativeSubtitleLanguage").unwrap();
+        for setting in [mode, language] {
+            assert!(setting.writable());
+            assert_eq!(setting.descriptor()["scope"], "application");
+            assert_eq!(setting.descriptor()["apply"], "immediate");
+            assert_eq!(revision_key(setting), super::super::super::subtitle_settings::REVISION);
+        }
+        assert_eq!(stored(&before, mode)["value"], "off");
+        assert_eq!(stored(&before, language)["value"], "");
+        let candidate = selection::Field::Mode.candidate(&before, &json!("auto")).unwrap();
+        assert_ne!(signature(&before, language), signature(&candidate, language),
+            "a mode update also retires a previously issued language CAS receipt");
+        assert_eq!(stored(&candidate, mode)["persisted_value"], "auto");
+        assert!(!mode.valid(&json!("always")));
+        assert!(!language.valid(&json!("en/US")));
+    }
+}
+
+#[cfg(test)]
+mod hosted_epg_setting_tests {
+    use super::*;
+    #[test]
+    fn native_epg_setting_uses_legacy_string_schema_and_preserves_exact_json_text() {
+        let setting = Setting::find("nativeEpgApiV1").unwrap();
+        let descriptor = setting.descriptor();
+        let fixture: Value = serde_json::from_str(include_str!("fixtures/native-epg-setting-v1.json")).unwrap();
+        assert_eq!(descriptor, fixture);
+        assert_eq!(descriptor["type"], "string");
+        assert_eq!(descriptor["default_value"], "");
+        assert_eq!(descriptor["constraints"], json!({"max_utf8_bytes":4096}));
+        assert!(descriptor.get("nullable").is_none());
+        let text = r#"{ "source": "epg-one", "url": "https://guide.invalid/epg/v1", "version": 1 }"#;
+        let value = json!(text);
+        assert!(setting.valid(&value));
+        let mut saved = Saved::default();
+        saved.settings.insert(setting.id().into(), value.clone());
+        let record = stored(&saved, setting);
+        assert_eq!(record["value"], value);
+        assert_eq!(record["persisted_value"], value);
+        assert!(setting.valid(&json!("")));
+        assert!(!setting.valid(&Value::Null));
+        assert!(!setting.valid(&json!({"version":1,"url":"https://guide.invalid/epg/v1","source":"epg-one"})));
+    }
+    #[test]
+    fn native_input_probe_setting_is_readonly_string_and_never_persisted_input() {
+        let setting = Setting::find("nativeInputProbeV1").unwrap();
+        let descriptor = setting.descriptor();
+        assert_eq!(descriptor["type"], "string");
+        assert_eq!(descriptor["access"], json!({"read":true,"write":false,"reason":"unsupported"}));
+        assert_eq!(descriptor["constraints"]["max_utf8_bytes"], 4096);
+        assert!(!setting.writable());
+        let mut saved = Saved::default();
+        saved.settings.insert(setting.id().into(), json!("untrusted-persisted-input"));
+        assert_eq!(stored(&saved, setting), json!({"id":"nativeInputProbeV1","storage":"default","value":""}));
+    }
+
 }

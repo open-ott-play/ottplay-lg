@@ -61,7 +61,7 @@ fn nonlocal_startup_continues_when_unrelated_local_inventory_fails() {
 }
 
 #[test]
-fn mixed_favorite_network_failure_defers_local_successor_until_binding_is_ready() {
+fn mixed_favorite_network_failure_never_selects_a_local_successor_when_binding_becomes_ready() {
     let _serial = plx_base::testlock::serial();
     let _reset = Reset;
     let (_root_dir, mut app, root) = setup();
@@ -104,19 +104,12 @@ fn mixed_favorite_network_failure_defers_local_successor_until_binding_is_ready(
             .unwrap_or_else(|_| panic!("resolver receiver"));
     }
     runtime_tick(&mut app);
-    {
-        let runtime = app.ott.as_ref().unwrap();
-        assert!(runtime.continuity.has_deferred_start(runtime.generation));
-        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none(),
-            "Local B must wait, not fail through to network C");
-        assert!(!runtime.catalog_dirty);
-        assert!(!runtime.continuity.accepts_end(runtime.generation, &local_id));
-    }
-    // Repeated frames neither consume the target nor create another worker.
     for _ in 0..3 { runtime_tick(&mut app); }
     let mut runtime = app.ott.take().unwrap();
-    assert!(runtime.continuity.has_deferred_start(runtime.generation));
-    runtime.resolver_busy = true;
+    assert!(!runtime.continuity.has_deferred_start(runtime.generation));
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none(),
+        "a failed exact favorite cannot select another network or local item");
+    assert!(!runtime.continuity.accepts_end(runtime.generation, &local_id));
     let generation = runtime.generation;
     let sources = runtime.local_inventory.sources.clone();
     runtime.local_inventory.phase = transient::InventoryPhase::Loading(generation);
@@ -124,15 +117,11 @@ fn mixed_favorite_network_failure_defers_local_successor_until_binding_is_ready(
         sources, lookup: None, matched: vec![], operation_error: None,
     }));
     assert!(matches!(runtime.local_inventory.phase, transient::InventoryPhase::Ready(_)));
-    // Readiness itself, without another catalogue batch, wakes the same target.
-    assert!(runtime.catalog_dirty);
     app.ott = Some(runtime);
     runtime_tick(&mut app);
     let runtime = app.ott.as_ref().unwrap();
-    let target = runtime.play_target.as_ref().expect("Local B must resume when its binding is ready");
-    assert_eq!(target.id, local_id);
-    assert_eq!(target.position_ms, 0);
-    assert!(target.local_selection.is_some());
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none(),
+        "new local readiness cannot revive a forbidden automatic successor");
     assert!(!runtime.continuity.has_deferred_start(runtime.generation));
 }
 

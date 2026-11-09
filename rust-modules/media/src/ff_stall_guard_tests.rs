@@ -382,8 +382,9 @@ fn the_lookahead_wiring_aborts_through_the_shared_reducer_when_the_guard_is_arme
                     audio_expected: true,
                 }))
             } else {
-                Ok(HlsSegmentOutput {
+                Ok(HlsSegmentOutput { transport_timing: None,
                     webvtt_clock: None,
+        observed: None,
                     aus: Vec::new(),
                     transfer: SegmentTransfer {
                         bytes: 5_400_000,
@@ -1973,6 +1974,7 @@ fn avio_state_for(
     let (reserve_deadline, mut runtime) = acquisition.begin(aq);
     runtime.enter(Phase::Body);
     AvioState {
+        hls_ts: None,
         src,
         aq,
         off: 0,

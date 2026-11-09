@@ -75,6 +75,25 @@ fn local_alias(profile: &ProviderProfile) -> &str {
     }
 }
 
+fn portable_brand(profile:&ProviderProfile)->Option<&'static str> {
+    let name=match profile.kind {ProviderKind::Edem=>"Edem.tv / iLook.tv",ProviderKind::Operator(id)=>id.name(),_=>return None};
+    let default_name=profile.name==name || profile.name==format!("{name} 1") || profile.name==format!("{} 1",profile.kind.canonical_id()) || profile.name==format!("{} 1",profile.kind.canonical_id().replace('/',"_"))
+        || (profile.kind==ProviderKind::Edem && matches!(profile.name.as_str(),"Edem / iLook TV 1"|"Edem / iLook TV"));
+    (default_name&&(profile.source_alias.is_empty()||profile.source_alias==profile.name||profile.source_alias==name)).then_some(name)
+}
+fn playlist_origin(profile:&ProviderProfile)->Option<String> {
+    match profile.kind {
+        ProviderKind::Edem=>plx_data::ott::edem::Config::parse(&profile.source).ok().map(|config|format!("Playlist {}",config.list+1)),
+        ProviderKind::Operator(id) if id.canonical_id()=="kb-team"=>plx_data::ott::operators::Config::parse(id,&profile.source).ok().map(|config|format!("Playlist {}",config.list+1)),
+        _=>None,
+    }
+}
+
+fn origin_matches(profile:&ProviderProfile,origin:&Origin)->bool {
+    (origin.profile==profile.name && origin.source_alias==profile.alias())
+        || portable_brand(profile).is_some_and(|name|origin.profile==name&&origin.source_alias==name)
+}
+
 fn profile_matches(profile: &ProviderProfile, favorite: &Favorite) -> bool {
     let origin = &favorite.origin;
     match (&profile.kind, &favorite.locator) {
@@ -85,6 +104,10 @@ fn profile_matches(profile: &ProviderProfile, favorite: &Favorite) -> bool {
                 && ((origin.profile == "Plex" && origin.source_alias == *server_id)
                     || (origin.profile == profile.name && origin.source_alias == profile.alias()))
         }
+        (ProviderKind::Edem | ProviderKind::Operator(plx_data::ott::OperatorId::KbTeam), Locator::Channel { .. } | Locator::ChannelName { .. }) => {
+            let expected=playlist_origin(profile);
+            origin_matches(profile,origin) && origin.subprofile.as_ref()==expected.as_ref()
+        }
         (ProviderKind::Local, Locator::Local { root_alias, .. }) => {
             origin.profile == profile.name
                 && origin.source_alias == *root_alias
@@ -93,8 +116,7 @@ fn profile_matches(profile: &ProviderProfile, favorite: &Favorite) -> bool {
                     || root_alias == profile.alias())
         }
         _ => {
-            origin.profile == profile.name
-                && (origin.source_alias == profile.name || origin.source_alias == profile.alias())
+            origin_matches(profile,origin)
         }
     }
 }
@@ -111,11 +133,12 @@ pub(super) fn resolve_profile<'a>(
     let kind = match favorite.origin.provider.as_str() {
         "m3u" => ProviderKind::M3u,
         "xtream" => ProviderKind::Xtream,
+        "edem" => ProviderKind::Edem,
         "stalker" => ProviderKind::Stalker,
         "local" => ProviderKind::Local,
         "plex" => ProviderKind::Plex,
         "vportal" => ProviderKind::VPortal,
-        _ => return Err(BindingError::UnsupportedProvider),
+        provider => ProviderKind::from_id(provider).ok_or(BindingError::UnsupportedProvider)?,
     };
     match (&kind, &favorite.locator) {
         (ProviderKind::Local, Locator::Local { root_alias, .. }) => {
@@ -131,13 +154,18 @@ pub(super) fn resolve_profile<'a>(
                 return Err(BindingError::UnsupportedSource);
             }
         }
-        (ProviderKind::VPortal, Locator::VPortal { .. }) => {}
+        (ProviderKind::VPortal | ProviderKind::Edem, Locator::VPortal { .. }) => {}
         (ProviderKind::M3u, Locator::VPortal { .. }) => {
             // An ordinary M3U URL cannot resolve a separate embedded portal.
             return Err(BindingError::UnsupportedSource);
         }
+        (ProviderKind::Edem | ProviderKind::Operator(plx_data::ott::OperatorId::KbTeam), Locator::Channel { .. } | Locator::ChannelName { .. }) => {
+            if !favorite.origin.subprofile.as_deref().is_some_and(|slot|slot.strip_prefix("Playlist ").and_then(|n|n.parse::<u8>().ok()).is_some_and(|n|(1..=4).contains(&n))) {
+                return Err(BindingError::UnsupportedSource);
+            }
+        }
         (ProviderKind::M3u, Locator::Channel { .. } | Locator::ChannelName { .. })
-        | (ProviderKind::Xtream | ProviderKind::Stalker, Locator::ChannelName { .. }) => {
+        | (ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Operator(_), Locator::ChannelName { .. }) => {
             if favorite.origin.subprofile.is_some() {
                 return Err(BindingError::UnsupportedSource);
             }
@@ -206,8 +234,9 @@ pub(super) fn capture(profile: &ProviderProfile, entry: &CatalogEntry) -> Option
         provider: profile.kind.canonical_id().into(),
         profile: profile.name.clone(),
         subprofile: None,
-        source_alias: profile.name.clone(),
+        source_alias: profile.alias().to_owned(),
     };
+    if let Some(name)=portable_brand(profile){origin.profile=name.into();origin.source_alias=name.into();}
     let locator = match (&profile.kind, &entry.media) {
         (ProviderKind::Local, MediaLocator::Local { relative_path }) => {
             origin.source_alias = local_alias(profile).into();
@@ -249,7 +278,9 @@ pub(super) fn capture(profile: &ProviderProfile, entry: &CatalogEntry) -> Option
                 rating_key: rating_key.clone(),
             }
         }
-        (ProviderKind::VPortal, MediaLocator::VPortal { .. } | MediaLocator::Http { .. }) => {
+        (ProviderKind::VPortal, MediaLocator::VPortal { .. } | MediaLocator::Http { .. })
+        | (ProviderKind::Edem, MediaLocator::VPortal { .. } | MediaLocator::Http { .. })
+            if profile.kind == ProviderKind::VPortal || entry.provider_id_field.is_some() => {
             origin.subprofile = (!entry.category.is_empty()).then(|| entry.category.clone());
             Locator::VPortal {
                 id_field: entry.provider_id_field.clone()?,
@@ -266,7 +297,16 @@ pub(super) fn capture(profile: &ProviderProfile, entry: &CatalogEntry) -> Option
             .unwrap_or_else(|| channel_name(entry)),
         // Web Xtream falls back to name+group. Stalker media keys require source
         // attestation; a native numeric ID is not that same portable identity.
-        (ProviderKind::Xtream | ProviderKind::Stalker, _) => channel_name(entry),
+        (ProviderKind::Edem, _) => {
+            let config=plx_data::ott::edem::Config::parse(&profile.source).ok()?;
+            origin.subprofile=Some(format!("Playlist {}",config.list + 1));
+            channel_name(entry)
+        }
+        (ProviderKind::Operator(id), _) if id.canonical_id()=="kb-team" => {
+            origin.subprofile=playlist_origin(profile);
+            channel_name(entry)
+        }
+        (ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Operator(_), _) => channel_name(entry),
         _ => return None,
     };
     let favorite = Favorite {
@@ -1303,5 +1343,50 @@ mod tests {
             }
         }
         assert_eq!(starred, 1000);
+    }
+}
+
+#[cfg(test)]
+mod edem_favorite_tests {
+    use super::*;
+    #[test]
+    fn edem_live_template_and_portal_favorites_keep_distinct_portable_identity() {
+        let profile=ProviderProfile{id:"edem-1".into(),name:"Edem".into(),kind:ProviderKind::Edem,source:r#"{"key":"test_key","list":2}"#.into(),source_alias:String::new(),enabled:true};
+        let template=plx_data::ott::edem::Config::parse(&profile.source).unwrap().template_profile(&profile);
+        let mut row=plx_data::ott::parse_m3u("#EXTM3U\n#EXTINF:-1 group-title=\"News\",Channel\nhttp://media.invalid/live\n",&template).unwrap().entries.remove(0);
+        let live=capture(&profile,&row).unwrap();
+        assert_eq!(live.origin.subprofile.as_deref(),Some("Playlist 3"));
+        let profiles=ProviderProfiles{version:1,active_profile:Some(profile.id.clone()),profiles:vec![profile.clone()]};
+        assert!(resolve_profile(&profiles,&live).is_ok());
+        row.live=None;row.provider_id=Some("47".into());row.provider_id_field=Some("id".into());row.category="Movies / Comedy".into();
+        let movie=capture(&profile,&row).unwrap();
+        assert!(matches!(movie.locator,Locator::VPortal{..}));
+        assert_eq!(movie.origin.subprofile.as_deref(),Some("Movies / Comedy"));
+        assert!(resolve_profile(&profiles,&movie).is_ok());
+        assert!(matches_entry(&movie,&row));
+    }
+}
+
+#[cfg(test)]
+mod operator_default_identity_tests {
+    use super::*;
+    #[test]
+    fn default_brand_names_are_portable_and_duplicate_accounts_remain_ambiguous() {
+        let id=plx_data::ott::OperatorId::from_id("great").unwrap();
+        let profile=ProviderProfile{id:"great-1".into(),name:"great 1".into(),kind:ProviderKind::Operator(id),source:r#"{"m3u":"https://playlist.invalid/list.m3u"}"#.into(),source_alias:String::new(),enabled:true};
+        let mut template=profile.clone();template.kind=ProviderKind::M3u;template.source="https://playlist.invalid/list.m3u".into();
+        let row=plx_data::ott::parse_m3u("#EXTM3U\n#EXTINF:-1,Fixture\nhttps://media.invalid/live.ts\n",&template).unwrap().entries.remove(0);
+        let favorite=capture(&profile,&row).unwrap();assert_eq!(favorite.origin.profile,id.name());
+        let mut receiver=profile.clone();receiver.name=id.name().into();
+        let mut profiles=ProviderProfiles{version:1,active_profile:None,profiles:vec![receiver.clone()]};assert!(resolve_profile(&profiles,&favorite).is_ok());
+        let mut isolated=receiver.clone();isolated.source_alias="account-B".into();
+        let isolated_profiles=ProviderProfiles{version:1,active_profile:None,profiles:vec![isolated.clone()]};
+        assert!(resolve_profile(&isolated_profiles,&favorite).is_err(),"Default brand must not select another explicit account");
+        let explicit=capture(&isolated,&row).unwrap();assert_eq!(explicit.origin.source_alias,"account-B");
+        assert!(resolve_profile(&isolated_profiles,&explicit).is_ok());
+        receiver.id="great-duplicate".into();profiles.profiles.push(receiver);
+        assert_eq!(resolve_profile(&profiles,&favorite).err(),Some(BindingError::AmbiguousSource));
+        let mut custom=profile.clone();custom.name="Account two".into();custom.source_alias="Account two".into();
+        assert_eq!(capture(&custom,&row).unwrap().origin.profile,"Account two");
     }
 }

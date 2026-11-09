@@ -48,6 +48,26 @@ fn stage(runtime: &mut Runtime, key: &str, value: u64) {
 }
 
 #[test]
+fn native_subtitle_group_stages_typed_preferences_and_saves_them_together() {
+    let _serial = plx_base::testlock::serial();
+    let mut runtime = runtime();
+    let before = saved(&runtime);
+    open_group(&mut runtime, "subtitles");
+    assert!(projected(&runtime).rows.iter().any(|row| row.detail == "Off (manual selection)"));
+    stage(&mut runtime, "nativeSubtitleMode", 1);
+    stage(&mut runtime, "nativeSubtitleLanguage", 2);
+    assert_eq!(saved(&runtime), before, "draft cannot change the active policy");
+    assert!(projected(&runtime).rows.iter().any(|row| row.detail == "Automatic"));
+    assert!(projected(&runtime).rows.iter().any(|row| row.detail == "Russian"));
+    let candidate = merge(&runtime, address(&runtime).unwrap()).unwrap().unwrap();
+    let policy = subtitle_settings::selection::read(&candidate).unwrap();
+    assert_eq!(policy.mode, plx_media::route::HlsSubtitleMode::Auto);
+    assert_eq!(policy.language, "ru");
+    assert_eq!(candidate.settings[subtitle_settings::REVISION], json!(1));
+    assert_eq!(saved(&runtime), before);
+}
+
+#[test]
 fn root_groups_preserve_separate_actions_and_opening_never_saves() {
     let _serial = plx_base::testlock::serial();
     let mut runtime = runtime();
@@ -872,4 +892,21 @@ fn corrupt_stored_color_is_repairable_only_after_explicit_save() {
         let candidate = merge(&runtime, address(&runtime).unwrap()).unwrap().unwrap();
         assert_eq!(candidate.settings["uiColorConfig"], "");
     }
+}
+
+#[test]
+fn remote_group_shows_only_durable_identity_as_read_only() {
+    let _serial = plx_base::testlock::serial();
+    let mut runtime = runtime();
+    open_group(&mut runtime, "remote");
+    let rows = projected(&runtime).rows;
+    let row = rows.iter().find(|row| row.id == "remote.device_id").unwrap();
+    assert_eq!(row.detail, "group_fixture");
+    assert!(!row.enabled);
+    runtime.remote = Remote::from_install("provisional_fixture", "fixture");
+    let rows = projected(&runtime).rows;
+    let row = rows.iter().find(|row| row.id == "remote.device_id").unwrap();
+    assert_eq!(row.detail, "Identity loading or unavailable");
+    assert!(!row.enabled);
+    assert!(!row.detail.contains("provisional_fixture"));
 }

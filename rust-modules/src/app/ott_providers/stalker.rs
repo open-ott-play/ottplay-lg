@@ -396,6 +396,61 @@ fn short_guide(
         .collect())
 }
 
+/// Fetch the finite civil dates touched by a selected epoch interval. Adjacent
+/// UTC dates cover portal timezone offsets without guessing the portal zone.
+fn day_rows(profile: &ProviderProfile, entry: &CatalogEntry, start: i64, end: i64,
+            http: &mut dyn ProviderHttp) -> Result<Vec<Value>, &'static str> {
+    let MediaLocator::Stalker { cmd, stream_kind, series } = &entry.media else { return Err("Invalid Stalker media locator"); };
+    validate_locator(cmd, stream_kind, series)?;
+    if stream_kind != "itv" { return Err("Guide requires a live channel"); }
+    let id = entry.provider_id.as_deref().filter(|id| !id.is_empty() && id.len() <= 1024
+        && !id.chars().any(char::is_control)).ok_or("Missing guide identity")?;
+    if start < 0 || end <= start || end - start > 90_000 { return Err("Invalid guide interval"); }
+    let first = (start / 86400).saturating_sub(1).max(0);
+    let last = (end / 86400).checked_add(1).ok_or("Invalid guide interval")?;
+    let mut session = Session::connect(profile, http)?;
+    let mut output = Vec::new();
+    let mut seen = BTreeSet::new();
+    for day in first..=last {
+        let date = super::utc_stamp(day.checked_mul(86400).ok_or("Invalid guide interval")?, false)?;
+        let mut pages = Pages::default();
+        for number in 1..=64 {
+            let response = session.call("epg", "get_simple_data_table", &[("ch_id", id.into()),
+                ("date", date.clone()), ("p", number.to_string())])?;
+            for row in pages.accept(&response)? {
+                if row.get("ch_id").is_some() && stalker::scalar(&row["ch_id"]) != id {
+                    return Err("Stalker returned another guide channel");
+                }
+                let key = stalker::scalar(&row["id"]);
+                if seen.insert(key) { output.push(row); }
+            }
+            if pages.done { break; }
+            if number == 64 { return Err("Stalker guide pagination exceeds limit"); }
+        }
+    }
+    Ok(output)
+}
+
+pub(super) fn archive(profile: &ProviderProfile, entry: &CatalogEntry,
+    interval: ott::archive::ArchiveInterval, http: &mut dyn ProviderHttp) -> Result<String, &'static str> {
+    let rows = day_rows(profile, entry, interval.start, interval.end, http)?;
+    let channel = entry.provider_id.as_deref().ok_or("Missing guide identity")?;
+    let mut matches = rows.into_iter().filter(|row| {
+        stalker::short_epg(channel, &json!([row])).is_ok_and(|programmes| programmes.len() == 1
+            && programmes[0].start == interval.start && programmes[0].stop == interval.end)
+    });
+    let programme = matches.next().ok_or("Archive programme is unavailable")?;
+    if matches.next().is_some() { return Err("Archive programme identity is ambiguous"); }
+    if !matches!(programme["mark_archive"].as_i64(), Some(1)) && programme["mark_archive"].as_str() != Some("1") {
+        return Err("Provider has not archived this programme");
+    }
+    let id = stalker::scalar(&programme["id"]);
+    if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_digit()) { return Err("Invalid archive programme identity"); }
+    let mut session = Session::connect(profile, http)?;
+    let response = session.call("tv_archive", "create_link", &[("cmd", format!("/media/{id}.mpg"))])?;
+    stalker::playback_url(&session.config, &response)
+}
+
 pub(super) fn guide(
     profile: &ProviderProfile,
     entry: &CatalogEntry,
@@ -409,7 +464,13 @@ pub(super) fn guide(
     if request.context.profile_id != profile.id || request.context.entry_id != entry.id {
         return Err("Guide context mismatch");
     }
-    let rows = short_guide(profile, entry, http)?;
+    let rows = if let ott::guide::Query::Day { start, end } = request.query {
+        let rows = day_rows(profile, entry, start, end, http)?;
+        let id = entry.provider_id.as_deref().ok_or("Missing guide identity")?;
+        stalker::short_epg(id, &Value::Array(rows))?.into_iter().map(|row| ott::epg::Programme {
+            channel: id.into(), start: row.start, end: row.stop, title: row.title, description: row.description,
+        }).collect()
+    } else { short_guide(profile, entry, http)? };
     let channel = entry
         .provider_id
         .as_deref()
@@ -419,7 +480,8 @@ pub(super) fn guide(
     Ok(ott::guide::ResultSet {
         context: request.context.clone(),
         query: request.query,
-        coverage: ott::guide::Coverage::ProviderShortGuide,
+        coverage: if matches!(request.query, ott::guide::Query::Day { .. }) { ott::guide::Coverage::RequestedWindow }
+            else { ott::guide::Coverage::ProviderShortGuide },
         programmes,
     })
 }
@@ -635,4 +697,34 @@ mod tests {
         assert!(resolve(&p, &entry, &mut http).is_err());
         assert!(http.urls.is_empty());
     }
+    #[test]
+    fn archive_uses_exact_provider_programme_identity_and_rejects_unarchived_rows() {
+        let p = profile(false);
+        let c = Config::parse(&p.source).unwrap();
+        let entry = stalker::rows(&p, &c, "itv", &BTreeMap::new(), &Folder::default(),
+            &[json!({"id":2,"name":"Channel","cmd":"ffmpeg /ch/2","tv_archive_duration":24})])
+            .unwrap().0.entries.remove(0);
+        for archived in [0, 1] {
+            let mut replies = auth();
+            replies.push((200,json!({"js":{"total_items":1,"max_page_items":10,"data":[{
+                "id":99,"ch_id":2,"name":"Past","start_timestamp":100,"stop_timestamp":200,"mark_archive":archived}]}})));
+            replies.push((200,json!({"js":{"total_items":0,"max_page_items":10,"data":[]}})));
+            if archived == 1 {
+                replies.extend(auth());
+                replies.push((200,json!({"js":{"cmd":"ffmpeg https://archive.invalid/programme99.ts"}})));
+            }
+            let mut http = Http::new(replies);
+            let result = archive(&p, &entry, ott::archive::ArchiveInterval { start:100,end:200 }, &mut http);
+            assert!(http.urls.iter().any(|url| url.contains("type=epg") && url.contains("get_simple_data_table")));
+            if archived == 1 {
+                assert_eq!(result.unwrap(), "https://archive.invalid:443/programme99.ts");
+                assert!(http.urls.last().unwrap().contains("type=tv_archive"));
+                assert!(http.urls.last().unwrap().contains("%2Fmedia%2F99.mpg"));
+            } else {
+                assert_eq!(result, Err("Provider has not archived this programme"));
+                assert!(!http.urls.iter().any(|url| url.contains("create_link")));
+            }
+        }
+    }
+
 }

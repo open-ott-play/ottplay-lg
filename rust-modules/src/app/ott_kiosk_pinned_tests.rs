@@ -159,7 +159,7 @@ fn pinned_marker_does_not_bypass_exact_archive_request_validation() {
         description: String::new(), poster: String::new(), duration_ms: None,
         provider_id: Some("fixture-channel".into()), provider_id_field: Some("tvg-id".into()),
         media: MediaLocator::Http { url: "https://media.invalid/live.m3u8".into() },
-        live: Some(ChannelMetadata { tvg_name: String::new(), guide_shift_seconds: 0,
+        live: Some(ChannelMetadata { guide_id: None, guide_feed: String::new(), tvg_name: String::new(), guide_shift_seconds: 0,
             catchup: Some(CatchupSource { mode: CatchupMode::Append,
                 source: "?start={utc}&end={utcend}".into(), retention_seconds: 1000, correction_seconds: 0 }) }),
     };

@@ -54,7 +54,7 @@ fn fixture(outer_selection: &str, resolved_id: &str) -> Guide {
             duration_ms: None,
             provider_id: Some("xmltv-channel-a".into()),
             provider_id_field: Some("tvg-id".into()),
-            live: Some(ChannelMetadata {
+            live: Some(ChannelMetadata { guide_id: None, guide_feed: String::new(),
                 tvg_name: "Channel A".into(),
                 guide_shift_seconds: 0,
         catchup: None,

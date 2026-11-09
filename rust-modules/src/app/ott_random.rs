@@ -41,7 +41,7 @@ pub(super) fn context(runtime: &Runtime, rows: &[OttRow]) -> Option<String> {
 
 // A bounded rejection sampler avoids modulo bias. SplitMix64 is a local stream
 // derived from already loaded boot entropy, not a new security identity or RNG.
-fn index(mut seed: u64, length: usize) -> Option<usize> {
+pub(super) fn index(mut seed: u64, length: usize) -> Option<usize> {
     let bound = u64::try_from(length).ok().filter(|bound| *bound != 0)?;
     let threshold = bound.wrapping_neg() % bound;
     for _ in 0..8 {

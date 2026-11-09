@@ -87,8 +87,11 @@ fn classic_settings_schema_appends_all_classic_fields_and_hides_duplicate_arrow_
         cursor = result["data"]["next_cursor"].clone();
         if cursor.is_null() { break; }
     }
-    assert_eq!(ids.len(), 41);
+    assert_eq!(ids.len(), 45);
+    assert_eq!(ids[43], "nativeEpgApiV1");
+    assert_eq!(ids[44], "nativeInputProbeV1");
     assert_eq!(ids[40], "uiColorConfig");
+    assert_eq!(&ids[41..43], &["nativeSubtitleMode", "nativeSubtitleLanguage"]);
     assert_eq!(&ids[26..40], &["volumeStep", "sleepTimeout", "infoTimeout", "osdOpacity", "permanentTime",
         "pageSize", "listPosition", "seek13Duration", "arrowFun", "showNumber", "showName", "showProgram", "showDescription", "showProgress"]);
     for (serial,id,value) in [(20,"pageSize",25),(21,"listPosition",0),(22,"seek13Duration",15),(23,"arrowFun",0)] {

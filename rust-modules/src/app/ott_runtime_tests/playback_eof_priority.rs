@@ -180,3 +180,76 @@ fn outgoing_error_eof_does_not_replace_a_pending_viewer_choice() {
     assert_eq!(runtime.playing.as_ref().unwrap().selection_id, "first");
     assert!(runtime.playback_failure.snapshot().is_none());
 }
+
+#[test]
+fn exact_live_eof_retains_channel_and_queues_only_same_source_retry() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = terminal_fixture();
+    admit(&mut app, "first");
+    let runtime = app.ott.as_mut().unwrap();
+    runtime.resolver_busy = true;
+    let mut live = profile();
+    live.kind = ProviderKind::M3u;
+    live.source = "https://media.invalid/list.m3u".into();
+    let mut channel = entry("first");
+    channel.media = MediaLocator::Http { url: PRIVATE_URL.into() };
+    channel.duration_ms = None;
+    channel.live = Some(Default::default());
+    runtime.saved.profiles.profiles = vec![live.clone()];
+    runtime.saved.profiles.active_profile = Some(live.id.clone());
+    runtime.provider = ProviderKind::M3u;
+    runtime.catalog.entries = vec![channel.clone()];
+    let playing = runtime.playing.as_mut().unwrap();
+    playing.profile = live;
+    playing.entry = channel;
+    playing.advance_on_failure = false;
+    let selected = playing.selection_id.clone();
+    plx_media::player::swap_state_for_test(PlaybackState::Playing);
+    mark_eof();
+    assert!(finish_catalog_playback(&mut app));
+    let runtime = app.ott.as_mut().unwrap();
+    assert_eq!(runtime.playing.as_ref().unwrap().selection_id, selected);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    let due = runtime.continuity.pending_retry().unwrap().not_before_ms;
+    assert!(matches!(runtime.continuity.tick(runtime.generation, due, &["first", "second"], true),
+        continuity::Decision::Start { entry_id, .. } if entry_id == "first"));
+}
+
+#[test]
+fn cold_restore_normalizes_live_failure_policy_before_resolver_admission() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = terminal_fixture();
+    let runtime = app.ott.as_mut().unwrap();
+    let mut live = profile();
+    live.kind = ProviderKind::M3u;
+    live.source = "https://media.invalid/list.m3u".into();
+    let mut channel = entry("first");
+    channel.media = MediaLocator::Http { url: PRIVATE_URL.into() };
+    channel.duration_ms = None;
+    channel.live = Some(Default::default());
+    runtime.saved.profiles.profiles = vec![live.clone()];
+    runtime.saved.profiles.active_profile = Some(live.id);
+    runtime.provider = ProviderKind::M3u;
+    runtime.catalog.entries = vec![channel];
+    let request = PlaybackRequest::ordinary("first", 0);
+    assert!(request.advance_on_failure, "model the saved automatic restore default");
+    let (request, _, _, _) = runtime.prepare_play_request(request).unwrap();
+    assert!(!request.advance_on_failure, "a failed cold restore must not advance to another TV channel");
+}
+
+#[test]
+fn unresolved_favorite_failure_is_exact_without_changing_vod_eof_policy() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = terminal_fixture();
+    let runtime = app.ott.as_mut().unwrap();
+    let favorite = selection::capture(&profile(), &entry("first")).unwrap();
+    let id = format!("favorite:{}", favorite.identity());
+    runtime.saved.favorites.toggle(favorite).unwrap();
+    let (request, _, row, _) = runtime.prepare_play_request(PlaybackRequest::ordinary(&id, 0)).unwrap();
+    assert!(row.is_none(), "the provider has not resolved this Favorite yet");
+    assert!(!request.advance_on_failure, "an unknown failed Favorite cannot authorize a different channel");
+    // Normal finite completion is covered by non_error_eof_keeps_short_and_near_end_no_callback_completion.
+}

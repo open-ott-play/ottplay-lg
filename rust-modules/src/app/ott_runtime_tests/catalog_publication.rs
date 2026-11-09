@@ -483,7 +483,9 @@ fn fresh_numeric_after_nodes_only_batch_uses_retained_screen_order_and_source() 
     assert_eq!(runtime.selected.as_deref(), Some(wanted.id.as_str()));
     let target = runtime.play_target.as_ref().expect("ordinary numeric Play admission");
     assert_eq!(target.id, wanted.id);
-    assert!(target.advance_on_failure, "retain ordinary UI Play policy");
+    assert!(!target.advance_on_failure, "numeric selection owns the exact row; a failure is not EOF");
+    assert_eq!(runtime.view().pending_play.as_deref(), Some(wanted.id.as_str()),
+        "numeric selection exposes the same source-bound pending handoff as OK");
     let queued = runtime.resolver_next.as_ref().expect("held actual resolver request");
     assert_eq!(queued.profile, profile);
     assert_eq!(queued.entry.as_ref(), Some(&wanted));

@@ -453,6 +453,40 @@ fn accepted_stored_kiosk_policy_change_rejects_an_already_prepared_remote_select
 }
 
 #[test]
+fn strict_kiosk_keeps_saved_automatic_subtitles_and_auto_off_authority() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = globals();
+    for armed in [false, true] {
+        let mut app = fixture();
+        install(&mut app, &HlsPlayback::fixture_with_subtitles_for_test());
+        let origin = plx_data::ott::favorites::Origin { provider: "local".into(), profile: "Fixture".into(),
+            subprofile: None, source_alias: "Fixture".into() };
+        let kiosk = if armed {
+            crate::app::ott_kiosk_stored::Stored::armed(origin, true).unwrap()
+        } else {
+            crate::app::ott_kiosk_stored::Stored::local_folder(origin, true,
+                "fixture_root".into(), "a".repeat(64)).unwrap()
+        };
+        app.ott.as_mut().unwrap().saved.settings.insert("nativeKiosk".into(), kiosk.encode().unwrap());
+        assert!(gate(app.ott.as_ref().unwrap(), &app).is_err(), "manual controls remain restricted");
+        assert!(automatic_gate(app.ott.as_ref().unwrap(), &app).is_ok());
+        for mode in [route::HlsSubtitleMode::Auto, route::HlsSubtitleMode::Off] {
+            route::restore_hls_subtitle_policy(&mut app.player.session, route::HlsSubtitlePolicy {
+                mode, language: "en".into(),
+            });
+            let mut rt = app.ott.take().unwrap();
+            enqueue_automatic(&mut rt.hls_tracks, &mut app.player.session);
+            app.ott = Some(rt);
+            let (id, _, request) = start(&mut app);
+            let at = now(&app);
+            complete(&mut app, id, Ok(request.prepared_for_test()), Some(at));
+            assert_eq!(route::hls_track_catalog(&app.player.session).unwrap().selected_subtitle().is_some(),
+                mode == route::HlsSubtitleMode::Auto);
+        }
+    }
+}
+
+#[test]
 fn production_completion_resamples_time_instead_of_using_the_old_frame_sample() {
     let _lock = plx_base::testlock::serial();
     let _globals = globals();

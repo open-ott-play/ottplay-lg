@@ -27,7 +27,7 @@ use plx_ui::frame::Budget;
 use plx_ui::route_screen::RouteLayout;
 use plx_ui::screen::{Activate, At, Dir, DrawFrame, EdgeRule, ElemKind, FocusSource, Focusable, GroupSpec,
     HitSource, Hover, Link, Part, Placed, RenderStrategy, Screen, ScreenEvent, Step, Stop};
-use plx_ui::table::{Badge, Row, RowArt};
+use plx_ui::table::{Row, RowArt};
 use plx_ui::table_screen::{Header, TableScreen};
 use plx_ui::text_buffer::TextBuffer;
 use plx_ui::document_reader::DocumentReader;
@@ -35,7 +35,7 @@ use plx_ui::table_screen::{DocumentFocus, DocumentPart};
 use plx_ui::{theme, Rect};
 use plx_ui::widgets::{CtlPop, TabStrip};
 
-pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
+pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,pending_play:Option<str>,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
 
 /// Presentation order for the already loaded single-channel guide window.
 /// This does not request or claim a complete archive/recordings history.
@@ -318,6 +318,8 @@ pub struct OttView {
     pub status: String,
     /// The status describes pending work; accounted only where its text is drawn.
     pub status_working: bool,
+    /// Runtime-owned pending Play identity; presentation must not claim playback admission.
+    pub pending_play: Option<String>,
     pub rows: Vec<OttRow>,
     /// Empty preserves the flat catalogue presentation. Runtime supplies these
     /// only for its unfiltered All list; Classic continues to use `rows`.
@@ -332,7 +334,7 @@ pub struct OttView {
 impl Default for OttView {
     fn default() -> Self {
         Self { classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None, catalog_progress: None, page_id: "loading".into(), revision: 0, title: msg::ott_brand().into(),
-            description: msg::ott_intro().into(), status: String::new(), status_working: false,
+            description: msg::ott_intro().into(), status: String::new(), status_working: false, pending_play: None,
             rows: Vec::new(), shelves: Vec::new(), shelf_context: None, selected_row: None, search: None }
     }
 }
@@ -388,6 +390,25 @@ impl OttScreen {
     /// Provider URLs may embed credentials even when displayed as plain text.
     /// The runner must suppress raw text recording for every native editor.
     pub fn handles_private_text(&self) -> bool { self.editor.is_some() }
+
+    /// Closed, read-only guide presentation counters for authenticated status.
+    /// Never exports provider names, channel IDs, programme text or editor values.
+    pub fn guide_presentation_diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "revision": self.snapshot.revision,
+            "classic": self.classic_mode,
+            "browse": self.browse,
+            "editing": self.editor.is_some(),
+            "classic_catalogue": self.form.table.is_classic_catalogue(),
+            "rows": self.snapshot.rows.len(),
+            "compact_current_rows": self.snapshot.rows.iter().filter(|row| row.current_programme.is_some()).count(),
+            "guide_available_rows": self.snapshot.rows.iter().filter(|row| row.guide_available).count(),
+            "programme_label_rows": self.snapshot.rows.iter().filter(|row|
+                !classic::catalogue_detail(row, self.snapshot.classic_preferences,
+                    self.guide_clock.now_for(row.guide.as_ref())).is_empty()).count(),
+            "show_program": self.snapshot.classic_preferences.show_program()
+        })
+    }
 
     /// Private screenshot capture is limited to audited navigation/settings UI.
     /// Pairing codes may be visible in this private diagnostic artifact; credential
@@ -617,13 +638,13 @@ impl OttScreen {
             let catalogue_item = classic_catalogue && matches!(row.action, OttAction::Play(_));
             let channel_item = catalogue_item && classic::catalogue_live(row);
             let row_now = self.guide_clock.now_for(row.guide.as_ref());
-            let detail = if channel_item { classic::catalogue_detail(row, snapshot.classic_preferences, row_now) }
-                else if classic_catalogue { String::new() } else { row.detail.clone() };
-            let title = if channel_item { classic::catalogue_title(row, snapshot.classic_preferences) }
+            let detail = if classic_catalogue { String::new() } else { row.detail.clone() };
+            let title = if channel_item { classic::catalogue_label(row, snapshot.classic_preferences, row_now) }
                 else if catalogue_item { classic::list_label(row, snapshot.classic_preferences, row_now) }
                 else { row.title.clone() };
             let presentation_row = Row::new(title);
-            let mut presentation = if channel_item && !snapshot.classic_preferences.show_name() {
+            let mut presentation = if channel_item && !snapshot.classic_preferences.show_name()
+                && classic::catalogue_detail(row,snapshot.classic_preferences,row_now).is_empty() {
                 // catalogue_title supplies an app-owned localized fallback
                 // when the user hides provider channel names.
                 presentation_row
@@ -648,14 +669,14 @@ impl OttScreen {
                     });
                     if let Some(art) = art { presentation = presentation.catalogue_art(art); }
                     else { presentation = presentation.catalogue_icon(plx_ui::icons::Icon::Show); }
-                    let epg_available = row.guide_available || row.current_programme.is_some()
-                        || row.guide.as_ref().is_some_and(|guide|
-                            guide.current.is_some() || guide.next.is_some());
-                    let epg = format!("{} {}", msg::ott_classic_epg(), if epg_available { "✓" } else { "—" });
-                    let archive = format!("{} {}", msg::ott_records(), if row.records_available { "✓" } else { "—" });
-                    presentation = presentation.badge(Badge::Text(epg.into()))
-                        .badge(Badge::Text(archive.into()));
+                    // Capability is a compact strip, not an EPG claim or a
+                    // wide translated badge competing with programme text.
+                    presentation = presentation.catalogue_archive(row.records_available);
                 }
+            }
+            if catalogue_item {
+                let secondary=classic::list_secondary_start(row, snapshot.classic_preferences, &presentation.label);
+                presentation.set_secondary_label_start(secondary);
             }
             if classic_choices {
                 // Values share the title's row. Explanatory text stays in the
@@ -963,11 +984,10 @@ impl OttScreen {
         if !matches!(row.action, OttAction::Play(_)) { return; }
         let now = self.guide_clock.now_for(row.guide.as_ref());
         let channel_item = classic::catalogue_live(row);
-        let label = if channel_item { classic::catalogue_title(row, self.snapshot.classic_preferences) }
+        let label = if channel_item { classic::catalogue_label(row, self.snapshot.classic_preferences, now) }
             else { classic::list_label(row, self.snapshot.classic_preferences, now) };
-        let detail = if channel_item { classic::catalogue_detail(row, self.snapshot.classic_preferences, now) } else { String::new() };
-        let secondary = if channel_item { None }
-            else { classic::list_secondary_start(row, self.snapshot.classic_preferences, &label) };
+        let detail = String::new();
+        let secondary = classic::list_secondary_start(row, self.snapshot.classic_preferences, &label);
         let progress = self.snapshot.classic_preferences.show_progress()
             .then(|| classic::list_progress_interval(row, now)).flatten();
         let Some(key) = self.keys.get(&format!("item:{}", row.id)) else { return; };
@@ -1209,6 +1229,16 @@ impl OttScreen {
         self.restore_memory = None;
         match item.action {
             FormAction::Forward(action) => {
+                if matches!(action, OttAction::ShowCategories) {
+                    // Category navigation retires the old row's dwell. The
+                    // asynchronous response may arrive after another Tick;
+                    // consume this row's preview opportunity now so that Tick
+                    // cannot start playback from the departing channel list.
+                    self.previewed = self.preview.clone().or_else(|| self.media
+                        .and_then(|index| self.snapshot.rows.get(index))
+                        .map(|row| row.id.clone()));
+                    self.preview = None; self.preview_token = None; self.preview_dwell = 0.0;
+                }
                 if self.browse && !matches!(action, OttAction::BeginSearch | OttAction::Refresh) { self.close_browse(fx); }
                 self.send(action, fx);
             }
@@ -1338,6 +1368,22 @@ impl OttScreen {
     fn step_inner<H: AppLike<Memory = PageMemory>>(&mut self, ev: &ScreenEvent<H>, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         if let Some(handled) = self.exit_event(ev, cx, fx) { return handled; }
         self.refresh_presentation(H::ui_mode(&cx.views), cx.measure);
+        // A selected item leaves the list immediately, while the runtime still
+        // resolves/admit its source. Hidden rows cannot receive navigation or
+        // preview input; Back cancels the addressed request in the runtime.
+        if self.snapshot.pending_play.is_some() {
+            match ev {
+                ScreenEvent::Input(input) => {
+                    if matches!(input.kind, InputKind::Key { key: Key::Back, edge: Edge::Down, at_edge: false, .. }) {
+                        self.send(OttAction::Back, fx);
+                    }
+                    return Handled::Yes;
+                }
+                ScreenEvent::Activate(_) | ScreenEvent::PressCommit(_) | ScreenEvent::PressHold(_)
+                | ScreenEvent::FocusMoved { .. } | ScreenEvent::Tick(_) => return Handled::Yes,
+                _ => {}
+            }
+        }
         if !self.accepts_channel_number() { self.clear_number_notice(); }
         let guide_changed = self.guide_clock.update(self.media.and_then(|i| self.snapshot.rows.get(i)).and_then(|row| row.guide.as_ref()), cx.tick.ms);
         if guide_changed && self.browse && self.editor.is_none() {
@@ -1679,6 +1725,7 @@ impl LogicalState for OttScreen {
             .u32(u32::from(preferences.arrow_mode())).u32(preferences.seek13_seconds());
         out.bool(preferences.show_number()).bool(preferences.show_name()).bool(preferences.show_program()).bool(preferences.show_progress()).bool(preferences.show_description());
         out.bool(self.snapshot.volume_available);
+        out.option(self.snapshot.pending_play.as_ref(), |out, id| { out.str(id); });
         out.str(&self.snapshot.page_id).u64(self.snapshot.revision).seq(self.snapshot.rows.len());
         for row in &self.snapshot.rows { out.str(&row.id).bool(row.enabled).bool(row.favorite).bool(row.guide_available).bool(row.records_available); }
         out.seq(self.snapshot.shelves.len());
@@ -1766,6 +1813,20 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
     fn draw(&mut self, frame: &mut DrawFrame<'_, '_, H>) {
         // Use the same mode-specific surface with or without an admitted preview.
         let ground = if self.classic_mode { plx_ui::palette::color(plx_ui::palette::Role::Background, theme::CLASSIC_BACKGROUND) } else { plx_ui::palette::color(plx_ui::palette::Role::Background, theme::SURFACE_APP) };
+        if let Some(id) = &self.snapshot.pending_play {
+            // Opaque cover, not a Player route: old preview geometry and list
+            // focus stops must never flash while source admission is pending.
+            use plx_ui::View;
+            plx_gfx::gfx::frame_clear(ground[0], ground[1], ground[2]);
+            let caption = std::ffi::CString::new(if self.snapshot.status.is_empty() {
+                msg::browse_library_loading()
+            } else { &self.snapshot.status }).unwrap_or_default();
+            let title = std::ffi::CString::new(self.snapshot.rows.iter()
+                .find(|row| &row.id == id).map_or("", |row| row.title.as_str())).unwrap_or_default();
+            plx_ui::widgets::StatusOverlay::new(Rect::FULL, &caption, plx_ui::widgets::StatusKind::Working)
+                .reason(&title).phase(frame.cx.tick.ms).draw(&plx_ui::Env::inert(), frame.painter);
+            return;
+        }
         // This owned page paints the ground before its foreground-only parts.
         if let Some(aperture) = self.viewport_aperture() {
             plx_gfx::gfx::frame_clear_through();
@@ -2012,7 +2073,7 @@ mod tests {
             kind: InputKind::Key { key, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true } })
     }
     fn snapshot(revision: u64, ids: &[&str]) -> Arc<OttView> {
-        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
+        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
             description: String::new(), status: String::new(), selected_row: None, search: None,
             rows: ids.iter().map(|id| OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: id.to_string(), title: id.to_string(), detail: String::new(),
                 description: "Complete description. A second sentence remains available.".into(), poster: None,
@@ -2659,13 +2720,13 @@ mod catalogue_projection_regression_tests {
         let view = OttView { page_id: "channels".into(), rows: vec![live, finite], ..Default::default() };
         let screen = classic_screen(view);
         let rows = rows(&screen);
-        assert_eq!(rows[0].label, "Live station");
-        assert_eq!(rows[0].detail, "Guide now");
-        assert_eq!(rows[0].badges.iter().map(Badge::text).collect::<Vec<_>>(), [
-            format!("{} ✓", msg::ott_classic_epg()), format!("{} ✓", msg::ott_records())
-        ]);
-        assert_eq!(rows[0].badges[0].text(), "Guide TV ✓");
-        assert_eq!(rows[0].badges[1].text(), "Enregistrements ✓");
+        assert_eq!(rows[0].label, "Live station  Guide now");
+        assert!(rows[0].detail.is_empty());
+        assert_eq!(rows[0].secondary_label_start(), Some("Live station  ".len()));
+        assert!(rows[0].badges.is_empty(), "EPG remains inline, not a wide capability badge");
+        assert_eq!(rows[0].catalogue_archive_available(), Some(true));
+        assert_eq!(rows[0].progress_bounds(), Some((10,20)));
+        assert_eq!(rows[1].catalogue_archive_available(), None);
         assert!(rows[0].catalogue_icon.is_some());
         assert_eq!(rows[1].badges.len(), 0, "finite HTTP video stays an ordinary row");
         assert!(rows[1].catalogue_icon.is_none());
@@ -2688,8 +2749,8 @@ mod catalogue_projection_regression_tests {
                     .with_channel_display(0, 0, 1, 1).unwrap(), ..Default::default() };
             let screen = classic_screen(view);
             let rendered = &rows(&screen)[0];
-            assert_eq!(rendered.label_origin, plx_ui::table::Origin::App,
-                "localized fallback remains app-owned for {}", preference.tag());
+            assert_eq!(rendered.label_origin, plx_ui::table::Origin::Server,
+                "visible programme text remains provider-owned for {}", preference.tag());
             assert!(screen.form.table.app_fit_failures(RouteLayout::screen().sectioned_table().w, preference.tag()).is_empty(),
                 "Classic hidden-name catalogue label fits for {}", preference.tag());
         }
@@ -2714,6 +2775,27 @@ mod catalogue_projection_regression_tests {
         let after = rows(&screen);
         assert_eq!(after[0].label, msg::ott_channel_list());
         assert!(after[0].detail.is_empty(), "clock refresh must also respect Show programme off");
+    }
+
+    #[test]
+    fn inline_programme_rollover_updates_text_and_progress_without_moving_the_row() {
+        let _serial=plx_base::testlock::serial();
+        let mut row=live_row("station","Station");
+        row.guide.as_mut().unwrap().now_s=19;
+        let mut screen=classic_screen(OttView{page_id:"channels".into(),rows:vec![row],..Default::default()});
+        screen.media=Some(0);
+        let selected=screen.form.table.sel;
+        let guide=screen.snapshot.rows[0].guide.as_ref().unwrap().clone();
+        screen.guide_clock.update(Some(&guide),0);
+        screen.guide_clock.update(Some(&guide),2_000);
+        screen.refresh_classic_programme();
+        let row=rows(&screen)[0];
+        assert_eq!(row.label,"Station  Guide next");
+        assert!(row.detail.is_empty());
+        assert_eq!(row.progress_bounds(),Some((20,30)));
+        assert_eq!(row.secondary_label_start(),Some("Station  ".len()));
+        assert_eq!(row.catalogue_archive_available(),Some(true));
+        assert_eq!(screen.form.table.sel,selected);
     }
 
     #[test]

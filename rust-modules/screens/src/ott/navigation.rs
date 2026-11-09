@@ -90,18 +90,29 @@ pub(super) fn classic_footer_keys(snapshot: &OttView, controls: &[(u32, String)]
     let list_keys = matches!(snapshot.page_id.split(':').next(), Some("channels" | "favorites" | "categories"));
     let mut out = Vec::new();
     if list_keys {
-        if let Some(key) = exposed("nav:guide").or_else(|| exposed("nav:description")) {
+        if let Some(key) = (snapshot.page_id.split(':').next() == Some("categories")).then(|| exposed("nav:catalog")).flatten()
+            .or_else(|| exposed("nav:guide")).or_else(|| exposed("nav:description")) {
             out.push((key, vec![FooterKey::color(FooterTone::Red)]));
         }
     }
     if let Some(key) = exposed("nav:categories") {
-        out.push((key, vec![FooterKey::color(FooterTone::Blue)]));
+        let mut hints = vec![FooterKey::color(FooterTone::Blue)];
+        if matches!(snapshot.page_id.split(':').next(), Some("channels" | "favorites")) {
+            hints.push(FooterKey::plain("▶Ⅱ"));
+        }
+        out.push((key, hints));
     }
     let yellow = if snapshot.page_id.split(':').next() == Some("favorites") { "nav:favorite" } else { "nav:actions" };
     if list_keys {
         if let Some(key) = exposed(yellow) {
             out.push((key, vec![FooterKey::color(FooterTone::Yellow)]));
         }
+    }
+    // Native digits remain channel tuning. Description is a focusable real
+    // footer action; OK is its established activation, rather than a fictitious
+    // INFO scancode or stealing the television's number 2.
+    if let Some(key) = exposed("nav:description").filter(|key| !out.iter().any(|(id, _)| id == key)) {
+        out.push((key, vec![FooterKey::plain("OK")]));
     }
     out
 }
@@ -175,7 +186,7 @@ fn build_header(measure: &dyn Measure, width: f32, browse: u32,
 pub(super) const CONTEXT_IDS: [&str; 15] = ["nav:providers", "nav:profiles", "nav:catalog", "nav:categories",
     "nav:favorites", "nav:settings", "nav:search", "nav:clear-search", "nav:actions", "nav:random",
     "nav:description", "nav:play", "nav:guide", "nav:records", "nav:favorite"];
-const CONTEXT_CONTROLS: [&str; 8] = ["nav:categories", "nav:play", "nav:description", "nav:guide",
+const CONTEXT_CONTROLS: [&str; 9] = ["nav:catalog", "nav:categories", "nav:play", "nav:description", "nav:guide",
     "nav:actions", "nav:favorites", "nav:favorite", "nav:search"];
 pub(super) fn is_context_control(id: &str) -> bool { CONTEXT_CONTROLS.contains(&id) }
 
@@ -273,7 +284,9 @@ pub(super) fn classic_controls(snapshot: &OttView, actions: &[Action], keys: &st
     let compact = [primary, "nav:categories", context, if primary == "nav:guide" { "nav:description" } else { "" }];
     // Additional operations keep their ordinary Browse routes. This is only
     // the channel footer's presentation, not a new action/capability policy.
-    let ids = if catalogue { compact.as_slice() } else { CONTEXT_CONTROLS.as_slice() };
+    let categories = ["nav:catalog", "nav:actions", "nav:search", "nav:favorites"];
+    let ids = if catalogue { compact.as_slice() } else if page == "categories" { categories.as_slice() }
+        else { CONTEXT_CONTROLS.as_slice() };
     ids.iter().filter_map(|&id| {
         let item = actions.iter().find(|item| item.id == id)?;
         let label = match id {
@@ -448,10 +461,10 @@ mod tests {
         let tone = |items: Vec<(u32, Vec<page_header::FooterKey>)>| items.into_iter()
             .map(|(id, keys)| (id, keys[0].tone)).collect::<Vec<_>>();
         assert_eq!(tone(classic_footer_keys(&snapshot, &all, &keys)),
-            vec![(1, FooterTone::Red), (3, FooterTone::Blue), (4, FooterTone::Yellow)]);
+            vec![(1, FooterTone::Red), (3, FooterTone::Blue), (4, FooterTone::Yellow), (2, FooterTone::Plain)]);
         snapshot.page_id = "favorites".into();
         assert_eq!(tone(classic_footer_keys(&snapshot, &all, &keys)),
-            vec![(1, FooterTone::Red), (3, FooterTone::Blue), (5, FooterTone::Yellow)]);
+            vec![(1, FooterTone::Red), (3, FooterTone::Blue), (5, FooterTone::Yellow), (2, FooterTone::Plain)]);
         let only_description = vec![(2, "Description".to_owned())];
         assert_eq!(tone(classic_footer_keys(&snapshot, &only_description, &keys)), vec![(2, FooterTone::Red)]);
         assert!(classic_footer_keys(&snapshot, &[], &keys).is_empty());

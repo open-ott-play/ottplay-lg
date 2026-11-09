@@ -468,7 +468,7 @@ fn numeric_channel_archive_retains_transport_digits_despite_live_entry() {
     let mut app = playing(true);
     let runtime = app.ott.as_mut().unwrap();
     let playing = runtime.playing.as_mut().unwrap();
-    playing.entry.live = Some(plx_data::ott::guide::ChannelMetadata {
+    playing.entry.live = Some(plx_data::ott::guide::ChannelMetadata { guide_id: None, guide_feed: String::new(),
         tvg_name: "One".into(), guide_shift_seconds: 0,
         catchup: Some(plx_data::ott::archive::CatchupSource {
             mode: plx_data::ott::archive::CatchupMode::Append,
@@ -673,7 +673,7 @@ fn numeric_seek13_archive_uses_finite_timeline_even_with_live_channel_metadata()
     let mut app = playing(true);
     let runtime = app.ott.as_mut().unwrap();
     let playing = runtime.playing.as_mut().unwrap();
-    playing.entry.live = Some(plx_data::ott::guide::ChannelMetadata {
+    playing.entry.live = Some(plx_data::ott::guide::ChannelMetadata { guide_id: None, guide_feed: String::new(),
         tvg_name: "One".into(), guide_shift_seconds: 0,
         catchup: Some(plx_data::ott::archive::CatchupSource {
             mode: plx_data::ott::archive::CatchupMode::Append,

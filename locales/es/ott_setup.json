@@ -31,5 +31,5 @@
   "ott.profile_no_matches": "Sin resultados. Borra la búsqueda para mostrar todo.",
   "ott.profile_empty": "Esta lista está vacía.",
   "ott.profile_provider_limit": "Este proveedor ya tiene 15 perfiles.",
-  "ott.profile_total_limit": "Ya hay 90 perfiles."
+  "ott.profile_total_limit": "Se ha alcanzado el límite de perfiles de este dispositivo."
 }

@@ -22,8 +22,8 @@ use super::*;
 
 
 /// The Magic Remote POINTER, as one value: which input mode the remote is in, what the
-/// cursor is doing, and the two gestures that outlive a single event (a scrub drag and the
-/// wheel's own debounce).
+/// cursor is doing, and gestures that outlive a single event (a scrub drag and
+/// the pointer's edge glide).
 ///
 /// `dpad_mode`/`cur_hidden`/`mot_accum` are one rule between them and are why this is a
 /// type: the first D-pad press hides the cursor and switches modes, and motion only switches
@@ -46,7 +46,6 @@ pub(crate) struct Pointer {
     /// left here is the pointer-machine FACT the loop still has to know: the button's state, which
     /// decides whether a motion event is dispatched as `InputKind::Pointer` or `InputKind::Drag`.
     pub(crate) button_down: bool,
-    pub(crate) last_wheel: u32,  // last wheel tick, for the wheel's own debounce
     /// The button now held went DOWN as an OK key, not a click ([`click_is_ok`]), so its up must
     /// be an OK key-up too.
     pub(crate) ok_from_click: bool,
@@ -63,7 +62,6 @@ impl Pointer {
         prev_my: -1.0,
         last_motion: 0,
         button_down: false,
-        last_wheel: 0,
         ok_from_click: false,
         edge: EdgeScroll::IDLE,
     };

@@ -161,7 +161,7 @@ pub fn text_in<'a>(source: &'a str, cx: &LocaleContext) -> &'a str {
         "Select a profile first" | "Select a provider profile" => msg::ott_profile_select_in(cx),
         "This profile changed; reopen its setup before saving" => msg::ott_profile_changed_in(cx),
         "This provider already has 15 profiles" => msg::ott_profile_provider_limit_in(cx),
-        "There are already 90 profiles" => msg::ott_profile_total_limit_in(cx),
+        "There are already 90 profiles" | "This installation has reached its profile limit" => msg::ott_profile_total_limit_in(cx),
         "Profile setup is no longer active" | "Profile editor is no longer active" | "Editor screen is no longer active" | "Editor session is no longer active" => msg::ott_profile_inactive_in(cx),
         "This profile is being saved" | "Another editor save is in progress" => msg::ott_profile_saving_in(cx),
         "This field is not available for this provider" | "This provider does not use credential setup" => msg::ott_profile_unavailable_in(cx),

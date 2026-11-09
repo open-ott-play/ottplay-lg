@@ -31,5 +31,5 @@
   "ott.profile_no_matches": "Nincs találat. Az összes elemhez törölje a keresést.",
   "ott.profile_empty": "Ez a lista üres.",
   "ott.profile_provider_limit": "Ennél a szolgáltatónál már 15 profil van.",
-  "ott.profile_total_limit": "Már 90 profil van."
+  "ott.profile_total_limit": "Az eszköz elérte a profilok megengedett számát."
 }

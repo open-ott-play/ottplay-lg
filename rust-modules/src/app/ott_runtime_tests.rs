@@ -507,3 +507,6 @@ mod catalog_publication;
 
 #[path = "ott_runtime_tests/favorite_profile_rename.rs"]
 mod favorite_profile_rename;
+
+#[path = "ott_runtime_tests/classic_play_handoff.rs"]
+mod classic_play_handoff_tests;

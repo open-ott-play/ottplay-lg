@@ -5,6 +5,7 @@ use serde_json::json;
 fn fixture(kind: ProviderKind, titles: &[&str]) -> (ProviderProfile, Catalog) {
     let source = match kind {
         ProviderKind::M3u => "https://playlist.invalid/list.m3u",
+        ProviderKind::Edem | ProviderKind::Operator(_) => r#"{"key":"fixture"}"#,
         ProviderKind::Xtream => r#"{"server":"https://tv.invalid","username":"u","password":"p"}"#,
         ProviderKind::Stalker => r#"{"portal":"https://tv.invalid","mac":"00:1A:79:00:00:01"}"#,
         ProviderKind::VPortal => "portal::[key:private]https://portal.invalid/api",
@@ -16,7 +17,7 @@ fn fixture(kind: ProviderKind, titles: &[&str]) -> (ProviderProfile, Catalog) {
     let entries = titles.iter().enumerate().map(|(index, title)| {
         let key = format!("{:016x}", index + 1);
         let media = match kind {
-            ProviderKind::M3u => MediaLocator::Http { url: format!("https://media.invalid/{index}") },
+            ProviderKind::M3u | ProviderKind::Edem | ProviderKind::Operator(_) => MediaLocator::Http { url: format!("https://media.invalid/{index}") },
             ProviderKind::Xtream => MediaLocator::Xtream { stream_id: key.clone(), stream_kind: "live".into(),
                 extension: "ts".into(), series_id: None, has_direct_source: false },
             ProviderKind::Stalker => MediaLocator::Stalker { cmd: format!("ffmpeg http://localhost/ch/{index}"),

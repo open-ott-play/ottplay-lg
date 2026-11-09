@@ -12,7 +12,7 @@ pub(super) struct SaveOnly {
 }
 
 pub(super) fn supported(kind: ProviderKind) -> bool {
-    matches!(kind, ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker
+    matches!(kind, ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)
         | ProviderKind::VPortal | ProviderKind::Local)
 }
 
@@ -55,7 +55,7 @@ impl Runtime {
     {
         if !supported(profile.kind) { return Err("This provider uses its own connection flow"); }
         let target = profile.id.clone();
-        if matches!(profile.kind, ProviderKind::Xtream | ProviderKind::Stalker) {
+        if matches!(profile.kind, ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)) {
             self.open_setup(profile, false)?;
         } else {
             let save_only = profile.kind == ProviderKind::M3u;
@@ -67,11 +67,11 @@ impl Runtime {
 
     pub(super) fn new_profile_draft(&self) -> Result<ProviderProfile, &'static str> {
         let index = (1..=self.saved.profiles.profiles.len() + 1).find(|index| {
-            let id = format!("{}-{index}", self.provider.canonical_id());
+            let id = format!("{}-{index}", self.provider.canonical_id().replace('/', "_"));
             !self.saved.profiles.profiles.iter().any(|profile| profile.id == id)
         }).ok_or("Unable to allocate a new profile")?;
-        Ok(ProviderProfile { id: format!("{}-{index}", self.provider.canonical_id()),
-            name: format!("{} {index}", self.provider.canonical_id()), kind: self.provider,
+        Ok(ProviderProfile { id: format!("{}-{index}", self.provider.canonical_id().replace('/', "_")),
+            name: if matches!(self.provider,ProviderKind::Edem|ProviderKind::Operator(_)){super::commands::default_profile_name(self.provider,index)}else{format!("{} {index}",self.provider.canonical_id())}, kind: self.provider,
             source: String::new(), source_alias: String::new(), enabled: true })
     }
 

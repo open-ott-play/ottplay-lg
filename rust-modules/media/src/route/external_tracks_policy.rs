@@ -84,9 +84,10 @@ pub fn classify_hls_audio(
             TrackAvailability::Unsupported(TrackUnavailable::Codec)
         };
     }
-    // AAC remains compressed ADTS. Only the explicitly admitted embedded MP2
+    // AAC/AC3 remain compressed. Only the explicitly admitted embedded MP2
     // branch above runs a PCM decoder; other software codecs remain refused.
-    if caps.native_audio_track("aac", track.channels, track.sample_rate, mode == DirectPlayMode::Forced) {
+    if matches!(track.codec.as_str(), "aac" | "ac3")
+        && caps.native_audio_track(&track.codec, track.channels, track.sample_rate, mode == DirectPlayMode::Forced) {
         TrackAvailability::Supported
     } else {
         TrackAvailability::Unsupported(TrackUnavailable::Codec)
@@ -380,6 +381,34 @@ mod tests {
             assert_eq!(audio(&dts, &software, mode), Supported);
             assert_eq!(classify_hls_audio(&software_inventory, &dts, &software, mode),
                 Unsupported(TrackUnavailable::Transport));
+        }
+    }
+
+    #[test]
+    fn hls_ac3_uses_its_own_native_caps_and_never_aac_or_software_fallback() {
+        let mut row=track(TrackKind::Audio,"ac3"); row.ordinal=0; row.stream_index=1;
+        row.sample_rate=48_000; row.channels=6; row.decoder_available=false;
+        let classify=|row: &InspectedTrack,caps: &Caps,mode| {
+            classify_hls_audio(&TrackInventory::from_partial(vec![row.clone()],vec![]),row,caps,mode)
+        };
+        let caps=Caps::assumed();
+        for mode in [DirectPlayMode::Auto,DirectPlayMode::Forced] {
+            assert_eq!(classify(&row,&caps,mode),Supported);
+            let mut no_ac3=caps.clone();
+            no_ac3.audio_channels.insert("ac3".into(),0);
+            no_ac3.native_ceiling.insert("ac3".into(),0);
+            assert!(no_ac3.native_audio_track("aac",2,48_000,mode==DirectPlayMode::Forced));
+            assert_eq!(classify(&row,&no_ac3,mode),Unsupported(TrackUnavailable::Codec));
+            let mut no_aac=caps.clone();
+            no_aac.audio_channels.insert("aac".into(),0);
+            no_aac.native_ceiling.insert("aac".into(),0);
+            assert_eq!(classify(&row,&no_aac,mode),Supported);
+            for (channels,rate) in [(0,48_000),(7,48_000),(6,0),(6,24_000)] {
+                let mut invalid=row.clone(); invalid.channels=channels; invalid.sample_rate=rate;
+                assert_eq!(classify(&invalid,&caps,mode),Unsupported(TrackUnavailable::Transport));
+            }
+            let mut eac3=row.clone(); eac3.codec="eac3".into();
+            assert_eq!(classify(&eac3,&caps,mode),Unsupported(TrackUnavailable::Transport));
         }
     }
 

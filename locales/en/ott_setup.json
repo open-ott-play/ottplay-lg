@@ -128,7 +128,7 @@
     "description": "Native profile capacity validation: provider limit."
   },
   "ott.profile_total_limit": {
-    "value": "There are already 90 profiles.",
+    "value": "This installation has reached its profile limit.",
     "description": "Native profile capacity validation: total limit."
   }
 }

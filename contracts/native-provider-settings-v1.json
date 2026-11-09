@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "capability": {
+    "native_provider_settings": {
+      "version": 1,
+      "operations": ["compare", "set"],
+      "providers": ["edem", "ottclub", "d/maxtv"]
+    }
+  },
+  "provider_ids": [
+    "edem", "antifriz", "kb-team", "itv", "ottclub", "shura", "1ott",
+    "bestlist/stalker", "only4", "shara-tv", "tvteam", "all4you", "bestlist", "cbilling", "d/maxtv",
+    "diamondtv", "dosug", "dragon", "drvao", "fabryka", "fox", "fxml", "great", "ipstream",
+    "iptv-ott.ru", "korona", "moidom", "newlook", "ottg", "ottprime", "polmedia", "prost",
+    "raduga", "rd", "russkoetv", "shara.club", "sharavoz", "shocktv", "tabox", "top", "topiptv",
+    "tvclub", "ultifl1x", "vidok"
+  ],
+  "probe": {"action": "capabilities", "params": {"native_provider_settings": true}},
+  "document": {"provider": "edem", "number": 3, "settings": {"key": "fixture_key", "list": 2}},
+  "compare_request": {
+    "action": "settings_compare",
+    "params": {"version": 1, "runtime": "native-runtime-1", "provider": "edem", "number": 3, "settings": {"key": "fixture_key", "list": 2}}
+  },
+  "compare_result": {
+    "version": 1, "runtime": "native-runtime-1", "provider": "edem", "number": 3,
+    "context": "context-123", "revision": "revision-456", "matched": false
+  },
+  "set_request": {
+    "action": "provider_settings",
+    "params": {"version": 1, "runtime": "native-runtime-1", "provider": "edem", "number": 3,
+      "settings": {"key": "fixture_key", "list": 2}, "context": "context-123", "revision": "revision-456"}
+  },
+  "set_result": {
+    "version": 1, "runtime": "native-runtime-1", "provider": "edem", "number": 3,
+    "context": "context-123", "revision": "revision-456", "saved": true, "fields": ["key", "list"],
+    "reloaded": true, "reload_required": false
+  },
+  "rejected_result": {
+    "version": 1, "runtime": "native-runtime-1", "provider": "edem", "number": 3, "reason": "revision_conflict"
+  },
+  "reasons": ["invalid_request", "unsupported", "policy_restricted", "runtime_changed", "source_changed",
+    "revision_conflict", "invalid_value", "storage_failed", "busy", "expired"]
+}

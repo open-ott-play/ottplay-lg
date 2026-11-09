@@ -69,17 +69,11 @@ with the source and worker; each segment must retain the same audio descriptors,
 although stream order may change. Missing, ambiguous or changed tracks stop the
 stream rather than switching to another language. Reopen the source to inspect a
 changed track table. Remote enumeration of this embedded inventory remains
-unavailable because one segment is not a complete presentation catalog. Finite
-VOD with supported external AUDIO renditions instead exposes the retained active
-master audio group through the native menu and the existing `media_tracks` API,
-as described in [HLS audio renditions](native-hls-audio-renditions.md). An otherwise
-supported audio/video master may declare subtitle groups without blocking playback.
-The verified separate-rendition TS VOD route also offers manual external WebVTT
-choices through its presentation catalog, not the embedded AVStream inventory;
-see [HLS WebVTT subtitles](native-hls-webvtt.md). Unselected subtitle playlists
-are not fetched. Embedded HLS subtitles, ordinary multiplexed HLS subtitle groups
-and automatic default/forced subtitle selection remain unavailable. No HLS
-selection is redirected into a Plex operation.
+unavailable because one segment is not a complete presentation catalog. The source candidate (including media snapshots `37feb00` and `401055f`) now supports finite and precisely anchored live external AUDIO renditions, rolling WebVTT on multiplexed and paired live HLS, and a separate saved native Off/Auto/Forced language policy. These are source/host-validation results, not a statement about the earlier published `0.3.3-beta.1` package or physical television acceptance. See [native HLS subtitle policy](native-hls-subtitle-policy.md) for the actual settings/receipt contract and timing requirements.
+
+Declared master audio/WebVTT choices use their retained presentation identity. Live lanes use independent playlist sequence numbers and actual packet clocks; video is fed only after complete selected AAC coverage is proved. WebVTT snapshots are bounded, cancellable, and fenced by source and discontinuity/restart epoch. Manual track and Off intent supersede automatic preparation and survive refresh/audio reload. Unselected subtitle playlists are not fetched. No HLS selection is redirected into a Plex operation.
+
+Observed embedded PID/program inventories and in-band subtitle decoding are a separate work-in-progress block. A partial segment snapshot must not silently become a v1 complete-presentation catalogue. CEA-608 is not supported merely by enabling the bundled decoder: extraction, service selection and committed screen rendering also require verification. CEA-708 decoding is not implemented by the current caption decoder. Consult [the current parity boundary](native-hls-parity-work.md) before advertising either capability.
 
 ## Small synthetic fixture
 

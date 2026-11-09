@@ -42,6 +42,14 @@ impl Severity {
     fn label(self) -> &'static str {
         match self { Self::Info => "Home update", Self::Warning => "Attention", Self::Critical => "Alert" }
     }
+    // Same one-pixel perimeter colours as the shared web/Tauri banners.
+    fn border(self) -> [f32; 4] {
+        match self {
+            Self::Info => [121.0 / 255.0, 187.0 / 255.0, 1.0, 1.0],
+            Self::Warning => [1.0, 208.0 / 255.0, 121.0 / 255.0, 1.0],
+            Self::Critical => [1.0, 146.0 / 255.0, 156.0 / 255.0, 1.0],
+        }
+    }
     fn color(self) -> [f32; 4] {
         match self {
             Self::Info => [0.65, 0.83, 1.0, 1.0],
@@ -183,6 +191,9 @@ impl Renderer {
                 painter.clip(clip.intersect(Rect::FULL));
                 // The complete camera frame replaces all redundant text; no crop.
                 painter.alpha(state.text).tex(image.tex.id, rect, 20.0, [1.0; 4]);
+                // A full, uniform perimeter, not a severity stripe along one edge.
+                painter.alpha(state.surface).rect_rimmed(rect, 20.0,
+                    [0.0; 4], [0.0; 4], b.severity.border(), 0.0);
                 painter.clip_clear();
                 h
             } else {
@@ -221,8 +232,12 @@ fn draw_text(b: &Banner, state: Phase, top: f32, opacity: f32, p: Painter, measu
     // The input is the resolved footer alpha; the web notification contract adds
     // eight points then applies an 80% surface factor (default 0.624, maximum 0.8).
     let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 0.70 };
-    let surface = p.alpha(state.surface * (opacity + 0.08).min(1.0) * 0.8);
-    surface.rrect(rect, 20.0, 20.0, [0.09, 0.11, 0.15, 1.0]);
+    let fill_alpha = (opacity + 0.08).min(1.0) * 0.8;
+    let fill = [0.09, 0.11, 0.15, fill_alpha];
+    // Border and surface follow the same fade, while the readable text keeps
+    // its separate exit-only opacity. rim_top=0 makes all four sides uniform.
+    p.alpha(state.surface).rect_rimmed(rect, 20.0, fill, fill, b.severity.border(), 0.0);
+    let surface = p.alpha(state.surface * fill_alpha);
     let icon = Rect::new(rect.x + PAD, rect.y + PAD, ICON, ICON);
     surface.rrect(icon, 14.0, 14.0, [accent[0] * 0.2, accent[1] * 0.2, accent[2] * 0.2, 1.0]);
     draw_activity_ring(surface, icon, accent, state.ring, state.text);
@@ -472,6 +487,39 @@ mod tests {
         assert!(renderer.resident.is_empty());
         renderer.clear();
         drop(renderer);
+    }
+
+    #[test]
+    fn camera_perimeter_matches_the_complete_image_without_covering_it() {
+        let _guard = plx_base::testlock::serial();
+        let mut b = banner(); b.image = Some(image(640, 360));
+        let mut renderer = Renderer::default(); let mut gpu = FakeGpu::default();
+        renderer.sync(std::slice::from_ref(&b), 1500, &mut gpu);
+        let mut textures = Vec::new();
+        let inks = plx_ui::draw_census::capture_inks(|| {
+            textures = plx_ui::draw_census::capture_tex(|| renderer.draw(&[b],
+                1500, 0.7, false, Painter::recording(), &plx_machine::machine::BareMeasure));
+        });
+        assert_eq!(textures.len(), 1);
+        let rims: Vec<_> = inks.iter().filter(|(kind, _, _)| *kind == 8).collect();
+        assert_eq!(rims.len(), 1);
+        assert_eq!(rims[0].1, textures[0].1);
+        assert_eq!(rims[0].2, 0.0, "the perimeter must leave the camera image unpainted inside");
+        renderer.release(&mut gpu);
+    }
+
+    #[test]
+    fn notification_card_has_a_full_rim_instead_of_a_left_edge_stripe() {
+        let _guard = plx_base::testlock::serial();
+        let mut renderer = Renderer::default();
+        let b = banner();
+        let inks = plx_ui::draw_census::capture_inks(|| renderer.draw(&[b],
+            1500, 0.7, false, Painter::recording(), &plx_machine::machine::BareMeasure));
+        let cards: Vec<_> = inks.iter().filter(|(_, rect, _)| rect.w == WIDTH).collect();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].0, 8, "one uniform rounded perimeter around the complete card");
+        assert!(cards[0].1.h > ICON);
+        assert!((cards[0].2 - 0.624).abs() < 0.0001, "existing background opacity is unchanged");
     }
 
     #[test]

@@ -599,10 +599,11 @@ pub fn push(generation: u64, track: i32, start_ns: i64, end_ns: i64, payload: &[
 pub fn seek(generation: u64) {
     store().seek(generation);
 }
+/// Retire selected embedded cues and producer generations before a route-owned
+/// HLS track change. Late batches still need their independent selection token.
+pub fn retire_selection() { store().reset(); }
 #[cfg(any(test, feature = "test-support"))]
-pub fn reset() {
-    store().reset();
-}
+pub fn reset() { retire_selection(); }
 pub fn font_snapshot() -> (u64, Arc<[Font]>) {
     let mut store = store();
     let fonts = store.fonts.get_or_insert_with(|| Arc::from([])).clone();

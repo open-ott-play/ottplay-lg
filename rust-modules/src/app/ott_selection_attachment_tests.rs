@@ -179,3 +179,14 @@ fn unrelated_profile_changes_keep_binding_but_disabled_or_removed_parent_cannot_
     authorities.observe(&Registry::default(), &profiles).unwrap();
     assert!(matches!(bind_bound(&SelectionBindings::profiles_only(&profiles).with_attachments(&authorities), &favorite), Err(BindingError::MissingProfile)));
 }
+
+#[test]
+fn explicit_attachment_alias_cannot_be_replaced_by_display_name() {
+    let (profiles, _, authorities) = setup("m3u-1", "attachment-one", "sender.invalid");
+    let bindings = SelectionBindings::profiles_only(&profiles).with_attachments(&authorities);
+    let receipt = authorities.receipt("m3u-1").unwrap();
+    let mut favorite = capture_bound(&bindings, SelectionOwner::M3uAttachment(receipt), &row(receipt)).unwrap();
+    assert!(bind_bound(&bindings, &favorite).is_ok());
+    favorite.origin.source_alias = profiles.profiles[0].name.clone();
+    assert!(bind_bound(&bindings, &favorite).is_err());
+}

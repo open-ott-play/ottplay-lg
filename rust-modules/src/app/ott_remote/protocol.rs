@@ -182,6 +182,8 @@ pub(crate) struct Invocation {
     pub(super) media_tracks_raw: Option<String>,
     /// Received duplicate-checked action/params projection; absent for Value-only admission.
     pub(super) plex_servers_raw: Option<String>,
+    /// Complete received queued envelope, duplicate-checked and bounded before admission.
+    pub(super) provider_settings_raw: Option<String>,
     pub deadline_ms: u64,
     pub(super) request: bool,
     pub(super) generation: u64,
@@ -192,6 +194,9 @@ impl Invocation {
     }
     pub(crate) fn plex_servers_projection(&self) -> Option<&[u8]> {
         self.plex_servers_raw.as_deref().map(str::as_bytes)
+    }
+    pub(crate) fn provider_settings_projection(&self) -> Option<&[u8]> {
+        self.provider_settings_raw.as_deref().map(str::as_bytes)
     }
     pub(crate) fn expects_response(&self) -> bool {
         self.request
@@ -254,6 +259,13 @@ fn refused_request(id: &str, action: &str, params: &Value, code: &str, message: 
             super::plex_servers::Correlation::from_params(params)
                 .map_or_else(|| json!({"status":"rejected","data":{"error":message}}),
                     |correlation| correlation.rejected(error))
+        }
+        else if matches!(action, "settings_compare" | "provider_settings") && params.get("version").is_some() {
+            json!({"status":"rejected","data":{"version":1,
+                "runtime":params["runtime"].as_str().filter(|s|valid_device(s)).unwrap_or(""),
+                "provider":params["provider"].as_str().filter(|s|s.len()<=64).unwrap_or(""),
+                "number":params["number"].as_u64().filter(|n|(1..=15).contains(n)).unwrap_or(0),
+                "reason":if code=="expired" {"expired"} else {"revision_conflict"}}})
         }
         else if action == "local_browser" || (action == "local_media" && params.get("source_handle").is_some()) {
             // Delivery may expire a request before the application sees it. Keep
@@ -392,6 +404,7 @@ impl Delivery {
                         params: command.clone(),
                         media_tracks_raw: None,
                         plex_servers_raw: None,
+                        provider_settings_raw: None,
                         deadline_ms: until,
                         request: false,
                         generation: 0,
@@ -450,6 +463,7 @@ impl Delivery {
                         params,
                         media_tracks_raw: None,
                         plex_servers_raw: None,
+                        provider_settings_raw: None,
                         deadline_ms: until,
                         request: true,
                         generation: 0,

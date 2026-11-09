@@ -11,7 +11,7 @@ fn archive_fixture(with_metadata: bool) -> App {
     playing.profile.source = "https://media.invalid/live.m3u".into();
     playing.entry.title = "Fixture channel".into();
     playing.entry.description = "Unrelated currently live programme".into();
-    playing.entry.live = Some(ChannelMetadata {
+    playing.entry.live = Some(ChannelMetadata { guide_id: None, guide_feed: String::new(),
         tvg_name: "Fixture channel".into(), guide_shift_seconds: 0,
         catchup: Some(CatchupSource { mode: CatchupMode::Append,
             source: "?start={utc}&duration={duration}".into(),

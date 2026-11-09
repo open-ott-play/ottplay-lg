@@ -2014,6 +2014,19 @@ pub fn stream_tls_with_timeouts(
     cancel: &AtomicBool,
     on_bytes: &mut dyn FnMut(&[u8]) -> bool,
 ) -> StreamEnd {
+    stream_request_tls_with_timeouts(url, headers, "GET", None, tls, resolve, timeouts, idle, cancel, on_bytes)
+}
+
+/// Bounded cancellable streaming request using the same TLS and redirect policy
+/// as stream_tls_with_timeouts. Request bodies remain owned by the caller.
+#[allow(clippy::too_many_arguments)]
+#[track_caller]
+pub fn stream_request_tls_with_timeouts(
+    url: &str, headers: &[String], verb: &str, body: Option<&[u8]>,
+    tls: Tls<'_>, resolve: Option<&str>, timeouts: Timeouts,
+    idle: std::time::Duration, cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(&[u8]) -> bool,
+) -> StreamEnd {
     if !available() || !threaded_tls_ready() {
         return StreamEnd::Unsupported;
     }
@@ -2021,7 +2034,7 @@ pub fn stream_tls_with_timeouts(
         return StreamEnd::Cancelled;
     }
     let sink = StreamSink::new(on_bytes, cancel, idle);
-    let result = request_tls_sink(url, headers, "GET", None, timeouts, false, None, tls, resolve, false, TlsFallback::Existing, &SinkMode::Stream(&sink));
+    let result = request_tls_sink(url, headers, verb, body, timeouts, false, None, tls, resolve, false, TlsFallback::Existing, &SinkMode::Stream(&sink));
     if let Some(end) = sink.ended() {
         return end;
     }

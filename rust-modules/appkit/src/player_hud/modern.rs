@@ -21,10 +21,11 @@ pub(super) struct Layout {
     pub title: Rect,
     title_lines: usize,
     pub detail: Rect,
+    pub art: Option<Rect>,
 }
 
-pub fn shows_timeline(model: &HudModel, _playing: Option<&NowPlaying>) -> bool {
-    model.duration_ns > 0
+pub fn shows_timeline(model: &HudModel, playing: Option<&NowPlaying>) -> bool {
+    model.duration_ns > 0 || playing.and_then(|playing| super::ott_footer::live_timeline(playing, model.wall_now_s)).is_some()
 }
 
 pub(super) fn focused_label(slot: ControlSlot, focused: Option<i32>) -> &'static str {
@@ -136,9 +137,16 @@ pub(super) fn compose(mut geometry: HudGeometry, slot: ControlSlot, motion: &Hud
     for span in stack.placed() { lines[span.i] = Rect::new(empty.x, span.y, width, span.h); }
     let top = (content_bottom - stack.height() - theme::space::LG)
         .min(geometry.row.y - theme::space::SM).max(plx_ui::consts::MARGIN_Y);
+    let art = playing.and_then(|playing| playing.ott.as_ref()).and_then(|info| info.art.as_ref())
+        .filter(|_| stack.height() > 0.0).map(|_| {
+            let side = stack.height().min(120.0);
+            let rect = Rect::new(empty.x, content_bottom - stack.height(), side, side);
+            for line in &mut lines { line.x += side + theme::space::MD; line.w = (line.w - side - theme::space::MD).max(0.0); }
+            rect
+        });
     geometry.title = lines[1];
     geometry.band = HudBand::from_controls_top(top);
-    Layout { geometry, context: lines[0], title: lines[1], title_lines, detail: lines[2],
+    Layout { geometry, art, context: lines[0], title: lines[1], title_lines, detail: lines[2],
         panel: Rect::new(super::classic::SB_X - theme::space::SM, top,
             width + 2.0 * theme::space::SM, plx_ui::consts::SCR_H - plx_ui::consts::MARGIN_Y - top) }
 }
@@ -178,40 +186,70 @@ fn draw_clocked_text(p: Painter, frame: Rect, clock: &str, text: TextView<'_>,
     }
 }
 
+/// Keep the real remaining/duration column separate from the programme title.
+fn draw_programme_text(p: Painter, mut frame: Rect, clock: &str, end: &str,
+    text: TextView<'_>, max_lines: usize, measure: &dyn Measure) {
+    let width = measure.width_str(end, theme::size::CAPTION, false).min(frame.w * 0.2);
+    if width > 0.0 {
+        TextView::new(end, theme::size::CAPTION, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY))
+            .max_lines(1).with_measure(measure).draw(p, Rect::new(frame.x + frame.w - width, frame.y, width, frame.h));
+        frame.w = (frame.w - width - theme::space::SM).max(0.0);
+    }
+    draw_clocked_text(p, frame, clock, text, max_lines, measure);
+}
+
 pub(super) fn draw_information(p: Painter, layout: &Layout, playing: Option<&NowPlaying>,
     wall_now_s: Option<i64>, clocks: &mut super::ott_footer::ClockLabels, measure: &dyn Measure) {
     let Some(playing) = playing else { return; };
     let content = now_playing_context(playing, wall_now_s);
     clocks.refresh_context(&content);
+    clocks.refresh_wall(wall_now_s);
+    clocks.refresh_ends(playing.ott.as_ref(), wall_now_s, None);
+    if let (Some(frame), Some(art)) = (layout.art, playing.ott.as_ref().and_then(|info| info.art.as_ref())) {
+        let art = match art {
+            plx_data::metadata::MediaArt::Plex { server, key } => plx_ui::widgets::Art::Thumb { sid: *server, key, res: (240, 240) },
+            plx_data::metadata::MediaArt::Http { url } => plx_ui::widgets::Art::Http { url, res: (240, 240) },
+            plx_data::metadata::MediaArt::Local { key } => plx_ui::widgets::Art::Local { key },
+        };
+        plx_ui::widgets::card_named(p, frame, art, None, theme::space::XS, false, 1.0, 0.0);
+    }
     let state = match content.kind {
         NowPlayingKind::Live => plx_platform::i18n::msg::modern_player_live(),
         NowPlayingKind::Replay => plx_platform::i18n::msg::modern_player_replay(),
         NowPlayingKind::Video => plx_platform::i18n::msg::modern_player_video(),
     };
     if layout.context.h > 0.0 {
+        let mut context = layout.context;
+        let technical = clocks.technical();
+        let width = measure.width_str(technical, theme::size::CAPTION, false).min(context.w * 0.45);
+        if width > 0.0 {
+            TextView::new(technical, theme::size::CAPTION, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY))
+                .max_lines(1).with_measure(measure).draw(p, Rect::new(context.x + context.w - width, context.y, width, context.h));
+            context.w = (context.w - width - theme::space::MD).max(0.0);
+        }
         let ordinal = content.ordinal.map(|value| value.to_string()).unwrap_or_default();
-        let state_w = measure.width_str(state, theme::size::CAPTION, true).min(layout.context.w);
-        let ordinal_room = (layout.context.w - state_w - theme::space::SM).max(0.0);
+        let state_w = measure.width_str(state, theme::size::CAPTION, true).min(context.w);
+        let ordinal_room = (context.w - state_w - theme::space::SM).max(0.0);
         let ordinal_item = if ordinal.is_empty() || ordinal_room == 0.0 { Item::absent() } else {
             Item::new(measure.width_str(&ordinal, theme::size::CAPTION, false)
                 .next_up().ceil().min(ordinal_room))
         };
         let mut items = [Item::new(state_w), ordinal_item, Item::absent()];
-        let used = HStack::new(&items, theme::space::SM, Align::Leading(layout.context.x)).width();
-        let context_room = (layout.context.w - used - theme::space::SM).max(0.0);
+        let used = HStack::new(&items, theme::space::SM, Align::Leading(context.x)).width();
+        let context_room = (context.w - used - theme::space::SM).max(0.0);
         if !content.context.is_empty() && context_room > 0.0 { items[2] = Item::new(context_room); }
-        for span in HStack::new(&items, theme::space::SM, Align::Leading(layout.context.x)).placed() {
+        for span in HStack::new(&items, theme::space::SM, Align::Leading(context.x)).placed() {
             let text = match span.i { 0 => state, 1 => &ordinal, _ => content.context };
             let view = TextView::new(text, theme::size::CAPTION, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY))
                 .max_lines(1).with_measure(measure);
             let view = if span.i == 0 { view.bold() } else { view };
-            view.draw(p, Rect::new(span.x, layout.context.y, span.w, layout.context.h));
+            view.draw(p, Rect::new(span.x, context.y, span.w, context.h));
         }
     }
     if layout.title.h > 0.0 {
         let title = TextView::new(content.title, theme::size::TITLE, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::TEXT_PRIMARY))
             .bold().with_measure(measure);
-        draw_clocked_text(p, layout.title, clocks.current(), title, layout.title_lines, measure);
+        draw_programme_text(p, layout.title, clocks.current(), clocks.remaining(), title, layout.title_lines, measure);
     }
     if layout.detail.h > 0.0 {
         let detail = TextView::new(content.next.unwrap_or(content.description), theme::size::CAPTION, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY))
@@ -219,8 +257,9 @@ pub(super) fn draw_information(p: Painter, layout: &Layout, playing: Option<&Now
         let detail = if content.next.is_some() {
             detail.lead(plx_platform::i18n::msg::modern_player_next(), plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::TEXT_SECONDARY))
         } else { detail };
-        draw_clocked_text(p, layout.detail,
-            if content.next.is_some() { clocks.next() } else { "" }, detail, 1, measure);
+        draw_programme_text(p, layout.detail,
+            if content.next.is_some() { clocks.next() } else { "" },
+            if content.next.is_some() { clocks.next_duration() } else { "" }, detail, 1, measure);
     }
 }
 

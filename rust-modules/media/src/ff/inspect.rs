@@ -44,6 +44,34 @@ pub struct MediaInfo {
     pub dovi: plx_data::metadata::Dovi,
 }
 
+/// This is prefix evidence for an initial track choice, not a whole-segment
+/// observation. Playback independently validates its complete PAT/PMT again.
+#[derive(Default)]
+struct InitialTransport {
+    probe: Option<super::hls_observed::TsProbe>,
+    table: Option<super::hls_observed::ProgramTable>,
+}
+impl InitialTransport {
+    fn new() -> Self { Self { probe: Some(super::hls_observed::TsProbe::new()), table: None } }
+    fn read(&mut self, offset: i64, bytes: &[u8]) {
+        if self.table.is_some() { return; }
+        let Some(mut probe) = self.probe.take() else { return; };
+        // Capture the first coherent PSI prefix even when a larger AVIO read
+        // also contains later table updates. At most one TS packet per step.
+        let mut at = 0usize;
+        for chunk in bytes.chunks(188) {
+            let Some(position) = offset.checked_add(at as i64) else { return; };
+            if probe.feed_at(position, chunk).is_err() { return; }
+            if let Ok(table) = probe.table() { self.table = Some(table); return; }
+            at += chunk.len();
+        }
+        self.probe = Some(probe);
+    }
+    fn seek(&mut self, old: i64, next: i64) {
+        if self.table.is_none() && old != next { self.probe = None; }
+    }
+}
+
 struct Input {
     source: InputSource,
     deadline: Instant,
@@ -53,6 +81,7 @@ struct Input {
     parked_at_end: bool,
     prefix: Vec<u8>,
     prefix_at: usize,
+    initial_transport: Option<InitialTransport>,
 }
 enum InputSource {
     Http(Box<crate::curlio::CurlSource>),
@@ -116,6 +145,7 @@ extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, size: c_int) -> c_int {
     if input.prefix_at < input.prefix.len() {
         let n = buffer.len().min(input.prefix.len() - input.prefix_at);
         buffer[..n].copy_from_slice(&input.prefix[input.prefix_at..input.prefix_at + n]);
+        if let Some(transport) = &mut input.initial_transport { transport.read(input.offset, &buffer[..n]); }
         input.prefix_at += n;
         input.bytes += n;
         input.offset += n as i64;
@@ -123,6 +153,7 @@ extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, size: c_int) -> c_int {
     }
     let n = input.source.read(buffer, input.deadline, &input.cancelled);
     if n > 0 {
+        if let Some(transport) = &mut input.initial_transport { transport.read(input.offset, &buffer[..n as usize]); }
         input.bytes += n as usize;
         input.offset += i64::from(n);
         n
@@ -154,6 +185,7 @@ extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
         return -1;
     };
     if input.source.size() >= 0 && position >= input.source.size() {
+        if let Some(transport) = &mut input.initial_transport { transport.seek(input.offset, position); }
         input.offset = position;
         input.parked_at_end = true;
         return position;
@@ -162,6 +194,7 @@ extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
         .source
         .seek(position, input.deadline, &input.cancelled)
     {
+        if let Some(transport) = &mut input.initial_transport { transport.seek(input.offset, position); }
         input.prefix.clear();
         input.prefix_at = 0;
         input.offset = position;
@@ -305,6 +338,7 @@ fn raw_inner_capture(
             file_source::FileSource::held(file).map_err(|_| "Local media source was withdrawn")?),
         ExternalSource::Hls(_) => return Err("Segmented media needs playlist inspection"),
     };
+    let observe_initial_transport = !recognize_hls && lane.is_none() && timing.is_none();
     let mut input = Input {
         source,
         deadline,
@@ -314,6 +348,7 @@ fn raw_inner_capture(
         parked_at_end: false,
         prefix,
         prefix_at: 0,
+        initial_transport: observe_initial_transport.then(InitialTransport::new),
     };
     unsafe {
         let format = if lane.is_some() {
@@ -372,7 +407,11 @@ fn raw_inner_capture(
         } else if let Some(lane) = lane {
             describe_lane(context, lane)
         } else {
-            describe(context)
+            describe(context).and_then(|mut info| {
+                let table = input.initial_transport.as_ref().and_then(|transport| transport.table.clone());
+                if let Some(table) = table { bind_initial_transport(context, &table, &mut info)?; }
+                Ok(info)
+            })
         };
         let inspection_stopped = input.stopped();
         if result.is_ok() && !inspection_stopped {
@@ -391,6 +430,33 @@ fn raw_inner_capture(
             result
         }
     }
+}
+
+/// Bind the initial choice to the selected video's actual MPEG-TS program.
+/// No inferred PID, PMT order, label or AVStream ordinal establishes identity.
+unsafe fn bind_initial_transport(context: *mut AVFormatContext,
+    table: &super::hls_observed::ProgramTable, info: &mut MediaInfo) -> Result<(), &'static str>
+{
+    let video = av_find_best_stream(context, AVMEDIA_TYPE_VIDEO, -1, -1, std::ptr::null_mut(), 0);
+    if video < 0 || video as u32 >= (*context).nb_streams { return Err("HLS initial video identity is unavailable"); }
+    let streams = (*context).streams;
+    let video_pid = stream_transport_pid(*streams.add(video as usize))
+        .ok_or("HLS initial video has no checked PID")?;
+    table.identity_for_pid(video_pid, &info.video_codec)?;
+    let pids: Vec<_> = (0..(*context).nb_streams as usize).filter_map(|index| {
+        let stream = *streams.add(index);
+        if stream.is_null() { return None; }
+        Some((stream_index(stream), stream_transport_pid(stream)?))
+    }).collect();
+    let bound = table.bind_inventory_for_video(&info.tracks, &pids, video_pid)?;
+    if let Some(audio) = bound.audio.first() {
+        info.audio_codec = audio.codec.clone(); info.audio_channels = audio.channels;
+        info.audio_sample_rate = audio.sample_rate; info.audio_bit_depth = audio.bit_depth;
+    } else {
+        info.audio_codec.clear(); info.audio_channels = 0; info.audio_sample_rate = 0; info.audio_bit_depth = 0;
+    }
+    info.tracks = bound;
+    Ok(())
 }
 
 /// Read only this initial segment under Input's existing byte/deadline/abort bounds.
@@ -441,6 +507,62 @@ unsafe fn capture_video_timing(context: *mut AVFormatContext, input: *mut Input)
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn initial_ts_tables() -> Vec<u8> {
+        fn section(mut bytes: Vec<u8>) -> Vec<u8> {
+            let length = bytes.len()+4-3;
+            bytes[1] = 0xb0 | ((length>>8) as u8 & 15); bytes[2] = length as u8;
+            let mut crc = u32::MAX;
+            for &byte in &bytes { crc ^= u32::from(byte)<<24;
+                for _ in 0..8 { crc = if crc & 0x8000_0000 != 0 { (crc<<1)^0x04c1_1db7 } else { crc<<1 }; }
+            }
+            bytes.extend_from_slice(&crc.to_be_bytes()); bytes
+        }
+        fn packet(pid: u16, section: &[u8]) -> Vec<u8> {
+            let mut out = vec![0x47,0x40 | ((pid>>8) as u8 & 31),pid as u8,0x10,0];
+            out.extend_from_slice(section); out.resize(188,0xff); out
+        }
+        let pat = section(vec![0,0,0,0,1,0xc1,0,0,0,1,0xf0,0]);
+        let pmt = section(vec![2,0,0,0,1,0xc1,0,0,0xe1,0,0xf0,0,0x24,0xe1,0,0xf0,0,
+            0x81,0xe1,1,0xf0,0,0x81,0xe1,2,0xf0,0]);
+        [packet(0,&pat),packet(0x1000,&pmt)].concat()
+    }
+    #[test]
+    fn initial_hls_prefix_identity_survives_later_probe_seek_and_remains_partial() {
+        let bytes = initial_ts_tables(); let mut initial = InitialTransport::new();
+        initial.read(0,&bytes[..100]); assert!(initial.table.is_none());
+        initial.read(100,&bytes[100..]);
+        let before: Vec<_> = initial.table.as_ref().unwrap().identities().collect();
+        initial.seek(bytes.len() as i64, 9_000_000);
+        initial.read(9_000_000,b"unrelated tail bytes");
+        assert_eq!(initial.table.as_ref().unwrap().identities().collect::<Vec<_>>(),before);
+        assert!(initial.probe.is_none());
+        let mut unproved = InitialTransport::new(); unproved.read(0,&bytes[..100]);
+        unproved.seek(100,188); unproved.read(188,&bytes[188..]);
+        assert!(unproved.table.is_none(),"seek cannot manufacture missing prefix evidence");
+    }
+    #[test]
+    #[ignore = "requires bundled host FFmpeg and OTTPLAY_HLS_INITIAL_TS; private offline TS only"]
+    fn initial_hls_same_format_audio_uses_checked_transport_pid_identity() {
+        let _serial = plx_base::testlock::serial();
+        let _ff = super::super::image_subtitle_tests::bind_host_ffmpeg();
+        let path = std::path::PathBuf::from(std::env::var_os("OTTPLAY_HLS_INITIAL_TS").expect("private TS fixture path"));
+        let input = ExternalSource::Local(path);
+        let info = raw(&input,Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!((info.video_codec.as_str(),info.audio_codec.as_str()),("hevc","ac3"));
+        assert!(info.tracks.audio.len() >= 2);
+        assert!(!info.tracks.is_complete());
+        let identities: Vec<_> = info.tracks.audio.iter().map(|row|info.tracks.transport_identity(row.stream_index).unwrap()).collect();
+        assert_ne!(identities[0],identities[1]);
+        for row in &info.tracks.audio {
+            let selection = super::super::hls_audio::Selection::new(&info.tracks,row.ordinal).unwrap();
+            assert!(selection.requires_transport_identity());
+        }
+        let first = &info.tracks.audio[0];
+        assert_eq!((info.audio_channels,info.audio_sample_rate,info.audio_bit_depth),(first.channels,first.sample_rate,first.bit_depth));
+        let ordinary = source(&input,Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(ordinary.tracks.is_complete());
+        assert!(ordinary.tracks.audio.iter().all(|row|ordinary.tracks.transport_identity(row.stream_index).is_none()));
+    }
     #[test]
     fn local_probe_seek_to_end_does_not_invalidate_the_next_read() {
         use std::io::Write;
@@ -466,6 +588,7 @@ mod tests {
             parked_at_end: false,
             prefix: Vec::new(),
             prefix_at: 0,
+            initial_transport: None,
         };
         let ptr = (&mut input as *mut Input).cast();
         let mut bytes = [0; 4];

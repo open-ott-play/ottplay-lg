@@ -21,7 +21,7 @@ fn language(raw: &str) -> String {
     }
 }
 
-fn track_row(track: &InspectedTrack, selected: bool, available: bool) -> Row {
+pub(super) fn track_row(track: &InspectedTrack, selected: bool, available: bool) -> Row {
     use plx_platform::i18n::msg;
     let mut details = Vec::new();
     if !track.title.trim().is_empty() {
@@ -321,6 +321,7 @@ impl TrackMenuState {
             TrackKind::Subtitle => catalog.selected_subtitle(),
         };
         if current == ordinal
+            && !(kind == TrackKind::Subtitle && self.hls.is_some())
             && (kind != TrackKind::Subtitle || catalog.selected_local_subtitle().is_none())
         {
             return TrackOk::Dismiss;
