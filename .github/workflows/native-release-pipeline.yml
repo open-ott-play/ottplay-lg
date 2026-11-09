@@ -168,7 +168,7 @@ jobs:
               RC_DIR="$RUNNER_TEMP/rc-assets"
               mkdir -p "$RC_DIR"
               gh release download "$RC_TAG" --dir "$RC_DIR"
-              python3 ci/native_release_artifacts.py verify-rc \
+              python3 ci/native_release_artifacts.py verify-rc --require-complete-companion-source \
                 --artifact-dir "$RC_DIR" --repository "$GITHUB_REPOSITORY" \
                 --version "$VERSION" --tag "$RC_TAG" \
                 --output-json "$RUNNER_TEMP/rc-identity.json"
@@ -224,7 +224,7 @@ jobs:
           ORIGINAL_DIR: ${{ runner.temp }}/original-rc-candidate
           RC_DIR: ${{ runner.temp }}/rc-assets
         run: |
-          python3 ci/native_release_artifacts.py verify-rc \
+          python3 ci/native_release_artifacts.py verify-rc --require-complete-companion-source \
             --artifact-dir "$RC_DIR" --candidate-artifact-dir "$ORIGINAL_DIR" \
             --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RC_TAG" \
             --output-json "$RUNNER_TEMP/rc-identity-verified.json"
@@ -496,7 +496,7 @@ jobs:
           RC_DIR="$RUNNER_TEMP/rc-assets"
           mkdir -p "$RC_DIR"
           gh release download "$RC_TAG" --dir "$RC_DIR"
-          python3 ci/native_release_artifacts.py verify-rc \
+          python3 ci/native_release_artifacts.py verify-rc --require-complete-companion-source \
             --artifact-dir "$RC_DIR" --candidate-artifact-dir "$ORIGINAL_DIR" \
             --repository "$GITHUB_REPOSITORY" \
             --version "$VERSION" --tag "$RC_TAG" \
