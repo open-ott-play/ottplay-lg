@@ -101,6 +101,8 @@ pub struct Row {
     pub catalogue_art: Option<RowArt>,
     /// A semantic fallback mark when a catalogue row has no artwork.
     pub catalogue_icon: Option<crate::icons::Icon>,
+    /// Aligned capability strip; false reserves the slot without claiming archive.
+    catalogue_archive: Option<bool>,
     pub dim: bool, // render dimmer (unavailable / de-emphasised)
     /// A **non-selectable hairline** that groups the rows above it from the rows below (the item
     /// menu's navigation-vs-state divider). It occupies a global row index like any other row, but
@@ -142,6 +144,7 @@ impl Row {
             licon: None,
             catalogue_art: None,
             catalogue_icon: None,
+            catalogue_archive: None,
             dim: false,
             sep: false,
             destructive: false,
@@ -298,6 +301,11 @@ impl Row {
         self.catalogue_art = Some(art);
         self
     }
+    pub fn catalogue_archive(mut self, available: bool) -> Self {
+        self.catalogue_archive = Some(available);
+        self
+    }
+    pub fn catalogue_archive_available(&self) -> Option<bool> { self.catalogue_archive }
     pub fn catalogue_icon(mut self, icon: crate::icons::Icon) -> Self {
         self.catalogue_icon = Some(icon);
         self
@@ -1572,11 +1580,19 @@ impl TableView {
         measure.width_str("9", self.label_style().0, false) * digits as f32 + 6.0 * frame_w / 720.0
     }
 
+    fn catalogue_art_width(&self, row: &Row) -> f32 {
+        if row.catalogue_art.is_some() || row.catalogue_icon.is_some() {
+            (self.plain_row_h()-2.0).max(0.0)*1.5+6.0
+        } else { 0.0 }
+    }
+    fn catalogue_archive_width(row: &Row, frame_w: f32) -> f32 {
+        if row.catalogue_archive.is_some() { 9.0*frame_w/720.0 } else { 0.0 }
+    }
     fn row_label_inset(&self, row: &Row, frame_w: f32, measure: &dyn plx_machine::machine::Measure) -> f32 {
         if self.is_classic_catalogue() {
             self.catalogue_number_width(frame_w, measure)
                 + measure.width_str("\u{a0}", self.label_style().0, false)
-                + if row.catalogue_art.is_some() || row.catalogue_icon.is_some() { 42.0 } else { 0.0 }
+                + Self::catalogue_archive_width(row,frame_w) + self.catalogue_art_width(row)
         } else if self.is_classic_choices() && !row.checked && row.licon.is_none() {
             measure.width_str("\u{a0}", self.label_style().0, false)
         } else { LABEL_INSET }
@@ -1593,11 +1609,12 @@ impl TableView {
             return 2.0 * self.row_content_padding() + self.row_label_inset(row, 0.0, measure) + content;
         }
         let digits = self.catalogue_max_digits();
-        let fixed = 20.0 + content + measure.width_str("\u{a0}", self.label_style().0, false)
+        let fixed = 20.0 + content + self.catalogue_art_width(row) + measure.width_str("\u{a0}", self.label_style().0, false)
             + measure.width_str("9", self.label_style().0, false) * digits as f32;
         // Solve the same proportional columns that row_columns reserves:
         // number padding (6 * wk) and optional progress (40 * wk).
         let proportional = (if digits > 0 { 6.0 / 720.0 } else { 0.0 })
+            + (if row.catalogue_archive.is_some() { 9.0 / 720.0 } else { 0.0 })
             + (if self.progress_width(row, 0.0).is_some() { 40.0 / 720.0 } else { 0.0 });
         fixed / (1.0 - proportional)
     }
@@ -1928,14 +1945,22 @@ impl TableView {
         let visible_h = (frame_h - self.vertical_padding()).max(0.0);
         let top = self.row_top(self.sel);
         let rh = self.row_height(self.sel);
-        // top and bottom edges spring independently → the pill stretches/morphs between rows
-        self.hl_top.step(top + self.pill_inset(), 360.0, dt);
-        self.hl_bot.step(top + rh - self.pill_inset(), 360.0, dt);
+        // Classic follows the web player's discrete row/page changes. Advancing
+        // two highlight springs and a separate scroll spring showed half a row
+        // before the final selection, especially at the TV's lower frame rate.
+        // Modern retains its independent spring-driven highlight treatment.
+        if self.is_classic() {
+            self.hl_top.jump(top + self.pill_inset());
+            self.hl_bot.jump(top + rh - self.pill_inset());
+        } else {
+            self.hl_top.step(top + self.pill_inset(), 360.0, dt);
+            self.hl_bot.step(top + rh - self.pill_inset(), 360.0, dt);
+        }
         if let Some(rows) = self.classic_page_rows() {
             // A page is the same row interval used by catalogue_next. The last
             // partial page retains its origin rather than revealing prior rows.
             let first = (self.sel.max(0) as usize / rows) * rows;
-            self.scroll.step(first as f32 * self.plain_row_h(), 300.0, dt);
+            self.scroll.jump(first as f32 * self.plain_row_h());
             return;
         }
         // keep the selection (plus a row of context) inside the viewport
@@ -1962,7 +1987,8 @@ impl TableView {
             sc = top + rh + below - visible_h;
         }
         sc = sc.clamp(0.0, max_scroll);
-        self.scroll.step(sc, 300.0, dt);
+        if self.is_classic() { self.scroll.jump(sc); }
+        else { self.scroll.step(sc, 300.0, dt); }
     }
 
     /// The highlight springs as `(top position, top velocity, bottom position, bottom velocity)`.
@@ -2252,10 +2278,19 @@ impl TableView {
                             .h(HAlign::Right).draw(p, Rect::new(content_x, sy, width, h));
                     }
                 }
+                let archive_width=Self::catalogue_archive_width(row,frame.w);
+                if row.catalogue_archive==Some(true) {
+                    let bar=archive_width/3.0;
+                    let x=content_x+self.catalogue_number_width(frame.w,measure)+bar;
+                    let height=(h-2.0*bar).max(0.0);
+                    let color=on_pill(theme::CLASSIC_ARCHIVE_AVAILABLE,ink);
+                    p.rect(Rect::new(x,cyc-height*0.5,bar,height),bar*0.5,color,color,0.0);
+                }
                 if row.catalogue_art.is_some() || row.catalogue_icon.is_some() {
                     let number_width = self.catalogue_number_width(frame.w, measure);
-                    let icon_x = content_x + number_width + measure.width_str("\u{a0}", self.label_style().0, false);
-                    let frame = Rect::new(icon_x, cyc - 12.0, 36.0, 24.0);
+                    let icon_x = content_x + number_width + archive_width + measure.width_str("\u{a0}", self.label_style().0, false);
+                    let art_h=(h-2.0).max(0.0);
+                    let frame = Rect::new(icon_x, cyc - art_h*0.5, art_h*1.5, art_h);
                     if let Some(source) = row.catalogue_art.as_ref() {
                         let art = match source {
                             RowArt::Local(key) => crate::widgets::Art::Local { key },
@@ -2265,7 +2300,7 @@ impl TableView {
                         let image = crate::widgets::resolve_card_art(p, frame, &art);
                         crate::widgets::card_named_led(p, frame, art, None, 3.0, false, 1.0, 0.0, Some(image));
                     } else if let Some(icon) = row.catalogue_icon {
-                        crate::icons::draw(p, icon, Rect::new(icon_x + 5.0, cyc - 13.0, 26.0, 26.0), base);
+                        crate::icons::draw(p, icon, Rect::new(icon_x+(frame.w-art_h)*0.5,cyc-art_h*0.5,art_h,art_h), base);
                     }
                 }
             }
@@ -2620,6 +2655,59 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn classic_row_and_page_motion_settle_in_one_update_without_fractional_frames() {
+        let mut table = TableView::new();
+        let section = (0..41).fold(Section::new(""), |section, n| section.row(Row::new(format!("row {n}"))));
+        table.set_sections(vec![section], 0, false);
+        table.set_classic(true);
+        table.set_classic_catalogue(true);
+        let frame = Rect::new(0.0, 0.0, 800.0, 880.0);
+        table.set_classic_page_size(Some(10), frame.h);
+        table.fit_layout(&crate::fixture::FixtureMeasure);
+        let rows = table.classic_page_rows().unwrap();
+        for selected in [1, rows as i32 - 1, rows as i32, 40, 0] {
+            table.sel = selected;
+            table.update(1.0 / 30.0, frame.h);
+            let first = selected.max(0) as usize / rows * rows;
+            assert_eq!(table.scroll.pos, first as f32 * table.plain_row_h());
+            assert_eq!(table.scroll.vel, 0.0);
+            assert_eq!(table.hl_top.pos, table.row_top(selected) + table.pill_inset());
+            assert_eq!(table.hl_bot.pos, table.row_top(selected) + table.row_height(selected) - table.pill_inset());
+            assert_eq!((table.hl_top.vel, table.hl_bot.vel), (0.0, 0.0));
+            let row = table.row_rect(frame, selected).unwrap();
+            assert_eq!(table.hit_row(frame, row.cx(), row.cy()), Some(selected), "paint and hit placement must already use the final page");
+            let before = (table.scroll.pos, table.hl_top.pos, table.hl_bot.pos);
+            table.update(0.0, frame.h);
+            assert_eq!(before, (table.scroll.pos, table.hl_top.pos, table.hl_bot.pos));
+        }
+    }
+
+    #[test]
+    fn classic_choices_snap_but_modern_rows_keep_their_spring_motion() {
+        for classic in [false, true] {
+            let mut table = TableView::new();
+            let section = (0..20).fold(Section::new(""), |section, n| section.row(Row::new(format!("row {n}"))));
+            table.set_sections(vec![section], 0, false);
+            table.set_classic(classic);
+            table.set_classic_choices(classic);
+            table.fit_layout(&crate::fixture::FixtureMeasure);
+            table.sel = 10;
+            table.update(1.0 / 60.0, 300.0);
+            let wanted = table.row_top(10) + table.pill_inset();
+            if classic {
+                assert_eq!(table.hl_top.pos, wanted);
+                assert_eq!(table.scroll.vel, 0.0);
+                let before = table.scroll.pos;
+                table.update(1.0 / 60.0, 300.0);
+                assert_eq!(table.scroll.pos, before, "a Classic menu must not finish a second half-step");
+            } else {
+                assert!(table.hl_top.pos < wanted);
+                assert!(table.hl_top.vel > 0.0, "Modern keeps its original animated treatment");
+            }
+        }
+    }
 
     #[test]
     fn large_table_actual_paint_visits_each_row_once_and_culls_offscreen_ink() {
@@ -4155,6 +4243,32 @@ mod classic_progress_tests {
                 let all_bars = painted.iter().filter(|(tag, r, _)| *tag == 2 && r.w == expected.w && r.h == expected.h).count();
                 assert!(all_bars <= 2 * 26, "only visible rows may paint progress");
             }
+        }
+    }
+
+    #[test]
+    fn compact_archive_slot_and_logo_fit_dense_rows_without_changing_hit_identity() {
+        let measure=crate::fixture::FixtureMeasure;
+        let frame=Rect::new(0.0,0.0,720.0,540.0);
+        for count in [25,50] {
+            let mut table=table(frame,1);
+            table.set_classic_page_size(Some(count),frame.h);
+            table.fit_layout(&measure);
+            let plain=table.row_columns(&table.sections[0].rows[0],frame.w,&measure).label_w;
+            let row=table.row_mut(0).unwrap();
+            *row=Row::new("Station  Current programme").catalogue_archive(true)
+                .catalogue_icon(crate::icons::Icon::Show).progress_interval(100,200);
+            table.fit_layout(&measure);
+            let row=&table.sections[0].rows[0];
+            let art=table.catalogue_art_width(row)-6.0;
+            assert!(art/1.5<=table.plain_row_h()-2.0);
+            assert!((plain-table.row_columns(row,frame.w,&measure).label_w-9.0-art-6.0).abs()<0.01);
+            let width=table.row_columns(row,frame.w,&measure).label_w;
+            table.row_mut(0).unwrap().catalogue_archive=Some(false);
+            assert_eq!(table.row_columns(&table.sections[0].rows[0],frame.w,&measure).label_w,width,
+                "unavailable archive leaves an aligned blank slot");
+            let row=table.row_frame(frame,0).unwrap();
+            assert_eq!(table.hit_row(frame,frame.x+frame.w-1.0,row.y+row.h*0.5),Some(0));
         }
     }
 

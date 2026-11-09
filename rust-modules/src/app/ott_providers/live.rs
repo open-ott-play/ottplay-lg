@@ -138,7 +138,7 @@ pub(super) fn m3u_guide(
     }
 }
 
-fn m3u_guide_sources(profile: &ProviderProfile, http: &mut dyn ProviderHttp) -> Result<Vec<String>, &'static str> {
+pub(super) fn m3u_guide_sources(profile: &ProviderProfile, http: &mut dyn ProviderHttp) -> Result<Vec<String>, &'static str> {
     if http.cancelled() {
         return Err("Provider request cancelled");
     }

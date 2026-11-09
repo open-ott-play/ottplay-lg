@@ -211,6 +211,39 @@ impl ExternalTracks {
         });
         Ok(removed)
     }
+    /// Refresh one committed TS inventory. A new PMT never turns an ordinal or
+    /// language into identity; only the same verified transport and codec shape
+    /// can retain a selected track. Segment observations are always partial.
+    pub(crate) fn replace_observed_inventory(&mut self, mut inventory: TrackInventory,
+        audio: Vec<TrackAvailability>, subtitles: Vec<TrackAvailability>, force_identity: bool, observed_audio: Option<i32>,
+    ) -> Result<(bool, bool), ExternalTrackError> {
+        inventory.mark_incomplete();
+        if !force_identity && self.inventory() == &inventory
+            && self.catalog.audio == audio && self.catalog.subtitles == subtitles { return Ok((false, false)); }
+        let retain = |kind, ordinal: Option<i32>| {
+            let old_rows = if kind == TrackKind::Audio { &self.inventory().audio } else { &self.inventory().subtitles };
+            let rows = if kind == TrackKind::Audio { &inventory.audio } else { &inventory.subtitles };
+            let old = old_rows.iter().find(|t| Some(t.ordinal) == ordinal)?;
+            let transport = self.inventory().transport_identity(old.stream_index)?;
+            let mut matches = rows.iter().filter(|track|
+                inventory.transport_identity(track.stream_index) == Some(transport)
+                && track.codec == old.codec && track.channels == old.channels
+                && track.sample_rate == old.sample_rate && track.bit_depth == old.bit_depth);
+            let retained = matches.next()?.ordinal;
+            matches.next().is_none().then_some(retained)
+        };
+        let had_audio_identity = self.selected_audio.and_then(|ordinal| self.inventory().audio.iter().find(|track| track.ordinal == ordinal))
+            .and_then(|track| self.inventory().transport_identity(track.stream_index)).is_some();
+        let selected_audio = retain(TrackKind::Audio, self.selected_audio)
+            .or_else(|| (!had_audio_identity).then_some(observed_audio).flatten());
+        let selected_subtitle = retain(TrackKind::Subtitle, self.selected_subtitle);
+        let removed = self.selected_subtitle.is_some() && selected_subtitle.is_none();
+        let mut next = Self::new(inventory, audio, subtitles, selected_audio)?;
+        next.selected_subtitle = selected_subtitle;
+        *self = next;
+        Ok((true, removed))
+    }
+
     pub fn local_choice(&self, target: &LocalSubtitleTarget) -> Result<ExternalTrackChoice, ExternalTrackError> {
         if !self.local_subtitles().iter().any(|row| row.target == *target) {
             return Err(ExternalTrackError::MissingTrack);
@@ -567,4 +600,34 @@ mod tests {
         assert_eq!(active.selected_local_subtitle(),None);
     }
 
+}
+
+#[cfg(test)]
+mod observed_tests {
+    use super::*;
+    use crate::ff::hls_observed::{Scope, Snapshot};
+    #[test]
+    fn observed_pmt_reordering_retains_pid_and_partial_status_without_language_deduplication() {
+        let scope = Scope::new("https://example.invalid/master.m3u8", "https://example.invalid/video.m3u8", 1, 0).unwrap();
+        let snapshot = Snapshot::fixture_for_test(scope);
+        let inventory = snapshot.inventory().clone();
+        let availability = vec![TrackAvailability::Supported; inventory.audio.len()];
+        let subtitles = vec![TrackAvailability::Unsupported(TrackUnavailable::Transport); inventory.subtitles.len()];
+        let mut tracks = ExternalTracks::new(inventory.clone(), availability.clone(), subtitles.clone(), Some(0)).unwrap();
+        let old = tracks.choice(TrackKind::Audio, Some(1)).unwrap();
+        assert_eq!(inventory.audio[0].language, inventory.audio[1].language);
+        let mut audio = inventory.audio.clone();
+        audio.swap(0, 1);
+        for (i, track) in audio.iter_mut().enumerate() { track.ordinal = i as i32; }
+        let bindings: Vec<_> = inventory.audio.iter().chain(&inventory.subtitles)
+            .map(|track| (track.stream_index, inventory.transport_identity(track.stream_index).unwrap())).collect();
+        let reordered = TrackInventory::from_partial(audio, inventory.subtitles.clone()).with_transport_for_test(&bindings).unwrap();
+        assert_eq!(tracks.replace_observed_inventory(reordered.clone(), availability.clone(), subtitles.clone(), false, Some(0)), Ok((true, false)));
+        assert_eq!(tracks.selected_audio(), Some(1), "the same PID moved to a different dense ordinal");
+        assert_eq!(tracks.inventory().audio.len(), 2, "equal languages and codecs cannot collapse distinct PIDs");
+        assert!(!tracks.is_complete());
+        assert_eq!(tracks.plan(&old), Err(ExternalTrackError::StaleSession));
+        assert_eq!(tracks.replace_observed_inventory(reordered, availability, subtitles, false, Some(1)), Ok((false, false)),
+            "ordinary segment publication does not churn menu identity");
+    }
 }

@@ -1550,6 +1550,7 @@ fn store_idle() -> bool {
 /// the slot scan below is the same one [`idle_of`] would run, so this is the store's one
 /// once-a-frame, screen-agnostic read of whether it is quiet.
 pub(crate) fn begin_frame() {
+    http::begin_frame();
     trace::begin_frame();
     let now = crate::app::clock::now();
     let mut g = store();

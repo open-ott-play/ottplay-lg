@@ -18,6 +18,7 @@ fn source_profile(kind: ProviderKind, id: &str) -> ProviderProfile {
             ProviderKind::Stalker => portal(id).source,
             ProviderKind::VPortal => format!("portal::[key:fixture-{id}]https://{id}.invalid/api/"),
             ProviderKind::Local => format!("/media/fixture-{id}"),
+            ProviderKind::Edem | ProviderKind::Operator(_) => r#"{"key":"fixture"}"#.into(),
             ProviderKind::Plex => format!("fixture-machine-{id}"),
         },
         source_alias: format!("Source {id}"), enabled: true,

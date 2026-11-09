@@ -567,7 +567,7 @@ mod label_tests {
         read: impl FnOnce(&Cards<'_>, &cards::Tile)) {
         let landscape = matches!(row.media.as_ref().unwrap().kind,
             OttMediaKind::LiveChannel | OttMediaKind::Episode);
-        let view = OttView { status_working: false, page_id: "channels:fixture".into(), revision: 1, title: String::new(),
+        let view = OttView { status_working: false, pending_play: None, page_id: "channels:fixture".into(), revision: 1, title: String::new(),
             classic_preferences: Default::default(), volume_available: false, category_label: None, description: String::new(), status: String::new(),
             selected_row: Some(row.id.clone()), shelves: Vec::new(), shelf_context: None, rows: vec![row], search: None, catalog_progress: None,
             preview_context: None, random_context: None, order_context: None };

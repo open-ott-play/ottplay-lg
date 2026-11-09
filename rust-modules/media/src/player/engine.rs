@@ -2229,6 +2229,7 @@ fn start_bufferfeed_inner(
             // `teardown(true) + start_bufferfeed()` (reload_at / reload_transcode /
             // switch_audio_native), which respawns this thread with the new value.
             let acodec = crate::route::stream_acodec(ps);
+            let video_codec = crate::route::stream_vcodec(ps);
             let text_style = super::text_style::TextStyle::current(crate::route::subtitle_text_appearance(ps));
             let abr = crate::route::hls_abr_control(ps);
             let auto_original = crate::route::auto_original_watch(ps);
@@ -2256,13 +2257,19 @@ fn start_bufferfeed_inner(
                         .map(crate::ff::HlsTrackSelection::Embedded)
                 })
             } else { None };
+            let observed_playback = crate::route::playback_identity(ps);
             stream_th = plx_base::task::spawn_off_frame_keeping("demux", move |off| {
                 if track_guard.as_ref().is_some_and(|guard| !guard.allows(off)) {
                     SHARED.demux_failed.store(true, Ordering::Release);
                     return;
                 }
                 if let Some(source)=external {
-                    crate::ff::demux_external(off,native_epoch,source,acodec,hls_audio,aqp,aqap,hsp,text_style)
+                    if let Some(playback) = observed_playback {
+                        crate::ff::with_observed_hls_worker(native_epoch, playback, ||
+                            crate::ff::demux_external(off,native_epoch,source,video_codec,acodec,hls_audio,aqp,aqap,hsp,text_style))
+                    } else {
+                        crate::ff::demux_external(off,native_epoch,source,video_codec,acodec,hls_audio,aqp,aqap,hsp,text_style)
+                    }
                 } else if let Some((origin,path))=transport {
                     crate::ff::demux(off, native_epoch, origin, path, acodec, abr, auto_original, aqp, aqap, hsp, text_style)
                 }

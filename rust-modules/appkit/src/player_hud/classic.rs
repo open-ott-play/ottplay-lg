@@ -248,6 +248,23 @@ impl FailureReadout {
         self.actions.iter().map(|a| failure_action_label(*a)).collect()
     }
 
+    fn compact_overlay(&self) -> StatusOverlay<'_> {
+        // A transient playback error is information, never a relocated failure
+        // page. Navigation belongs to the ordinary remote/catalogue controls.
+        StatusOverlay::new(Rect::new(SCR_W - 1_248.0, 32.0, 1_200.0, 96.0),
+            plx_platform::i18n::msg::widgets_status_failed_c(), StatusKind::Failed)
+    }
+
+    pub fn compact_frames(&self, _measure: &dyn plx_machine::machine::Measure) -> [Option<Rect>; plx_ui::widgets::STATUS_ROW_MAX] {
+        [None; plx_ui::widgets::STATUS_ROW_MAX]
+    }
+
+    fn draw_compact(&self, p: Painter, _focus: usize, measure: &dyn plx_machine::machine::Measure) {
+        let panel = Rect::new(SCR_W - 1_248.0, 40.0, 1_200.0, 112.0);
+        p.rrect(panel, 18.0, 0.0, theme::scrim_black(0.82));
+        self.compact_overlay().draw_measured(&hud_env(), p, measure);
+    }
+
     /// Each control's rect, by row index — the geometry the draw uses.
     pub fn frames(&self, measure: &dyn plx_machine::machine::Measure) -> [Option<Rect>; plx_ui::widgets::STATUS_ROW_MAX] {
         let labels = self.labels();
@@ -330,14 +347,7 @@ fn draw_failed_readout(
     focus: usize,
     measure: &dyn plx_machine::machine::Measure,
 ) {
-    // The GROUND, first: a full-bleed opaque black, one quad. Without it the read-out stood on
-    // whatever the video plane happened to be holding: `app.rs` clears the graphics plane to alpha
-    // 0 on the player route, and the transport is not drawn at all under a failure. "The plane is
-    // black by the time an error is up" is usually true and not always — `busy_surface` resolves
-    // Error to Failed for BOTH values of `seen_frame`, i.e. a mid-playback failure over a held
-    // frame is a state the code contemplates.
-    p.rrect(Rect::FULL, 0.0, 0.0, theme::scrim_black(1.0));
-    FailureReadout::now(ps).draw(p, focus, measure);
+    FailureReadout::now(ps).draw_compact(p, focus, measure);
 }
 
 /// x of control button `idx`, left to right: 0 = Subtitles, 1 = Audio, 2 = More.
@@ -818,9 +828,9 @@ impl RailDomain {
         }
     }
 }
-pub fn rail_domain(mode: plx_machine::machine::UiMode, model: &HudModel,
+pub fn rail_domain(_mode: plx_machine::machine::UiMode, model: &HudModel,
     playing: Option<&plx_data::metadata::NowPlaying>) -> RailDomain {
-    if mode == plx_machine::machine::UiMode::Classic && model.duration_ns <= 0
+    if model.duration_ns <= 0
         && model.scrub_ns < 0 && model.seek_display_ns < 0 {
         if let Some(playing) = playing.filter(|playing| playing.ott.as_ref().is_some_and(|info| info.live.is_some())) {
             let (position_ns, duration_ns) = super::ott_footer::live_timeline(playing, model.wall_now_s).unwrap_or((0, 0));
@@ -993,7 +1003,8 @@ pub fn draw_hud_in_mode(
     }
     // An expanded Classic description sits above this same footer, not in its
     // place. Contextual offers stay on the actual transport surface only.
-    let visible_slot = if transport { slot } else { ControlSlot::Discs(Controls::NONE) };
+    let visible_slot = if transport && !failure_row_drawn(busy) { slot } else { ControlSlot::Discs(Controls::NONE) };
+    row.ott_clock_labels.refresh_raster(model.video_raster);
     let layout = ott_classic_layout(visible_slot, row, 0, meta.now_playing(), measure);
     let p = Painter::root();
     let color = theme::with_a(plx_ui::palette::color(plx_ui::palette::Role::Background, theme::CLASSIC_BACKGROUND), model.osd_opacity.background_alpha(0.78));
@@ -1053,6 +1064,7 @@ fn draw_modern(
     meta: plx_data::metadata::MetadataView<'_>,
 ) {
     let p = Painter::root();
+    row.ott_clock_labels.refresh_raster(model.video_raster);
     let focused = (focus == GROUP_ROW).then_some(btn);
     let label = super::modern::focused_label(slot, focused);
     let tabs = if crate::chapters_panel::has_chapters(meta) { 2 } else { 1 };
@@ -1068,6 +1080,7 @@ fn draw_modern(
             super::modern::draw_information(pc, &layout, meta.now_playing(), model.wall_now_s,
                 &mut row.ott_clock_labels, measure);
             match slot {
+                _ if failure_row_drawn(busy) => {},
                 ControlSlot::Discs(controls) => super::modern::draw_controls(pc, &layout,
                     controls, row, focused, label, measure),
                 ControlSlot::Skip(prompt) => crate::skip_pill::draw(row, pc, prompt,
@@ -1076,15 +1089,21 @@ fn draw_modern(
                     focus == GROUP_ROW, btn, now, measure),
             }
         }
-        if super::modern::shows_timeline(model, meta.now_playing()) {
+        if !failure_row_drawn(busy) && super::modern::shows_timeline(model, meta.now_playing()) {
             let mut bar = Playbar::live(model, busy, focus, row.since_play_ms(now), now);
             bar.clock_grow = row.preview.motion.clock_grow(now);
             bar.pos_ns = row.spring.apply(bar.pos_ns, now);
-            draw_playbar(p, bar, measure);
-            draw_scrub_preview(p, ps, model, row, bar);
+            let domain = rail_domain(plx_machine::machine::UiMode::Modern, model, meta.now_playing());
+            domain.apply(&mut bar);
+            if matches!(domain, RailDomain::GuideReadOnly { .. }) {
+                draw_playbar_track(p, bar, layout.geometry.playbar);
+            } else {
+                draw_playbar(p, bar, measure);
+                draw_scrub_preview(p, ps, model, row, bar);
+            }
         }
     }
-    draw_tabs(&hud_env(), pc, tabs > 1, chrome,
+    draw_tabs(&hud_env(), pc, tabs > 1, chrome && !failure_row_drawn(busy),
         |i| hud_tab_state(transport, focus, tab, i), measure);
 }
 
@@ -1422,4 +1441,28 @@ mod ott_classic_geometry_tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod compact_failure_tests {
+    use super::*;
+    #[test]
+    fn failure_notice_is_compact_and_has_no_fullscreen_ground_or_private_detail() {
+        use plx_media::player::{FailureAction, FailureKind};
+        let mut error = plx_media::player::error_now(plx_media::route::idle_session_for_test());
+        error.kind = FailureKind::MediaSource;
+        error.detail = "https://private.invalid/?token=never-render".into();
+        let notice = FailureReadout::of(&error,
+            vec![FailureAction::TryAgain, FailureAction::Back], "private diagnostic footer".into());
+        let frames = notice.compact_frames(&plx_ui::fixture::FixtureMeasure);
+        assert!(frames.iter().all(Option::is_none), "transient notices have no buttons or focus targets");
+        for rect in frames.iter().flatten() {
+            assert!(rect.y < SCR_H * 0.25 && rect.y + rect.h < SCR_H * 0.3);
+            assert!(rect.x >= 0.0 && rect.x + rect.w <= SCR_W);
+        }
+        let log = plx_ui::draw_census::capture(||
+            notice.draw_compact(Painter::recording(), 0, &plx_ui::fixture::FixtureMeasure));
+        assert!(!log.iter().any(|(_,rect)| rect.w >= SCR_W && rect.h >= SCR_H),
+            "a failure notice must never cover the video plane");
+    }
 }

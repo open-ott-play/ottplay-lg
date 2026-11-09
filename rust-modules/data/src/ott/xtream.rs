@@ -74,6 +74,15 @@ impl Config {
         }
         result
     }
+    /// Explicit timeshift identity; callers supply a validated UTC calendar minute.
+    pub fn archive_url(&self, id: &str, start: &str, minutes: u64) -> Result<String, CatalogError> {
+        if !numeric(id) || minutes == 0 || minutes > 1500 || start.len() != 16
+            || !start.bytes().enumerate().all(|(i,b)| match i { 4|7|13 => b == b'-', 10 => b == b':', _ => b.is_ascii_digit() }) {
+            return Err(CatalogError::InvalidFormat);
+        }
+        Ok(format!("{}/timeshift/{}/{}/{}/{}/{}.ts", self.server, component(&self.username),
+            component(&self.password), minutes, start, id))
+    }
     pub fn stream_url(
         &self,
         kind: &str,
@@ -265,8 +274,17 @@ pub fn streams(
                 has_direct_source: direct_source(config, row).is_some(),
             },
             duration_ms: None,
-            provider_id: Some(id),
-            provider_id_field: Some("stream_id".into()), live: None,
+            provider_id: Some(id.clone()),
+            provider_id_field: Some("stream_id".into()),
+            live: (kind == "live").then(|| super::guide::ChannelMetadata {
+                tvg_name: String::new(), guide_id: Some(id.clone()), guide_feed: String::new(), guide_shift_seconds: 0,
+                catchup: (matches!(row["tv_archive"].as_i64(), Some(1)) || row["tv_archive"].as_str() == Some("1"))
+                    .then(|| label(&row["tv_archive_duration"]).parse::<u64>().ok()
+                        .or_else(|| row["tv_archive_duration"].as_u64()))
+                    .flatten().filter(|days| (1..=366).contains(days))
+                    .map(|days| super::archive::CatchupSource { mode: super::archive::CatchupMode::Provider,
+                        source: "xtream".into(), retention_seconds: days * 86400, correction_seconds: 0 }),
+            }),
         });
     }
     let mut bounded = Catalog::default();
@@ -667,5 +685,26 @@ mod tests {
                 description: "Text".into()
             }]
         );
+    }
+}
+
+#[cfg(test)]
+mod archive_contract_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn archive_capability_uses_provider_flag_and_days_not_channel_names() {
+        let config = Config::parse(r#"{"server":"https://provider.invalid","username":"u","password":"p"}"#).unwrap();
+        let profile = ProviderProfile { id:"xc".into(), name:"XC".into(), kind:super::super::ProviderKind::Xtream,
+            source:serde_json::to_string(&config).unwrap(), source_alias:String::new(), enabled:true };
+        let catalog = streams(&json!([
+            {"stream_id":1,"name":"One","tv_archive":1,"tv_archive_duration":7},
+            {"stream_id":2,"name":"Two","tv_archive":0,"tv_archive_duration":7}]),
+            &profile,&config,"live",&BTreeMap::new()).unwrap();
+        assert_eq!(catalog.entries[0].live.as_ref().unwrap().catchup.as_ref().unwrap().retention_seconds,7*86400);
+        assert!(catalog.entries[1].live.as_ref().unwrap().catchup.is_none());
+        assert_eq!(config.archive_url("1","2026-11-09:12-30", 61).unwrap(),
+            "https://provider.invalid:443/timeshift/u/p/61/2026-11-09:12-30/1.ts");
+        assert!(config.archive_url("../1","2026-11-09:12-30",61).is_err());
     }
 }

@@ -80,6 +80,15 @@ impl OttScreen {
                 return Some(Handled::Yes);
             }
         }
+        // The Classic TV list uses the same direct category shortcut as the
+        // desktop player: Play/Pause opens Category selection, not a second
+        // navigation form and not transport for the video behind the list.
+        if self.classic_mode && matches!(self.snapshot.page_id.split(':').next(), Some("channels" | "favorites"))
+            && matches!(classify_input(key, sym, wcode), RemoteKey::Play | RemoteKey::Pause | RemoteKey::PlayPause)
+        {
+            if edge == Edge::Down && !at_edge { self.activate_shortcut("nav:categories", fx); }
+            return Some(Handled::Yes);
+        }
         let button = remote_button(sym, wcode)?;
         // Blue follows the shared Categories action advertised by the footer,
         // including provider screens. Channel paging stays catalogue-only.
@@ -92,7 +101,9 @@ impl OttScreen {
             RemoteButton::ChannelUp => -1,
             RemoteButton::ChannelDown => 1,
             RemoteButton::Red => {
-                if edge == Edge::Down && !self.activate_shortcut("nav:guide", fx) {
+                if edge == Edge::Down && self.snapshot.page_id.split(':').next() == Some("categories") {
+                    self.activate_shortcut("nav:catalog", fx);
+                } else if edge == Edge::Down && !self.activate_shortcut("nav:guide", fx) {
                     self.activate_shortcut("nav:description", fx);
                 }
                 return Some(Handled::Yes);

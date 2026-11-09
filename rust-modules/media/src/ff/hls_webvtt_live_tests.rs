@@ -195,3 +195,26 @@ fn live_explicit_restart_invalidates_same_source_epoch_mapping_and_cache() {
     timeline.commit("source", 4, Some(Clock { pts_90k: 1_800_000, presentation_ns: 0 }), 2_000_000_000);
     assert!(timeline.revision() > previous);
 }
+
+#[test]
+fn live_subtitle_window_uses_actual_transport_end_after_extinf_drift() {
+    let mut transport = crate::hls::TransportClock::default();
+    for n in 0..200 {
+        transport.offset(10_000_000_000 + n * 2_400_000_000,
+            n * 2_000_000_000, n * 2_000_000_000 + 2_400_000_000).unwrap();
+    }
+    let timeline = Timeline::default();
+    let decoder = Clock { pts_90k: 900_000, presentation_ns: 478_000_000_000 };
+    timeline.commit("video", 0, Some(decoder), transport.end_ns().unwrap());
+    let anchor = timeline.snapshot().unwrap();
+    assert_eq!(anchor.end_ns, 480_000_000_000);
+    let text = "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:900000\n\n00:00:00.000 --> 00:00:01.000\ncurrent cue\n";
+    let mut actual = Assembly::new(anchor.clock);
+    push_window(&mut actual, text, Window { start_ns: anchor.end_ns - 60_000_000_000,
+        end_ns: anchor.end_ns + 60_000_000_000 }, &mut || false).unwrap();
+    assert_eq!(actual.cues.len(), 1);
+    let mut stale = Assembly::new(anchor.clock);
+    push_window(&mut stale, text, Window { start_ns: 340_000_000_000,
+        end_ns: 460_000_000_000 }, &mut || false).unwrap();
+    assert!(stale.cues.is_empty(), "EXTINF-based horizon would discard the current mapped cue");
+}

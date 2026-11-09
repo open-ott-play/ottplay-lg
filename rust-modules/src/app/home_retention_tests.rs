@@ -204,6 +204,7 @@ fn mounted_home_walks_to_the_twentieth_row() {
         assert_eq!(rig.with_home(&d, |home, cx, focus| home.grid_position::<AppHost>(focus, cx)),
             Some(Some((row, 0))), "row={row}");
     }
+    #[cfg(feature = "devtriggers")]
     assert_eq!(rig.with_home(&d, |home, _, _| home.shelf_len(19)), Some(Some(3)));
 }
 

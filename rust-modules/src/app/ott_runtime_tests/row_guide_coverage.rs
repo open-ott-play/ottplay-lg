@@ -38,6 +38,10 @@ fn coverage_without_snapshot_is_admitted_and_keeps_fresh_earlier_rows() {
     assert_eq!(diagnostic["coverage"]["state"], "unavailable");
     assert_eq!(diagnostic["coverage"]["reasons"], json!(["index-limit"]));
     assert_eq!(diagnostic["fresh"], true);
+    assert!(diagnostic["projection"]["bound_current_rows"].as_u64().unwrap() > 0);
+    assert_eq!(diagnostic["projection"]["compact_current_rows"],
+        diagnostic["projection"]["bound_current_rows"]);
+    assert!(diagnostic["projection"]["show_program"].is_boolean());
     assert!(runtime.current_row_programme(&runtime.catalog.entries[1]).is_some());
 }
 
@@ -68,7 +72,16 @@ fn cancelled_coverage_cannot_replace_current_diagnostics() {
     let before = app.ott.as_ref().unwrap().row_guide_diagnostics();
     app.ott.as_ref().unwrap().metadata_cancel.store(true, Ordering::Release);
     deliver(&mut app, sample, failed);
-    assert_eq!(app.ott.as_ref().unwrap().row_guide_diagnostics(), before);
+    let after = app.ott.as_ref().unwrap().row_guide_diagnostics();
+    assert_eq!(after["coverage"], before["coverage"], "cancelled replies cannot replace accepted coverage");
+    assert_eq!(after["fresh"], before["fresh"]);
+    for field in ["bound_current_rows", "rows", "compact_current_rows", "guide_available_rows", "selected_compact", "show_program"] {
+        assert_eq!(after["projection"][field], before["projection"][field], "retained compact facts: {field}");
+    }
+    assert!(before["projection"]["full_guide_rows"].as_u64().unwrap() > 0);
+    assert_eq!(after["projection"]["full_guide_rows"], 0,
+        "cancellation retires the separately source-bound selected guide");
+    assert_eq!(after["projection"]["selected_full_current"], false);
 }
 
 #[test]

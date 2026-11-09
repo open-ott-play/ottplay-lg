@@ -205,6 +205,7 @@ fn pattern() -> Vec<u8> {
 
 fn avio_over(src: Src, size: i64, aq: *mut AuQueue) -> AvioState {
     AvioState {
+        hls_ts: None,
         src,
         aq,
         off: 0,

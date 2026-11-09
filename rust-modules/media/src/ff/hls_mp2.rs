@@ -21,26 +21,9 @@ pub(crate) fn supported(
 pub(super) struct Decoder {
     inner: Option<crate::ff_pcm::PcmDecoder>,
     shape: Option<(i32, i32)>,
-    timeline: Option<(i64, i64)>,
-    last_stamp: Option<i64>,
 }
 
 impl Decoder {
-    /// Keep the decoded sample clock across contiguous segments. Their EXTINF
-    /// boundaries need not coincide with a 1152-sample MPEG audio frame.
-    pub(super) fn map_stamp(&mut self, raw: i64, segment_start: i64) -> Result<i64, &'static str> {
-        let (origin, base) = *self.timeline.get_or_insert((raw, segment_start));
-        let mapped = raw
-            .checked_sub(origin)
-            .and_then(|delta| base.checked_add(delta))
-            .ok_or("MP2 HLS audio timestamp overflow")?;
-        if self.last_stamp.is_some_and(|previous| mapped < previous) {
-            return Err("MP2 HLS audio timestamp regressed");
-        }
-        self.last_stamp = Some(mapped);
-        Ok(mapped)
-    }
-
     pub(super) unsafe fn prepare(
         &mut self,
         par: *const AVCodecParameters,

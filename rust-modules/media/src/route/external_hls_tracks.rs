@@ -74,6 +74,7 @@ pub struct HlsTrackCatalog {
     playback: PlaybackIdentity,
     presentation: HlsPlayback,
     subtitle: Option<HlsSubtitleId>,
+    embedded: Option<ExternalTracks>,
 }
 impl std::fmt::Debug for HlsTrackCatalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,6 +93,8 @@ impl HlsTrackCatalog {
         }).collect()
     }
     pub fn selected_subtitle(&self) -> Option<HlsSubtitleId> { self.subtitle }
+    /// Observed container tracks remain distinct from manifest rendition IDs.
+    pub fn embedded_tracks(&self) -> Option<&ExternalTracks> { self.embedded.as_ref() }
     pub fn subtitle_choice(&self, id: Option<HlsSubtitleId>) -> Result<HlsTrackChoice, ExternalTrackApplyError> {
         if id.is_some_and(|id| !self.presentation.has_subtitle(id)) {
             return Err(ExternalTrackApplyError::Inactive);
@@ -100,6 +103,9 @@ impl HlsTrackCatalog {
     }
     pub fn same_session(&self, other: &Self) -> bool {
         self.playback == other.playback && self.presentation.same_presentation(&other.presentation)
+            && match (&self.embedded, &other.embedded) {
+                (Some(a), Some(b)) => a.same_session(b), (None, None) => true, _ => false,
+            }
     }
     pub fn choice(&self, id: RenditionId) -> Result<HlsTrackChoice, ExternalTrackApplyError> {
         if !self.presentation.has_rendition(id) { return Err(ExternalTrackApplyError::Inactive); }
@@ -198,12 +204,98 @@ impl HlsTrackRequest {
     }
 }
 
+/// Main-thread projection of committed TS facts. Snapshot construction and the
+/// registry's current-worker fence remain with the decoder publication owner.
+pub fn reconcile_observed_hls_tracks(ps: &mut PlaybackSession) -> Result<bool, ExternalTrackApplyError> {
+    let Some(snapshot) = crate::ff::hls_observed::observed_hls_tracks() else { return Ok(false); };
+    install_observed_hls_tracks(ps, &snapshot)
+}
+pub fn observed_hls_tracks(ps: &PlaybackSession) -> Option<&crate::ff::hls_observed::Snapshot> { ps.hls_observed.as_ref() }
+pub fn observed_hls_subtitle_selection(ps: &PlaybackSession) -> Option<crate::ff::hls_observed::Selection> {
+    ps.hls_observed.as_ref()?;
+    let tracks = ps.external_tracks.as_ref()?;
+    crate::ff::hls_observed::Selection::new(tracks.inventory(), crate::ff::inspect::TrackKind::Subtitle,
+        tracks.selected_subtitle()?).ok()
+}
+pub fn install_observed_hls_tracks(ps: &mut PlaybackSession, snapshot: &crate::ff::hls_observed::Snapshot)
+    -> Result<bool, ExternalTrackApplyError>
+{
+    use crate::ff::hls_observed;
+    if !hls_observed::snapshot_is_current(snapshot)
+        || snapshot.scope().playback() != ps.playback_identity.as_ref()
+        || !matches!(&ps.external_source, Some(crate::ff::ExternalSource::Hls(source)) if snapshot.scope().matches_source(source))
+    { return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession)); }
+    if ps.hls_observed.as_ref().is_some_and(|previous| previous.scope() == snapshot.scope()
+        && previous.sequence() > snapshot.sequence()) {
+        return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
+    }
+    let inventory = snapshot.inventory().clone();
+    let audio = inventory.audio.iter().map(|track|
+        classify_hls_audio(&inventory, track, &ps.attempt_caps(), ps.direct_play_mode)).collect();
+    let subtitles = inventory.subtitles.iter().map(|track| classify_observed_hls_subtitle(&inventory, track)).collect();
+    let force_identity = ps.hls_observed.as_ref().is_none_or(|previous| previous.scope() != snapshot.scope());
+    let observed_audio = snapshot.selected_audio().and_then(|identity| {
+        let mut rows = inventory.audio.iter().filter(|track| inventory.transport_identity(track.stream_index) == Some(identity));
+        let ordinal = rows.next()?.ordinal;
+        rows.next().is_none().then_some(ordinal)
+    });
+    let mut catalog = ps.external_tracks.as_ref().ok_or(ExternalTrackApplyError::Inactive)?.clone();
+    let (changed, removed_subtitle) = catalog.replace_observed_inventory(inventory, audio, subtitles, force_identity, observed_audio)
+        .map_err(ExternalTrackApplyError::InvalidChoice)?;
+    if !changed { ps.hls_observed = Some(snapshot.clone()); return Ok(false); }
+    let _edit = reserve_external_projection(false)?;
+    if let Some(track) = catalog.selected_audio().and_then(|ordinal| catalog.inventory().audio.iter().find(|track| track.ordinal == ordinal)) {
+        ps.cur_audio = Some(carried_audio(track));
+        crate::player::set_audio_track(track.ordinal);
+    }
+    ps.external_tracks = Some(catalog);
+    ps.hls_observed = Some(snapshot.clone());
+    if removed_subtitle {
+        hls_observed::clear_subtitle_selection();
+        crate::player::request_subtitle(-1);
+        crate::player::ass_source::retire_selection();
+        ps.cur_sub_sid = 0; ps.cur_sub_sidecar = false; ps.cur_sub_client_drawable = false; ps.cur_sub_ordinal = -1;
+    } else if let Some(ordinal) = ps.external_tracks.as_ref().and_then(|tracks| tracks.selected_subtitle()) {
+        ps.cur_sub_ordinal = ordinal;
+        crate::player::request_subtitle(ordinal);
+    }
+    commit_in_place_route_projection(ps, false);
+    Ok(true)
+}
+// Packet decode and post-feed publication must both be wired before this gate
+// can be enabled. A compiled decoder helper alone is not an active transport.
+const OBSERVED_SUBTITLE_DECODER_READY: bool = false;
+pub(super) fn classify_observed_hls_subtitle(inventory: &crate::ff::inspect::TrackInventory,
+    track: &crate::ff::inspect::InspectedTrack) -> TrackAvailability {
+    if crate::ff::hls_observed::Selection::new(inventory, crate::ff::inspect::TrackKind::Subtitle, track.ordinal).is_err() {
+        return TrackAvailability::Unsupported(crate::route::TrackUnavailable::Transport);
+    }
+    if !OBSERVED_SUBTITLE_DECODER_READY {
+        return TrackAvailability::Unsupported(crate::route::TrackUnavailable::Transport);
+    }
+    if !crate::ff::hls_embedded_subtitles::supported(track) {
+        return TrackAvailability::Unsupported(crate::route::TrackUnavailable::Codec);
+    }
+    TrackAvailability::Supported
+}
+fn retire_observed_subtitle(ps: &mut PlaybackSession) -> bool {
+    crate::ff::hls_observed::clear_subtitle_selection();
+    let Some(tracks) = ps.external_tracks.as_mut() else { return false; };
+    if tracks.selected_subtitle().is_none() { return false; }
+    let Ok(off) = tracks.choice(crate::ff::inspect::TrackKind::Subtitle, None) else { return false; };
+    if tracks.commit(&off).is_err() { return false; }
+    crate::player::request_subtitle(-1);
+    crate::player::ass_source::retire_selection();
+    true
+}
+
 pub fn hls_track_catalog(ps: &PlaybackSession) -> Option<HlsTrackCatalog> {
     let playback = playback_identity(ps)?;
     Some(HlsTrackCatalog { subtitle: sidecar::selected_hls(&playback),
-        playback, presentation: external_hls(ps)?.clone() })
+        playback, presentation: external_hls(ps)?.clone(), embedded: ps.external_tracks.clone() })
 }
 fn choice_is_current(ps: &PlaybackSession, choice: &HlsTrackChoice) -> bool {
+    if ps.hls_observed.as_ref().is_some_and(|snapshot| !crate::ff::hls_observed::snapshot_is_current(snapshot)) { return false; }
     hls_track_catalog(ps).is_some_and(|catalog| catalog.same_session(&choice.catalog))
 }
 pub fn begin_hls_track_request(ps: &mut PlaybackSession, choice: &HlsTrackChoice)
@@ -279,11 +371,13 @@ pub fn complete_hls_track_request(ps: &mut PlaybackSession, request: &HlsTrackRe
             crate::player::note_audio_pick();
         }
         Prepared::Subtitle { playback, id, content, epoch } => {
+            let retired_embedded = retire_observed_subtitle(ps);
             let changed = sidecar::selected_hls(&request.choice.catalog.playback) != Some(id);
             if !sidecar::install_hls(&request.choice.catalog.playback, id, content) {
                 return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
             }
             commit_hls_subtitle(ps, true, changed);
+            if retired_embedded { crate::route::request_user_route_intent(ps, UserRouteIntent::NativeAudioReload); }
             if playback.is_live_subtitles() {
                 if let Some(token) = sidecar::hls_refresh_token(&request.choice.catalog.playback, id) {
                     if let Some(epoch) = epoch {
@@ -295,8 +389,10 @@ pub fn complete_hls_track_request(ps: &mut PlaybackSession, request: &HlsTrackRe
             }
         }
         Prepared::Off(_) => {
+            let retired_embedded = retire_observed_subtitle(ps);
             sidecar::reset_hls();
             commit_hls_subtitle(ps, false, true);
+            if retired_embedded { crate::route::request_user_route_intent(ps, UserRouteIntent::NativeAudioReload); }
         }
     }
     Ok(true)

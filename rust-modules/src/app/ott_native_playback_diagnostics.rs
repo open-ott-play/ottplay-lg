@@ -31,7 +31,39 @@ struct Session {
     next_sample_at: u32,
     playback: plx_media::route::PlaybackIdentity,
     records: VecDeque<Record>,
+    input: VecDeque<NativeKey>,
     dropped: u32,
+}
+
+#[derive(Clone, Copy)]
+struct NativeKey { t_ms: u32, state: u32, scancode: u32, sym: u32 }
+
+impl Runtime {
+    /// Only a bounded authenticated diagnostic capture may retain native input.
+    /// Printable Unicode and text input are excluded, including numeric keys.
+    pub(in crate::app) fn note_native_input(&mut self, state: u32, scancode: u32, sym: u32,
+        now: u32, source: plx_machine::machine::Source,
+        playback: Option<&plx_media::route::PlaybackIdentity>) {
+        // Some native keyboards omit sym. Exclude SDL text-producing
+        // scancodes too, including letters/digits, punctuation and keypads.
+        let printable_scan = matches!(scancode, 4..=39 | 44..=56 | 89..=100 | 133..=143 | 176..=221);
+        if source != plx_machine::machine::Source::Sdl || state & 0xff != 1 || printable_scan
+            || (sym != 0 && sym & (1 << 30) == 0) { return; }
+        let Some(session) = self.native_playback_capture.capture.as_mut() else { return; };
+        if session.state != State::Capturing || age(now, session.started_at) >= session.duration_ms
+            || playback != Some(&session.playback) { return; }
+        if session.input.len() == 16 { session.input.pop_front(); }
+        session.input.push_back(NativeKey { t_ms: age(now, session.started_at), state: state & 0x1ff, scancode, sym });
+    }
+
+    pub(in crate::app) fn native_input_probe(&self) -> String {
+        let Some(session) = self.native_playback_capture.capture.as_ref() else { return String::new(); };
+        // Retain the existing completed capture's evidence; starting another
+        // capture replaces its owner and events together. Nothing is persisted.
+        json!({"version":1,"state":session.state.wire(),"events":session.input.iter().map(|key|
+            json!({"t_ms":key.t_ms,"state":key.state,"scancode":key.scancode,"sym":key.sym}))
+            .collect::<Vec<_>>()}).to_string()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -334,6 +366,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 next_sample_at: now,
                 playback,
                 records: VecDeque::with_capacity(MAX_RECORDS),
+                input: VecDeque::with_capacity(16),
                 dropped: 0,
             });
             turn_capture_readout_on(true);
@@ -416,7 +449,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
 
 #[cfg(test)]
 mod tests {
-    use super::requested_duration_s;
+    use super::*;
     use serde_json::{json, Value};
 
     #[test]
@@ -433,4 +466,44 @@ mod tests {
             assert_eq!(requested_duration_s(Some(&invalid)), None, "{invalid}");
         }
     }
+    #[test]
+    #[cfg(feature = "hostsim")]
+    fn native_input_probe_is_capture_owned_bounded_nonprinting_and_retained() {
+        let _lock = plx_base::testlock::serial();
+        let mut session = plx_media::route::PlaybackSession::default();
+        plx_media::route::reset_player_control_for_test(&session);
+        plx_media::route::install_plex_playback_for_test(&mut session,
+            plx_plex::plex::ServerId::from_raw(0), "input-fixture");
+        let playback = plx_media::route::playback_identity(&session).unwrap();
+        let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        assert_eq!(runtime.native_input_probe(), "");
+        runtime.native_playback_capture.capture = Some(Session { id:"fixture".into(), state:State::Capturing,
+            started_at:1_000, ended_at:None, duration_ms:5_000, next_sample_at:1_000,
+            playback:playback.clone(), records:VecDeque::new(), input:VecDeque::new(), dropped:0 });
+        for sym in [b'p' as u32, b'1' as u32, 'Ж' as u32] {
+            runtime.note_native_input(1, 42, sym, 1_001, plx_machine::machine::Source::Sdl, Some(&playback));
+        }
+        runtime.note_native_input(1, 480, 0, 1_001, plx_machine::machine::Source::RemoteFifo, Some(&playback));
+        for scancode in [4, 30, 44, 45, 89, 99, 100, 133, 135, 176, 221] {
+            runtime.note_native_input(1, scancode, 0, 1_001, plx_machine::machine::Source::Sdl, Some(&playback));
+            runtime.note_native_input(1, scancode, (1 << 30) | scancode, 1_001, plx_machine::machine::Source::Sdl, Some(&playback));
+        }
+        assert_eq!(serde_json::from_str::<Value>(&runtime.native_input_probe()).unwrap()["events"], json!([]));
+        for scancode in 480..500 {
+            runtime.note_native_input(1, scancode, 0, 1_010, plx_machine::machine::Source::Sdl, Some(&playback));
+        }
+        let data: Value = serde_json::from_str(&runtime.native_input_probe()).unwrap();
+        assert_eq!(data["events"].as_array().unwrap().len(), 16);
+        assert_eq!(data["events"][0]["scancode"], 484);
+        assert!(runtime.native_input_probe().len() <= 4096);
+        runtime.note_native_input(1, 999, 0, 6_000, plx_machine::machine::Source::Sdl, Some(&playback));
+        runtime.note_native_input(1, 998, 0, 1_100, plx_machine::machine::Source::Sdl, None);
+        assert_eq!(serde_json::from_str::<Value>(&runtime.native_input_probe()).unwrap()["events"], data["events"]);
+        runtime.native_playback_capture.capture.as_mut().unwrap().state = State::SessionChanged;
+        runtime.note_native_input(1, 997, 0, 1_110, plx_machine::machine::Source::Sdl, Some(&playback));
+        let completed: Value = serde_json::from_str(&runtime.native_input_probe()).unwrap();
+        assert_eq!(completed["state"], "session_changed");
+        assert_eq!(completed["events"], data["events"], "source change must preserve captured evidence without adding new input");
+    }
+
 }

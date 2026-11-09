@@ -146,17 +146,21 @@ pub fn apply_external_track(
     {
         return Err(ExternalTrackApplyError::Inactive);
     }
+    if ps.hls_observed.as_ref().is_some_and(|snapshot| !crate::ff::hls_observed::snapshot_is_current(snapshot)) {
+        return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
+    }
     let transport = track_transport(source);
     let mut selected = ps.external_tracks.as_ref()
         .ok_or(ExternalTrackApplyError::Inactive)?.clone();
     // Prepare the entire after-image locally. A failed identity/policy/busy check
     // must leave the session, catalog and all player atomics untouched.
     let mut plan = selected.commit(choice).map_err(ExternalTrackApplyError::InvalidChoice)?;
-    let hls_subtitle_edit = ps.external_hls.is_some() && choice.kind() == crate::ff::inspect::TrackKind::Subtitle;
+    let hls_subtitle_edit = (ps.external_hls.is_some() || ps.hls_observed.is_some()) && choice.kind() == crate::ff::inspect::TrackKind::Subtitle;
     // The embedded catalog may already say Off while an HLS rendition is
     // selected in the shared sidecar. An accepted embedded Off must retire it.
     if hls_subtitle_edit && matches!(plan, ExternalTrackPlan::Unchanged)
-        && playback_identity(ps).as_ref().and_then(|owner| crate::player::sidecar::selected_hls(owner)).is_some()
+        && (choice.ordinal().is_some() && ps.hls_observed.is_some()
+            || playback_identity(ps).as_ref().and_then(|owner| crate::player::sidecar::selected_hls(owner)).is_some())
     {
         plan = ExternalTrackPlan::Subtitle(choice.ordinal().and_then(|ordinal|
             selected.inventory().subtitles.iter().find(|track| track.ordinal == ordinal).cloned()));
@@ -169,7 +173,9 @@ pub fn apply_external_track(
             classify_audio(track, &ps.attempt_caps(), ps.direct_play_mode, transport)
         },
         // This build ships the text renderer. Per-track parse/render failures remain runtime errors.
-        ExternalTrackPlan::Subtitle(Some(track)) => classify_subtitle(track, transport, true),
+        ExternalTrackPlan::Subtitle(Some(track)) => if transport == ExternalTrackTransport::Hls && ps.hls_observed.is_some() {
+            hls_tracks::classify_observed_hls_subtitle(selected.inventory(), track)
+        } else { classify_subtitle(track, transport, true) },
         ExternalTrackPlan::Subtitle(None) => TrackAvailability::Supported,
         ExternalTrackPlan::LocalSubtitle(_) => {
             local_subtitle_playback(ps)?;
@@ -181,6 +187,14 @@ pub fn apply_external_track(
     }
     let _edit = reserve_external_track_edit()?;
     if hls_subtitle_edit {
+        if let Some(ordinal) = choice.ordinal() {
+            if let Some(snapshot) = &ps.hls_observed {
+                let target = crate::ff::hls_observed::Selection::new(selected.inventory(), crate::ff::inspect::TrackKind::Subtitle, ordinal)
+                    .map_err(|_| ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession))?;
+                crate::ff::hls_observed::set_subtitle_selection(snapshot, target)
+                    .map_err(|_| ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession))?;
+            }
+        } else { crate::ff::hls_observed::clear_subtitle_selection(); }
         ps.hls_subtitle_intent = if choice.ordinal().is_some() || choice.local_target().is_some() {
             HlsSubtitleIntent::ManualTrack
         } else { HlsSubtitleIntent::ManualOff };
@@ -194,6 +208,10 @@ pub fn apply_external_track(
             crate::player::note_audio_pick();
         }
         ExternalTrackPlan::Subtitle(track) => {
+            if ps.hls_observed.is_some() {
+                crate::player::request_subtitle(-1);
+                crate::player::ass_source::retire_selection();
+            }
             crate::player::sidecar::deselect();
             let ordinal = track.as_ref().map_or(-1, |track| track.ordinal);
             ps.cur_sub_sid = 0;
@@ -206,6 +224,9 @@ pub fn apply_external_track(
             crate::player::set_subtitle_offset(0);
             crate::player::request_subtitle(ordinal);
             commit_in_place_route_projection(ps, false);
+            if ps.hls_observed.is_some() {
+                crate::route::request_user_route_intent(ps, UserRouteIntent::NativeAudioReload);
+            }
         }
         ExternalTrackPlan::LocalSubtitle(track) => {
             let playback = local_subtitle_playback(ps)?;
@@ -290,11 +311,17 @@ pub fn rearm_selected_local_subtitle(ps: &PlaybackSession) -> Result<bool, Exter
 /// Forget a retired external source after its playback owner has stopped it.
 /// Resetting local data must not retain an address or lease in an idle route.
 pub fn forget_external_source(ps: &mut PlaybackSession) {
+    if ps.hls_observed.is_some() {
+        crate::ff::hls_observed::clear_subtitle_selection();
+        crate::player::ass_source::retire_selection();
+        crate::player::request_subtitle(-1);
+    }
     crate::player::sidecar::reset_hls();
     crate::player::sidecar::reset_local();
     ps.playback_identity = None;
     ps.external_source = None;
     ps.external_hls = None;
+    ps.hls_observed = None;
     ps.external_duration_ns = 0;
     ps.external_tracks = None;
     clear_url(ps);
@@ -555,6 +582,7 @@ fn install_external_source(
         return Err(ExternalError::Busy);
     }
     next.playback_identity = Some(continuation.cloned().unwrap_or_else(PlaybackIdentity::fresh));
+    if continuation.is_none() { crate::ff::hls_observed::clear_subtitle_selection(); }
     *ps = next;
     install_active_encoder("");
     reset_track_selection(ServerId::UNSET, "", retry);
@@ -1156,4 +1184,4 @@ mod managed_continuation_tests;
 
 #[path = "external_hls_tracks.rs"]
 mod hls_tracks;
-pub use hls_tracks::{HlsSubtitleMode, HlsSubtitlePolicy, HlsSubtitleIntent, hls_subtitle_policy, hls_subtitle_intent, restore_hls_subtitle_policy, begin_automatic_hls_subtitle_request, hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack};
+pub use hls_tracks::{reconcile_observed_hls_tracks, install_observed_hls_tracks, observed_hls_tracks, observed_hls_subtitle_selection, HlsSubtitleMode, HlsSubtitlePolicy, HlsSubtitleIntent, hls_subtitle_policy, hls_subtitle_intent, restore_hls_subtitle_policy, begin_automatic_hls_subtitle_request, hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack};

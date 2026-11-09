@@ -285,18 +285,9 @@ pub fn busy_surface_with(
     }
 }
 
-/// PURE: does the read-out own the WHOLE frame, so [`draw_hud`] draws nothing at all?
-///
-/// **Only a failure**, and the asymmetry is the point. A `Failed` read-out is terminal: there is no
-/// picture and no position, so every piece of transport under it is a lie — `Player Screen.dc.html`
-/// hides both the transport (`hudDisplay:none`) and the bottom tabs (`tabsDisplay:none`) on that
-/// variant. A `Working` read-out is the opposite: the pipeline is mid-flight, the position is real,
-/// and the transport is what the user reads the moment the first frame lands. Hiding it there would
-/// blank the HUD through every cold start and every pre-roll — which is why this asks the KIND and
-/// not merely "is a read-out up".
-pub fn readout_owns_frame(busy: Busy) -> bool {
-    matches!(busy, Busy::Readout(StatusKind::Failed, _))
-}
+/// Playback errors are nonmodal notices. The ordinary HUD and source-bound
+/// channel navigation remain available while a retry is offered.
+pub fn readout_owns_frame(_busy: Busy) -> bool { false }
 
 /// The same question for `crate::screens::player::PlayerScreen::handle_key`, which asks it
 /// FIRST, before any transport arm: is the transport (and every panel over it) absent from the
@@ -315,7 +306,10 @@ pub fn readout_owns_frame(busy: Busy) -> bool {
 /// It resamples [`busy`] rather than taking one, because the event loop runs before the frame's
 /// single resolve exists; both reads are of the same main-thread state within one iteration.
 pub fn transport_hidden(ps: &plx_media::route::PlaybackSession) -> bool {
-    readout_owns_frame(busy(ps))
+    // A compact notice does not own the frame, but a dead source still has
+    // no play/pause or seek transport. Source-bound catalogue recovery is
+    // admitted separately by the player screen.
+    failure_row_drawn(busy(ps))
 }
 
 /// Sample the live globals ONCE and resolve the owner. Call this once per frame and pass the result
@@ -618,10 +612,10 @@ pub const ELEM_FAILURE_BASE: u32 = 30;
 /// One past the failure row's last possible element.
 pub const ELEM_FAILURE_END: u32 = ELEM_FAILURE_BASE + plx_ui::widgets::STATUS_ROW_MAX as u32;
 
-/// Is the failure read-out's row ON SCREEN — a failure owns the frame. The row always holds at
-/// least *Back*, so a failure always has something to press.
+/// Does playback currently offer failure actions? The screen independently
+/// bounds the notice lifetime and registers stops only while it is visible.
 pub fn failure_row_drawn(busy: Busy) -> bool {
-    readout_owns_frame(busy)
+    matches!(busy, Busy::Readout(StatusKind::Failed, _))
 }
 
 /// Product copy is resolved here; the worker's technical error identity stays unchanged.

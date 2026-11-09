@@ -64,3 +64,15 @@ fn armed_state_is_not_an_owned_target() {
     let pin = Stored::armed(item.origin.clone(), true).unwrap();
     assert!(!matches_pin(&pin, &item, None));
 }
+
+#[test]
+fn kiosk_origin_keeps_explicit_receiver_source_alias() {
+    let profile = ProviderProfile {
+        id: "m3u-1".into(), name: "Home".into(), kind: ProviderKind::M3u,
+        source: "https://media.invalid/list.m3u".into(),
+        source_alias: "account-B".into(), enabled: true,
+    };
+    let captured = origin(&profile);
+    assert_eq!(captured.profile, "Home");
+    assert_eq!(captured.source_alias, "account-B");
+}

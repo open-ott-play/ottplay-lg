@@ -62,6 +62,12 @@ const XTREAM_FIELDS: &[Field] = &[
         text_policy: OttTextPolicy::Literal,
     },
 ];
+const EDEM_FIELDS: &[Field] = &[
+    NAME,
+    Field {key:"profile.setup.key",title:"Access key",secret:true,limit:512,text_policy:OttTextPolicy::Literal},
+    Field {key:"profile.setup.list",title:"List template (0–3)",secret:false,limit:1,text_policy:OttTextPolicy::Literal},
+    Field {key:"profile.setup.portal",title:"VPortal link",secret:true,limit:8192,text_policy:OttTextPolicy::Literal},
+];
 const STALKER_FIELDS: &[Field] = &[
     NAME,
     Field {
@@ -83,6 +89,34 @@ const STALKER_FIELDS: &[Field] = &[
     },
 ];
 
+const OPERATOR_PLAYLIST: Field = Field {key:"profile.setup.playlist",title:"Playlist URL",secret:true,limit:8192,text_policy:OttTextPolicy::Literal};
+const OPERATOR_MODE: Field = Field {key:"profile.setup.mode",title:"Stream format (0–2)",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
+const OPERATOR_MODE_BINARY: Field = Field {key:"profile.setup.mode",title:"Stream format: 0 HLS, 1 MPEGTS",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
+const OPERATOR_LIST: Field = Field {key:"profile.setup.list",title:"Playlist (0–2)",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
+const OPERATOR_MAC: Field = Field {key:"profile.setup.mac",title:"Device MAC",secret:true,limit:32,text_policy:OttTextPolicy::Literal};
+const OPERATOR_URL_FIELDS: &[Field] = &[NAME,OPERATOR_PLAYLIST];
+const OPERATOR_LOGIN_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[2],XTREAM_FIELDS[3]];
+const OPERATOR_MAC_FIELDS: &[Field] = &[NAME,OPERATOR_MAC,OPERATOR_LIST];
+const OPERATOR_KEY_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[2],OPERATOR_MODE];
+const SHURA_SERVER: Field = Field {key:"profile.setup.server",title:"Server number (1, 2, 3, 5)",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
+const OTTCLUB_SERVER: Field = Field {key:"profile.setup.server",title:"Server host[:port]",secret:false,limit:8192,text_policy:OttTextPolicy::Literal};
+const SHURA_FIELDS: &[Field] = &[NAME,SHURA_SERVER,XTREAM_FIELDS[2],OPERATOR_MODE_BINARY];
+const OTTCLUB_FIELDS: &[Field] = &[NAME,OTTCLUB_SERVER,XTREAM_FIELDS[2],OPERATOR_MODE_BINARY];
+const ANTIFRIZ_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[2],OPERATOR_MODE_BINARY];
+const OPERATOR_GENERIC_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[1],XTREAM_FIELDS[2],XTREAM_FIELDS[3],OPERATOR_PLAYLIST];
+fn operator_fields(id:plx_data::ott::OperatorId)->&'static [Field] {
+    match id.canonical_id() {
+        "tvteam"=>OPERATOR_URL_FIELDS,
+        "1ott"|"shara-tv"=>OPERATOR_LOGIN_FIELDS,
+        "kb-team"=>OPERATOR_MAC_FIELDS,
+        "only4"|"itv"=>OPERATOR_KEY_FIELDS,
+        "antifriz"=>ANTIFRIZ_FIELDS,
+        "ottclub"=>OTTCLUB_FIELDS,
+        "shura"=>SHURA_FIELDS,
+        _=>OPERATOR_GENERIC_FIELDS,
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Draft {
     profile: ProviderProfile,
@@ -102,6 +136,8 @@ impl Draft {
     pub(super) fn new(profile: &ProviderProfile) -> Result<Self, &'static str> {
         let fields = match profile.kind {
             ProviderKind::Xtream => XTREAM_FIELDS,
+            ProviderKind::Edem => EDEM_FIELDS,
+            ProviderKind::Operator(id) => operator_fields(id),
             ProviderKind::Stalker => STALKER_FIELDS,
             _ => return Err("This provider does not use credential setup"),
         };
@@ -112,16 +148,34 @@ impl Draft {
                 .map(|field| {
                     (
                         field.key[PREFIX.len()..].to_owned(),
-                        Value::String(String::new()),
+                        Value::String(if (profile.kind == ProviderKind::Edem || matches!(profile.kind,ProviderKind::Operator(_))) && matches!(field.key,"profile.setup.list"|"profile.setup.mode") {"0".into()} else {String::new()}),
                     )
                 })
                 .collect()
         } else {
             validate_source(profile.kind, &profile.source)?;
-            serde_json::from_str::<Value>(&profile.source)
+            let normalized;
+            let source = if profile.kind == ProviderKind::Edem {
+                normalized = serde_json::to_string(&plx_data::ott::edem::Config::parse(&profile.source)
+                    .map_err(|_| INVALID_SOURCE)?).map_err(|_| INVALID_SOURCE)?;
+                &normalized
+            } else if let ProviderKind::Operator(id)=profile.kind {
+                normalized=serde_json::to_string(&plx_data::ott::operators::Config::parse(id,&profile.source).map_err(|_|INVALID_SOURCE)?).map_err(|_|INVALID_SOURCE)?;
+                &normalized
+            } else { &profile.source };
+            serde_json::from_str::<Value>(source)
                 .map_err(|_| INVALID_SOURCE)?
                 .as_object()
                 .cloned()
+                .map(|mut source| { if profile.kind == ProviderKind::Edem {
+                    let list=source.get("list").and_then(Value::as_u64).unwrap_or(0);
+                    source.insert("list".into(),Value::String(list.to_string()));
+                    source.entry("portal").or_insert(Value::String(String::new()));
+                }
+                if matches!(profile.kind,ProviderKind::Operator(_)) {
+                    for field in ["list","mode"] {let value=source.get(field).and_then(Value::as_u64).unwrap_or(0);source.insert(field.into(),Value::String(value.to_string()));}
+                }
+                source })
                 .ok_or(INVALID_SOURCE)?
         };
         Ok(Self {
@@ -143,6 +197,8 @@ impl Draft {
     pub(super) fn fields(&self) -> &'static [Field] {
         match self.profile.kind {
             ProviderKind::Xtream => XTREAM_FIELDS,
+            ProviderKind::Edem => EDEM_FIELDS,
+            ProviderKind::Operator(id) => operator_fields(id),
             ProviderKind::Stalker => STALKER_FIELDS,
             // Only new() constructs a Draft, after the provider check.
             _ => &[],
@@ -201,7 +257,17 @@ impl Draft {
     /// nor any saved profile changes on success or failure of this operation.
     pub(super) fn prepare(&self) -> Result<ProviderProfile, &'static str> {
         let mut candidate = self.profile.clone();
-        candidate.source = serde_json::to_string(&self.source).map_err(|_| INVALID_SOURCE)?;
+        let mut source = self.source.clone();
+        if self.profile.kind == ProviderKind::Edem {
+            let list = source.get("list").and_then(Value::as_str).and_then(|s| s.parse::<u8>().ok()).filter(|n|*n<=3).ok_or("Select list template 0 to 3")?;
+            source.insert("list".into(), Value::from(list));
+        }
+        if matches!(self.profile.kind,ProviderKind::Operator(_)) {
+            for field in ["list","mode"] {
+                if let Some(value)=source.get(field) { let value=value.as_str().and_then(|text|text.parse::<u8>().ok()).ok_or("Invalid operator format or playlist")?;source.insert(field.into(),Value::from(value)); }
+            }
+        }
+        candidate.source = serde_json::to_string(&source).map_err(|_| INVALID_SOURCE)?;
         candidate
             .validate()
             .map_err(|_| "Check the profile name and provider credentials")?;
@@ -216,6 +282,8 @@ fn validate_source(kind: ProviderKind, source: &str) -> Result<(), &'static str>
     }
     let valid = match kind {
         ProviderKind::Xtream => xtream::Config::parse(source).is_ok(),
+        ProviderKind::Edem => plx_data::ott::edem::Config::parse(source).is_ok(),
+        ProviderKind::Operator(id) => plx_data::ott::operators::Config::parse(id,source).is_ok(),
         ProviderKind::Stalker => stalker::Config::parse(source).is_ok(),
         _ => false,
     };
@@ -582,4 +650,37 @@ mod tests {
         ]);
     }
 
+}
+
+#[cfg(test)]
+mod edem_setup_tests {
+    use super::*;
+    #[test]
+    fn edem_legacy_edit_retains_list_and_portal_and_discards_saved_endpoint() {
+        let profile=ProviderProfile{id:"edem-1".into(),name:"Edem".into(),kind:ProviderKind::Edem,
+            source:r#"{"edkey":"old_key","edlist":"3","vpurl":"portal::[key:vod]https://portal.invalid/api","edcdn":"old.invalid"}"#.into(),source_alias:String::new(),enabled:true};
+        let mut draft=Draft::new(&profile).unwrap();
+        assert_eq!(draft.value("profile.setup.list").unwrap(),"3");
+        draft.stage("profile.setup.key","new_key").unwrap();
+        let saved=draft.prepare().unwrap();
+        let config=plx_data::ott::edem::Config::parse(&saved.source).unwrap();
+        assert_eq!(config.key,"new_key");assert_eq!(config.list,3);
+        assert_eq!(config.portal,"portal::[key:vod]https://portal.invalid/api");
+        assert!(!saved.source.contains("old.invalid"));
+    }
+    #[test]
+    fn edem_form_saves_numeric_template_and_keeps_missing_key_editable() {
+        let p=ProviderProfile{id:"edem-1".into(),name:"Edem".into(),kind:ProviderKind::Edem,source:String::new(),source_alias:String::new(),enabled:true};
+        let mut draft=Draft::new(&p).unwrap();
+        assert!(draft.prepare().is_err());
+        draft.stage("profile.setup.key","test_key").unwrap();
+        draft.stage("profile.setup.list","3").unwrap();
+        let saved=draft.prepare().unwrap();
+        let config=plx_data::ott::edem::Config::parse(&saved.source).unwrap();
+        assert_eq!(config.list,3);
+        assert!(Draft::new(&saved).unwrap().prepare().is_ok());
+        assert!(!draft.fields().iter().any(|field|field.key.contains("cdn")));
+        draft.stage("profile.setup.list","9").unwrap();
+        assert!(draft.prepare().is_err());
+    }
 }

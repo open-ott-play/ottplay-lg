@@ -1595,7 +1595,7 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         rows.push(button("torrent.retry", "Refresh / retry"));
     }
     rows.push(button("torrent.back", "Back / cancel"));
-    Some(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
+    Some(OttView { pending_play: None, shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
         preview_context: None,
         order_context: None, random_context: None,
         catalog_progress: None,

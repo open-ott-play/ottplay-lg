@@ -64,6 +64,10 @@ fn fetch(endpoint: &str, body: &Value, cancel: &AtomicBool) -> Result<String> {
 
 fn link(profile: &ProviderProfile) -> Result<ott::PortalLink> {
     profile.validate().map_err(|_| "Invalid VPortal profile")?;
+    if profile.kind == ProviderKind::Edem {
+        let config=ott::edem::Config::parse(&profile.source).map_err(|_| "Invalid Edem profile")?;
+        return ott::parse_vportal_link(&config.portal).map_err(|_| "Configure the Edem VPortal link");
+    }
     if profile.kind != ProviderKind::VPortal {
         return Err("Invalid VPortal profile");
     }

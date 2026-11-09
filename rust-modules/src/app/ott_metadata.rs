@@ -62,13 +62,14 @@ pub(super) fn start(
     generation: u64,
     query: Query,
     row_request: Option<super::ott_runtime::row_guide::Request>,
+    hosted: Option<plx_data::ott::hosted_epg::Config>,
     cancel: Arc<AtomicBool>,
     tx: Sender<Event>,
     done: Arc<AtomicBool>,
 ) -> bool {
     super::ott_worker::spawn("ott-metadata", done, move |worker| {
         if run(&profile, &entry, generation, &cancel, &tx, || {
-            metadata(worker, &profile, &entry, generation, query, row_request, &cancel)
+            metadata(worker, &profile, &entry, generation, query, row_request, hosted.as_ref(), &cancel)
         }) {
             plx_machine::idle::invalidate();
         }
@@ -91,12 +92,12 @@ impl FavoriteSource {
     }
 
     fn inspect(&self, worker: &OffFrame, favorite: &Favorite, entry: &CatalogEntry,
-        generation: u64, query: Query, cancel: &AtomicBool) -> Fetched {
+        generation: u64, query: Query, hosted: Option<&plx_data::ott::hosted_epg::Config>, cancel: &AtomicBool) -> Fetched {
         match self {
-            Self::Profile(profile, _) | Self::Managed(profile, _) | Self::Classic(profile, _) => metadata(worker, profile, entry, generation, query, None, cancel),
+            Self::Profile(profile, _) | Self::Managed(profile, _) | Self::Classic(profile, _) => metadata(worker, profile, entry, generation, query, None, hosted, cancel),
             Self::M3uAttachment(receipt) => {
                 match super::ott_runtime::attachment_profile(receipt, favorite) {
-                    Ok(effective) => metadata(worker, &effective, entry, generation, query, None, cancel),
+                    Ok(effective) => metadata(worker, &effective, entry, generation, query, None, hosted, cancel),
                     Err(error) => Fetched::Preview(Err(error)),
                 }
             }
@@ -111,12 +112,13 @@ pub(super) fn start_favorite(
     local_proof: Option<super::ott_runtime::LocalFavoritePermit>,
     generation: u64,
     query: Query,
+    hosted: Option<plx_data::ott::hosted_epg::Config>,
     cancel: Arc<AtomicBool>,
     tx: Sender<Event>,
     done: Arc<AtomicBool>,
 ) -> bool {
     start_favorite_source(FavoriteSource::Profile(profile, local_proof), favorite,
-        generation, query, cancel, tx, done)
+        generation, query, hosted, cancel, tx, done)
 }
 
 pub(super) fn start_attachment_favorite(
@@ -129,21 +131,21 @@ pub(super) fn start_attachment_favorite(
     done: Arc<AtomicBool>,
 ) -> bool {
     start_favorite_source(FavoriteSource::M3uAttachment(receipt), favorite,
-        generation, query, cancel, tx, done)
+        generation, query, None, cancel, tx, done)
 }
 
 pub(super) fn start_managed_favorite(
     profile: ProviderProfile, favorite: Favorite, read: super::adapters::session::ManagedRead,
     generation: u64, query: Query, cancel: Arc<AtomicBool>, tx: Sender<Event>, done: Arc<AtomicBool>,
 ) -> bool {
-    start_favorite_source(FavoriteSource::Managed(profile, read), favorite, generation, query, cancel, tx, done)
+    start_favorite_source(FavoriteSource::Managed(profile, read), favorite, generation, query, None, cancel, tx, done)
 }
 
 pub(super) fn start_classic_favorite(
     profile: ProviderProfile, favorite: Favorite, read: super::ott_plex::ClassicRead,
     generation: u64, query: Query, cancel: Arc<AtomicBool>, tx: Sender<Event>, done: Arc<AtomicBool>,
 ) -> bool {
-    start_favorite_source(FavoriteSource::Classic(profile, read), favorite, generation, query, cancel, tx, done)
+    start_favorite_source(FavoriteSource::Classic(profile, read), favorite, generation, query, None, cancel, tx, done)
 }
 
 // Reject non-Plex locators before the shared lookup can fall back to scanning a catalogue.
@@ -158,6 +160,7 @@ fn classic_favorite_machine<'a>(profile: &ProviderProfile, favorite: &'a Favorit
 
 fn start_favorite_source(
     source: FavoriteSource, favorite: Favorite, generation: u64, query: Query,
+    hosted: Option<plx_data::ott::hosted_epg::Config>,
     cancel: Arc<AtomicBool>, tx: Sender<Event>, done: Arc<AtomicBool>,
 ) -> bool {
     super::ott_worker::spawn("ott-fav-preview", done, move |worker| {
@@ -183,7 +186,7 @@ fn start_favorite_source(
                 FavoriteSource::M3uAttachment(receipt) =>
                     super::ott_catalog::find_attachment_favorite(worker, receipt, &favorite, &cancel),
             },
-            |entry| source.inspect(worker, &favorite, entry, generation, query, &cancel),
+            |entry| source.inspect(worker, &favorite, entry, generation, query, hosted.as_ref(), &cancel),
         ) {
             plx_machine::idle::invalidate();
         }
@@ -197,6 +200,7 @@ fn metadata(
     generation: u64,
     query: Query,
     row_request: Option<super::ott_runtime::row_guide::Request>,
+    hosted: Option<&plx_data::ott::hosted_epg::Config>,
     cancel: &AtomicBool,
 ) -> Fetched {
     let guide = match (&profile.kind, &entry.media) {
@@ -218,13 +222,13 @@ fn metadata(
         };
         let source_profile = profile.clone();
         let (result, row_guide) = if let Some(row_request) = row_request {
-            let (result, outcome) = super::ott_provider_http::guide_rows_cancellable(
-                worker, profile, entry, &request, &row_request.selectors, cancel);
+            let (result, outcome) = super::ott_provider_http::guide_rows_configured_cancellable(
+                worker, profile, entry, &request, &row_request.selectors, hosted, cancel);
             (result, Some(super::ott_runtime::row_guide::Reply {
                 request: row_request, outcome,
             }))
         } else {
-            (super::ott_provider_http::guide_cancellable(worker, profile, entry, &request, cancel), None)
+            (super::ott_provider_http::guide_configured_cancellable(worker, profile, entry, &request, hosted, cancel), None)
         };
         return Fetched::Guide { source_profile, request, result, row_guide };
     }
@@ -735,7 +739,7 @@ mod tests {
             p.source = "no network endpoint".into();
             let Fetched::Preview(result) = metadata(
                 &OffFrame::for_test(), &p, &row, 1,
-                Query::CurrentNext { now: 0 }, None, &AtomicBool::new(false),
+                Query::CurrentNext { now: 0 }, None, None, &AtomicBool::new(false),
             ) else { panic!("expected library metadata"); };
             let data = result.unwrap();
             assert_eq!(data["description"], row.description);

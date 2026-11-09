@@ -428,7 +428,16 @@ fn classic_footer_badges_match_the_pages_actual_remote_handlers() {
         let hints = crate::ott::navigation::classic_footer_keys(&screen.snapshot, &controls, &screen.keys);
         let color = |tone| hints.iter().find(|(_, keys)| keys.iter().any(|key| key.tone == tone)).map(|(id, _)| *id);
         assert_eq!(color(FooterTone::Blue), Some(screen.keys["nav:categories"]));
-        assert!(hints.iter().all(|(_, keys)| keys.iter().all(|key| key.text.is_empty())), "no unsupported Info, digit or transport aliases");
+        assert!(hints.iter().all(|(id, keys)| keys.iter().all(|key| key.text.is_empty()
+            || (*id == screen.keys["nav:description"] && key.text == "OK")
+            || (*id == screen.keys["nav:categories"] && key.text == "▶Ⅱ"
+                && matches!(page.split(':').next(), Some("channels" | "favorites"))))),
+            "only implemented Description OK and channel-list Category Play/Pause shortcuts are advertised");
+        if page != "torrent-files" {
+            assert_eq!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
+                raw_mode(consts::WCODE_PLAYPAUSE, Edge::Down))), vec![OttAction::ShowCategories],
+                "the advertised Category transport badge must reach the real handler");
+        }
         let red = mode_actions(&step_mode(&mut screen, UiMode::Classic, raw_mode(consts::WCODE_RED, Edge::Down)));
         let yellow = mode_actions(&step_mode(&mut screen, UiMode::Classic, raw_mode(consts::WCODE_YELLOW, Edge::Down)));
         if page == "torrent-files" {
@@ -450,6 +459,11 @@ fn classic_footer_badges_match_the_pages_actual_remote_handlers() {
         }
         assert_eq!(mode_actions(&step_mode(&mut screen, UiMode::Classic, raw_mode(consts::WCODE_BLUE, Edge::Down))),
             vec![OttAction::ShowCategories]);
+        if hints.iter().any(|(id, keys)| *id == screen.keys["nav:description"] && keys.iter().any(|key| key.text == "OK")) {
+            let description = screen.keys["nav:description"];
+            step_mode(&mut screen, UiMode::Classic, ScreenEvent::Activate(description));
+            assert!(screen.reading, "the advertised Description button opens its actual reader");
+        }
     }
 }
 

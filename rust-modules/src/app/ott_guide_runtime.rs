@@ -22,6 +22,7 @@ pub(super) struct State {
     entry: CatalogEntry,
     selection_id: String,
     query: Query,
+    records_progress: Option<records::Progress>,
     result: Option<ResultSet>,
     order: OttGuideOrder,
     programme_order: Vec<usize>,
@@ -33,6 +34,7 @@ pub(super) struct State {
 pub(super) fn is_live(profile: &ProviderProfile, entry: &CatalogEntry) -> bool {
     match (&profile.kind, &entry.media) {
         (ProviderKind::M3u, MediaLocator::Http { .. }) => entry.duration_ms.is_none(),
+        (ProviderKind::Edem | ProviderKind::Operator(_), MediaLocator::Http { .. }) => entry.live.is_some() && entry.provider_id_field.is_none(),
         (ProviderKind::Stalker, MediaLocator::StalkerApi { .. }) => true,
         (ProviderKind::Stalker, MediaLocator::Stalker { stream_kind, .. }) => stream_kind == "itv",
         (ProviderKind::Xtream, MediaLocator::Xtream { stream_kind, .. }) => stream_kind == "live",
@@ -41,9 +43,11 @@ pub(super) fn is_live(profile: &ProviderProfile, entry: &CatalogEntry) -> bool {
 }
 
 fn supports_day(profile: &ProviderProfile, entry: &CatalogEntry) -> bool {
+    if matches!((&profile.kind, &entry.media), (ProviderKind::Xtream, MediaLocator::Xtream { stream_kind, .. }) if stream_kind == "live")
+        || matches!((&profile.kind, &entry.media), (ProviderKind::Stalker, MediaLocator::Stalker { stream_kind, .. }) if stream_kind == "itv") { return true; }
     matches!(
         (&profile.kind, &entry.media),
-        (ProviderKind::M3u, MediaLocator::Http { .. })
+        (ProviderKind::M3u | ProviderKind::Edem | ProviderKind::Operator(_), MediaLocator::Http { .. })
             | (ProviderKind::Stalker, MediaLocator::StalkerApi { .. })
     )
 }
@@ -157,17 +161,22 @@ fn enqueue(runtime: &mut Runtime, mut state: State, query: Query) -> Result<(), 
     } else {
         MetadataSelection::Entry(state.entry.clone())
     };
+    let preserve=state.query==query && state.records_progress.is_some();
+    state.query = query;
+    if !preserve { state.records_progress=if records::lazy(&state.profile) {records::Progress::new(query)} else {None}; }
+    let wire_query=if let Some(progress)=state.records_progress.as_mut() {
+        let next=progress.next().ok_or("All archive days have been loaded")?;
+        progress.pending=Some(next); next
+    } else {query};
+    if !preserve { state.result=None; state.programme_order.clear(); }
     runtime.metadata_cancel.store(true, Ordering::Release);
     runtime.metadata_cancel = Arc::new(AtomicBool::new(false));
     runtime.metadata_generation = generation;
     state.request_generation = generation;
-    state.query = query;
-    state.result = None;
-    state.programme_order.clear();
     state.error = None;
     state.programme = None;
     runtime.metadata_target = Some((state.profile.id.clone(), state.selection_id.clone()));
-    runtime.metadata_query = Some(query);
+    runtime.metadata_query = Some(wire_query);
     runtime.metadata_local_selection = None;
     runtime.metadata_playback_identity = runtime
         .playing
@@ -182,6 +191,7 @@ fn enqueue(runtime: &mut Runtime, mut state: State, query: Query) -> Result<(), 
     if runtime.metadata_query.is_none() {
         if let Some(state) = runtime.guide.as_mut() {
             state.error = Some("Could not start guide request");
+            if let Some(progress)=state.records_progress.as_mut(){progress.pending=None;}
         }
     }
     runtime.changed();
@@ -230,6 +240,7 @@ fn open_mode(runtime: &mut Runtime, id: &str, records: bool) -> Result<(), &'sta
         entry,
         selection_id: id.into(),
         query,
+        records_progress: None,
         result: None,
         order: OttGuideOrder::Chronological,
         programme_order: Vec::new(),
@@ -254,7 +265,7 @@ pub(super) fn accept(runtime: &mut Runtime, event: &super::super::ott_metadata::
     if !matches!(runtime.page, "guide" | "guide-programme")
         || !source_current(runtime, state)
         || state.request_generation != event.generation
-        || state.query != event.request.query
+        || state.records_progress.as_ref().and_then(|p|p.pending).unwrap_or(state.query) != event.request.query
         || !event.is_current(
             runtime.metadata_generation,
             runtime.metadata_target.as_ref(),
@@ -277,7 +288,14 @@ pub(super) fn accept(runtime: &mut Runtime, event: &super::super::ott_metadata::
     }
     match &event.result {
         Ok(result) => {
-            match records::projection(result, state.order) {
+            let merged=if let Some(progress)=state.records_progress.as_mut() {
+                progress.merge(state.result.as_ref(),result)
+            } else { Ok(result.clone()) };
+            let result=match merged { Ok(result)=>result,Err(error)=> {
+                if let Some(progress)=state.records_progress.as_mut(){progress.pending=None;}
+                state.error=Some(error); runtime.changed(); return is_day;
+            }};
+            match records::projection(&result, state.order) {
                 Ok(indices) => {
                     state.programme_order = indices;
                     state.result = Some(result.clone());
@@ -291,8 +309,8 @@ pub(super) fn accept(runtime: &mut Runtime, event: &super::super::ott_metadata::
             }
         }
         Err(error) => {
-            state.result = None;
-            state.programme_order.clear();
+            if let Some(progress)=state.records_progress.as_mut() {progress.pending=None;}
+            else {state.result=None;state.programme_order.clear();}
             state.error = Some(error);
         }
     }
@@ -316,15 +334,15 @@ pub(super) fn accept_failure(
         || state.request_generation != event.generation
         || runtime.metadata_generation != event.generation
         || runtime.metadata_cancel.load(Ordering::Acquire)
-        || runtime.metadata_query.as_ref() != Some(&state.query)
+        || runtime.metadata_query != Some(state.records_progress.as_ref().and_then(|p|p.pending).unwrap_or(state.query))
         || runtime.metadata_target.as_ref()
             != Some(&(event.profile_id.clone(), event.entry_id.clone()))
     {
         return false;
     }
     let state = runtime.guide.as_mut().expect("validated guide");
-    state.result = None;
-    state.programme_order.clear();
+    if let Some(progress)=state.records_progress.as_mut(){progress.pending=None;}
+    else {state.result=None;state.programme_order.clear();}
     state.error = Some(error);
     runtime.changed();
     true
@@ -337,8 +355,8 @@ pub(super) fn start_failed(runtime: &mut Runtime) {
         .filter(|state| state.request_generation == runtime.metadata_generation)
     {
         state.error = Some("Could not start guide request");
-        state.result = None;
-        state.programme_order.clear();
+        if let Some(progress)=state.records_progress.as_mut(){progress.pending=None;}
+        else {state.result=None;state.programme_order.clear();}
         runtime.changed();
     }
 }
@@ -372,7 +390,12 @@ pub(super) fn action(
         } => (|| {
             let state = checked(runtime, *generation)?;
             if records::is_records(state.query) {
-                return Err("Records use the complete archive window");
+                let progress=state.records_progress.as_ref().ok_or("Records use the complete archive window")?;
+                if progress.pending.is_some() {return Err("An archive page is already loading");}
+                let Some(Query::Day {start,..})=progress.next() else {return Err("All archive days have been loaded");};
+                if start!=*day_start_s {return Err("Archive page cursor changed");}
+                let state=state.clone();let query=state.query;
+                return enqueue(runtime,state,query);
             }
             if !supports_day(&state.profile, &state.entry) {
                 return Err("This source only supplies a short guide");
@@ -498,7 +521,8 @@ pub(super) fn action(
             } else {
                 refreshed_query(state.query, now)
             };
-            let state = runtime.guide.as_ref().expect("validated guide").clone();
+            let mut state = runtime.guide.as_ref().expect("validated guide").clone();
+            state.records_progress=None;
             enqueue(runtime, state, query)
         })(),
         _ => {
@@ -679,6 +703,14 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
                     .map(|&i| programme_row(runtime, state, &result.programmes[i], reminder_source.as_deref())),
             );
         }
+        if let Some(progress)=&state.records_progress {
+            if progress.pending.is_none() {
+                if let Some(Query::Day {start,..})=progress.next() {
+                    rows.push(row("records:more".into(),msg::ott_records_more().into(),String::new(),
+                        OttAction::GuideDay {generation,day_start_s:start},false));
+                }
+            }
+        }
     }
     if !current {
         for row in &mut rows {
@@ -691,12 +723,18 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         error.into()
     } else if state.result.is_none() {
         msg::ott_guide_loading().into()
+    } else if state.records_progress.as_ref().is_some_and(|p|p.pending.is_some()) {
+        msg::ott_guide_loading().into()
+    } else if state.records_progress.as_ref().is_some_and(|p|p.incomplete()) {
+        msg::ott_records_partial().into()
     } else if state.programme_order.is_empty() {
         if records::is_records(state.query) {
             msg::ott_records_empty().into()
         } else {
             msg::ott_guide_empty().into()
         }
+    } else if state.records_progress.is_some() {
+        String::new()
     } else if !supports_day(&state.profile, &state.entry) {
         msg::ott_guide_short().into()
     } else {
@@ -709,7 +747,8 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         Query::CurrentNext { .. } => msg::ott_guide_current_next().into(),
         Query::Records { .. } => String::new(),
     };
-    Some(OttView { shelf_context: None, shelves: Vec::new(), status_working: current && state.error.is_none() && state.result.is_none(), classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None,
+    Some(OttView { pending_play: None, shelf_context: None, shelves: Vec::new(), status_working: current && state.error.is_none() && (state.result.is_none()
+            || state.records_progress.as_ref().is_some_and(|progress|progress.pending.is_some())), classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None,
         catalog_progress: None,
         search: None,
         page_id: format!("{}:{}", runtime.page, generation),
@@ -735,3 +774,17 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
 #[cfg(test)]
 #[path = "ott_guide_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod edem_guide_admission_tests {
+    use super::*;
+    #[test]
+    fn edem_direct_portal_movie_without_duration_has_no_live_guide() {
+        let profile=ProviderProfile{id:"edem-1".into(),name:"Edem".into(),kind:ProviderKind::Edem,source:r#"{"key":"test_key"}"#.into(),source_alias:String::new(),enabled:true};
+        let template=plx_data::ott::edem::Config::parse(&profile.source).unwrap().template_profile(&profile);
+        let mut row=plx_data::ott::parse_m3u("#EXTM3U\n#EXTINF:-1,Movie\nhttps://movies.invalid/video.mp4\n",&template).unwrap().entries.remove(0);
+        assert!(is_live(&profile,&row));
+        row.live=None;row.duration_ms=None;row.provider_id_field=Some("id".into());
+        assert!(!is_live(&profile,&row));
+    }
+}

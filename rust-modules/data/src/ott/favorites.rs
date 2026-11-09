@@ -129,7 +129,7 @@ impl Favorite {
                         && relative_path.as_bytes()[0].is_ascii_alphabetic())
                     && relative_path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
             }
-            ("vportal" | "m3u", Locator::VPortal { id_field, id }) => {
+            ("vportal" | "m3u" | "edem", Locator::VPortal { id_field, id }) => {
                 ["id", "fid", "stream_id", "itemId", "media_id", "episode_id"].contains(&id_field.as_str())
                     && identifier(id, 256)
             }

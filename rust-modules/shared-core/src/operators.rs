@@ -689,3 +689,35 @@ mod guide_tests {
         );
     }
 }
+
+/// Canonical provider catch-up transform over a source-bound live identity.
+/// Credentials and the resulting URL remain private to the playback owner.
+#[allow(clippy::too_many_arguments)]
+pub fn archive_url(mode: &str, live_url: &str, first: &str, second: &str,
+    start: i64, end: i64, now: i64, streammode: u8) -> Result<String, Error> {
+    if !matches!(mode,"utc"|"auto-utc-now"|"only4"|"itv"|"club"|"archive"|"antifriz"|"kb")
+        || start < 0 || end <= start || now < end || now > 9_007_199_254_740_991 || streammode > 9
+        || [live_url,first,second].iter().any(|s|s.len()>URL_BYTES || s.chars().any(char::is_control)) {
+        return Err(Error::InvalidInput);
+    }
+    url(with_planner(|planner| planner.operator_call("providerArchiveUrl",
+        json!([mode,live_url,first,second,start,end,now,false,streammode])))?)
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    #[test]
+    fn archive_urls_follow_core_modes_and_refuse_unknown_policy() {
+        assert_eq!(archive_url("utc","https://fixture.invalid/live","","",1000,1100,1500,0).unwrap(),
+            "https://fixture.invalid/live?utc=1000");
+        assert_eq!(archive_url("auto-utc-now","https://fixture.invalid/live","","",1000,1100,1500,0).unwrap(),
+            "https://fixture.invalid/live?utc=1000&lutc=1500");
+        assert!(archive_url("unknown","https://fixture.invalid/live","","",1000,1100,1500,0).is_err());
+        assert!(archive_url("utc","https://fixture.invalid/live","","",1000,1600,1500,0).is_err());
+    }
+}
+
+#[path = "operators_guide.rs"]
+mod guide_flow;
+pub use guide_flow::{guide_plan, GuidePlan, GuideReply};

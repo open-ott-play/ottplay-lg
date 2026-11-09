@@ -67,6 +67,8 @@ SAME(LIBAVUTIL_VERSION_MAJOR, 61, "bundled libavutil is not 61");
 /* --- AVStream: read by offset. NB index is +4, not +0: FFmpeg 5.0 put av_class first. --- */
 SAME32(offsetof(AVStream, index), 4, "OFF_STREAM_INDEX != 4");
 SAME64(offsetof(AVStream, index), 8, "OFF_STREAM_INDEX != 4 [host]");
+SAME32(offsetof(AVStream, id), 8, "OFF_STREAM_ID != 8");
+SAME64(offsetof(AVStream, id), 12, "OFF_STREAM_ID != 12 [host]");
 SAME32(offsetof(AVStream, codecpar), 12, "OFF_STREAM_CODECPAR != 12");
 SAME64(offsetof(AVStream, codecpar), 16, "OFF_STREAM_CODECPAR != 12 [host]");
 SAME32(offsetof(AVStream, time_base), 20, "OFF_STREAM_TIME_BASE != 20");

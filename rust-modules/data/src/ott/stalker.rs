@@ -479,9 +479,15 @@ pub fn rows(
                 .parse::<u64>()
                 .ok()
                 .and_then(|n| n.checked_mul(60_000)),
-            provider_id: Some(id),
+            provider_id: Some(id.clone()),
             provider_id_field: Some("id".into()),
-            live: None,
+            live: (kind == "itv").then(|| super::guide::ChannelMetadata {
+                tvg_name: String::new(), guide_id: Some(id.clone()), guide_feed: String::new(), guide_shift_seconds: 0,
+                catchup: scalar(&row["tv_archive_duration"]).parse::<u64>().ok()
+                    .filter(|hours| (1..=8784).contains(hours))
+                    .map(|hours| super::archive::CatchupSource { mode: super::archive::CatchupMode::Provider,
+                        source: "stalker".into(), retention_seconds: hours * 3600, correction_seconds: 0 }),
+            }),
         });
     }
     Ok((result, folders))

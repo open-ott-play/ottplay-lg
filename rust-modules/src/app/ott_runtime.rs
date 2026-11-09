@@ -11,6 +11,8 @@ mod classic_bookmark;
 mod classic_clock;
 #[path = "ott_classic_navigation.rs"]
 mod classic_navigation;
+#[path = "ott_classic_play_handoff.rs"]
+mod classic_play_handoff;
 #[path = "ott_classic_source.rs"]
 mod classic_source;
 #[path = "ott_exit_confirmation.rs"]
@@ -32,6 +34,8 @@ mod archive_programme;
 mod commands;
 #[path = "ott_guide_projection.rs"]
 mod guide_projection;
+#[path = "ott_hosted_epg_settings.rs"]
+mod hosted_epg_settings;
 #[path = "ott_live_hud.rs"]
 mod live_hud;
 #[path = "ott_live_label.rs"]
@@ -545,7 +549,10 @@ pub(super) struct Runtime {
     desktop_input: desktop_input::State,
     numeric_input: numeric_input::State,
     sleep_timer: sleep_timer::State,
-    organization: organization_runtime::State,
+    // These long-lived opaque owners hold large optional receipt/source payloads.
+    // Heap ownership keeps moving Runtime through input dispatch bounded; the
+    // state, lifetime and authority rules remain owned by their existing modules.
+    organization: Box<organization_runtime::State>,
     parental: parental_runtime::State,
     guide: Option<guide_ui::State>,
     search: search::Search,
@@ -577,6 +584,7 @@ pub(super) struct Runtime {
     catalog_diagnostics: catalog_diagnostics::State,
     preplay: preplay::State,
     playback_failure: playback_failure::State,
+    explicit_step: playback_step::State,
     native_playback_capture: native_playback_diagnostics::Capture,
     page: &'static str,
     provider: ProviderKind,
@@ -653,7 +661,7 @@ pub(super) struct Runtime {
     catalog_next: Option<ProviderProfile>,
     entropy: Option<[u8; 16]>,
     uuid_counter: u64,
-    command_receipts: commands::Receipts,
+    command_receipts: Box<commands::Receipts>,
     kiosk_capture: kiosk_capture::Capture,
     verified_imports: Vec<super::ott_import::VerifiedSource>,
     managed: managed::State,
@@ -661,6 +669,7 @@ pub(super) struct Runtime {
     continuity: continuity::Continuity,
     continuity_retry_log: Option<continuity_diagnostics::Pending>,
     play_target: Option<PlaybackRequest>,
+    classic_play_handoff: classic_play_handoff::State,
     // Exact source captured at resolver admission. Catalogue generation and
     // selection IDs alone do not identify a pending mixed-Favorites request.
     play_profile: Option<(u64, ProviderProfile)>,
@@ -675,7 +684,7 @@ pub(super) struct Runtime {
     last_checkpoint_ms: u64,
     persistence_uncertain: bool,
     active_lease: Option<HeldLease>,
-    quality: vportal_quality::State,
+    quality: Box<vportal_quality::State>,
     plex_refresh_pending: bool,
     plex_refresh_requested: bool,
     companion: super::ott_companion::Supervisor,
@@ -684,6 +693,7 @@ pub(super) struct Runtime {
     metadata_rx: Receiver<super::ott_metadata::Event>,
     metadata_cancel: Arc<AtomicBool>,
     metadata_generation: u64,
+    hosted_epg_config: Option<plx_data::ott::hosted_epg::Config>,
     metadata_target: Option<(String, String)>,
     metadata_query: Option<plx_data::ott::guide::Query>,
     metadata_guide: Option<selected_guide::Retained>,
@@ -700,7 +710,7 @@ pub(super) struct Runtime {
     local_assets: local_assets::State,
     favorite_preview: Option<(String, CatalogEntry)>,
     metadata_refresh_ms: u64,
-    source_lifecycle: work_lifecycle::State,
+    source_lifecycle: Box<work_lifecycle::State>,
 }
 
 #[path = "ott_archive_settings.rs"]
@@ -1025,7 +1035,7 @@ impl Runtime {
             numeric_input: numeric_input::State::default(),
             sleep_timer: sleep_timer::State::default(),
             guide: None,
-            organization: organization_runtime::State::default(),
+            organization: Box::default(),
             search: search::Search::default(),
             parental: parental_runtime::State::default(),
             saved: Saved::default(),
@@ -1049,6 +1059,7 @@ impl Runtime {
             catalog_diagnostics: Default::default(),
             preplay: Default::default(),
             playback_failure: Default::default(),
+            explicit_step: Default::default(),
             native_playback_capture: Default::default(),
             page: "providers",
             provider: ProviderKind::M3u,
@@ -1122,7 +1133,7 @@ impl Runtime {
             catalog_next: None,
             entropy: None,
             uuid_counter: 0,
-            command_receipts: commands::Receipts::default(),
+            command_receipts: Box::default(),
             kiosk_capture: kiosk_capture::Capture::default(),
             verified_imports: Vec::new(),
             managed: managed::State::default(),
@@ -1130,6 +1141,7 @@ impl Runtime {
             continuity: continuity::Continuity::new(0, None),
             continuity_retry_log: None,
             play_target: None,
+            classic_play_handoff: Default::default(),
             play_profile: None,
             restore_play_generation: None,
             resume_floor: None,
@@ -1147,6 +1159,7 @@ impl Runtime {
             metadata_rx,
             metadata_cancel: Arc::new(AtomicBool::new(false)),
             metadata_generation: 0,
+            hosted_epg_config: None,
             metadata_target: None,
             metadata_query: None,
             metadata_guide: None,
@@ -1163,7 +1176,7 @@ impl Runtime {
             local_assets: local_assets::State::default(),
             favorite_preview: None,
             metadata_refresh_ms: 0,
-            source_lifecycle: work_lifecycle::State::default(),
+            source_lifecycle: Box::default(),
         }
     }
     /// Calendar time supplied by the frame runner, separate from deadline time.
@@ -1351,7 +1364,9 @@ impl Runtime {
                     Some("local" | "offline") => ProviderKind::Local,
                     Some("plex") => ProviderKind::Plex,
                     Some("xtream") => ProviderKind::Xtream,
+                    Some("edem" | "ilook" | "ilooktv") => ProviderKind::Edem,
                     Some("stalker") => ProviderKind::Stalker,
+                    Some(id) => ProviderKind::from_id(id).unwrap_or(ProviderKind::M3u),
                     _ => ProviderKind::M3u,
                 }
             });
@@ -2577,7 +2592,7 @@ impl Runtime {
         }
         if !matches!(
             profile.kind,
-            ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker
+            ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)
         ) {
             return;
         }
@@ -2770,6 +2785,7 @@ impl Runtime {
                     self.metadata_generation,
                     query,
                     row_request,
+                    self.hosted_epg_config.clone(),
                     self.metadata_cancel.clone(),
                     self.metadata_tx.clone(),
                     self.metadata_done.clone(),
@@ -2815,6 +2831,7 @@ impl Runtime {
                         local_proof,
                         self.metadata_generation,
                         query,
+                        self.hosted_epg_config.clone(),
                         self.metadata_cancel.clone(),
                         self.metadata_tx.clone(),
                         self.metadata_done.clone(),
@@ -2911,6 +2928,10 @@ impl Runtime {
         plx_base::diag::spans::span("ott_view", || {
             let mut view = menu_settings::view(self)
                 .unwrap_or_else(|| settings_groups::view(self, self.raw_view()));
+            view.pending_play = classic_play_handoff::selected(self);
+            if view.pending_play.is_some() {
+                view.status = "Opening video…".into();
+            }
             view.classic_preferences = self.classic_preferences();
             view.volume_available = self.playing.is_some();
             ui_text::view(view)
@@ -3018,14 +3039,7 @@ impl Runtime {
                     fields
                 })
                 .unwrap_or_default(),
-            "providers" => [
-                ProviderKind::M3u,
-                ProviderKind::Xtream,
-                ProviderKind::Stalker,
-                ProviderKind::VPortal,
-                ProviderKind::Local,
-                ProviderKind::Plex,
-            ]
+            "providers" => ProviderKind::all()
             .into_iter()
             .map(|kind| {
                 let id = kind.canonical_id().to_owned();
@@ -3037,6 +3051,8 @@ impl Runtime {
                         ProviderKind::Local => "Local videos",
                         ProviderKind::Plex => "Plex",
                         ProviderKind::Xtream => "Xtream",
+                        ProviderKind::Edem => "Edem / iLook TV",
+                        ProviderKind::Operator(id) => id.name(),
                         ProviderKind::Stalker => "Stalker",
                     }
                     .into(),
@@ -3188,6 +3204,7 @@ impl Runtime {
                 ("profile.name", "Profile name"),
                 ("profile.source", "Source address or folder"),
                 ("profile.history_hours", "Archive hours"),
+                ("remote.device_id", "Device ID"),
                 ("remote.address", "Remote control server"),
                 ("remote.find", "Find command server"),
                 ("uiFontScale", "Interface text scale (%)"),
@@ -3229,6 +3246,8 @@ impl Runtime {
                         format!("{}%", self.volume_step())
                     } else if id == "infoTimeout" {
                         format!("{} s", self.info_timeout().seconds())
+                    } else if id == "remote.device_id" {
+                        self.remote.persisted_device_id().unwrap_or("Identity loading or unavailable").into()
                     } else if id == "remote.find" {
                         self.remote_find_status().unwrap_or_default()
                     } else if id == "remote.address"
@@ -3253,6 +3272,9 @@ impl Runtime {
                     OttAction::EditSetting(id.into()),
                     false,
                 );
+                if id == "remote.device_id" {
+                    item.enabled = false;
+                }
                 if id == "interfaceMode" {
                     item.enabled = public_preferences::write_refusal(self).is_none();
                 }
@@ -3524,6 +3546,7 @@ impl Runtime {
             shelf_context,
             shelves,
             status_working: false,
+            pending_play: None,
             classic_preferences: self.classic_preferences(),
             volume_available: self.playing.is_some(),
             category_label: self.category_label(),
@@ -3833,15 +3856,10 @@ impl Runtime {
         }
     }
 
-    fn recover_plex_profiles(&mut self, app: &mut App, explicit: bool) -> Result<(), &'static str> {
-        if !explicit && managed::browse_active(self, app) {
-            return Ok(());
-        }
-        use super::ott_plex_setup::{self, PlexSetupPlan, PlexSetupServer};
-        self.profile_focus = None;
-        self.plex_omitted_servers = 0;
-        // The registry is a source snapshot, not evidence of current connectivity.
-        // Apply its existing credential policy without probing or authorizing URLs.
+    /// Read the same credential-eligible registry snapshot for UI and remote setup.
+    /// This returns profile metadata only; no token, origin or authorization is changed.
+    fn native_plex_setup_servers(&self) -> Vec<super::ott_plex_setup::PlexSetupServer> {
+        use super::ott_plex_setup::PlexSetupServer;
         let servers: Vec<_> = plx_plex::plex::server_ids()
             .into_iter()
             .filter_map(|sid| {
@@ -3864,6 +3882,19 @@ impl Runtime {
                 })
             })
             .collect();
+        servers
+    }
+
+    fn recover_plex_profiles(&mut self, app: &mut App, explicit: bool) -> Result<(), &'static str> {
+        if !explicit && managed::browse_active(self, app) {
+            return Ok(());
+        }
+        use super::ott_plex_setup::{self, PlexSetupPlan};
+        self.profile_focus = None;
+        self.plex_omitted_servers = 0;
+        // The registry is a source snapshot, not evidence of current connectivity.
+        // Apply its existing credential policy without probing or authorizing URLs.
+        let servers = self.native_plex_setup_servers();
         if !explicit
             && self.saved.profiles.profiles.iter().any(|profile| {
                 profile.enabled
@@ -4007,6 +4038,8 @@ impl Runtime {
             .map(|(_, profile)| profile)
     }
     fn cancel_play_request(&mut self) {
+        self.classic_play_handoff = Default::default();
+        self.explicit_step.clear();
         preplay::cancel(self, preplay::CancelReason::Cancelled);
         vportal_quality::cancel(self);
         self.play_attachment = None;
@@ -4276,11 +4309,15 @@ impl Runtime {
             };
         if let Some(favorite) = &favorite {
             self.favorite_permit(&profile, favorite)?;
+            request.advance_on_failure = false;
         }
         if request.continuation.is_some() && request.local_selection != binding {
             return Err("Local source changed before continuation");
         }
         request.local_selection = binding;
+        if entry.as_ref().is_some_and(|entry| guide_ui::is_live(&profile, entry)) {
+            request.advance_on_failure = false;
+        }
         if request.transient_owner.is_none() {
             request.transient_owner = self
                 .transient
@@ -4620,7 +4657,9 @@ impl Runtime {
                             None,
                         )
                     } else {
-                        let resolved = if matches!(&entry.media, MediaLocator::VPortal { .. })
+                        let resolved = if let Some(intent) = archive.as_ref().filter(|intent| intent.provider_route()) {
+                            archive_play::resolve_provider(intent, &profile, &entry, worker, &cancel)?
+                        } else if matches!(&entry.media, MediaLocator::VPortal { .. })
                             && archive.is_none()
                         {
                             let choices = ott_catalog::vportal_choices(
@@ -4639,10 +4678,10 @@ impl Runtime {
                             ott_catalog::resolve_typed(worker, &profile, &entry, &cancel)?
                         };
                         let resolved = match &archive {
-                            Some(archive) => {
-                                archive_play::resolved(archive, &profile, &entry, resolved, worker)?
+                            Some(archive) if !archive.provider_route() => {
+                                archive_play::resolved(archive, &profile, &entry, resolved, worker, &cancel)?
                             }
-                            None => resolved,
+                            _ => resolved,
                         };
                         (
                             plx_media::ff::ExternalSource::Http(resolved.url),
@@ -5261,6 +5300,7 @@ fn tick_with_start(
                     ),
                     _ => unreachable!("matched settings write completion"),
                 };
+                let provider_settings_activation = commands::provider_settings_before_saved(&mut runtime, invocation.as_ref());
                 profile_rename::settle(&mut runtime, result.as_ref().ok());
                 let profile_saved_only =
                     runtime.finish_profile_edit(result.as_ref().ok(), invocation.as_ref(), reload);
@@ -5291,7 +5331,7 @@ fn tick_with_start(
                     .is_some_and(|pending| pending.can_publish(app));
                 let mut subtitle_outcome = TrackCommitOutcome::Saved;
                 let restore_allowed =
-                    may_navigate && runtime.save_playback_epoch == runtime.playback_epoch;
+                    may_navigate && runtime.save_playback_epoch == runtime.playback_epoch && provider_settings_activation;
                 let usb_install_pending = runtime.usb_install_pending();
                 let usb_activation_ready = result.as_ref().is_ok_and(|candidate| {
                     owner_current
@@ -5404,6 +5444,7 @@ fn tick_with_start(
                                 }
                             }
                             if !profile_saved_only
+                                && provider_settings_activation
                                 && (reload || source_changed)
                                 && (!usb_install_pending || usb_activation_ready)
                             {
@@ -5529,6 +5570,8 @@ fn tick_with_start(
                     } else {
                         response
                     };
+                    let response = commands::provider_settings_settled(&mut runtime, &invocation,
+                        setup_persisted, kiosk_settings_applied).unwrap_or(response);
                     runtime.remote.complete(invocation, response);
                 }
                 if let Some(pending) = subtitle_save {
@@ -5596,6 +5639,7 @@ fn tick_with_start(
                                     commands::KioskSettlement::Unknown,
                                 )
                             })
+                            .or_else(|| commands::provider_settings_uncertain(&mut runtime, &invocation))
                             .or_else(|| commands::settings_failure(&invocation, "storage_failed"))
                             .unwrap_or_else(|| rejected(&runtime.status));
                     runtime.remote.complete(invocation, response);
@@ -5844,6 +5888,11 @@ fn tick_with_start(
                     })
                 };
                 let response_failed = response.is_err();
+                classic_play_handoff::completed(&mut runtime, generation, !response_failed);
+                let refused_step = response_failed && !resolved && !expired && !superseded
+                    && playback_allowed(app) && commands::pending_catalog_current(&runtime)
+                    && runtime.pending_attachment_current() && transient::target_current(&runtime);
+                playback_step::resolved(&mut runtime, app, generation, refused_step);
                 // Observe this attempt before failure policy can retire it or queue a successor.
                 if response_failed {
                     preplay::failed(
@@ -6421,6 +6470,7 @@ fn tick_with_start(
         .is_some_and(|owner| runtime.reply == Some(owner));
     if runtime.reply != current_ott && !retain_language {
         runtime.reply = None;
+        runtime.classic_play_handoff = Default::default();
         runtime.exit_confirmation.retire();
         runtime.cancel_setup();
         settings_groups::cancel(&mut runtime);
@@ -6689,6 +6739,7 @@ fn apply_ui_action(
             }
             if explicit_play {
                 kiosk_capture::explicit_admitted(runtime);
+                classic_play_handoff::begin(runtime, app);
             }
         }
         Err(error) => {
@@ -6768,6 +6819,9 @@ fn handle_action(
         OttAction::Back if runtime.page == "m3u-media-links" => OttAction::ShowProfiles,
         action => action,
     };
+    if let Some(result) = classic_play_handoff::back(runtime, app, &selected) {
+        return result;
+    }
     // This inner picker owns Back even when the catalogue is a Player modal.
     // It still passes the ordinary policy gates before retiring its resources.
     if !(runtime.page == "vportal-quality" && matches!(&selected, OttAction::Back)) {
@@ -6926,8 +6980,9 @@ fn handle_action(
                 "local" | "offline" => ProviderKind::Local,
                 "plex" => ProviderKind::Plex,
                 "xtream" => ProviderKind::Xtream,
+                "edem" | "ilook" | "ilooktv" => ProviderKind::Edem,
                 "stalker" => ProviderKind::Stalker,
-                _ => return Err("Unknown provider"),
+                id => ProviderKind::from_id(id).ok_or("Unknown provider")?,
             };
             runtime.cancel_setup();
             runtime.page = "profiles";
@@ -7049,16 +7104,9 @@ fn handle_action(
                 }
                 let (mut request, profile, entry, favorite) =
                     runtime.prepare_play_request(PlaybackRequest::ordinary(&id, 0))?;
-                // A failed live channel is an error for the selected channel, not an EOF in a
-                // linear video queue. In particular, advancing here makes a bad URL/decoder
-                // look like the remote changed channels by itself. Keep the existing failure
-                // continuation for VOD rows, but let live M3U/Xtream/Stalker rows stay selected
-                // and expose their playback error for an explicit retry or channel change.
-                let live_channel = entry
-                    .as_ref()
-                    .is_some_and(|entry| guide_ui::is_live(&profile, entry));
-                request.advance_on_failure =
-                    !live_channel && transient::plex_remote::choice(runtime, &id).is_none();
+                // Explicit selection owns this exact row. A failed admission is
+                // not EOF and must not silently start another channel or film.
+                request.advance_on_failure = false;
                 runtime.play_prepared_request_with_quality_policy(
                     app,
                     (request, profile, entry, favorite),
@@ -7114,6 +7162,9 @@ fn handle_action(
         OttAction::Back => {
             if runtime.usb_browsing() {
                 return runtime.usb_browser_back(app);
+            }
+            if classic_play_handoff::close_catalog(runtime, app) {
+                return Ok(());
             }
             // Categories is another view of the same catalogue. Closing it must
             // retain progressive loading, the selected source and its playback.
@@ -7249,7 +7300,7 @@ fn handle_action(
                     runtime.edit_profile = Some(runtime.new_profile_draft()?);
                     if matches!(
                         runtime.provider,
-                        ProviderKind::Xtream | ProviderKind::Stalker
+                        ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)
                     ) {
                         let profile = runtime.edit_profile.take().expect("new profile draft");
                         return runtime.open_setup(profile, true);
@@ -7283,7 +7334,7 @@ fn handle_action(
                     runtime.edit_profile = runtime.provider_profile().cloned();
                     runtime.edit_profile_original = runtime.edit_profile.clone();
                     if runtime.edit_profile.as_ref().is_some_and(|profile| {
-                        matches!(profile.kind, ProviderKind::Xtream | ProviderKind::Stalker)
+                        matches!(profile.kind, ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_))
                     }) {
                         let profile = runtime.edit_profile.take().expect("selected profile draft");
                         return runtime.open_setup(profile, false);
@@ -7550,6 +7601,25 @@ pub(super) fn finish_catalog_playback(app: &mut App) -> bool {
         app.ott = Some(runtime);
         return true;
     }
+    if runtime.playing.as_ref().is_some_and(|playing|
+        playing.archive.is_none() && guide_ui::is_live(&playing.profile, &playing.entry))
+    {
+        // A live source has no successful final episode. Retain its exact row
+        // and retry through the existing bounded, generation-fenced runner.
+        let accepted = runtime.continuity.accepts_end(runtime.generation, &current);
+        let decision = runtime.continuity.live_disconnected(runtime.generation, &current, runtime.now_ms());
+        if accepted {
+            runtime.release_active_lease();
+            plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+            runtime.status = if runtime.continuity.pending_retry().is_some() {
+                "Live stream ended; retrying the same channel"
+            } else { "Live stream ended" }.into();
+            runtime.apply_continuity(decision);
+            runtime.changed();
+        }
+        app.ott = Some(runtime);
+        return true;
+    }
     if runtime
         .playing
         .as_ref()
@@ -7732,10 +7802,16 @@ fn start_resolved_with<R: playback::PlaybackResources>(
         runtime.retire_result(Ok((entry, source)));
         return Err(error);
     }
-    let request = runtime
+    let mut request = runtime
         .play_target
         .clone()
         .unwrap_or_else(|| PlaybackRequest::ordinary(&entry.id, 0));
+    if guide_ui::is_live(&profile, &entry) {
+        request.advance_on_failure = false;
+        if let Some(target) = runtime.play_target.as_mut() {
+            target.advance_on_failure = false;
+        }
+    }
     let automatic_resume = runtime.restore_play_generation == Some(runtime.play_generation);
     if let Err(error) = runtime.validate_archive_admission(&request, &profile, &entry, &source) {
         runtime.retire_result(Ok((entry, source)));
@@ -7776,7 +7852,7 @@ fn start_resolved_with<R: playback::PlaybackResources>(
     let selection_id = request.id;
     let position_ms = request.position_ms;
     let mut resume_floor_ms = position_ms;
-    let advance_on_failure = request.advance_on_failure;
+    let advance_on_failure = request.advance_on_failure && !guide_ui::is_live(&profile, &entry);
     let mut owned_source = None;
     match source {
         ReadySource::PreparedPlex(choice) => {

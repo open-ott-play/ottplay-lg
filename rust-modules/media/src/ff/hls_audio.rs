@@ -27,6 +27,7 @@ impl Descriptor {
 pub struct Selection {
     expected: Vec<Descriptor>,
     selected: Descriptor,
+    observed: Option<super::hls_observed::Selection>,
 }
 impl Selection {
     /// Freeze a known segment snapshot, without declaring the full presentation
@@ -44,22 +45,31 @@ impl Selection {
         let aac = track.codec == "aac" && track.channels > 0 && track.sample_rate > 0;
         let mp2 = super::hls_mp2::format(&track.codec, track.channels, track.sample_rate)
             && track.decoder_available;
-        if !aac && !mp2 {
-            return Err("HLS audio selection requires known AAC or decodable MP2 format");
+        let ac3 = super::hls_ac3::format(&track.codec, track.channels, track.sample_rate);
+        if !aac && !mp2 && !ac3 {
+            return Err("HLS audio selection requires known AAC/AC3 or decodable MP2 format");
         }
+        let observed = inventory.transport_identity(track.stream_index).map(|_|
+            super::hls_observed::Selection::new(inventory,TrackKind::Audio,ordinal)).transpose()?;
         let selected = Descriptor::of(track);
         let mut expected: Vec<_> = inventory.audio.iter().map(Descriptor::of).collect();
-        if expected.iter().filter(|d| **d == selected).count() != 1 {
+        if observed.is_none() && expected.iter().filter(|d| **d == selected).count() != 1 {
             return Err("HLS audio identity is ambiguous");
         }
         expected.sort();
-        Ok(Self { expected, selected })
+        Ok(Self { expected, selected, observed })
     }
+
+    /// Initial inspection descriptors require a complete container collection.
+    /// Observed choices require the separately proved PID/program inventory;
+    /// a missing program table must never downgrade them to descriptor matching.
+    pub(super) fn requires_transport_identity(&self) -> bool { self.observed.is_some() }
 
     /// Verify every segment before emitting any of its buffered AUs. A new or
     /// missing track, changed metadata/format, or ambiguous identity fails closed;
     /// it must never pick another language through best-stream/codec fallback.
     pub(super) fn select(&self, inventory: &TrackInventory) -> Result<i32, &'static str> {
+        if let Some(observed) = &self.observed { return observed.resolve_stream_index(inventory); }
         if !inventory.is_complete() {
             return Err("HLS segment audio inventory is incomplete");
         }

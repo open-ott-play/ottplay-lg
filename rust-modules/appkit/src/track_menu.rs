@@ -1332,6 +1332,8 @@ impl TrackMenuState {
                 Some(TrackRow::HlsAudio(i)) => return self.pick_hls_track(i),
                 Some(TrackRow::HlsSubtitle(i)) => return self.pick_hls_subtitle(Some(i)),
                 Some(TrackRow::SubOff) => return self.pick_hls_subtitle(None),
+                Some(TrackRow::Audio(i)) => return self.pick_external_track(plx_media::ff::inspect::TrackKind::Audio, Some(i)),
+                Some(TrackRow::Sub(i)) => return self.pick_external_track(plx_media::ff::inspect::TrackKind::Subtitle, Some(i)),
                 Some(TrackRow::Timing | TrackRow::Style | TrackRow::OpenField(_) | TrackRow::Choice(_, _)) if tab != 0 => {}
                 _ => return TrackOk::Inert,
             }

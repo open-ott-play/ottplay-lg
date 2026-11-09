@@ -122,19 +122,23 @@ fn live_hud_publishes_actual_channel_raw_ordinal_and_full_broadcast_facts() {
 }
 
 #[test]
-fn live_hud_waits_for_a_presented_frame_and_keeps_early_guide_until_then() {
+fn live_hud_shows_admitted_header_but_waits_for_frame_before_programme_clock() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     let (mut app, sample) = live_app();
     arm_playing(&mut app);
     let guide = reply(&app, "Early programme");
     deliver(&mut app, sample, guide);
-    assert!(live(&app).is_none());
+    let header = live(&app).expect("accepted source header does not wait for decoder");
+    assert_eq!(header.channel_title, "Current file");
+    assert_eq!(header.ordinal, Some(1));
+    assert!(header.guide.is_none());
+    assert!(app.bridge.metadata_view().now_playing().unwrap().ott.as_ref().unwrap().confirmed_start_unix_ms.is_none());
     player::SHARED.seen_frame.store(true, Ordering::Release);
     player::SHARED.start_queued.store(true, Ordering::Release);
     super::super::super::observe_programme(&mut app, sample.unix_ms());
     publish(&mut app);
-    assert!(live(&app).is_none(), "old frame latch cannot confirm a queued source");
+    assert!(live(&app).unwrap().guide.is_none(), "old frame latch cannot confirm a queued source");
     presented(&mut app, sample);
     publish(&mut app);
     assert_eq!(live(&app).unwrap().guide.unwrap().current.unwrap().title, "Early programme");
@@ -280,3 +284,21 @@ fn live_hud_return_to_player_rearms_playing_source_once_without_restarting_media
 
 #[path = "programme_info_cycle.rs"]
 mod info_cycle;
+
+#[test]
+fn live_hud_admitted_header_hands_off_to_presented_clock_without_metadata_change() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let (mut app, sample) = live_app();
+    publish_without_runtime_change(&mut app);
+    assert_eq!(live(&app).unwrap().channel_title, "Current file");
+    assert!(projection(&app).confirmed_start_unix_ms.is_none());
+    presented(&mut app, sample);
+    publish_without_runtime_change(&mut app);
+    assert_eq!(projection(&app).confirmed_start_unix_ms, Some(sample.unix_ms() as i64));
+    assert!(live(&app).unwrap().guide.is_none());
+    arm_playing(&mut app);
+    let guide = reply(&app, "Programme after first frame");
+    deliver(&mut app, sample, guide);
+    assert_eq!(live(&app).unwrap().guide.unwrap().current.unwrap().title, "Programme after first frame");
+}

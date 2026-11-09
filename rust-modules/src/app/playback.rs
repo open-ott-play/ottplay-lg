@@ -1416,6 +1416,28 @@ pub(crate) fn perform_hud_command(
     use plx_media::route::QueueStep;
     use plx_screens::player::overlay::OverlayKind;
     use plx_screens::registry::PlayerReq;
+    if matches!(command, HudCommand::Previous | HudCommand::Next) {
+        if let Some(offer) = bridge.ott_player_offer().cloned() {
+            // An OTT occurrence owns its own list, including Local, Favorites
+            // and provider media. Never let its HUD button enter the PMS queue.
+            // Keep a stale OTT offer fail-closed instead of falling through.
+            if !pages.surface_up()
+                && (offer.recovery_only || plx_media::route::playback_identity_matches(&player.session, &offer.source)) {
+                if let Some(page) = pages.nav.top_page().filter(|page| matches!(page.arg, AppArg::Player)) {
+                    if let Some(body) = page.inst.as_ref().filter(|body| !body.staged) {
+                        if pages.nav.input_owner() == Some(plx_machine::machine::InputOwner::Entry(page.id)) {
+                            bridge.queue_ott_player_request(plx_screens::registry::OttPlayerRequest {
+                                owner: body.id, source: offer.source,
+                                action: if command == HudCommand::Next { plx_screens::registry::OttPlayerAction::Next }
+                                    else { plx_screens::registry::OttPlayerAction::Previous },
+                            });
+                        }
+                    }
+                }
+            }
+            return ViewerTransport::None;
+        }
+    }
     let viewer_transport = match command {
         HudCommand::TogglePlay => {
             match super::bridge::player_mut(pages).map(|screen| screen.toggle_play(None, now)) {
