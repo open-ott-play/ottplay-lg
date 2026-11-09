@@ -610,3 +610,82 @@ mod playlist_tests {
         );
     }
 }
+
+pub fn catalog_credentials_valid(
+    profile: CatalogProfile,
+    key: &str,
+    server: &str,
+) -> Result<bool, Error> {
+    let result = with_planner(|planner| {
+        planner.operator_call("operatorCredentialsValid", json!([profile, key, server]))
+    })?;
+    result.as_bool().ok_or(Error::InvalidResult)
+}
+/// OTTCLUB's source-provided IDs are extracted by the same canonical codec as
+/// the browser before its decoded payload is reduced. No native key inference.
+pub fn club_ids(text: &str) -> Result<Vec<String>, Error> {
+    let result = with_planner(|planner| planner.operator_call("operatorClubIds", json!([text])))?;
+    let ids: Vec<String> = serde_json::from_value(result).map_err(|_| Error::InvalidResult)?;
+    if ids.len() > 50_000 {
+        return Err(Error::InvalidResult);
+    }
+    Ok(ids)
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuidePhase {
+    All,
+    Week,
+    Current,
+    Archive,
+}
+pub fn guide_url(
+    profile: CatalogProfile,
+    id: &str,
+    options: &Value,
+    phase: GuidePhase,
+) -> Result<String, Error> {
+    object(options)?;
+    url(with_planner(|planner| {
+        planner.operator_call("operatorGuideUrl", json!([profile, id, options, phase]))
+    })?)
+}
+#[cfg(test)]
+mod guide_tests {
+    use super::*;
+    #[test]
+    fn catalog_credentials_guide_routes_and_ids_remain_canonical() {
+        assert!(catalog_credentials_valid(CatalogProfile::Itv, "0123456789", "").unwrap());
+        assert!(!catalog_credentials_valid(CatalogProfile::Itv, "short", "").unwrap());
+        assert!(catalog_credentials_valid(
+            CatalogProfile::Ottclub,
+            "fixture-key",
+            "example.invalid"
+        )
+        .unwrap());
+        assert_eq!(
+            guide_url(
+                CatalogProfile::Ottclub,
+                "42",
+                &json!({"server":"example.invalid"}),
+                GuidePhase::All
+            )
+            .unwrap(),
+            "http://example.invalid/api/channel/42"
+        );
+        assert_eq!(
+            guide_url(
+                CatalogProfile::Shura,
+                "42",
+                &json!({"server":"1"}),
+                GuidePhase::Week
+            )
+            .unwrap(),
+            "http://s1.tvshka.net/42/epg/week.jsonp"
+        );
+        assert_eq!(
+            club_ids("{\"ch_id\":\"42\",\"name\":\"Fixture\"}").unwrap(),
+            vec!["42"]
+        );
+    }
+}
