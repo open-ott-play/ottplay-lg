@@ -84,6 +84,7 @@ impl TrackMenuState {
                 let label = if !name.is_empty() { name } else if !language.is_empty() { language }
                     else { msg::widgets_tracks_unknown() };
                 let mut display = Row::new(label).checked(row.selected);
+                if row.forced { display = display.badge(plx_ui::table::Badge::Forced); }
                 if !name.is_empty() || !language.is_empty() { display = display.server_label(); }
                 if !language.is_empty() && language != label { display = display.detail(language).server_detail(); }
                 section = section.item(TrackRow::HlsSubtitle(index), RowKind::Choice, (), display);
@@ -102,7 +103,11 @@ impl TrackMenuState {
             let label = if !name.is_empty() { name } else if !language.is_empty() { language }
                 else { msg::widgets_tracks_unknown() };
             let mut display = Row::new(label).checked(row.selected);
-            if !language.is_empty() && language != label { display = display.detail(language); }
+            // Rendition names and language tags are source text, as for subtitles.
+            if !name.is_empty() || !language.is_empty() { display = display.server_label(); }
+            if !language.is_empty() && language != label {
+                display = display.detail(language).server_detail();
+            }
             section = section.item(TrackRow::HlsAudio(index), RowKind::Choice, (), display);
         }
         Form::new().section(section)
