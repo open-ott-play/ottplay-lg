@@ -412,9 +412,34 @@ def _load_plan_helper():
     return module
 
 
+
+def require_complete_companion_source(receipt: dict[str, Any], assets: dict[str, Path]) -> None:
+    """Stable-only gate; supplement hashes must remain bound to the accepted RC.
+
+    Legacy candidates without an embedded companion retain their existing gates.
+    A pending source supplement is valid beta/RC evidence, never stable coverage.
+    """
+    if "companion" not in receipt:
+        return
+    companion = receipt["companion"]
+    for name, digest in companion["source_assets"].items():
+        path = assets[name]
+        _regular_file(path, "companion source asset")
+        _require(0 < path.stat().st_size <= MAX_COMPANION_SOURCE_BYTES,
+                 "companion source asset exceeds its size bound")
+        _require(sha256(path) == digest, "companion source asset digest mismatch")
+    closure = _read_json(assets["companion-source-closure.json"])
+    _require(type(closure) is dict, "companion source closure must be an object")
+    _require(closure.get("complete_corresponding_source") is True,
+             "stable requires complete companion corresponding-source coverage")
+    _require(closure.get("sdk_runtime_source_coverage") == "PASS",
+             "stable requires verified companion SDK runtime-source coverage")
+
+
 def verify_rc(
     artifact_dir: Path, *, version: str, tag: str, repository: str,
     candidate_artifact_dir: Path | None = None,
+    require_complete_source: bool = False,
 ) -> dict[str, Any]:
     """Validate a downloaded RC asset set and return its exact identity."""
     _require(type(version) is str and VERSION_RE.fullmatch(version) is not None,
@@ -428,6 +453,8 @@ def verify_rc(
             _require(0 < assets[name].stat().st_size <= MAX_COMPANION_SOURCE_BYTES,
                      "companion source asset exceeds its size bound")
             _require(sha256(assets[name]) == digest, "companion source asset digest mismatch")
+    if require_complete_source:
+        require_complete_companion_source(receipt, assets)
     plan = _load_plan_helper().validate_plan(_read_json(assets["native-release-plan.json"]))
     expected_tag = f"v{version}-rc.{plan['sequence']}"
     _require(plan["channel"] == "rc", "RC artifact release plan channel must be rc")
@@ -505,6 +532,8 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--repository", required=True)
     verify.add_argument("--candidate-artifact-dir", type=Path,
                         help="original immutable artifact downloaded by run ID; pass this for release qualification")
+    verify.add_argument("--require-complete-companion-source", action="store_true",
+                        help="stable promotion only: refuse pending companion runtime-source coverage")
     verify.add_argument("--output-json", required=True, type=Path)
     return root
 
@@ -513,7 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         identity = verify_rc(args.artifact_dir, version=args.version, tag=args.tag, repository=args.repository,
-                             candidate_artifact_dir=args.candidate_artifact_dir)
+                             candidate_artifact_dir=args.candidate_artifact_dir,
+                             require_complete_source=args.require_complete_companion_source)
         write_identity(identity, args.output_json)
     except (OSError, ArtifactError, ValueError, KeyError, tarfile.TarError) as exc:
         print(f"native_release_artifacts: {exc}", file=sys.stderr)
