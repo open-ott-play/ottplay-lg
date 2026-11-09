@@ -35,6 +35,37 @@ pub(super) fn list_label(row: &OttRow, preferences: plx_appkit::classic_settings
     parts.join("  ")
 }
 
+/// A numbered live channel keeps its identity on the primary line; the
+/// current programme is a separate row detail so long titles cannot hide it.
+pub(super) fn catalogue_live(row: &OttRow) -> bool {
+    if row.media.as_ref().is_some_and(|media| media.kind == super::OttMediaKind::LiveChannel) {
+        return true;
+    }
+    // M3U live streams retain the coarse Video subtype. The provider adapter
+    // marks these rows with guide/records facts; finite HTTP videos with a known
+    // duration have neither and stay ordinary catalogue items.
+    row.guide_available || row.records_available || row.current_programme.is_some() || row.guide.is_some()
+}
+
+pub(super) fn catalogue_title(
+    row: &OttRow,
+    preferences: plx_appkit::classic_settings::Preferences,
+) -> String {
+    if !preferences.show_name() {
+        return plx_platform::i18n::msg::ott_channel_list().to_owned();
+    }
+    row.content_title.as_deref().filter(|name| !name.trim().is_empty()).unwrap_or(&row.title).to_owned()
+}
+
+pub(super) fn catalogue_detail(
+    row: &OttRow,
+    preferences: plx_appkit::classic_settings::Preferences,
+    now: Option<i64>,
+) -> String {
+    if !preferences.show_program() { return String::new(); }
+    current_programme(row, now).map(|programme| programme.title.to_owned()).unwrap_or_default()
+}
+
 /// The secondary run is derived from the same name/visibility projection as
 /// `list_label`; it never parses server-provided punctuation or changes identity.
 pub(super) fn list_secondary_start(row: &OttRow, preferences: plx_appkit::classic_settings::Preferences, label: &str) -> Option<usize> {
@@ -246,6 +277,52 @@ pub(super) fn paint_left(p: Painter, layout: Layout, row: &OttRow, status: &str,
 mod tests {
     use super::*;
     use super::super::OttGuideProgramme;
+
+    fn catalogue_row() -> OttRow {
+        OttRow { current_programme: None, content_title: Some("Station".into()), guide: None,
+            guide_available: false, records_available: false,
+            media: Some(super::super::OttMedia { kind: super::super::OttMediaKind::LiveChannel,
+                duration_ms: None, progress: None, synopsis: None }),
+            id: "station".into(), title: "3450  Station".into(), detail: String::new(),
+            description: String::new(), poster: None, action: OttAction::Play("station".into()),
+            enabled: true, favorite: false }
+    }
+
+    #[test]
+    fn typed_live_catalogue_respects_name_and_program_preferences() {
+        let row = catalogue_row();
+        let all = plx_appkit::classic_settings::Preferences::default();
+        assert_eq!(catalogue_title(&row, all), "Station");
+        assert_eq!(catalogue_title(&row, all.with_channel_display(0, 0, 1, 1).unwrap()),
+            plx_platform::i18n::msg::ott_channel_list(), "hidden names keep a localized nonempty row identity");
+        assert_eq!(catalogue_detail(&row, all.with_channel_display(1, 1, 0, 1).unwrap(), Some(10)), "");
+    }
+
+    #[test]
+    fn full_guide_is_authoritative_over_a_still_active_compact_programme() {
+        let mut row = catalogue_row();
+        row.guide_available = true;
+        row.current_programme = Some(plx_data::ott::guide::rows::CurrentProgramme {
+            title: "Stale compact".into(), start_s: 10, end_s: 30 });
+        row.guide = Some(OttNowNext { now_s: 21,
+            current: Some(OttGuideProgramme { title: "News".into(), description: String::new(), start_s: 10, end_s: 20 }),
+            next: Some(OttGuideProgramme { title: "Sports".into(), description: String::new(), start_s: 20, end_s: 30 }) });
+        let all = plx_appkit::classic_settings::Preferences::default();
+        assert_eq!(catalogue_detail(&row, all, Some(21)), "Sports");
+    }
+
+    #[test]
+    fn m3u_live_fact_is_distinguished_from_finite_http_video() {
+        let mut row = catalogue_row();
+        row.media = Some(super::super::OttMedia { kind: super::super::OttMediaKind::Video,
+            duration_ms: None, progress: None, synopsis: None });
+        row.guide_available = true;
+        assert!(catalogue_live(&row), "M3U live streams carry the guide capability even with Video subtype");
+        row.guide_available = false;
+        row.media.as_mut().unwrap().duration_ms = Some(90_000);
+        assert!(!catalogue_live(&row), "a finite HTTP video remains a regular video row");
+    }
+
     #[test]
     fn short_details_reserve_footer_lines_before_fitting_metadata() {
         let measure = plx_ui::fixture::FixtureMeasure;

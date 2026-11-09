@@ -1132,11 +1132,19 @@ def check_product_documents(metadata):
     before = len(FAILURES)
     body = documents["notes"].decode("utf-8")
     placeholders = re.findall(r"__[A-Z0-9_]+__", body)
-    check(not placeholders, "outer release note carries no unresolved placeholder")
+    if config["notes_contract"] == "standalone-native-v1":
+        # The native candidate draft workflow substitutes this one checksum
+        # from the verified IPK before publishing the authored note. It rejects
+        # missing, duplicate, or unknown tokens at draft time.
+        check(placeholders == [REQUIRED_SENTINEL],
+              "standalone release note carries exactly one package checksum sentinel")
+    else:
+        check(not placeholders, "outer release note carries no unresolved placeholder")
     check(not re.search(r"\b[0-9a-fA-F]{64}\b", body),
           "outer release note carries no hand-typed package hash")
-    # The outer publisher uploads this numeric-version asset and publishes the note
-    # verbatim. It does not substitute the upstream __IPK_SHA256__ sentinel.
+    # The publisher uploads this numeric-version asset. The outer-publisher route
+    # publishes notes verbatim; the standalone native draft route substitutes the
+    # single package hash from the verified candidate artifact.
     prefix = "ottplay-lg-" if config["notes_contract"] == "standalone-native-v1" else "ottplay-native-webos-"
     checksum = prefix + config["version"] + ".sha256"
     command = r"(?:sha256sum[ \t]+-c|shasum[ \t]+-a[ \t]+256[ \t]+-c)[ \t]+" + re.escape(checksum)

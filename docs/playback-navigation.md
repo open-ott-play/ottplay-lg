@@ -4,7 +4,8 @@
 
 For a live OTT channel, the remote's **CH+/CH−** buttons select the next or
 previous item in the current list in both Classic and Modern. They work with
-the video controls visible or hidden. Number keys select a channel by its
+the video controls visible or hidden; hiding the transport HUD does not consume
+these channel-specific buttons. Number keys select a channel by its
 displayed number; a visible information banner does not block number entry.
 Multi-digit entry waits for the existing two-second input window before opening
 the selected channel. Finite-video seek shortcuts keep their separate rules.

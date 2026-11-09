@@ -186,6 +186,10 @@ static ACB_OK: AtomicBool = AtomicBool::new(false); // was the g_acb availabilit
 /// Off at boot, and never persisted.
 pub static DIAG_READOUT_ON: AtomicBool = AtomicBool::new(false);
 
+/// The authenticated, bounded remote playback capture also needs queue and frame-age samples.
+/// Keep its switch separate so ending a capture never hides an already-open Stats-for-nerds panel.
+pub static NATIVE_CAPTURE_DIAG_ON: AtomicBool = AtomicBool::new(false);
+
 // Diagnostics-only Auto state. These codes cross the demux/UI thread boundary through atomics;
 // named constants keep the writer and the photograph formatter from growing separate vocabularies.
 pub const ABR_MODE_ORIGINAL: u8 = 1;

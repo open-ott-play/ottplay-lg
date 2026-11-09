@@ -89,28 +89,29 @@ rooted, Dev Manager should be able to download them, because they are readable b
 
 | What happened | Attach |
 | --- | --- |
-| Playback failed, stalled or stopped (for example "Playback stopped after it had started") | the event log |
+| Playback failed, stalled or stopped (for example, picture and sound disappeared after playback started) | the event log; if the player still responds, also open **More → Stats for nerds** and take a photo while the failure is visible |
 | The app closed by itself, vanished, or the TV returned to the launcher | the crash log **and** the event log |
 | The app does not start, or shows a black screen and exits | the stderr log **and** the crash log |
 
-If you are not sure, attach all three. They are small.
+If you are not sure, attach all three. They are small. `plxnative-diag.log` is for saved-state/storage diagnostics; it does not contain the playback counters.
 
 ### Where they are
 
-Where the files are depends on which PlxNative you run. The regular release keeps its logs
-directly in `/tmp/`. PlxNative Nightly keeps its own copies in a folder of its own, so it never
-overwrites the regular app's logs.
+Each OTTPlay install keeps its logs in a directory named for its app ID, so debug and stable
+installs do not overwrite each other.
 
 | Install | Where the log files are |
 | --- | --- |
-| PlxNative (release) | directly in `/tmp/`, for example `/tmp/plxnative-events.log` |
-| PlxNative Nightly | in the folder `/tmp/com.beb.plxnative.nightly/` |
+| OTTPlay (stable) | `/tmp/com.openottplay.player.native/` |
+| OTTPlay (debug) | `/tmp/com.openottplay.player.native.debug/` |
+| OTTPlay (nightly) | `/tmp/com.openottplay.player.native.nightly/` |
 
-The three files have the same names in both places:
+The files share these names in each folder:
 
 - `plxnative-events.log` — the event log: what the app did, line by line.
 - `plxnative-crash.log` — the crash log: a record each time the app was stopped by a fault.
 - `plxnative-stderr.log` — what the app and the TV's own libraries printed to the error stream.
+- `plxnative-diag.log` — saved-state/storage diagnostics, not the live playback counters.
 
 ### Fetch them before you reopen the app
 

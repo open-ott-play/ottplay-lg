@@ -31,6 +31,15 @@ pub enum Badge {
     Cc,
     Text(String),
 }
+
+/// Artwork shown in the leading column of a Classic catalogue row. The row owns
+/// only a source identity; normal artwork caches and fetch policy resolve it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowArt {
+    Local(plx_machine::machine::PosterKey),
+    Http(String),
+    Plex { server: u16, key: String },
+}
 impl Badge {
     pub fn text(&self) -> &str {
         match self {
@@ -88,6 +97,10 @@ pub struct Row {
     /// `[icon] [label]` rows). `checked` wins the slot when both are set: a picker's active mark is
     /// state, an action glyph is only decoration.
     pub licon: Option<crate::icons::Icon>,
+    /// Small provider artwork in a numbered Classic catalogue row.
+    pub catalogue_art: Option<RowArt>,
+    /// A semantic fallback mark when a catalogue row has no artwork.
+    pub catalogue_icon: Option<crate::icons::Icon>,
     pub dim: bool, // render dimmer (unavailable / de-emphasised)
     /// A **non-selectable hairline** that groups the rows above it from the rows below (the item
     /// menu's navigation-vs-state divider). It occupies a global row index like any other row, but
@@ -127,6 +140,8 @@ impl Row {
             value_dim: false,
             ticon: None,
             licon: None,
+            catalogue_art: None,
+            catalogue_icon: None,
             dim: false,
             sep: false,
             destructive: false,
@@ -277,6 +292,14 @@ impl Row {
     }
     pub fn licon(mut self, i: crate::icons::Icon) -> Self {
         self.licon = Some(i);
+        self
+    }
+    pub fn catalogue_art(mut self, art: RowArt) -> Self {
+        self.catalogue_art = Some(art);
+        self
+    }
+    pub fn catalogue_icon(mut self, icon: crate::icons::Icon) -> Self {
+        self.catalogue_icon = Some(icon);
         self
     }
     pub fn dim(mut self, v: bool) -> Self {
@@ -1551,7 +1574,9 @@ impl TableView {
 
     fn row_label_inset(&self, row: &Row, frame_w: f32, measure: &dyn plx_machine::machine::Measure) -> f32 {
         if self.is_classic_catalogue() {
-            self.catalogue_number_width(frame_w, measure) + measure.width_str("\u{a0}", self.label_style().0, false)
+            self.catalogue_number_width(frame_w, measure)
+                + measure.width_str("\u{a0}", self.label_style().0, false)
+                + if row.catalogue_art.is_some() || row.catalogue_icon.is_some() { 42.0 } else { 0.0 }
         } else if self.is_classic_choices() && !row.checked && row.licon.is_none() {
             measure.width_str("\u{a0}", self.label_style().0, false)
         } else { LABEL_INSET }
@@ -2225,6 +2250,22 @@ impl TableView {
                         let _clip = crate::screen::ClipScope::open_in(p, Rect::new(content_x, sy, width, h));
                         Label::new(number.as_ptr(), self.label_style().0, base)
                             .h(HAlign::Right).draw(p, Rect::new(content_x, sy, width, h));
+                    }
+                }
+                if row.catalogue_art.is_some() || row.catalogue_icon.is_some() {
+                    let number_width = self.catalogue_number_width(frame.w, measure);
+                    let icon_x = content_x + number_width + measure.width_str("\u{a0}", self.label_style().0, false);
+                    let frame = Rect::new(icon_x, cyc - 12.0, 36.0, 24.0);
+                    if let Some(source) = row.catalogue_art.as_ref() {
+                        let art = match source {
+                            RowArt::Local(key) => crate::widgets::Art::Local { key },
+                            RowArt::Http(url) => crate::widgets::Art::Http { url, res: (96, 64) },
+                            RowArt::Plex { server, key } => crate::widgets::Art::Thumb { sid: *server, key, res: (96, 64) },
+                        };
+                        let image = crate::widgets::resolve_card_art(p, frame, &art);
+                        crate::widgets::card_named_led(p, frame, art, None, 3.0, false, 1.0, 0.0, Some(image));
+                    } else if let Some(icon) = row.catalogue_icon {
+                        crate::icons::draw(p, icon, Rect::new(icon_x + 5.0, cyc - 13.0, 26.0, 26.0), base);
                     }
                 }
             }

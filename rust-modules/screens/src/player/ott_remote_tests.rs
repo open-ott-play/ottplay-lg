@@ -112,6 +112,8 @@ fn hidden_fullscreen_buttons_emit_one_owned_action_in_both_themes() {
             (consts::SDLK_LEFT, 80, Action::OpenMenu), (consts::SDLK_RIGHT, 79, Action::ShowInfo),
             (consts::SDLK_RETURN, 40, Action::OpenCatalog),
             (0, 300, Action::Next), (0, 301, Action::Previous),
+            (consts::SDLK_PAGEUP, 0, Action::Next),
+            (consts::SDLK_PAGEDOWN, 0, Action::Previous),
             (0, 486, Action::OpenGuide), (0, 488, Action::OpenMenu), (0, 489, Action::OpenCategories),
         ] {
             let mut page = bare(&session);

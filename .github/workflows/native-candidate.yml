@@ -1,0 +1,166 @@
+name: Build native webOS candidate
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact main commit selected by the release plan
+        required: true
+        type: string
+      version:
+        description: Numeric webOS package version from appinfo.json
+        required: true
+        type: string
+      channel:
+        description: Beta or release-candidate channel from the frozen plan
+        required: true
+        type: string
+      sequence:
+        description: Positive prerelease sequence
+        required: true
+        type: number
+      tag:
+        description: Exact prerelease tag from the frozen plan
+        required: true
+        type: string
+      plan_artifact_name:
+        description: Immutable release plan artifact created by the caller
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify stable-ID IPK
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Audit workflow network egress
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+
+      - name: Validate source and package version
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          SEQUENCE: ${{ inputs.sequence }}
+          TAG: ${{ inputs.tag }}
+          PLAN_ARTIFACT: ${{ inputs.plan_artifact_name }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" == "$DISPATCH_SHA" ]] || {
+            echo "::error::source_sha must equal the release workflow's exact main commit"; exit 1;
+          }
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+
+      - name: Check out the exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download and verify the frozen release plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ inputs.plan_artifact_name }}
+          path: ${{ runner.temp }}/native-release-plan
+
+      - name: Verify exact release plan identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          SEQUENCE: ${{ inputs.sequence }}
+          TAG: ${{ inputs.tag }}
+          PLAN_ARTIFACT: ${{ inputs.plan_artifact_name }}
+        run: |
+          set -euo pipefail
+          python3 ci/native_release.py verify-plan \
+            --plan "$RUNNER_TEMP/native-release-plan/native-release-plan.json" \
+            --repository "$GITHUB_REPOSITORY" --channel "$CHANNEL" \
+            --version "$VERSION" --sequence "$SEQUENCE" --tag "$TAG" \
+            --source-sha "$SOURCE_SHA" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Confirm source and release tooling
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(python3 -c 'import json; print(json.load(open("pkg/appinfo.json"))["version"])')" = "$VERSION"
+          test "$(python3 -c 'import json; print(json.load(open("ci/ottplay-integration/release/product.json"))["version"])')" = "$VERSION"
+          for path in .github/actions/apt-install/action.yml \
+                      .github/actions/rust-toolchain/action.yml \
+                      .github/actions/webos-ndk/action.yml \
+                      ci/make-native-candidate-receipt.py \
+                      ci/verify-native-candidate.py; do
+            git cat-file -e "HEAD:$path" || {
+              echo "::error::selected source is missing required release tooling: $path"; exit 1;
+            }
+          done
+
+      - name: Install pinned host build tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config libclang-18-dev cmake ninja-build meson autoconf automake libtool nasm yasm bzip2 xz-utils libssl-dev curl
+
+      - name: Verify source and dependency pins
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=all)"
+          python3 ci/deps.py check
+          python3 ci/check-package.py --selftest
+          python3 -m unittest ci.test_native_candidate_receipt ci.test_package_product_config -v
+
+      - name: Install pinned Rust toolchain
+        uses: ./.github/actions/rust-toolchain
+
+      - name: Install and verify pinned webOS SDK
+        id: sdk
+        uses: ./.github/actions/webos-ndk
+        with:
+          install-root: ${{ runner.temp }}/webos-ndk
+
+      - name: Build and verify release package
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+        run: make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk
+
+      - name: Assemble immutable candidate and provenance receipt
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          OUTPUT_DIR: ${{ runner.temp }}/native-candidate
+        run: |
+          set -euo pipefail
+          python3 ci/make-native-candidate-receipt.py \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --sdk "$WEBOS_SDK" \
+            --ipk "$(find pkg -maxdepth 1 -type f -name 'com.openottplay.player.native_*_arm.ipk' -print -quit)" \
+            --output-dir "$OUTPUT_DIR"
+          cp "$RUNNER_TEMP/native-release-plan/native-release-plan.json" \
+            "$OUTPUT_DIR/native-release-plan.json"
+
+      - name: Upload immutable candidate artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: webos-native-candidate-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-candidate/
+          if-no-files-found: error
+          retention-days: 90

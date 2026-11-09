@@ -27,7 +27,7 @@ use plx_ui::frame::Budget;
 use plx_ui::route_screen::RouteLayout;
 use plx_ui::screen::{Activate, At, Dir, DrawFrame, EdgeRule, ElemKind, FocusSource, Focusable, GroupSpec,
     HitSource, Hover, Link, Part, Placed, RenderStrategy, Screen, ScreenEvent, Step, Stop};
-use plx_ui::table::Row;
+use plx_ui::table::{Badge, Row, RowArt};
 use plx_ui::table_screen::{Header, TableScreen};
 use plx_ui::text_buffer::TextBuffer;
 use plx_ui::document_reader::DocumentReader;
@@ -615,10 +615,21 @@ impl OttScreen {
             if !torrent_catalogue || torrent_item { self.catalog_keys.push(key.0); }
             if self.metadata_row(row) { self.media_keys.insert(key.0, i); }
             let catalogue_item = classic_catalogue && matches!(row.action, OttAction::Play(_));
-            let mut presentation = Row::new(if catalogue_item {
-                classic::list_label(row, snapshot.classic_preferences, self.guide_clock.now_for(row.guide.as_ref()))
-            } else { row.title.clone() }).server_label()
-                .detail(if classic_catalogue { String::new() } else { row.detail.clone() }).server_detail().checked(row.favorite);
+            let channel_item = catalogue_item && classic::catalogue_live(row);
+            let row_now = self.guide_clock.now_for(row.guide.as_ref());
+            let detail = if channel_item { classic::catalogue_detail(row, snapshot.classic_preferences, row_now) }
+                else if classic_catalogue { String::new() } else { row.detail.clone() };
+            let title = if channel_item { classic::catalogue_title(row, snapshot.classic_preferences) }
+                else if catalogue_item { classic::list_label(row, snapshot.classic_preferences, row_now) }
+                else { row.title.clone() };
+            let presentation_row = Row::new(title);
+            let mut presentation = if channel_item && !snapshot.classic_preferences.show_name() {
+                // catalogue_title supplies an app-owned localized fallback
+                // when the user hides provider channel names.
+                presentation_row
+            } else {
+                presentation_row.server_label()
+            }.detail(detail.clone()).server_detail().checked(row.favorite);
             if row.favorite && matches!(&row.action, OttAction::GuideProgramme { .. }) {
                 // Guide rows use the accepted checked state as a timer marker,
                 // before their date rather than in the title's checkbox slot.
@@ -626,8 +637,25 @@ impl OttScreen {
             }
             if catalogue_item {
                 catalogue_number += 1;
-                presentation.set_secondary_label_start(classic::list_secondary_start(row,
-                    snapshot.classic_preferences, &presentation.label));
+                if torrent_item || snapshot.classic_preferences.show_number() {
+                    presentation = presentation.catalogue_number(catalogue_number.to_string());
+                }
+                if channel_item {
+                    let art = row.poster.as_ref().map(|poster| match poster {
+                        OttPoster::Local { key } => RowArt::Local(*key),
+                        OttPoster::Http { url } => RowArt::Http(url.clone()),
+                        OttPoster::Plex { server, key } => RowArt::Plex { server: *server, key: key.clone() },
+                    });
+                    if let Some(art) = art { presentation = presentation.catalogue_art(art); }
+                    else { presentation = presentation.catalogue_icon(plx_ui::icons::Icon::Show); }
+                    let epg_available = row.guide_available || row.current_programme.is_some()
+                        || row.guide.as_ref().is_some_and(|guide|
+                            guide.current.is_some() || guide.next.is_some());
+                    let epg = format!("{} {}", msg::ott_classic_epg(), if epg_available { "✓" } else { "—" });
+                    let archive = format!("{} {}", msg::ott_records(), if row.records_available { "✓" } else { "—" });
+                    presentation = presentation.badge(Badge::Text(epg.into()))
+                        .badge(Badge::Text(archive.into()));
+                }
             }
             if classic_choices {
                 // Values share the title's row. Explanatory text stays in the
@@ -641,9 +669,6 @@ impl OttScreen {
                 if let Some((start, end)) = classic::list_progress_interval(row, self.guide_clock.now_for(row.guide.as_ref())) {
                     presentation = presentation.progress_interval(start, end);
                 }
-            }
-            if catalogue_item && snapshot.classic_preferences.show_number() {
-                presentation = presentation.catalogue_number(catalogue_number.to_string());
             }
             if classic_catalogue && category_page && Self::category_numbered(row) {
                 category_number += 1;
@@ -937,8 +962,12 @@ impl OttScreen {
         let Some(row) = self.snapshot.rows.get(index) else { return; };
         if !matches!(row.action, OttAction::Play(_)) { return; }
         let now = self.guide_clock.now_for(row.guide.as_ref());
-        let label = classic::list_label(row, self.snapshot.classic_preferences, now);
-        let secondary = classic::list_secondary_start(row, self.snapshot.classic_preferences, &label);
+        let channel_item = classic::catalogue_live(row);
+        let label = if channel_item { classic::catalogue_title(row, self.snapshot.classic_preferences) }
+            else { classic::list_label(row, self.snapshot.classic_preferences, now) };
+        let detail = if channel_item { classic::catalogue_detail(row, self.snapshot.classic_preferences, now) } else { String::new() };
+        let secondary = if channel_item { None }
+            else { classic::list_secondary_start(row, self.snapshot.classic_preferences, &label) };
         let progress = self.snapshot.classic_preferences.show_progress()
             .then(|| classic::list_progress_interval(row, now)).flatten();
         let Some(key) = self.keys.get(&format!("item:{}", row.id)) else { return; };
@@ -948,13 +977,17 @@ impl OttScreen {
         if self.form.key_at(index) != Some(RowKey(*key)) { return; }
         let mut offset = index;
         let changed = self.form.table.sections.iter().find_map(|section| {
-            if offset < section.rows.len() { Some(section.rows[offset].label != label || section.rows[offset].progress_bounds() != progress || section.rows[offset].secondary_label_start() != secondary) }
+            if offset < section.rows.len() { Some(section.rows[offset].label != label
+                || (channel_item && section.rows[offset].detail != detail)
+                || section.rows[offset].progress_bounds() != progress
+                || section.rows[offset].secondary_label_start() != secondary) }
             else { offset -= section.rows.len(); None }
         }).unwrap_or(false);
         if changed {
             if let Ok(index) = i32::try_from(index) {
                 if let Some(row) = self.form.table.row_mut(index) {
                     row.label = label;
+                    if channel_item { row.detail = detail; }
                     row.set_secondary_label_start(secondary);
                     row.set_progress_interval(progress);
                 }
@@ -2573,5 +2606,132 @@ mod guide_timer_marker_tests {
             snapshot.rows[0].favorite = false; snapshot.revision += 1;
             screen.install(Arc::new(snapshot)); assert_eq!(dots(&screen), plain);
         }
+    }
+}
+
+#[cfg(test)]
+mod catalogue_projection_regression_tests {
+    use super::*;
+    use plx_machine::machine::UiMode;
+
+    fn playable_row(id: &str, title: &str, media: OttMedia) -> OttRow {
+        OttRow { current_programme: None, content_title: Some(title.into()), guide: None,
+            guide_available: false, records_available: false, media: Some(media),
+            id: id.into(), title: title.into(), detail: String::new(), description: String::new(),
+            poster: None, action: OttAction::Play(id.into()), enabled: true, favorite: false }
+    }
+
+    fn live_row(id: &str, title: &str) -> OttRow {
+        let mut row = playable_row(id, title, OttMedia { kind: OttMediaKind::Video,
+            duration_ms: None, progress: None, synopsis: None });
+        row.guide_available = true;
+        row.records_available = true;
+        row.current_programme = Some(plx_data::ott::guide::rows::CurrentProgramme {
+            title: "Compact now".into(), start_s: 10, end_s: 20,
+        });
+        row.guide = Some(OttNowNext { now_s: 15,
+            current: Some(OttGuideProgramme { title: "Guide now".into(), description: String::new(), start_s: 10, end_s: 20 }),
+            next: Some(OttGuideProgramme { title: "Guide next".into(), description: String::new(), start_s: 20, end_s: 30 }) });
+        row
+    }
+
+    fn classic_screen(view: OttView) -> OttScreen {
+        let mut screen = OttScreen::new(EntryId(211), InstanceId(211));
+        screen.classic_mode = true;
+        screen.classic_visible = true;
+        screen.form.table.set_classic(true);
+        screen.install(Arc::new(view));
+        screen.refresh_presentation(UiMode::Classic, &plx_ui::fixture::FixtureMeasure);
+        screen
+    }
+
+    fn rows(screen: &OttScreen) -> Vec<&Row> {
+        screen.form.table.sections.iter().flat_map(|section| section.rows.iter()).collect()
+    }
+
+    #[test]
+    fn m3u_live_rows_get_channel_metadata_but_finite_http_videos_do_not() {
+        let _serial = plx_base::testlock::serial();
+        let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::Fr);
+        let live = live_row("m3u-live", "Live station");
+        let finite = playable_row("m3u-film", "Finite film", OttMedia { kind: OttMediaKind::Video,
+            duration_ms: Some(90_000), progress: None, synopsis: None });
+        let view = OttView { page_id: "channels".into(), rows: vec![live, finite], ..Default::default() };
+        let screen = classic_screen(view);
+        let rows = rows(&screen);
+        assert_eq!(rows[0].label, "Live station");
+        assert_eq!(rows[0].detail, "Guide now");
+        assert_eq!(rows[0].badges.iter().map(Badge::text).collect::<Vec<_>>(), [
+            format!("{} ✓", msg::ott_classic_epg()), format!("{} ✓", msg::ott_records())
+        ]);
+        assert_eq!(rows[0].badges[0].text(), "Guide TV ✓");
+        assert_eq!(rows[0].badges[1].text(), "Enregistrements ✓");
+        assert!(rows[0].catalogue_icon.is_some());
+        assert_eq!(rows[1].badges.len(), 0, "finite HTTP video stays an ordinary row");
+        assert!(rows[1].catalogue_icon.is_none());
+    }
+
+    #[test]
+    fn live_badge_and_hidden_name_labels_exist_in_every_shipped_locale() {
+        let _serial = plx_base::testlock::serial();
+        for preference in plx_platform::i18n::Preference::SHIPPED {
+            let _locale = plx_platform::i18n::language_on_this_thread_for_test(preference);
+            assert!(!msg::ott_classic_epg().is_empty(), "EPG badge translation for {}", preference.tag());
+            assert!(!msg::ott_records().is_empty(), "archive badge translation for {}", preference.tag());
+            assert!(!classic::catalogue_title(&live_row("station", "Station"),
+                plx_appkit::classic_settings::Preferences::default()
+                    .with_channel_display(0, 0, 1, 1).unwrap()).is_empty(),
+                "hidden-name fallback for {}", preference.tag());
+
+            let view = OttView { page_id: "channels".into(), rows: vec![live_row("station", "Station")],
+                classic_preferences: plx_appkit::classic_settings::Preferences::default()
+                    .with_channel_display(0, 0, 1, 1).unwrap(), ..Default::default() };
+            let screen = classic_screen(view);
+            let rendered = &rows(&screen)[0];
+            assert_eq!(rendered.label_origin, plx_ui::table::Origin::App,
+                "localized fallback remains app-owned for {}", preference.tag());
+            assert!(screen.form.table.app_fit_failures(RouteLayout::screen().sectioned_table().w, preference.tag()).is_empty(),
+                "Classic hidden-name catalogue label fits for {}", preference.tag());
+        }
+    }
+
+    #[test]
+    fn classic_live_row_preferences_apply_on_install_and_guide_clock_refresh() {
+        let _serial = plx_base::testlock::serial();
+        let mut row = live_row("m3u-live", "Live station");
+        row.guide.as_mut().unwrap().now_s = 19;
+        let mut view = OttView { page_id: "channels".into(), rows: vec![row], ..Default::default() };
+        view.classic_preferences = view.classic_preferences.with_channel_display(0, 0, 0, 1).unwrap();
+        let mut screen = classic_screen(view);
+        let before = rows(&screen);
+        assert_eq!(before[0].label, msg::ott_channel_list(), "name-hidden row keeps a localized identity");
+        assert!(before[0].detail.is_empty(), "Show programme off suppresses detail at install");
+        screen.media = Some(0);
+        let guide = screen.snapshot.rows[0].guide.as_ref().unwrap().clone();
+        screen.guide_clock.update(Some(&guide), 0);
+        screen.guide_clock.update(Some(&guide), 2_000);
+        screen.refresh_classic_programme();
+        let after = rows(&screen);
+        assert_eq!(after[0].label, msg::ott_channel_list());
+        assert!(after[0].detail.is_empty(), "clock refresh must also respect Show programme off");
+    }
+
+    #[test]
+    fn torrent_ordinals_remain_visible_when_classic_show_number_is_off() {
+        let _serial = plx_base::testlock::serial();
+        let mut torrent = playable_row("torrent.file:23:session:1", "Episode one", OttMedia {
+            kind: OttMediaKind::Video, duration_ms: Some(60_000), progress: None, synopsis: None });
+        torrent.action = OttAction::Play(torrent.id.clone());
+        let mut view = OttView { page_id: "torrent-files".into(), rows: vec![torrent], ..Default::default() };
+        view.classic_preferences = view.classic_preferences.with_channel_display(0, 1, 1, 1).unwrap();
+        let screen = classic_screen(view);
+        screen.form.table.fit_layout(&plx_ui::fixture::FixtureMeasure);
+        let frame = screen.classic_layout.get().unwrap().list;
+        let numeric_runs = plx_ui::draw_census::capture_runs(|| screen.form.table.draw(
+            plx_ui::Painter::recording(), frame, &plx_ui::fixture::FixtureMeasure))
+            .into_iter().filter(|run| run.align == 2 && !run.text.is_empty()
+                && run.text.bytes().all(|byte| byte.is_ascii_digit()))
+            .map(|run| run.text).collect::<Vec<_>>();
+        assert_eq!(numeric_runs, ["1"]);
     }
 }
