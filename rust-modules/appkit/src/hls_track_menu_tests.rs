@@ -160,3 +160,34 @@
         assert_ne!(audio, off);
         assert_ne!(audio, first);
     }
+
+    #[test]
+    fn hls_audio_rendition_labels_use_source_text_layout_policy() {
+        let _serial = plx_base::testlock::serial();
+        let _globals = route::HlsTrackRequest::test_globals_guard();
+        let ps = admitted(&HlsPlayback::fixture_for_test());
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let menu = TrackMenuState::new(&ps, meta.view(), 0, Vec::new());
+        let index = menu.form.index_of(&TrackRow::HlsAudio(0)).unwrap();
+        let row = menu.form.table.sections.iter().flat_map(|section| &section.rows).nth(index).unwrap();
+        assert_eq!(row.label_origin, plx_ui::table::Origin::Server);
+        assert_eq!(row.detail_origin, plx_ui::table::Origin::Server);
+        assert!(!row.label.is_empty());
+        assert!(!row.detail.is_empty());
+        assert!(row.checked);
+    }
+
+    #[test]
+    fn hls_subtitle_forced_badge_uses_retained_manifest_declaration() {
+        let _serial = plx_base::testlock::serial();
+        let _globals = route::HlsTrackRequest::test_globals_guard();
+        let ps = admitted(&HlsPlayback::fixture_with_subtitles_for_test());
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let menu = TrackMenuState::new(&ps, meta.view(), 1, Vec::new());
+        for (ordinal, forced) in [(0, false), (1, true)] {
+            let index = menu.form.index_of(&TrackRow::HlsSubtitle(ordinal)).unwrap();
+            let row = menu.form.table.sections.iter().flat_map(|section| &section.rows).nth(index).unwrap();
+            assert_eq!(row.badges.iter().any(|badge| matches!(badge, plx_ui::table::Badge::Forced)), forced);
+        }
+        assert_eq!(menu.selected_hls_row(), Some(TrackRow::SubOff));
+    }
