@@ -93,9 +93,8 @@ qualified stable release package with:
 make FLAVOR=stable RELEASE=1 hbc-manifest
 ```
 
-The target refuses debug/nightly packages. Attach the generated
-`com.openottplay.player.native.manifest.json` and the exact matching IPK to the
-same GitHub release, then submit the YAML file to
+The target refuses debug/nightly packages. The stable release workflow also generates and attaches the matching manifest
+automatically from the accepted RC bytes. For catalogue admission, submit the YAML file to
 [`webosbrew/apps-repo`](https://github.com/webosbrew/apps-repo) under
 `packages/com.openottplay.player.native.yml`. Keep the icon URL public and stable.
 The HBC repository stores listing metadata and a pointer; the release hosts the
