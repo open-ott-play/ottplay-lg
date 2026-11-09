@@ -834,8 +834,9 @@ pub(crate) unsafe fn cursor_is_transparent() -> bool {
 }
 
 /// Bring the pointer back after [`hide_cursor`] swapped in the transparent cursor. Call on pointer
-/// motion while the cursor is hidden. A no-op wherever LG's extension exists: there the
-/// compositor shows its own pointer on motion, as it always has.
+/// motion while the cursor is hidden. On LG's extension, explicitly restore visibility: the
+/// player itself hides the pointer after idle, so relying on the compositor to show it on motion
+/// can leave the Magic Remote pointer invisible for the rest of the session.
 #[inline]
 pub(crate) unsafe fn show_cursor_after_motion() {
     #[cfg(not(feature = "hostsim"))]
@@ -870,11 +871,15 @@ unsafe fn hide_through(door: CursorDoor, shown: &std::sync::atomic::AtomicUsize)
 /// [`show_cursor_after_motion`] on a given door.
 #[cfg(not(feature = "hostsim"))]
 unsafe fn show_through(door: CursorDoor, shown: &std::sync::atomic::AtomicUsize) {
-    if let CursorDoor::Sdl { set, .. } = door {
-        let shown = shown.load(std::sync::atomic::Ordering::Relaxed);
-        if shown != 0 {
-            set(shown as *mut std::ffi::c_void);
+    match door {
+        CursorDoor::Lg(f) => { f(1); }
+        CursorDoor::Sdl { set, .. } => {
+            let shown = shown.load(std::sync::atomic::Ordering::Relaxed);
+            if shown != 0 {
+                set(shown as *mut std::ffi::c_void);
+            }
         }
+        CursorDoor::None => {}
     }
 }
 /// The window to ask for when it is not the 1920x1080 canvas, `None` for the canvas (1:1): whatever
@@ -1214,14 +1219,14 @@ mod cursor_door_tests {
     }
 
     #[test]
-    fn lgs_extension_is_asked_to_hide_and_motion_leaves_it_to_the_compositor() {
+    fn lgs_extension_is_asked_to_hide_and_motion_restores_visibility() {
         let shown = AtomicUsize::new(0);
         LG.with(|l| l.borrow_mut().clear());
         unsafe {
             hide_through(CursorDoor::Lg(lg), &shown);
             show_through(CursorDoor::Lg(lg), &shown);
         }
-        assert_eq!(LG.with(|l| l.borrow().clone()), [0]);
+        assert_eq!(LG.with(|l| l.borrow().clone()), [0, 1]);
     }
 
     #[test]

@@ -48,10 +48,17 @@ pub(super) fn ui(runtime: &Runtime, action: &OttAction) -> Result<(), &'static s
     navigation(runtime)?;
     match action {
         OttAction::Back if matches!(runtime.page, "guide" | "guide-programme") => Ok(()),
-        OttAction::ShowActions(_) | OttAction::ShowActionsAt { .. } | OttAction::ShuffleOrder(_) | OttAction::ResetOrder(_)
-        | OttAction::MenuVisibility { .. } | OttAction::SelectProvider(_) | OttAction::SelectProfile(_) | OttAction::SelectManagedPlex { .. } | OttAction::ResumeManagedPlex { .. } | OttAction::EditM3uMediaLink { .. } | OttAction::Back => {
-            replace_source(runtime)
-        }
+        OttAction::ShowActions(_)
+        | OttAction::ShowActionsAt { .. }
+        | OttAction::ShuffleOrder(_)
+        | OttAction::ResetOrder(_)
+        | OttAction::MenuVisibility { .. }
+        | OttAction::SelectProvider(_)
+        | OttAction::SelectProfile(_)
+        | OttAction::SelectManagedPlex { .. }
+        | OttAction::ResumeManagedPlex { .. }
+        | OttAction::EditM3uMediaLink { .. }
+        | OttAction::Back => replace_source(runtime),
         OttAction::EditProfile { .. } => replace_source(runtime),
         OttAction::EditSetting(key) if !key.starts_with("parental.") => replace_source(runtime),
         OttAction::SubmitSetting { key, .. } if !key.starts_with("parental.") => {
@@ -95,8 +102,7 @@ fn operation(inv: &Invocation) -> &str {
 }
 pub(super) fn read_only(inv: &Invocation) -> bool {
     match inv.action.as_str() {
-        "state" | "status" | "capabilities" | "providers" | "channels"
-        | "settings_compare" => true,
+        "state" | "status" | "capabilities" | "providers" | "channels" | "settings_compare" => true,
         "categories" => inv.params["op"] == "list",
         "kiosk" => inv.params.get("mode").and_then(Value::as_str) == Some("status"),
         "player_settings" => matches!(operation(inv), "schema" | "get"),
@@ -107,7 +113,10 @@ pub(super) fn read_only(inv: &Invocation) -> bool {
         // Recovery has no mutating operation: even ACK is an explicit
         // unsupported response before IO. Keep inspection available in standby.
         "favorites_global_recovery" => true,
-        "favorites_global" => matches!(operation(inv), "describe" | "get" | "list" | "status" | "export"),
+        "favorites_global" => matches!(
+            operation(inv),
+            "describe" | "get" | "list" | "status" | "export"
+        ),
         _ => false,
     }
 }
@@ -165,7 +174,12 @@ fn plex_remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'static s
 pub(super) fn remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'static str> {
     // Installation consent remains available in standby and strict kiosk. Its
     // closed parser admits no navigation or source-changing operation.
-    if inv.action == "notifications" { return Ok(()); }
+    if matches!(
+        inv.action.as_str(),
+        "notifications" | "native_playback_diagnostics"
+    ) {
+        return Ok(());
+    }
     if inv.action == "plex_servers" {
         // The strict raw parser and shared UI/Remote selection handler own this
         // family's policy. No lossy op projection may bypass its restrictions.
@@ -237,7 +251,10 @@ pub(super) fn player(runtime: &Runtime, request: &plx_screens::registry::PlayerR
     if !pending(runtime) && !strict(runtime) {
         return true;
     }
-    matches!(request, PlayerReq::ExtendHud(_) | PlayerReq::ExtendDefaultHud | PlayerReq::ArmInfoPress)
+    matches!(
+        request,
+        PlayerReq::ExtendHud(_) | PlayerReq::ExtendDefaultHud | PlayerReq::ArmInfoPress
+    )
 }
 /// Source-changing effects from other native screens have no OTT item proof.
 /// A locked source must never be replaced through that alternate route.

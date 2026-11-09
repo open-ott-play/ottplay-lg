@@ -2210,6 +2210,32 @@ install: ipk tv-lock-require
 	@PLX_DISK_BUDGET_DONE=1 $(MAKE) --no-print-directory deploy FLAVOR=$(FLAVOR) RELEASE=$(RELEASE)
 	@echo "installed and deployed $(APPID)"
 
+# Non-root LG Developer Mode route. `install` above is the rooted-TV/Luna path;
+# pair a retail TV once with `ares-setup-device`, then use this target. The CLI
+# keeps its device key locally. Never put passphrases or private keys in Make
+# variables or this checkout.
+ARES_DEVICE ?=
+install-devmode: ipk
+	@test -n "$(ARES_DEVICE)" || { echo "set ARES_DEVICE to the ares-setup-device alias"; exit 2; }
+	@command -v ares-install >/dev/null || { echo "ares-install is missing; install the webOS CLI and pair the TV first"; exit 127; }
+	@command -v ares-launch >/dev/null || { echo "ares-launch is missing; install the webOS CLI first"; exit 127; }
+	ares-install --device "$(ARES_DEVICE)" "$(IPK)"
+	ares-launch --device "$(ARES_DEVICE)" "$(APPID)"
+	@echo "installed and launched $(APPID) through Developer Mode on $(ARES_DEVICE)"
+
+# Generate an HBC manifest only from an explicitly selected stable release.
+# Refuse before building so a debug/nightly package cannot become a catalogue
+# artifact by accident. Publication still requires qualification and TV QA.
+hbc-manifest:
+	@test "$(FLAVOR)" = stable || { echo "use: make FLAVOR=stable RELEASE=1 hbc-manifest"; exit 2; }
+	@test "$(RELEASE)" = 1 || { echo "use: make FLAVOR=stable RELEASE=1 hbc-manifest"; exit 2; }
+	+$(MAKE) --no-print-directory FLAVOR=stable RELEASE=1 ipk
+	@command -v webosbrew-gen-manifest >/dev/null || { echo "webosbrew-gen-manifest is missing; install webosbrew-toolbox-gen-manifest"; exit 127; }
+	webosbrew-gen-manifest -o "pkg/$(APPID_STABLE).manifest.json" \
+	  -p "pkg/$(APPID_STABLE)_$(IPK_VERSION)_arm.ipk" \
+	  -i "https://raw.githubusercontent.com/open-ott-play/ottplay-lg/main/pkg/icon160.png" \
+	  -l "https://github.com/open-ott-play/ottplay-lg"
+
 # Remove a flavour from the television. Refuses the stable id: uninstalling the app the household
 # watches with is not something a make target should make easy, and appinstalld gives no undo.
 uninstall: tv-lock-require
@@ -2602,5 +2628,5 @@ fetch-profile:
 	-$(SCP) tv:$(RUNDIR)/plxnative-hwcnt.jsonl pkg/plxnative-hwcnt.jsonl
 	@ls -l pkg/plxnative-*.jsonl 2>/dev/null || echo "no profiler output in $(RUNDIR) on the TV ($(APPID))"
 
-.PHONY: setup-rust libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile \
+.PHONY: setup-rust libass libass-host screenshots screenshots-sim demo-library disk symbols symbols-libs sentry-symbols sentry-native all setup-env telemetry-local deploy verify-deploy run run-stream kill check check-unlocked check-ffmpeg lint test ipk clean tv-lock-require threadprobe sockprobe logmprobe mali-hwcnt-probe tv-capture-bench mali-irq-sample plxnative-stackwalk sim sim-macos sim-linux site-video-sim sim-wsl sim-run sim-macos-run sim-shot sim-macos-shot sim-token sim-macos-token sim-play sim-macos-play sim-clean sim-macos-clean macapp macapp-zip fixtures fixtures-quick fixtures-pipeline fetch-profile install-devmode hbc-manifest \
         release-guard lab-guard install uninstall $(QUERY_GOALS)

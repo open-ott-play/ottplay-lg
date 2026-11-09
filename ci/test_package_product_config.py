@@ -211,13 +211,28 @@ class ProductPackage(unittest.TestCase):
         self.config["notes_contract"] = "standalone-native-v1"
         self.save_config()
         self.assert_rejected(self.configured("--tracked"), "release document checks failed")
-        self.write(NOTES, NOTE_TEXT.replace("ottplay-native-webos-", "ottplay-lg-"))
+        self.write(NOTES, NOTE_TEXT.replace("ottplay-native-webos-", "ottplay-lg-")
+                   + "\nPackage SHA-256: `__IPK_SHA256__`\n")
         result = self.configured("--tracked")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         receipt = next(json.loads(line.split("=", 1)[1]) for line in result.stdout.splitlines()
                        if line.startswith("PRODUCT_CONFIG_RECEIPT="))
         self.assertEqual(receipt["notes_contract"], "standalone-native-v1")
         self.assertEqual(receipt["scope"], "release-document-routing-only")
+
+    def test_standalone_route_rejects_duplicate_or_unknown_checksum_sentinels(self):
+        self.config["notes_contract"] = "standalone-native-v1"
+        self.save_config()
+        for body in (
+            NOTE_TEXT.replace("ottplay-native-webos-", "ottplay-lg-")
+            + "\n__IPK_SHA256__ __IPK_SHA256__\n",
+            NOTE_TEXT.replace("ottplay-native-webos-", "ottplay-lg-")
+            + "\n__UNKNOWN_HASH__\n",
+        ):
+            with self.subTest(body=body):
+                self.write(NOTES, body)
+                self.assert_rejected(self.configured("--tracked"),
+                                     "exactly one package checksum sentinel")
 
     def test_default_route_keeps_existing_note_contract(self):
         self.write("docs/release-notes/v0.3.0.md", "# Release\n\nChecksum: __IPK_SHA256__\n")

@@ -300,7 +300,9 @@ fn classic_programme_row_rolls_over_without_catalogue_reload_or_focus_change() {
     let focus = screen.form.selected_id().cloned();
     tick(&mut screen, 50_000);
     let index = screen.form.index_of_key(RowKey(screen.keys["item:station"])).unwrap();
-    assert_eq!(plx_ui::table::row_mut_in(&mut screen.form.table.sections, index).unwrap().label, "station  NOW_B");
+    let row = plx_ui::table::row_mut_in(&mut screen.form.table.sections, index).unwrap();
+    assert_eq!(row.label, "station", "channel identity stays on the primary line");
+    assert_eq!(row.detail, "NOW_B", "the programme rolls in its own detail line");
     assert_eq!(screen.form.selected_id(), focus.as_ref());
     assert!(Arc::ptr_eq(&view, &screen.snapshot));
 }
@@ -615,7 +617,7 @@ fn progress_visibility_and_selected_rollover_are_independent_of_programme_names(
     view.classic_preferences = view.classic_preferences.with_show_progress(0).unwrap();
     hidden.install(Arc::new(view));
     assert_eq!(hidden.form.table.sections[0].rows[0].progress_bounds(), None);
-    assert!(hidden.form.table.sections[0].rows[0].label.contains("NOW_A"),
+    assert!(hidden.form.table.sections[0].rows[0].detail.contains("NOW_A"),
         "hiding progress does not hide the current programme name");
 }
 

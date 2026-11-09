@@ -5,12 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: native-checks-${{ github.event.pull_request.number || github.ref }}
+  group: native-checks-${{ github.event.pull_request.number || github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
@@ -71,10 +72,26 @@ jobs:
           --target-dir "$RUNNER_TEMP/shared-core-arm"
           --libclang /usr/lib/llvm-18/lib
 
+  release-contracts:
+    name: Release contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - run: >-
+          python3 -m unittest ci.test_native_release ci.test_native_release_artifacts
+          ci.test_native_release_workflows ci.test_native_candidate_receipt
+          ci.test_package_product_config -v
+
   gate:
     name: CI gate
     if: always()
-    needs: [source, native, arm]
+    needs: [source, native, arm, release-contracts]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -83,4 +100,7 @@ jobs:
           SOURCE: ${{ needs.source.result }}
           NATIVE: ${{ needs.native.result }}
           ARM: ${{ needs.arm.result }}
-        run: test "$SOURCE" = success && test "$NATIVE" = success && test "$ARM" = success
+          RELEASE: ${{ needs.release-contracts.result }}
+        run: >-
+          test "$SOURCE" = success && test "$NATIVE" = success &&
+          test "$ARM" = success && test "$RELEASE" = success
