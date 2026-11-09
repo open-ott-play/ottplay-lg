@@ -1072,7 +1072,7 @@ fn entry_demux_tracks(http: &HttpFixture, name: &str, seek: i64, audio_enabled: 
     let mut audio = crate::aq::aq_new(128 * 1024);
     let mut hs = plx_net::stream::http_stream_boxed();
     let result = external_hls::demux(&format!("{}/{name}", http.url), if audio_enabled { "aac" } else { "" }, None,
-        &mut *video, &mut *audio, &mut *hs);
+        &mut *video, &mut *audio, &mut *hs, None);
     let mut aus = Vec::new();
     for queue in [&mut *video, &mut *audio] {
         loop {
@@ -1245,4 +1245,101 @@ fn external_hls_private_six_segment_chain_reaches_dependent_tail() {
         assert!(requests.iter().any(|path| path == &format!("/replay-{index}.ts")),
             "private replay did not request segment {index}");
     }
+}
+
+#[test]
+#[ignore = "requires bundled host FFmpeg, ffmpeg/libx264 and ffprobe CLI; synthetic localhost only"]
+fn external_live_hls_subtitles_use_committed_mux_video_clock_and_route_selection() {
+    use crate::{player::{sidecar, text_style::TextStyle}, route};
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::image_subtitle_tests::bind_host_ffmpeg();
+    let _globals = route::HlsTrackRequest::test_globals_guard();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    let _text = entry_fixture_with_audio(&dir.0, "10", true);
+    std::fs::write(dir.0.join("live.m3u8"),
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\npart-0.ts\n").unwrap();
+    std::fs::write(dir.0.join("master-live.m3u8"),
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"cc\",NAME=\"English\",LANGUAGE=\"en\",FORCED=YES,URI=\"live-cc.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=100,SUBTITLES=\"cc\"\nlive.m3u8\n").unwrap();
+    let video_ns = entry_packet_nals(&dir.0.join("part-0.ts"))[0].0;
+    let video_ticks = (i128::from(video_ns) * 90_000 + 500_000_000) / 1_000_000_000;
+    std::fs::write(dir.0.join("live-cc.m3u8"),
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:999\n#EXTINF:3,\nlive-cc.vtt\n").unwrap();
+    std::fs::write(dir.0.join("live-cc.vtt"), format!(
+        "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:{video_ticks}\n\n00:00.500 --> 00:01.500\nLive committed video caption\n\n")).unwrap();
+    let http = HttpFixture::start(dir.0.clone());
+    let info = inspect::http(&format!("{}/master-live.m3u8", http.url), Arc::new(AtomicBool::new(false))).unwrap();
+    let playback = info.hls_playback.as_ref().expect("selected master subtitle group retained").clone();
+    assert!(playback.is_live_subtitles());
+    assert_eq!(playback.live_subtitle_revision(), None, "inspection cannot publish a decoder clock");
+    assert!(http.requests.lock().unwrap().iter().all(|path| !path.contains("live-cc")));
+    let source = info.resolved_source.clone().unwrap();
+    let mut ps = route::PlaybackSession::IDLE;
+    route::reset_player_control_for_test(&ps);
+    route::request_external_source(&mut ps, &info, source.clone(), "Live fixture", "M3U",
+        plx_platform::devcaps::assumed_shared()).unwrap();
+    route::reset_player_control_for_test(&ps);
+    SHARED.reset_session();
+    SHARED.seek_to_ns.store(-1, Ordering::Release);
+    let prior_feed = FEED_AUDIO.swap(true, Ordering::Relaxed);
+    let mut video = crate::aq::aq_new(1024 * 1024);
+    let mut audio = crate::aq::aq_new(1024 * 1024);
+    let mut hs = plx_net::stream::http_stream_boxed();
+    let (v, a, h) = (SendPtr(&mut *video), SendPtr(&mut *audio), SendPtr(&mut *hs));
+    let selected = playback.clone();
+    let worker = std::thread::spawn(move || {
+        let off = plx_base::task::OffFrame::for_test();
+        demux_external(&off, 0, source, "aac".into(), Some(HlsTrackSelection::Rendition(selected)),
+            v, a, h, TextStyle::current(Default::default()));
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut first_video = None;
+    while Instant::now() < deadline && (!worker.is_finished()) {
+        for (queue, is_video) in [(&mut *video, true), (&mut *audio, false)] {
+            let node = crate::aq::aq_pop(queue, std::ptr::null_mut());
+            if !node.is_null() {
+                unsafe {
+                    if is_video && first_video.is_none() { first_video = Some(crate::aq::au_fields(node).2); }
+                    libc::free(node.cast());
+                }
+            }
+        }
+        if playback.live_subtitle_revision().is_some() && first_video.is_some() { break; }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Always stop and join the media producer before assertion/route failures.
+    crate::aq::aq_abort(&mut *video); crate::aq::aq_abort(&mut *audio);
+    crate::curlio::abort_active(); plx_net::stream::http_shutdown(&mut *hs);
+    worker.join().unwrap();
+    plx_net::stream::http_close(&mut *hs);
+    crate::aq::aq_destroy(&mut *video); crate::aq::aq_destroy(&mut *audio);
+    FEED_AUDIO.store(prior_feed, Ordering::Relaxed);
+    assert!(!SHARED.demux_failed.load(Ordering::Acquire));
+    assert!(playback.live_subtitle_revision().is_some(), "successful segment feed must publish its decoder clock");
+    let first_video = first_video.expect("real muxed TS must emit video AUs");
+    let catalog = route::hls_track_catalog(&ps).unwrap();
+    let rows = catalog.subtitle_rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].forced);
+    assert!(catalog.rows().is_empty(), "muxed metadata does not invent an audio rendition");
+    let id = rows[0].id;
+    let (canonical, epoch) = playback.prepare_subtitle_snapshot(id, Arc::new(AtomicBool::new(false))).unwrap();
+    assert_eq!(epoch, playback.live_subtitle_revision());
+    let expected_ms = (first_video + 500_000_000) / 1_000_000;
+    let expected = format!("00:00:{:02}.{:03}", expected_ms / 1000, expected_ms % 1000);
+    assert!(String::from_utf8(canonical).unwrap().contains(&expected), "cue must retain the actual muxed audio/video lead");
+    let request = route::begin_hls_track_request(&mut ps, &catalog.subtitle_choice(Some(id)).unwrap()).unwrap();
+    let off = plx_base::task::OffFrame::for_test();
+    let prepared = request.prepare(&off, Arc::new(AtomicBool::new(false))).unwrap();
+    assert!(route::complete_hls_track_request(&mut ps, &request, prepared).unwrap());
+    let style = TextStyle::current(route::subtitle_text_appearance(&ps));
+    let source = sidecar::ass_source(false, style).expect("live selection must reach shared renderer");
+    let crate::player::ass::Content::Script { bytes, .. } = &source.content else { panic!("live text script expected"); };
+    assert!(std::str::from_utf8(bytes).unwrap().contains("Live committed video caption"));
+    assert_eq!(route::hls_track_catalog(&ps).unwrap().selected_subtitle(), Some(id));
+    let off_request = route::begin_hls_track_request(&mut ps, &catalog.subtitle_choice(None).unwrap()).unwrap();
+    let prepared = off_request.prepare(&off, Arc::new(AtomicBool::new(false))).unwrap();
+    assert!(route::complete_hls_track_request(&mut ps, &off_request, prepared).unwrap());
+    assert_eq!(route::hls_track_catalog(&ps).unwrap().selected_subtitle(), None);
 }

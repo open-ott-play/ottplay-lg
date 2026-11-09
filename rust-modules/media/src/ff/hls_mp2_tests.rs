@@ -37,6 +37,7 @@ fn read_pcm(
         &mut *video,
         &mut *audio,
         &mut *hs,
+        None,
     );
     let mut stamps = Vec::new();
     let mut pcm = Vec::new();

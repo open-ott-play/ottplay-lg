@@ -211,7 +211,7 @@ impl JoinCursor {
             total_us: video.transfer.total_us.saturating_add(self.pending_transfer.total_us), audio_expected: true,
         };
         self.pending_transfer = SegmentTransfer { bytes: 0, active_us: 0, total_us: 0, audio_expected: true };
-        Ok(HlsSegmentOutput { aus, transfer, video_width: width, video_height: height,
+        Ok(HlsSegmentOutput { webvtt_clock: None, aus, transfer, video_width: width, video_height: height,
             video_tail_ns: video.end_ns, audio_tail_ns: Some(self.emitted_end) })
     }
 }

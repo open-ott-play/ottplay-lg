@@ -348,6 +348,7 @@ fn a_prefetched_segment_does_not_move_the_published_buffer() {
     let prev_pos = SHARED.playpos_ns.swap(0, Ordering::AcqRel);
     let prev_base = SHARED.disp_base.swap(0, Ordering::AcqRel);
     let held = HlsSegmentOutput {
+        webvtt_clock: None,
         aus: Vec::new(),
         transfer: SegmentTransfer {
             bytes: 1,

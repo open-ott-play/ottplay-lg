@@ -14,6 +14,7 @@ const PLAYLIST_SEGMENTS: usize = 20_000;
 struct Variant {
     url: String,
     bandwidth: u64,
+    subtitles: Option<String>,
 }
 #[derive(Clone)]
 struct MediaSegment {
@@ -108,6 +109,7 @@ fn parse_with_limits(base: &str, text: &str, segment_limit: usize, uri_bytes_lim
     let mut variants = Vec::new();
     let mut segments = Vec::new();
     let mut pending_variant = None;
+    let mut pending_subtitles = None;
     let mut duration = None;
     let mut sequence = 0u64;
     let mut sequence_set = false;
@@ -139,6 +141,7 @@ fn parse_with_limits(base: &str, text: &str, segment_limit: usize, uri_bytes_lim
                 .filter(|v| *v > 0)
                 .ok_or("Missing HLS variant bandwidth")?;
             pending_variant = Some(bandwidth);
+            pending_subtitles = a.get("SUBTITLES").map(|v| (*v).to_owned());
         } else if let Some(raw) = line.strip_prefix("#EXTINF:") {
             if duration.is_some() || pending_variant.is_some() || !variants.is_empty() {
                 return Err("Mixed HLS playlist types");
@@ -241,7 +244,7 @@ fn parse_with_limits(base: &str, text: &str, segment_limit: usize, uri_bytes_lim
                 if variants.len() >= 64 {
                     return Err("Too many HLS variants");
                 }
-                variants.push(Variant { url, bandwidth });
+                variants.push(Variant { url, bandwidth, subtitles: pending_subtitles.take() });
             } else if let Some(duration) = duration.take() {
                 segments.push(MediaSegment {
                     inner: crate::hls::Segment { sequence, duration, resource: resource(&url)? },
@@ -449,6 +452,7 @@ pub(super) fn inspect(
 ) -> Result<super::inspect::MediaInfo, &'static str> {
     let source_url = plx_data::ott::http_url(url).ok_or("Invalid HLS address")?;
     let mut url = source_url.clone();
+    let mut subtitle_master = None;
     for depth in 0..4 {
         let stage = if depth == 0 { PlaylistStage::Initial } else { PlaylistStage::Selected };
         let (landed, text) = fetch_traced(&url, &mut Owner::Inspect(&cancelled),
@@ -461,7 +465,11 @@ pub(super) fn inspect(
         match parse(&landed, &text)? {
             Playlist::Master(mut variants) => {
                 variants.sort_by_key(|v| v.bandwidth);
-                url = variants[0].url.clone();
+                let selected = &variants[0];
+                if selected.subtitles.is_some() {
+                    subtitle_master = Some((landed, text, selected.subtitles.clone()));
+                }
+                url = selected.url.clone();
             }
             Playlist::Media(media) => {
                 let segment = media
@@ -477,7 +485,7 @@ pub(super) fn inspect(
                     segment.inner.resource.origin.base(),
                     segment.inner.resource.path
                 );
-                let mut info = super::inspect::raw(&ExternalSource::Http(url), cancelled)?;
+                let mut info = super::inspect::raw(&ExternalSource::Http(url), Arc::clone(&cancelled))?;
                 let mp2 = info.video_codec == "h264" && info.audio_codec == "mp2"
                     && info.tracks.audio.first().is_some_and(|track|
                         hls_mp2::format(&track.codec, track.channels, track.sample_rate)
@@ -488,7 +496,7 @@ pub(super) fn inspect(
                 // This table describes one segment, not all variants/tracks in
                 // the presentation. Keep its rows for the existing manual menu.
                 info.tracks.mark_incomplete();
-                info.resolved_source = Some(ExternalSource::Hls(landed));
+                info.resolved_source = Some(ExternalSource::Hls(landed.clone()));
                 info.duration_ns = if media.ended {
                     media
                         .segments
@@ -500,6 +508,12 @@ pub(super) fn inspect(
                 } else {
                     0
                 };
+                if !media.ended {
+                    if let Some((master_url, master_text, group)) = subtitle_master.as_ref() {
+                        info.hls_playback = super::hls_presentation::live_presentation(
+                            &source_url, master_url, master_text, group.as_deref(), &landed, &info)?;
+                    }
+                }
                 return Ok(info);
             }
         }
@@ -514,6 +528,7 @@ pub(super) fn demux(
     aq: *mut AuQueue,
     aqa: *mut AuQueue,
     hs: *mut HttpStream,
+    presentation: Option<&super::hls_presentation::HlsPlayback>,
 ) -> Result<(), HlsExit> {
     let mut net = HlsNet { hs, curl: None };
     let mut next = None;
@@ -607,6 +622,10 @@ pub(super) fn demux(
                 discontinuity_sequence: segment.discontinuity_sequence, state: candidate,
             });
             timeline.commit(clock);
+            if let Some(presentation) = presentation {
+                presentation.commit_live_clock(&landed, segment.discontinuity_sequence,
+                    output.webvtt_clock, timeline.end_ns());
+            }
             next = Some(
                 segment.inner
                     .sequence
@@ -816,5 +835,16 @@ pub(super) fn vod_segments_bounded(base: &str, text: &str, segment_limit: usize,
     match parse_with_limits(base, text, segment_limit, Some(uri_bytes_limit))? {
         Playlist::Media(media) if media.ended => Ok(media.segments.into_iter().map(|segment| segment.inner).collect()),
         _ => Err("HLS subtitles require a complete VOD playlist"),
+    }
+}
+
+/// Subtitle window parser shares the exact transport feature refusals with A/V.
+pub(super) fn subtitle_window(base: &str, text: &str)
+    -> Result<Vec<(crate::hls::Segment, u64)>, &'static str>
+{
+    match parse_with_limits(base, text, 64, Some(1024 * 1024))? {
+        Playlist::Media(media) => Ok(media.segments.into_iter()
+            .map(|s| (s.inner, s.discontinuity_sequence)).collect()),
+        _ => Err("HLS subtitle address became a master playlist"),
     }
 }

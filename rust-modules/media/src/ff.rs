@@ -5102,6 +5102,8 @@ std::thread_local! {
 }
 
 struct HlsSegmentOutput {
+    // Anchor from the actual decoded video PES clock, never playlist wall time.
+    webvtt_clock: Option<hls_webvtt::Clock>,
     aus: Vec<HlsAu>,
     transfer: SegmentTransfer,
     video_width: i32,
@@ -5646,7 +5648,13 @@ unsafe fn hls_demux_segment_path(
     if let Some(state) = external_state {
         state.params = Some(params);
     }
+    let webvtt_clock = first_video_raw_pts.zip(origin).and_then(|(raw, origin)| {
+        let ticks = (i128::from(raw) * 90_000 + 500_000_000).div_euclid(1_000_000_000);
+        Some(hls_webvtt::Clock { pts_90k: i64::try_from(ticks).ok()?,
+            presentation_ns: clock.normalize_shared_ns(raw, origin) })
+    });
     Ok(HlsSegmentOutput {
+        webvtt_clock,
         aus,
         transfer,
         video_width,
@@ -7062,6 +7070,7 @@ fn hls_stall_abort_outcome(
     (
         segment,
         HlsSegmentOutput {
+            webvtt_clock: None,
             aus: Vec::new(),
             transfer,
             video_width: 0,
@@ -9425,6 +9434,7 @@ pub fn demux(
 pub enum HlsTrackSelection {
     Embedded(hls_audio::Selection),
     Rendition(hls_presentation::HlsPlayback),
+    Live { playback: hls_presentation::HlsPlayback, audio: Option<hls_audio::Selection> },
 }
 
 pub fn demux_external(
@@ -9475,12 +9485,17 @@ fn demux_inner(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(ExternalSource::Hls(url))=&external {
                 match audio.as_ref() {
+                    Some(HlsTrackSelection::Live { playback, audio }) if playback.matches_source(url) && playback.is_live_subtitles() =>
+                        external_hls::demux(url, &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback)),
+                    Some(HlsTrackSelection::Live { .. }) => Err(HlsExit::Failed("HLS live presentation source changed")),
+                    Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_subtitles() =>
+                        external_hls::demux(url, &acodec, None, aq_p, aqa_p, hs_p, Some(playback)),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) =>
                         hls_vod::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(_)) => Err(HlsExit::Failed("HLS presentation source changed")),
                     Some(HlsTrackSelection::Embedded(selection)) =>
-                        external_hls::demux(url, &acodec, Some(selection), aq_p, aqa_p, hs_p),
-                    None => external_hls::demux(url, &acodec, None, aq_p, aqa_p, hs_p),
+                        external_hls::demux(url, &acodec, Some(selection), aq_p, aqa_p, hs_p, None),
+                    None => external_hls::demux(url, &acodec, None, aq_p, aqa_p, hs_p, None),
                 }
             } else {
                 hls_demux(off, origin.as_ref().expect("HTTP HLS origin"), &path, &acodec, abr, aq_p, aqa_p, hs_p)
