@@ -49,7 +49,7 @@ def run(argv: list[str], *, cwd: Path = ROOT) -> str:
 
 
 def create_receipt(source_sha: str, run_id: str, run_attempt: str,
-                   sdk: Path, ipk: Path, output_dir: Path) -> dict:
+                   sdk: Path, ipk: Path, output_dir: Path, companion_sources: Path | None = None) -> dict:
     if not valid_source_sha(source_sha):
         raise ValueError("source SHA must be a full lowercase 40-character Git SHA")
     actual_sha = run(["git", "rev-parse", "HEAD"])
@@ -133,6 +133,33 @@ def create_receipt(source_sha: str, run_id: str, run_attempt: str,
                    "make FLAVOR=stable RELEASE=1 ipk (includes check-link-evidence.py, "
                    "check-package.py and check-packaged-elf.py)"],
     }
+    if companion_sources is not None:
+        import native_companion
+        native = native_companion.native_builder()
+        companion = native.verify_ipk(ipk, native.manifest()).get("companion")
+        if not companion:
+            raise ValueError("Candidate requires a packaged companion")
+        source_assets = {}
+        names = {"companion-source.tar.gz": "companion-source.tar.gz",
+                 "companion-source-closure.json": "source-closure.json",
+                 "companion-source-manifest.json": "SOURCE-MANIFEST.json"}
+        for target, original in names.items():
+            path = companion_sources / original
+            if not path.is_file() or path.is_symlink():
+                raise ValueError("Missing companion source asset: " + original)
+            shutil.copyfile(path, output_dir / target)
+            source_assets[target] = sha256(output_dir / target)
+        closure = json.loads((output_dir / "companion-source-closure.json").read_text())
+        if (closure.get("elf_sha256") != companion["elf_sha256"]
+                or closure.get("locked_source_coverage") != "PASS"
+                or closure.get("source_manifest_sha256") != source_assets["companion-source-manifest.json"]
+                or closure.get("local_inputs_sha256") != companion["local_inputs_sha256"]
+                or closure.get("local_source_archive_sha256") != companion["local_source_archive_sha256"]
+                or closure.get("source_receipt_sha256") != companion["source_receipt_sha256"]
+                or closure.get("source_archive", {}).get("sha256") != source_assets["companion-source.tar.gz"]):
+            raise ValueError("Companion source supplement does not match packaged helper")
+        receipt["companion"] = {"metadata": companion, "source_assets": source_assets,
+                                 "source_revision": json.loads((ROOT / "ci/companion-source.json").read_text())["revision"]}
     receipt_path = output_dir / "candidate-provenance.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     (output_dir / "candidate-provenance.json.sha256").write_text(
@@ -148,10 +175,11 @@ def main() -> None:
     parser.add_argument("--sdk", required=True, type=Path)
     parser.add_argument("--ipk", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--companion-sources", type=Path)
     args = parser.parse_args()
     try:
         receipt = create_receipt(args.source_sha, args.run_id, args.run_attempt,
-                                 args.sdk, args.ipk, args.output_dir)
+                                 args.sdk, args.ipk, args.output_dir, args.companion_sources)
     except (OSError, ValueError, subprocess.CalledProcessError, KeyError) as error:
         parser.exit(1, f"candidate receipt failed: {error}\n")
     print(f"candidate {receipt['package']['filename']} sha256={receipt['package']['sha256']}")
