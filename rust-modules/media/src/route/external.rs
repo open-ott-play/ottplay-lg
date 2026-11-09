@@ -74,7 +74,7 @@ pub fn external_duration_ns(ps: &PlaybackSession) -> i64 {
 /// Separate AUDIO presentations and ordinary/Plex media keep their own policy.
 pub(super) fn embedded_mp2_pcm(ps: &PlaybackSession) -> bool {
     if !matches!(ps.external_source, Some(crate::ff::ExternalSource::Hls(_)))
-        || ps.external_hls.is_some() || ps.stream_acodec != "mp2"
+        || ps.external_hls.as_ref().is_some_and(|hls| !hls.is_live_subtitles()) || ps.stream_acodec != "mp2"
     { return false; }
     let Some(tracks) = &ps.external_tracks else { return false; };
     let Some(track) = tracks.inventory().audio.iter()
@@ -151,7 +151,16 @@ pub fn apply_external_track(
         .ok_or(ExternalTrackApplyError::Inactive)?.clone();
     // Prepare the entire after-image locally. A failed identity/policy/busy check
     // must leave the session, catalog and all player atomics untouched.
-    let plan = selected.commit(choice).map_err(ExternalTrackApplyError::InvalidChoice)?;
+    let mut plan = selected.commit(choice).map_err(ExternalTrackApplyError::InvalidChoice)?;
+    let hls_subtitle_edit = ps.external_hls.is_some() && choice.kind() == crate::ff::inspect::TrackKind::Subtitle;
+    // The embedded catalog may already say Off while an HLS rendition is
+    // selected in the shared sidecar. An accepted embedded Off must retire it.
+    if hls_subtitle_edit && matches!(plan, ExternalTrackPlan::Unchanged)
+        && playback_identity(ps).as_ref().and_then(|owner| crate::player::sidecar::selected_hls(owner)).is_some()
+    {
+        plan = ExternalTrackPlan::Subtitle(choice.ordinal().and_then(|ordinal|
+            selected.inventory().subtitles.iter().find(|track| track.ordinal == ordinal).cloned()));
+    }
     let supported = match &plan {
         ExternalTrackPlan::Unchanged => TrackAvailability::Supported,
         ExternalTrackPlan::Audio(track) => if transport == ExternalTrackTransport::Hls {
@@ -171,6 +180,11 @@ pub fn apply_external_track(
         return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::Unsupported(reason)));
     }
     let _edit = reserve_external_track_edit()?;
+    if hls_subtitle_edit {
+        ps.hls_subtitle_intent = if choice.ordinal().is_some() || choice.local_target().is_some() {
+            HlsSubtitleIntent::ManualTrack
+        } else { HlsSubtitleIntent::ManualOff };
+    }
     match plan {
         ExternalTrackPlan::Audio(track) => {
             ps.cur_audio = Some(carried_audio(&track));
@@ -399,6 +413,10 @@ fn install_external_source(
     let mut next = PlaybackSession::IDLE;
     next.subtitle_text_appearance = ps.subtitle_text_appearance;
     next.native_subtitle_preferences = ps.native_subtitle_preferences;
+    next.hls_subtitle_policy = ps.hls_subtitle_policy.clone();
+    if continuation.is_some() && matches!(ps.hls_subtitle_intent, HlsSubtitleIntent::ManualTrack | HlsSubtitleIntent::ManualOff) {
+        next.hls_subtitle_intent = ps.hls_subtitle_intent;
+    }
     next.begin_attempt(caps.clone());
     if info.width == 0
         || info.height == 0
@@ -428,7 +446,7 @@ fn install_external_source(
     next.src_fps = info.fps;
     next.src_dovi = info.dovi;
     next.src_dv_decision = next.stream_dv_decision;
-    let embedded_mp2 = matches!(&source, ExternalSource::Hls(_)) && info.hls_playback.is_none()
+    let embedded_mp2 = matches!(&source, ExternalSource::Hls(_)) && info.hls_playback.as_ref().is_none_or(|hls| hls.is_live_subtitles())
         && info.audio_codec == "mp2" && info.tracks.audio.first()
             .is_some_and(|track| crate::ff::hls_mp2::supported(track, &caps));
     if !info.audio_codec.is_empty() {
@@ -1138,4 +1156,4 @@ mod managed_continuation_tests;
 
 #[path = "external_hls_tracks.rs"]
 mod hls_tracks;
-pub use hls_tracks::{hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack};
+pub use hls_tracks::{HlsSubtitleMode, HlsSubtitlePolicy, HlsSubtitleIntent, hls_subtitle_policy, hls_subtitle_intent, restore_hls_subtitle_policy, begin_automatic_hls_subtitle_request, hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack};

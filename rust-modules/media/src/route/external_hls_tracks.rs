@@ -6,6 +6,49 @@ use std::sync::{Arc, atomic::AtomicBool};
 use plx_base::task::OffFrame;
 use crate::player::{sidecar, text_style::TextStyle};
 
+/// Native HLS selection policy; independent of Plex's server preferences.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HlsSubtitleMode { #[default] Off, Auto, Forced }
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HlsSubtitlePolicy { pub mode: HlsSubtitleMode, pub language: String }
+impl HlsSubtitlePolicy {
+    pub const OFF: Self = Self { mode: HlsSubtitleMode::Off, language: String::new() };
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HlsSubtitleIntent { #[default] Unset, Auto, ManualTrack, ManualOff }
+pub fn hls_subtitle_policy(ps: &PlaybackSession) -> HlsSubtitlePolicy { ps.hls_subtitle_policy.clone() }
+pub fn hls_subtitle_intent(ps: &PlaybackSession) -> HlsSubtitleIntent { ps.hls_subtitle_intent }
+/// Restoring/changing a global preference never replaces this item's manual pick.
+pub fn restore_hls_subtitle_policy(ps: &mut PlaybackSession, policy: HlsSubtitlePolicy) {
+    if ps.hls_subtitle_policy == policy { return; }
+    ps.hls_subtitle_policy = policy;
+    if ps.hls_subtitle_intent == HlsSubtitleIntent::Auto { ps.hls_subtitle_intent = HlsSubtitleIntent::Unset; }
+}
+pub fn begin_automatic_hls_subtitle_request(ps: &mut PlaybackSession)
+    -> Result<Option<HlsTrackRequest>, ExternalTrackApplyError>
+{
+    if ps.hls_subtitle_intent != HlsSubtitleIntent::Unset { return Ok(None); }
+    let policy = hls_subtitle_policy(ps);
+    let Some(catalog) = hls_track_catalog(ps) else { return Ok(None); };
+    let language = (!policy.language.is_empty()).then_some(policy.language.as_str());
+    let id = match policy.mode {
+        HlsSubtitleMode::Off => None,
+        HlsSubtitleMode::Auto | HlsSubtitleMode::Forced =>
+            catalog.presentation.automatic_subtitle(language, policy.mode == HlsSubtitleMode::Forced),
+    };
+    if id.is_none() && catalog.selected_subtitle().is_none() {
+        if policy.mode != HlsSubtitleMode::Off { ps.hls_subtitle_intent = HlsSubtitleIntent::Auto; }
+        return Ok(None);
+    }
+    let choice = catalog.subtitle_choice(id)?;
+    let mut request = begin_hls_request(ps, &choice)?;
+    ps.hls_subtitle_intent = HlsSubtitleIntent::Auto;
+    request.automatic_policy = Some(policy);
+    Ok(Some(request))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HlsTrackRow {
     pub id: RenditionId,
@@ -19,6 +62,7 @@ pub struct HlsSubtitleRow {
     pub name: String,
     pub language: String,
     pub selected: bool,
+    pub forced: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HlsTrackTarget {
@@ -44,7 +88,7 @@ impl HlsTrackCatalog {
     }
     pub fn subtitle_rows(&self) -> Vec<HlsSubtitleRow> {
         self.presentation.subtitle_rows().map(|(id, name, language)| HlsSubtitleRow {
-            id, name: name.into(), language: language.into(), selected: self.subtitle == Some(id),
+            id, name: name.into(), language: language.into(), selected: self.subtitle == Some(id), forced: self.presentation.subtitle_forced(id),
         }).collect()
     }
     pub fn selected_subtitle(&self) -> Option<HlsSubtitleId> { self.subtitle }
@@ -87,6 +131,7 @@ pub struct HlsTrackRequest {
     revision: u64,
     worker: WorkerTicket,
     text_style: TextStyle,
+    automatic_policy: Option<HlsSubtitlePolicy>,
 }
 impl std::fmt::Debug for HlsTrackRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -96,7 +141,7 @@ impl std::fmt::Debug for HlsTrackRequest {
 pub struct PreparedHlsTrack(Prepared);
 enum Prepared {
     Audio(HlsPlayback),
-    Subtitle { playback: HlsPlayback, id: HlsSubtitleId, content: sidecar::PreparedHls },
+    Subtitle { playback: HlsPlayback, id: HlsSubtitleId, content: sidecar::PreparedHls, epoch: Option<u64> },
     Off(HlsPlayback),
 }
 impl PreparedHlsTrack {
@@ -123,7 +168,7 @@ impl HlsTrackRequest {
             HlsTrackTarget::Audio(id) => Prepared::Audio(presentation.selected_for_test(id)),
             HlsTrackTarget::Subtitle(None) => Prepared::Off(presentation.clone()),
             HlsTrackTarget::Subtitle(Some(id)) => Prepared::Subtitle {
-                playback: presentation.clone(), id,
+                playback: presentation.clone(), id, epoch: presentation.live_subtitle_revision(),
                 content: sidecar::prepare_hls(&OffFrame::for_test(), self.choice.catalog.playback.clone(), id,
                     b"WEBVTT\n\n00:00.100 --> 00:00.800\nFixture\n".to_vec(), self.text_style, &mut || false).unwrap(),
             },
@@ -141,12 +186,12 @@ impl HlsTrackRequest {
             HlsTrackTarget::Audio(id) => Prepared::Audio(presentation.prepare_rendition(id, cancelled.clone())?),
             HlsTrackTarget::Subtitle(None) => Prepared::Off(presentation.clone()),
             HlsTrackTarget::Subtitle(Some(id)) => {
-                let bytes = presentation.prepare_subtitle(id, cancelled.clone())?;
+                let (bytes, epoch) = presentation.prepare_subtitle_snapshot(id, cancelled.clone())?;
                 if should_stop() { return Err("HLS preparation cancelled or timed out"); }
                 let content = sidecar::prepare_hls(off, self.choice.catalog.playback.clone(), id, bytes,
                     self.text_style, &mut should_stop).map_err(|_| "HLS WebVTT conversion failed or cancelled")?;
                 if should_stop() { return Err("HLS preparation cancelled or timed out"); }
-                Prepared::Subtitle { playback: presentation.clone(), id, content }
+                Prepared::Subtitle { playback: presentation.clone(), id, content, epoch }
             }
         };
         Ok(PreparedHlsTrack(ready))
@@ -164,6 +209,17 @@ fn choice_is_current(ps: &PlaybackSession, choice: &HlsTrackChoice) -> bool {
 pub fn begin_hls_track_request(ps: &mut PlaybackSession, choice: &HlsTrackChoice)
     -> Result<HlsTrackRequest, ExternalTrackApplyError>
 {
+    let request = begin_hls_request(ps, choice)?;
+    match choice.target {
+        HlsTrackTarget::Subtitle(Some(_)) => ps.hls_subtitle_intent = HlsSubtitleIntent::ManualTrack,
+        HlsTrackTarget::Subtitle(None) => ps.hls_subtitle_intent = HlsSubtitleIntent::ManualOff,
+        HlsTrackTarget::Audio(_) => {},
+    }
+    Ok(request)
+}
+fn begin_hls_request(ps: &mut PlaybackSession, choice: &HlsTrackChoice)
+    -> Result<HlsTrackRequest, ExternalTrackApplyError>
+{
     if !choice_is_current(ps, choice) {
         return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
     }
@@ -177,10 +233,12 @@ pub fn begin_hls_track_request(ps: &mut PlaybackSession, choice: &HlsTrackChoice
     let control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
     Ok(HlsTrackRequest { choice: choice.clone(), revision: control.desired_revision,
         worker: worker_ticket_of(&control),
-        text_style })
+        text_style, automatic_policy: None })
 }
 pub fn hls_track_request_is_current(ps: &PlaybackSession, request: &HlsTrackRequest) -> bool {
     if !choice_is_current(ps, &request.choice) { return false; }
+    if request.automatic_policy.as_ref().is_some_and(|policy|
+        ps.hls_subtitle_intent != HlsSubtitleIntent::Auto || &ps.hls_subtitle_policy != policy) { return false; }
     let control = PLAYER_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
     control.desired_revision == request.revision && worker_ticket_of(&control) == request.worker
 }
@@ -189,6 +247,11 @@ pub fn complete_hls_track_request(ps: &mut PlaybackSession, request: &HlsTrackRe
 {
     if !hls_track_request_is_current(ps, request) || !prepared.matches(&request.choice) {
         return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
+    }
+    if let Prepared::Subtitle { playback, epoch, .. } = &prepared.0 {
+        if playback.is_live_subtitles() && (*epoch == None || playback.live_subtitle_revision() != *epoch) {
+            return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
+        }
     }
     if let Prepared::Audio(playback) = &prepared.0 {
         let track = playback.audio_track();
@@ -215,12 +278,21 @@ pub fn complete_hls_track_request(ps: &mut PlaybackSession, request: &HlsTrackRe
             crate::player::request_audio_track(ps, 0, "aac");
             crate::player::note_audio_pick();
         }
-        Prepared::Subtitle { id, content, .. } => {
+        Prepared::Subtitle { playback, id, content, epoch } => {
             let changed = sidecar::selected_hls(&request.choice.catalog.playback) != Some(id);
             if !sidecar::install_hls(&request.choice.catalog.playback, id, content) {
                 return Err(ExternalTrackApplyError::InvalidChoice(ExternalTrackError::StaleSession));
             }
             commit_hls_subtitle(ps, true, changed);
+            if playback.is_live_subtitles() {
+                if let Some(token) = sidecar::hls_refresh_token(&request.choice.catalog.playback, id) {
+                    if let Some(epoch) = epoch {
+                        if !sidecar::bind_hls_epoch(&token, &playback, epoch) { sidecar::clear_hls_refresh(&token); }
+                    }
+                    start_live_refresh(LiveRefresh { playback, owner: request.choice.catalog.playback.clone(),
+                        id, style: request.text_style, token, epoch });
+                }
+            }
         }
         Prepared::Off(_) => {
             sidecar::reset_hls();
@@ -228,6 +300,68 @@ pub fn complete_hls_track_request(ps: &mut PlaybackSession, request: &HlsTrackRe
         }
     }
     Ok(true)
+}
+
+// One live download worker and one latest-selection slot. Repeated menu picks
+// cannot accumulate workers while a previous request is being cancelled.
+struct LiveRefresh {
+    playback: HlsPlayback,
+    owner: PlaybackIdentity,
+    id: HlsSubtitleId,
+    style: TextStyle,
+    token: sidecar::HlsRefreshToken,
+    epoch: Option<u64>,
+}
+struct LiveWorker { running: bool, pending: Option<LiveRefresh> }
+static LIVE_WORKER: std::sync::Mutex<LiveWorker> = std::sync::Mutex::new(LiveWorker { running: false, pending: None });
+fn start_live_refresh(job: LiveRefresh) {
+    let mut worker = LIVE_WORKER.lock().unwrap_or_else(|e| e.into_inner());
+    worker.pending = Some(job);
+    if worker.running { return; }
+    worker.running = true;
+    drop(worker);
+    if !plx_base::task::spawn_off_frame("hls-subtitles", |off| loop {
+        let job = {
+            let mut worker = LIVE_WORKER.lock().unwrap_or_else(|e| e.into_inner());
+            match worker.pending.take() {
+                Some(job) => job,
+                None => { worker.running = false; return; }
+            }
+        };
+        run_live_refresh(off, job);
+    }) {
+        let mut worker = LIVE_WORKER.lock().unwrap_or_else(|e| e.into_inner());
+        worker.running = false;
+        worker.pending = None;
+    }
+}
+fn run_live_refresh(off: &OffFrame, mut job: LiveRefresh) {
+    use std::time::{Duration, Instant};
+    let mut next = Instant::now() + Duration::from_secs(1);
+    while sidecar::hls_refresh_is_current(&job.token) {
+        let epoch = job.playback.live_subtitle_revision();
+        if epoch != job.epoch {
+            if !sidecar::clear_hls_refresh(&job.token) { return; }
+            plx_machine::present::wake_from_worker();
+            job.epoch = epoch;
+            next = Instant::now();
+        }
+        if epoch.is_none() || Instant::now() < next {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        let snapshot = job.playback.prepare_subtitle_snapshot(job.id, job.token.cancelled.clone());
+        if let Ok((bytes, prepared_epoch)) = snapshot {
+            let mut stop = || !sidecar::hls_refresh_is_current(&job.token)
+                || job.playback.live_subtitle_revision() != prepared_epoch;
+            if let Ok(content) = sidecar::prepare_hls(off, job.owner.clone(), job.id, bytes, job.style, &mut stop) {
+                if !stop() && prepared_epoch.is_some_and(|epoch| sidecar::refresh_hls(&job.token, content, &job.playback, epoch)) {
+                    plx_machine::present::wake_from_worker();
+                }
+            }
+        }
+        next = Instant::now() + Duration::from_secs(1);
+    }
 }
 
 fn commit_hls_subtitle(ps: &mut PlaybackSession, selected: bool, reset_offset: bool) {

@@ -13,7 +13,7 @@ const NS: i128 = 1_000_000_000;
 const RATE: i128 = 90_000;
 const WRAP: i128 = 1_i128 << 33;
 
-/// Actual video PES clock, mapped by the same LaneClock used by the decoder.
+/// Actual video PES clock, mapped by the same presentation clock as the decoder.
 /// A source without this evidence must not guess from a playlist date or EXTINF.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Clock {
@@ -80,7 +80,14 @@ fn settings(value: &str) -> Result<String, &'static str> {
     Ok(fields.into_iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(" "))
 }
 
+#[cfg(test)]
 fn parse(text: &str) -> Result<(TimestampMap, Vec<text_ass::FileCue>), &'static str> {
+    parse_cancellable(text, &mut || false)
+}
+fn parse_cancellable(text: &str, stop: &mut dyn FnMut() -> bool)
+    -> Result<(TimestampMap, Vec<text_ass::FileCue>), &'static str>
+{
+    if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
     if text.len() > TEXT_BYTES || text.chars().any(|c| c.is_control() && !matches!(c, '\t' | '\r' | '\n')) {
         return Err("Invalid WebVTT segment");
     }
@@ -105,6 +112,7 @@ fn parse(text: &str) -> Result<(TimestampMap, Vec<text_ass::FileCue>), &'static 
     }
     let mut count = 0usize;
     for block in body.split("\n\n").filter(|b| !b.trim().is_empty()) {
+        if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
         let mut lines = block.lines();
         let first = lines.next().ok_or("Invalid WebVTT cue")?;
         if first == "NOTE" || first.starts_with("NOTE ") || first.starts_with("NOTE\t") { continue; }
@@ -124,8 +132,12 @@ fn parse(text: &str) -> Result<(TimestampMap, Vec<text_ass::FileCue>), &'static 
         count += 1;
         if count > CUE_LIMIT { return Err("WebVTT cue limit exceeded"); }
     }
+    if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
     let mut cues = text_ass::read_cues(body);
-    for cue in &mut cues { cue.settings = settings(&cue.settings)?; }
+    for cue in &mut cues {
+        if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
+        cue.settings = settings(&cue.settings)?;
+    }
     if cues.len() != count { return Err("WebVTT cue parse mismatch"); }
     // RFC 8216 section 3.5: absent mapping means LOCAL 0 maps to MPEGTS 0.
     Ok((map.unwrap_or(TimestampMap { local_ns: 0, mpegts: 0 }), cues))
@@ -165,11 +177,18 @@ struct Assembly {
 }
 impl Assembly {
     fn new(clock: Clock) -> Self { Self { clock, cues: BTreeSet::new(), input_bytes: 0, retained_bytes: 0 } }
+    #[cfg(test)]
     fn push(&mut self, text: &str, window: Window) -> Result<(), &'static str> {
+        self.push_cancellable(text, window, &mut || false)
+    }
+    fn push_cancellable(&mut self, text: &str, window: Window, stop: &mut dyn FnMut() -> bool)
+        -> Result<(), &'static str>
+    {
         self.input_bytes = self.input_bytes.checked_add(text.len()).filter(|n| *n <= TEXT_BYTES)
             .ok_or("HLS subtitle text exceeds sidecar limit")?;
-        let (map, cues) = parse(text)?;
+        let (map, cues) = parse_cancellable(text, stop)?;
         for cue in cues {
+            if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
             let (start, end) = mapped(self.clock, map, &cue, window)?;
             if end <= 0 { continue; }
             let key = (start.max(0), end, cue.id, cue.settings, cue.text);
@@ -182,9 +201,15 @@ impl Assembly {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn finish(self) -> Result<Vec<u8>, &'static str> {
+        self.finish_cancellable(&mut || false)
+    }
+    fn finish_cancellable(self, stop: &mut dyn FnMut() -> bool) -> Result<Vec<u8>, &'static str> {
+        if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
         let mut out = String::from("WEBVTT\n\n");
         for (start, end, id, settings, text) in self.cues {
+            if stop() { return Err("HLS subtitle preparation cancelled or timed out"); }
             if let Some(id) = id { out.push_str(&id); out.push('\n'); }
             out.push_str(&stamp(start)); out.push_str(" --> "); out.push_str(&stamp(end));
             if !settings.is_empty() { out.push(' '); out.push_str(&settings); }
@@ -219,13 +244,17 @@ pub(super) fn prepare(master: &str, reference: &str, clock: Clock, cancelled: Ar
             .ok_or("HLS subtitle duration overflow")?;
         let url = format!("{}{}", segment.resource.origin.base(), segment.resource.path);
         let (_, text) = external_hls::fetch_until(&url, &mut owner, deadline)?;
-        assembly.push(&text, Window { start_ns, end_ns })?;
+        assembly.push_cancellable(&text, Window { start_ns, end_ns }, &mut ||
+            cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline)?;
         start_ns = end_ns;
     }
     if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline { return Err("HLS subtitle preparation cancelled or timed out"); }
-    assembly.finish()
+    assembly.finish_cancellable(&mut || cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline)
 }
 
 #[cfg(test)]
 #[path = "hls_webvtt_tests.rs"]
 mod tests;
+
+#[path = "hls_webvtt_live.rs"]
+pub(super) mod live;

@@ -47,7 +47,7 @@ pub use identity::PlaybackIdentity;
 
 #[path = "external.rs"]
 mod external;
-pub use external::{hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack, request_external, request_external_source, continue_external_source, external_source, external_hls, external_duration_ns, external_tracks, apply_external_track, apply_external_track_request, cancel_external_track_request, external_track_request_status, ExternalTrackRequest, ExternalTrackRequestStatus, install_external_local_subtitles, rearm_selected_local_subtitle, forget_external_source, ExternalError, ExternalTrackApplyError};
+pub use external::{HlsSubtitleMode, HlsSubtitlePolicy, HlsSubtitleIntent, hls_subtitle_policy, hls_subtitle_intent, restore_hls_subtitle_policy, begin_automatic_hls_subtitle_request, hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack, request_external, request_external_source, continue_external_source, external_source, external_hls, external_duration_ns, external_tracks, apply_external_track, apply_external_track_request, cancel_external_track_request, external_track_request_status, ExternalTrackRequest, ExternalTrackRequestStatus, install_external_local_subtitles, rearm_selected_local_subtitle, forget_external_source, ExternalError, ExternalTrackApplyError};
 
 #[path = "plex_tracks.rs"]
 mod plex_tracks;
@@ -166,6 +166,8 @@ pub struct PlaybackSession {
     native_subtitle_preferences: NativeSubtitlePreferences,
     external_source: Option<crate::ff::ExternalSource>,
     external_hls: Option<crate::ff::hls_presentation::HlsPlayback>,
+    hls_subtitle_policy: HlsSubtitlePolicy,
+    hls_subtitle_intent: HlsSubtitleIntent,
     external_duration_ns: i64,
     /// Frozen for one logical playback, including its retries and track changes.
     direct_play_mode: DirectPlayMode,
@@ -610,6 +612,8 @@ impl PlaybackSession {
         },
         external_source: None,
         external_hls: None,
+        hls_subtitle_policy: HlsSubtitlePolicy::OFF,
+        hls_subtitle_intent: HlsSubtitleIntent::Unset,
         external_duration_ns: 0,
         direct_play_mode: DirectPlayMode::Auto,
         jail_load_blocked: false,
@@ -710,6 +714,8 @@ impl PlaybackSession {
             native_subtitle_preferences,
             external_source,
             external_hls,
+            hls_subtitle_policy,
+            hls_subtitle_intent,
             external_duration_ns,
             direct_play_mode,
             jail_load_blocked,
@@ -792,6 +798,8 @@ impl PlaybackSession {
             native_subtitle_preferences: *native_subtitle_preferences,
             external_source: external_source.clone(),
             external_hls: external_hls.clone(),
+            hls_subtitle_policy: hls_subtitle_policy.clone(),
+            hls_subtitle_intent: *hls_subtitle_intent,
             external_duration_ns: *external_duration_ns,
             direct_play_mode: *direct_play_mode,
             jail_load_blocked: *jail_load_blocked,
@@ -9554,6 +9562,8 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             native_subtitle_preferences: s.native_subtitle_preferences,
             external_source: None,
         external_hls: None,
+            hls_subtitle_policy: s.hls_subtitle_policy.clone(),
+            hls_subtitle_intent: s.hls_subtitle_intent,
             external_duration_ns: 0,
             direct_play_mode: plan.direct_play_mode,
             jail_load_blocked: false,

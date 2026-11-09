@@ -2238,7 +2238,15 @@ fn start_bufferfeed_inner(
             // Freeze the descriptor with this exact source/worker. Do not let a
             // later selection in another playback change a running segment reader.
             let hls_audio = if let Some(playback) = crate::route::external_hls(ps) {
-                Some(crate::ff::HlsTrackSelection::Rendition(playback.clone()))
+                if playback.is_live_subtitles() {
+                    let audio = crate::route::external_tracks(ps).and_then(|tracks| {
+                        let ordinal = tracks.selected_audio()?;
+                        crate::ff::hls_audio::Selection::new(tracks.inventory(), ordinal).ok()
+                    });
+                    Some(crate::ff::HlsTrackSelection::Live { playback: playback.clone(), audio })
+                } else {
+                    Some(crate::ff::HlsTrackSelection::Rendition(playback.clone()))
+                }
             } else if matches!(external, Some(crate::ff::ExternalSource::Hls(_))) {
                 crate::route::external_tracks(ps).and_then(|tracks| {
                     let ordinal = tracks.selected_audio()?;

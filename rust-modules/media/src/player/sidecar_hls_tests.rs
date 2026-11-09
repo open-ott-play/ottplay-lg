@@ -204,3 +204,69 @@ fn hls_expanded_script_limit_and_cancel_preserve_the_current_source() {
     assert_eq!(state().generation, generation);
     assert!(Arc::ptr_eq(&held, &ass_source(false, style).unwrap()));
 }
+
+#[test]
+fn live_refresh_tokens_cancel_on_reselection_off_and_foreign_source() {
+    let _serial = plx_base::testlock::serial();
+    let _cleanup = Cleanup;
+    reset();
+    let owner = identity();
+    let id = HlsSubtitleId(1);
+    let style = TextStyle::default();
+    assert!(install_hls(&owner, id, ready(&owner, id, CAPTION, style)));
+    let first = hls_refresh_token(&owner, id).unwrap();
+    assert!(hls_refresh_is_current(&first));
+    let held = ass_source(false, style).unwrap();
+    assert!(install_hls(&owner, id, ready(&owner, id, CAPTION, style)));
+    assert!(first.cancelled.load(Ordering::Acquire));
+    assert!(!hls_refresh_is_current(&first));
+    assert!(!clear_hls_refresh(&first), "a retired worker cannot clear a newer intent");
+    assert!(ass_source(false, style).is_some());
+    assert!(!Arc::ptr_eq(&held, &ass_source(false, style).unwrap()), "successful reselection replaces content");
+    assert!(install_hls(&owner, id, ready(&owner, id, CAPTION, style)));
+    let second = hls_refresh_token(&owner, id).unwrap();
+    assert!(!clear_hls_refresh(&first), "same-target reselection still retires old generation");
+    assert!(clear_hls_refresh(&second));
+    assert_eq!(selected_hls(&owner), Some(id), "discontinuity clears cues without changing user selection");
+    assert!(ass_source(false, style).is_none());
+    reset_hls();
+    assert!(second.cancelled.load(Ordering::Acquire));
+    assert!(!hls_refresh_is_current(&second));
+    assert!(hls_refresh_token(&owner, id).is_none(), "background refresh cannot select an Off track");
+    assert!(install_hls(&owner, id, ready(&owner, id, CAPTION, style)));
+    let third = hls_refresh_token(&owner, id).unwrap();
+    let replacement = identity();
+    assert!(install_hls(&replacement, id, ready(&replacement, id, CAPTION, style)));
+    assert!(third.cancelled.load(Ordering::Acquire));
+    assert!(!clear_hls_refresh(&third));
+    assert_eq!(selected_hls(&replacement), Some(id));
+}
+
+#[test]
+fn live_refresh_replaces_only_current_generation_and_epoch_and_hides_retired_cues() {
+    let _serial = plx_base::testlock::serial();
+    let _cleanup = Cleanup;
+    reset();
+    let owner = identity();
+    let id = HlsSubtitleId(1);
+    let style = TextStyle::default();
+    let playback = crate::ff::hls_presentation::HlsPlayback::fixture_live_with_subtitles_for_test();
+    let epoch = playback.live_subtitle_revision().unwrap();
+    assert!(install_hls(&owner, id, ready(&owner, id, CAPTION, style)));
+    let token = hls_refresh_token(&owner, id).unwrap();
+    assert!(bind_hls_epoch(&token, &playback, epoch));
+    let previous = ass_source(false, style).unwrap();
+    assert!(refresh_hls(&token, ready(&owner, id, "WEBVTT\n\n00:08.000 --> 00:09.000\nNew window\n", style), &playback, epoch));
+    assert!(!Arc::ptr_eq(&previous, &ass_source(false, style).unwrap()));
+    assert!(!refresh_hls(&token, ready(&owner, HlsSubtitleId(2), CAPTION, style), &playback, epoch));
+    playback.commit_live_clock_for_test(1, 10_000_000_000);
+    assert!(ass_source(false, style).is_none(), "renderer rejects old epoch while network refresh may still be blocked");
+    assert_eq!(selected_hls(&owner), Some(id));
+    assert!(!refresh_hls(&token, ready(&owner, id, CAPTION, style), &playback, epoch));
+    let next_epoch = playback.live_subtitle_revision().unwrap();
+    assert_ne!(epoch, next_epoch);
+    assert!(refresh_hls(&token, ready(&owner, id, CAPTION, style), &playback, next_epoch));
+    assert!(ass_source(false, style).is_some());
+    reset_hls();
+    assert!(!refresh_hls(&token, ready(&owner, id, CAPTION, style), &playback, next_epoch));
+}
