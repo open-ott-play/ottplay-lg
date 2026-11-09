@@ -643,7 +643,7 @@ impl OttScreen {
                     });
                     if let Some(art) = art { presentation = presentation.catalogue_art(art); }
                     else { presentation = presentation.catalogue_icon(plx_ui::icons::Icon::Show); }
-                    let epg_available = row.current_programme.is_some()
+                    let epg_available = row.guide_available || row.current_programme.is_some()
                         || row.guide.as_ref().is_some_and(|guide|
                             guide.current.is_some() || guide.next.is_some());
                     let epg = if epg_available { "EPG ✓" } else { "EPG —" };
