@@ -550,6 +550,18 @@ jobs:
           Path(output).write_text(prefix + body, encoding="utf-8")
           PY
 
+      - name: Generate Homebrew manifest from the approved RC bytes
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
+          APPROVED_SHA256: ${{ needs.preflight.outputs.ipk_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 ci/native_hbc_manifest.py \
+            --package "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            --version "$VERSION" --sha256 "$APPROVED_SHA256" \
+            --output "$RUNNER_TEMP/com.openottplay.player.native.manifest.json"
+
       - name: Publish stable from the exact RC package bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -567,7 +579,8 @@ jobs:
             "$CANDIDATE_DIR/candidate-provenance.json.sha256" \
             "$CANDIDATE_DIR/native-release-plan.json" \
             "$CANDIDATE_DIR/link-evidence.tar.gz" \
-            "ci/ottplay-integration/release/qualifications/v${VERSION}.json"
+            "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
+            "$RUNNER_TEMP/com.openottplay.player.native.manifest.json"
           git fetch --no-tags origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
           test "$(git rev-parse "v$VERSION^{commit}")" = "$SOURCE_SHA"
           gh release download "v$VERSION" --dir "$RUNNER_TEMP/stable-public"
@@ -584,6 +597,8 @@ jobs:
           done
           cmp "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
             "$RUNNER_TEMP/stable-public/v${VERSION}.json"
+          cmp "$RUNNER_TEMP/com.openottplay.player.native.manifest.json" \
+            "$RUNNER_TEMP/stable-public/com.openottplay.player.native.manifest.json"
           stable_release=$(gh release view "v$VERSION" --json tagName,isDraft,isPrerelease)
           STABLE_RELEASE_JSON="$stable_release" python3 - <<'PY'
           import json, os
