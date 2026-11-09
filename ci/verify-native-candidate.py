@@ -67,6 +67,31 @@ def verify(artifact_dir: Path, *, source_sha: str, run_id: str, run_attempt: str
         if not evidence_file.is_file() or sha256(evidence_file) != expected_digest:
             raise ValueError(f"link evidence checksum mismatch: {relative}")
 
+    if "companion" in receipt:
+        import importlib.util
+        script = Path(__file__).resolve().parents[1] / "scripts/lg-build.py"
+        spec = importlib.util.spec_from_file_location("candidate_native_package", script)
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        if native.verify_ipk(ipk, native.manifest()).get("companion") != receipt["companion"].get("metadata"):
+            raise ValueError("Packaged companion differs from candidate receipt")
+        expected = {"companion-source.tar.gz", "companion-source-closure.json", "companion-source-manifest.json"}
+        sources = receipt["companion"].get("source_assets", {})
+        if set(sources) != expected:
+            raise ValueError("Companion source asset inventory mismatch")
+        for name, expected_digest in sources.items():
+            path = artifact_dir / name
+            if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 1024 ** 3 or sha256(path) != expected_digest:
+                raise ValueError("Companion source asset mismatch: " + name)
+        closure = json.loads((artifact_dir / "companion-source-closure.json").read_text())
+        if (closure.get("elf_sha256") != receipt["companion"]["metadata"]["elf_sha256"]
+                or closure.get("locked_source_coverage") != "PASS"
+                or closure.get("source_manifest_sha256") != sources["companion-source-manifest.json"]
+                or closure.get("local_inputs_sha256") != receipt["companion"]["metadata"]["local_inputs_sha256"]
+                or closure.get("local_source_archive_sha256") != receipt["companion"]["metadata"]["local_source_archive_sha256"]
+                or closure.get("source_receipt_sha256") != receipt["companion"]["metadata"]["source_receipt_sha256"]
+                or closure.get("source_archive", {}).get("sha256") != sources["companion-source.tar.gz"]):
+            raise ValueError("Companion source closure does not match packaged helper")
     return ipk, receipt
 
 

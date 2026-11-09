@@ -99,6 +99,16 @@ def _regular_file(path: Path, label: str) -> None:
     _require(stat.S_ISREG(mode), f"{label} must be a regular non-symlink file")
 
 
+COMPANION_SOURCE_ASSETS = {"companion-source.tar.gz", "companion-source-closure.json", "companion-source-manifest.json"}
+MAX_COMPANION_SOURCE_BYTES = 1024 * 1024 * 1024
+
+
+def companion_inventory(root: Path) -> set[str]:
+    receipt = _read_json(root / "candidate-provenance.json")
+    _require(type(receipt) is dict, "candidate receipt must be an object")
+    return COMPANION_SOURCE_ASSETS if "companion" in receipt else set()
+
+
 def expected_inventory(version: str) -> set[str]:
     _require(type(version) is str and VERSION_RE.fullmatch(version) is not None,
              "version must be numeric X.Y.Z without leading zeroes")
@@ -115,7 +125,16 @@ def expected_inventory(version: str) -> set[str]:
 
 
 def _validate_receipt(receipt: Any, version: str) -> dict[str, Any]:
-    receipt = _strict_object(receipt, RECEIPT_FIELDS, "candidate receipt")
+    extra = {"companion"} if type(receipt) is dict and "companion" in receipt else set()
+    receipt = _strict_object(receipt, RECEIPT_FIELDS | extra, "candidate receipt")
+    if extra:
+        companion = _strict_object(receipt["companion"], {"metadata", "source_assets", "source_revision"}, "companion")
+        _require(type(companion["source_revision"]) is str and SHA_RE.fullmatch(companion["source_revision"]) is not None,
+                 "companion source revision must be a full SHA")
+        _strict_object(companion["source_assets"], COMPANION_SOURCE_ASSETS, "companion source assets")
+        for digest in companion["source_assets"].values():
+            _require(type(digest) is str and SHA256_RE.fullmatch(digest) is not None, "invalid companion source asset digest")
+        _require(type(companion["metadata"]) is dict, "companion metadata must be an object")
     _require(type(receipt["schema"]) is int and receipt["schema"] == 1,
              "candidate receipt schema must be integer 1")
     _require(receipt["artifact_kind"] == "native-webos-stable-candidate",
@@ -189,7 +208,7 @@ def _inventory_root(artifact_dir: Path, version: str) -> dict[str, Path]:
     _require(root.is_dir(), "artifact-dir must be a directory")
     entries = list(root.iterdir())
     names = {entry.name for entry in entries}
-    expected = expected_inventory(version)
+    expected = expected_inventory(version) | companion_inventory(root)
     missing = expected - names
     extra = names - expected
     _require(not missing, f"artifact inventory missing assets: {', '.join(sorted(missing))}")
@@ -205,7 +224,7 @@ def _inventory_root(artifact_dir: Path, version: str) -> dict[str, Path]:
 def _candidate_root(artifact_dir: Path, version: str) -> tuple[Path, dict[str, Path]]:
     root = artifact_dir.resolve(strict=True)
     _require(root.is_dir(), "candidate-artifact-dir must be a directory")
-    inventory = expected_inventory(version) - {"link-evidence.tar.gz"}
+    inventory = (expected_inventory(version) | companion_inventory(root)) - {"link-evidence.tar.gz"}
     expected = inventory | {"link-evidence"}
     entries = list(root.iterdir())
     names = {entry.name for entry in entries}
@@ -404,6 +423,11 @@ def verify_rc(
     receipt_path = assets["candidate-provenance.json"]
     _verify_receipt_sidecar(receipt_path, assets["candidate-provenance.json.sha256"])
     receipt = _validate_receipt(_read_json(receipt_path), version)
+    if "companion" in receipt:
+        for name, digest in receipt["companion"]["source_assets"].items():
+            _require(0 < assets[name].stat().st_size <= MAX_COMPANION_SOURCE_BYTES,
+                     "companion source asset exceeds its size bound")
+            _require(sha256(assets[name]) == digest, "companion source asset digest mismatch")
     plan = _load_plan_helper().validate_plan(_read_json(assets["native-release-plan.json"]))
     expected_tag = f"v{version}-rc.{plan['sequence']}"
     _require(plan["channel"] == "rc", "RC artifact release plan channel must be rc")
@@ -419,7 +443,7 @@ def verify_rc(
 
     temp_root = Path(tempfile.mkdtemp(prefix="native-rc-evidence-"))
     try:
-        for name in (expected_inventory(version) - {"link-evidence.tar.gz", "native-release-plan.json"}):
+        for name in (set(assets) - {"link-evidence.tar.gz", "native-release-plan.json"}):
             shutil.copyfile(assets[name], temp_root / name)
         extracted = temp_root / "extracted"
         _extract_evidence(assets["link-evidence.tar.gz"], extracted,
@@ -436,7 +460,7 @@ def verify_rc(
 
         if candidate_artifact_dir is not None:
             candidate_root, candidate_assets = _candidate_root(candidate_artifact_dir, version)
-            identity_files = expected_inventory(version) - {"link-evidence.tar.gz"}
+            identity_files = set(assets) - {"link-evidence.tar.gz"}
             for name in identity_files:
                 _same_bytes(candidate_assets[name], assets[name], name)
             _verify_candidate_evidence(candidate_root / "link-evidence", receipt["link_evidence_sha256"])
