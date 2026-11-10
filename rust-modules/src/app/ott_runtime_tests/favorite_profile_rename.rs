@@ -375,7 +375,24 @@ fn rename_does_not_acquire_favorite_with_display_name_instead_of_explicit_alias(
     ids(&mut runtime.saved);
     candidate.favorites = runtime.saved.favorites.clone();
     candidate.favorite_items = runtime.saved.favorite_items.clone();
-    profile_rename::prepare(&runtime, &mut candidate).unwrap().unwrap();
+    assert!(selection::resolve_profile(&runtime.saved.profiles, &foreign).is_err());
+    assert_eq!(selection::resolve_profile(&candidate.profiles, &foreign).unwrap().id, profile().id,
+        "legacy name/name playback compatibility would acquire this unrelated Favorite after rename");
+    let before = serde_json::to_value(&runtime.saved).unwrap();
+    let staged = serde_json::to_value(&candidate).unwrap();
+    let checkpoints = serde_json::to_value(&runtime.checkpoints).unwrap();
+    let uuids = favorite_item_ids::ordered(&runtime.saved).unwrap();
+    let selected = runtime.selected.clone();
+    assert_eq!(profile_rename::prepare(&runtime, &mut candidate).err(),
+        Some("Profile rename cannot preserve its current Favorites bindings"),
+        "a display-name collision must refuse the rename rather than acquire or rewrite another identity");
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+    assert_eq!(serde_json::to_value(&candidate).unwrap(), staged);
+    assert_eq!(serde_json::to_value(&runtime.checkpoints).unwrap(), checkpoints);
+    assert_eq!(favorite_item_ids::ordered(&runtime.saved).unwrap(), uuids);
+    assert_eq!(favorite_item_ids::ordered(&candidate).unwrap(), uuids);
+    assert_eq!(runtime.selected, selected);
     assert_eq!(candidate.favorites.entries()[1], foreign);
-    assert!(selection::resolve_profile(&candidate.profiles, &foreign).is_err());
+    assert!(selection::resolve_profile(&runtime.saved.profiles, &foreign).is_err(),
+        "only the uncommitted proposed name could bind it; the live source remains untouched");
 }
