@@ -90,13 +90,23 @@ fn playlist_origin(profile:&ProviderProfile)->Option<String> {
 }
 
 fn origin_matches(profile:&ProviderProfile,origin:&Origin)->bool {
-    (origin.profile==profile.name && origin.source_alias==profile.alias())
+    (origin.profile==profile.name && (origin.source_alias==profile.alias()
+        // Older native captures used the display name even when an explicit
+        // alias was configured. Keep that exact legacy form readable; the
+        // resolver still rejects every set with more than one matching source.
+        || (origin.source_alias==profile.name && matches!(profile.kind,
+            ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::VPortal))))
         || portable_brand(profile).is_some_and(|name|origin.profile==name&&origin.source_alias==name)
 }
 
 fn profile_matches(profile: &ProviderProfile, favorite: &Favorite) -> bool {
     let origin = &favorite.origin;
     match (&profile.kind, &favorite.locator) {
+        // Embedded portals are separately attested authorities. Their explicit
+        // parent alias cannot be replaced by a legacy ordinary-profile name.
+        (ProviderKind::M3u, Locator::VPortal { .. }) => {
+            origin.profile == profile.name && origin.source_alias == profile.alias()
+        }
         (ProviderKind::Plex, Locator::Plex { server_id, .. }) => {
             // Web Plex has one logical profile and several authenticated servers.
             // Accept old native names only against their exact original source.
@@ -1023,6 +1033,67 @@ mod tests {
             existing_identity(&source_profiles, &document, &profile, &entry),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn legacy_display_name_aliases_rebind_and_toggle_without_rewriting_portable_identity() {
+        for kind in [ProviderKind::M3u, ProviderKind::Xtream, ProviderKind::Stalker, ProviderKind::VPortal] {
+            let mut p = profile(kind);
+            p.name = "FamilyTV".into();
+            p.source_alias = "home".into();
+            let mut e = entry(MediaLocator::Http { url: "https://private.invalid/video".into() });
+            if kind == ProviderKind::VPortal {
+                e.provider_id = Some("42".into());
+                e.provider_id_field = Some("id".into());
+            }
+            let canonical = capture(&p, &e).unwrap();
+            assert_eq!(canonical.origin.source_alias, "home");
+            let mut legacy = canonical.clone();
+            legacy.origin.source_alias = "FamilyTV".into();
+            let configured = profiles(p.clone());
+            assert_eq!(resolve_profile(&configured, &legacy).unwrap(), &p);
+            assert_eq!(legacy.origin.source_alias, "FamilyTV", "reading must not rewrite imported identity");
+            assert_old_record_toggles_off(p, e, legacy);
+        }
+    }
+
+    #[test]
+    fn legacy_name_alias_counts_all_same_name_sources_while_modern_alias_is_specific() {
+        let mut home = profile(ProviderKind::M3u);
+        home.name = "FamilyTV".into(); home.source_alias = "home".into();
+        let e = entry(MediaLocator::Http { url: "https://private.invalid/video".into() });
+        let modern = capture(&home, &e).unwrap();
+        let mut legacy = modern.clone(); legacy.origin.source_alias = home.name.clone();
+        let mut other = home.clone();
+        other.id = "other-slot".into(); other.source_alias = "holiday".into();
+        other.source = "https://other.invalid/list.m3u".into();
+        let mut configured = profiles(home.clone()); configured.profiles.push(other);
+        for reverse in [false, true] {
+            if reverse { configured.profiles.reverse(); }
+            assert_eq!(resolve_profile(&configured, &legacy), Err(BindingError::AmbiguousSource));
+            assert_eq!(resolve_profile(&configured, &modern).unwrap(), &home);
+        }
+        let mut document = Document::default(); document.toggle(legacy.clone()).unwrap();
+        assert_eq!(existing_identity(&configured, &document, &home, &e), Err(BindingError::AmbiguousSource));
+        assert_eq!(FavoriteIndex::new(&configured, &document, &home).unwrap().identity(&e),
+            Err(BindingError::AmbiguousSource), "row stars must preserve the same ambiguity refusal");
+        let mut invalid = modern.clone(); invalid.origin.source_alias = "unknown-alias".into();
+        assert_eq!(resolve_profile(&configured, &invalid), Err(BindingError::MissingProfile));
+        configured.profiles.iter_mut().find(|p| p.id == "other-slot").unwrap().enabled = false;
+        assert_eq!(resolve_profile(&configured, &legacy).unwrap(), &home,
+            "disabled accounts are not receiver candidates");
+    }
+
+    #[test]
+    fn legacy_name_alias_never_prefers_an_exact_name_alias_over_another_matching_source() {
+        let mut explicit = profile(ProviderKind::M3u);
+        explicit.name = "FamilyTV".into(); explicit.source_alias = "home".into();
+        let e = entry(MediaLocator::Http { url: "https://private.invalid/video".into() });
+        let mut legacy = capture(&explicit, &e).unwrap(); legacy.origin.source_alias = explicit.name.clone();
+        let mut exact = explicit.clone(); exact.id = "exact-slot".into(); exact.source_alias = exact.name.clone();
+        let mut configured = profiles(exact); configured.profiles.push(explicit);
+        assert_eq!(resolve_profile(&configured, &legacy), Err(BindingError::AmbiguousSource),
+            "legacy fallback cannot guess between exact and historical name matches");
     }
 
     #[test]

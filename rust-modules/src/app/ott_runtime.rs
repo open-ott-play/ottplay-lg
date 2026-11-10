@@ -676,6 +676,8 @@ pub(super) struct Runtime {
     /// Only an automatic saved-file restore may be superseded by transport on
     /// the fallback that is still playing. An explicit successor keeps priority.
     restore_play_generation: Option<u64>,
+    /// Only the exact automatic live retry may be cancelled by a later Pause.
+    live_retry_generation: Option<u64>,
     /// Preroll protection belongs to the admitted logical playback, not its
     /// resolver generation or a later decoder reload of the same item.
     resume_floor: Option<(plx_media::route::PlaybackIdentity, continuity::ResumeFloor)>,
@@ -1144,6 +1146,7 @@ impl Runtime {
             classic_play_handoff: Default::default(),
             play_profile: None,
             restore_play_generation: None,
+            live_retry_generation: None,
             resume_floor: None,
             resume_pending: None,
             checkpoints: BTreeMap::new(),
@@ -2155,11 +2158,12 @@ impl Runtime {
         {
             return;
         }
-        let Some((current, advance_on_failure)) = self
+        let Some((current, advance_on_failure, live)) = self
             .playing
             .as_ref()
             .filter(|playing| playing_matches(playing, app))
-            .map(|playing| (playing.selection_id.clone(), playing.advance_on_failure))
+            .map(|playing| (playing.selection_id.clone(), playing.advance_on_failure,
+                playing.archive.is_none() && guide_ui::is_live(&playing.profile, &playing.entry)))
         else {
             return;
         };
@@ -2175,6 +2179,8 @@ impl Runtime {
             kind,
             details,
         );
+        let live_retry = live && !lifecycle::viewer_paused()
+            && recoverable_live_transport(details);
         self.failed_playback = failed_playback::capture(self, app);
         let plex_failure = transient::plex_remote::failure_event(self, app);
         self.checkpoint(app, false);
@@ -2187,6 +2193,17 @@ impl Runtime {
         }
         plx_media::route::cancel_play(&mut app.player.session);
         self.status = "Native playback failed".into();
+        if live_retry && !plex_failure {
+            // Only attributed transient transport evidence may reopen a live
+            // channel. This bounded path never applies next-item failure policy.
+            let decision = self.continuity.live_disconnected(self.generation, &current, self.now_ms());
+            if self.continuity.pending_retry().is_some() {
+                self.status = "Live stream interrupted; retrying the same channel".into();
+            }
+            self.apply_continuity(decision);
+            self.changed();
+            return;
+        }
         if plex_failure || !advance_on_failure {
             self.continuity.stop(self.generation);
             self.changed();
@@ -2330,6 +2347,8 @@ impl Runtime {
                 Ok(()) => {
                     self.restore_play_generation =
                         (reason == continuity::Reason::Restore).then_some(self.play_generation);
+                    self.live_retry_generation =
+                        (reason == continuity::Reason::LiveRetry).then_some(self.play_generation);
                     break;
                 }
                 Err(error) => {
@@ -2344,6 +2363,13 @@ impl Runtime {
                     self.cancel_play_request();
                     self.status = error.into();
                     self.changed();
+                    if reason == continuity::Reason::LiveRetry {
+                        // A stale/missing/rejected source is not permission to
+                        // select another channel, even on synchronous refusal.
+                        self.continuity.stop(self.generation);
+                        self.log_retry_cancelled(continuity_diagnostics::Reason::Changed);
+                        break;
+                    }
                     decision = self.continuity_failed(
                         &entry_id,
                         &refs,
@@ -4039,6 +4065,7 @@ impl Runtime {
     }
     fn cancel_play_request(&mut self) {
         self.classic_play_handoff = Default::default();
+        self.live_retry_generation = None;
         self.explicit_step.clear();
         preplay::cancel(self, preplay::CancelReason::Cancelled);
         vportal_quality::cancel(self);
@@ -4873,6 +4900,17 @@ pub(super) fn draw_notifications(app: &mut App) {
     }
 }
 
+/// Closed, current-native evidence only. Unknown/malformed/refused sources and
+/// decoder failures are terminal; they cannot gain an automatic retry policy.
+fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
+    use plx_media::player::report::IoFailureDetails;
+    use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
+    matches!(details.and_then(|details| details.io_failure), Some(IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed,
+        outcome: Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState),
+    }))
+}
+
 pub(super) fn playback_allowed(app: &App) -> bool {
     app.window_activity.allow_present(true) && !app.ott_standby
 }
@@ -5167,6 +5205,17 @@ fn tick_with_start(
             .refuse("Nondefault UI typography is not bound in this recording format");
     }
     hls_tracks::tick(&mut runtime, app);
+    // The cooldown may already have issued a resolver request. Accepted Pause
+    // still wins over its late completion, without cancelling a newer explicit
+    // Play (queue admission clears this exact-generation receipt).
+    if runtime.live_retry_generation == Some(runtime.play_generation)
+        && lifecycle::viewer_paused()
+    {
+        runtime.cancel_play_request();
+        runtime.continuity.pause(runtime.generation);
+        runtime.status.clear();
+        runtime.changed();
+    }
     while let Ok(job) = runtime.rx.try_recv() {
         if matches!(
             &job,
@@ -6656,6 +6705,13 @@ fn tick_with_start(
     numeric_input::tick(&mut runtime, app, now);
     // Consume failed-start deadlines only after viewer and remote commands, so
     // Stop/standby/source changes win even on the frame a retry becomes due.
+    // Failed playback has already retired `playing`, so accepted Pause may
+    // have no installed source for viewer_transport_intent to capture. Retire
+    // the deadline itself rather than letting recovery override viewer intent.
+    if lifecycle::viewer_paused() && runtime.continuity.pending_retry().is_some() {
+        runtime.continuity.pause(runtime.generation);
+        runtime.log_retry_cancelled(continuity_diagnostics::Reason::Changed);
+    }
     if playback_allowed(app)
         && runtime.play_work_allowed()
         && runtime.play_target.is_none()

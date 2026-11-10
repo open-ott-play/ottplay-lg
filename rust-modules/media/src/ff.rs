@@ -4325,6 +4325,9 @@ enum HlsExit {
     /// observation: PMS production, response pacing and network service are not identifiable
     /// separately before the response completes.
     StallAbort(SegmentTransfer),
+    /// The exact current open failed. Closed diagnostic outcome only: never a
+    /// URL, an inferred previous HTTP status, or a retry policy decision.
+    OpenFailed { reason: &'static str, outcome: TraceOutcome },
     Failed(&'static str),
 }
 
@@ -4342,15 +4345,43 @@ fn hls_prefetch_is_fatal(err: &HlsExit) -> bool {
     matches!(err, HlsExit::Aborted)
 }
 
+fn hls_open_status_outcome(status: c_int) -> TraceOutcome {
+    match status {
+        429 | 500 | 502 | 503 | 504 => TraceOutcome::ServerState,
+        _ => TraceOutcome::Refused,
+    }
+}
+
+fn hls_curl_open_outcome(error: crate::curlio::OpenErr) -> TraceOutcome {
+    use crate::curlio::OpenErr;
+    match error {
+        OpenErr::Status(status) => hls_open_status_outcome(status),
+        // Explicit DNS/connect/HTTP2/partial/empty/send/receive failures only.
+        OpenErr::Transport(5 | 6 | 7 | 16 | 18 | 52 | 55 | 56 | 92) => TraceOutcome::Transport,
+        OpenErr::Transport(28) | OpenErr::Deadline => TraceOutcome::Deadline,
+        // Unsupported/malformed URL, unsafe redirect, range and TLS trust/setup
+        // refusals are never evidence that a transient retry will repair them.
+        OpenErr::Transport(1 | 3 | 33 | 35 | 36 | 47 | 51 | 53 | 54 | 58 | 59 | 60
+            | 64 | 66 | 77 | 80 | 82 | 83 | 90 | 91 | 98)
+        | OpenErr::RangeIgnored | OpenErr::Aborted => TraceOutcome::Refused,
+        OpenErr::Transport(_) | OpenErr::Multi(_) | OpenErr::Local
+        | OpenErr::Unavailable | OpenErr::Stopped => TraceOutcome::Inconclusive,
+    }
+}
+
 fn classify_plaintext_open_failure(error: plx_net::stream::HttpOpenError) -> HlsExit {
     match error {
         plx_net::stream::HttpOpenError::Deadline => HlsExit::PrimeExpired,
         plx_net::stream::HttpOpenError::Status(404) => HlsExit::NotReady,
         plx_net::stream::HttpOpenError::Aborted => HlsExit::Aborted,
         plx_net::stream::HttpOpenError::Stopped => UNLATCHED_STOP,
-        plx_net::stream::HttpOpenError::Status(_) | plx_net::stream::HttpOpenError::Transport => {
-            HlsExit::Failed("HTTP request failed")
-        }
+        plx_net::stream::HttpOpenError::Status(status) => HlsExit::OpenFailed {
+            reason: "HTTP request failed", outcome: hls_open_status_outcome(status),
+        },
+        // This combines malformed input/headers, local setup and network errors.
+        plx_net::stream::HttpOpenError::Transport => HlsExit::OpenFailed {
+            reason: "HTTP request failed", outcome: TraceOutcome::Inconclusive,
+        },
     }
 }
 
@@ -4369,7 +4400,7 @@ fn classify_curl_open_err(e: crate::curlio::OpenErr) -> HlsExit {
     } else if e == crate::curlio::OpenErr::Stopped {
         UNLATCHED_STOP
     } else {
-        HlsExit::Failed("HTTPS request failed")
+        HlsExit::OpenFailed { reason: "HTTPS request failed", outcome: hls_curl_open_outcome(e) }
     }
 }
 
@@ -4472,11 +4503,7 @@ fn hls_open_curl(
             Err(crate::curlio::OpenErr::Status(status)) => {
                 SHARED.dg_http_status.store(status, Ordering::Relaxed);
                 net.curl = Some(cs);
-                return Err(if status == 404 {
-                    HlsExit::NotReady
-                } else {
-                    HlsExit::Failed("HTTPS request failed")
-                });
+                return Err(classify_curl_open_err(crate::curlio::OpenErr::Status(status)));
             }
             Err(_) => {
                 // Idle TLS session or a broken multi: drop it and dial as a first open.
@@ -4487,7 +4514,7 @@ fn hls_open_curl(
         if e == crate::curlio::OpenErr::Aborted {
             HlsExit::Aborted
         } else {
-            HlsExit::Failed("HTTPS reservation failed")
+            HlsExit::OpenFailed { reason: "HTTPS reservation failed", outcome: hls_curl_open_outcome(e) }
         }
     })?;
     if unsafe { crate::aq::aq_is_aborted(aq) } {
@@ -7091,7 +7118,7 @@ fn publish_hls_candidate(
 fn abr_reject_for_hls_exit(exit: HlsExit) -> crate::abr::RejectCause {
     match exit {
         HlsExit::PrimeExpired | HlsExit::StallAbort(_) => crate::abr::RejectCause::Censored,
-        HlsExit::Aborted | HlsExit::NotReady | HlsExit::Failed(_) => {
+        HlsExit::Aborted | HlsExit::NotReady | HlsExit::Failed(_) | HlsExit::OpenFailed { .. } => {
             crate::abr::RejectCause::Circumstance
         }
     }
@@ -9502,6 +9529,13 @@ mod pre_audio_headroom_tests {
 fn settle_hls_demux(native_epoch: u32, outcome: std::thread::Result<Result<(), HlsExit>>) {
     match outcome {
         Ok(Ok(())) | Ok(Err(HlsExit::Aborted)) => {}
+        Ok(Err(HlsExit::OpenFailed { reason, outcome })) => {
+            crate::player::log(&format!("hls: demux open failed: {reason} outcome={}", outcome.code()));
+            // Attribute even pre-feed failures, with the same captured epoch fence.
+            // Existing pre/post-feed terminal flags retain their original semantics.
+            SHARED.fail_hls_open_for(native_epoch, hls_failure::classify(reason), outcome,
+                PUSHED_ANY.load(Ordering::Relaxed));
+        }
         Ok(Err(HlsExit::Failed(why))) => {
             crate::player::log(&format!("hls: demux failed: {why}"));
             if PUSHED_ANY.load(Ordering::Relaxed) {

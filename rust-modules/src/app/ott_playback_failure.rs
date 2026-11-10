@@ -68,7 +68,9 @@ impl From<IoFailureDetails> for IoFailureSnapshot {
                     | DemuxExitClass::HlsTransportFailed => exit.code(),
                     _ => DemuxExitClass::Other.code(),
                 },
-                outcome: outcome.filter(|value| *value == TraceOutcome::Deadline).map(TraceOutcome::code),
+                outcome: outcome.filter(|value| matches!(value,
+                    TraceOutcome::Deadline | TraceOutcome::Transport | TraceOutcome::ServerState
+                    | TraceOutcome::Refused | TraceOutcome::Inconclusive)).map(TraceOutcome::code),
             },
             IoFailureDetails::AutoFallback => Self::AutoFallback { outcome: "refused" },
             IoFailureDetails::AudioDecode => Self::AudioDecode { outcome: "inconclusive" },

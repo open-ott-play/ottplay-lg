@@ -38,3 +38,9 @@ webOS wake service or a persistent OS alarm. Background or powered-off delivery
 requires a separately designed system service and firmware-specific permission
 and power-management validation; changing the reminder timer alone cannot
 provide it.
+
+## Same-channel recovery for admitted live sources
+
+A positively classified temporary HLS segment-open failure can reopen the same owned live channel, with at most four delayed automatic starts. It never selects another channel. Explicit selection, Stop, standby, pause and source changes cancel pending recovery; a late resolver result cannot override newer input. An admission refusal halts that retry rather than entering next-item policy. Normal video end-of-file advancement is separate.
+
+Retry eligibility comes from the current native attempt's typed failure, not a previous HTTP status or byte counter. The bounded whitelist covers known network transport errors and HTTP 429, 500, 502, 503 and 504. Authentication, certificate/transport trust, malformed or unsafe requests, local setup, unknown plaintext errors and unclassified playlist failures do not receive automatic recovery. Version-three diagnostics retain closed outcome classes; version-two responses remain unchanged.

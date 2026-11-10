@@ -134,6 +134,161 @@ fn register_source(app: &mut App, machine: &str) -> plx_plex::plex::ServerId {
     sid
 }
 
+fn register_native_account(app: &mut App, machine: &str) -> plx_plex::plex::ServerId {
+    let sid = register_source(app, machine);
+    app.ott.as_mut().unwrap().saved.settings.remove("nativePlexSources");
+    sid
+}
+
+#[test]
+fn native_account_plex_remote_commands_use_existing_client_without_importing_credentials() {
+    let _serial = plx_base::testlock::serial();
+    for (action, params) in [
+        ("plex_library", json!({"op":"list"})),
+        ("plex_library", json!({"op":"play","query":"Movies","shuffle":true})),
+        ("plex_queue", json!({"op":"preview","ids":["42"]})),
+        ("plex_queue", json!({"op":"play","ids":["42"]})),
+    ] {
+        let _reset = Reset;
+        let mut app = setup();
+        let sid = register_native_account(&mut app, "account-machine");
+        let before = saved_value(&app);
+        let key = plx_plex::plex::ClientKey::of(plx_plex::plex::client_for(sid).unwrap());
+        begin_plex(&mut app, action, params);
+        let r = app.ott.as_ref().unwrap();
+        let Some(transient::Candidate::Plex(candidate)) = &r.transient.candidate else { panic!("native account candidate"); };
+        assert!(matches!(candidate.work.source, transient::plex_remote::SourceBinding::NativeAccount(_)));
+        assert_eq!(candidate.work.authority.server, sid);
+        assert_eq!(candidate.work.authority.client_key, key);
+        assert_eq!(r.active().unwrap().id, "permanent", "remote one-shot does not select a saved provider");
+        assert_eq!(saved_value(&app), before, "no native token/settings import or profile mutation");
+    }
+}
+
+#[test]
+fn native_account_source_selection_requires_active_or_unique_profile_including_unavailable_accounts() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset;
+    let mut app = setup();
+    let selected = register_native_account(&mut app, "selected-machine");
+    let other = register_native_account(&mut app, "other-machine");
+    plx_plex::plex::client_for(other).unwrap().disable_data_io();
+    let before = saved_value(&app);
+    let response = command(&mut app, "plex_library", json!({"op":"list"})).unwrap();
+    assert_eq!(response["data"]["error"], queue::QueueError::Configuration.message());
+    assert_eq!(saved_value(&app), before);
+    assert!(app.ott.as_ref().unwrap().transient.candidate.is_none());
+    app.ott.as_mut().unwrap().saved.profiles.active_profile = Some("plex-other-machine".into());
+    let response = command(&mut app, "plex_library", json!({"op":"list"})).unwrap();
+    assert_eq!(response["data"]["error"], queue::QueueError::ServerUnavailable.message(),
+        "an unavailable active profile cannot fall back to the working server");
+    app.ott.as_mut().unwrap().saved.profiles.active_profile = Some("plex-selected-machine".into());
+    begin_plex(&mut app, "plex_library", json!({"op":"list"}));
+    let Some(transient::Candidate::Plex(candidate)) = &app.ott.as_ref().unwrap().transient.candidate else { panic!("active native account"); };
+    assert_eq!(candidate.work.authority.server, selected);
+}
+
+#[test]
+fn native_account_binding_never_downgrades_malformed_or_nonempty_explicit_imports() {
+    let _serial = plx_base::testlock::serial();
+    for malformed in [false, true] {
+        let _reset = Reset;
+        let mut app = setup();
+        register_source(&mut app, "account-machine");
+        let r = app.ott.as_mut().unwrap();
+        if malformed { r.saved.settings.insert("nativePlexSources".into(), json!({"invalid":true})); }
+        else { r.saved.settings.get_mut("nativePlexSources").unwrap()[0]["token"] = json!("different-imported-token"); }
+        let before = saved_value(&app);
+        let reply = command(&mut app, "plex_library", json!({"op":"list"})).unwrap();
+        assert_eq!(reply["data"]["state"], "error");
+        assert!(app.ott.as_ref().unwrap().transient.candidate.is_none());
+        assert_eq!(saved_value(&app), before);
+    }
+}
+
+#[test]
+fn native_account_preparation_completion_rejects_retired_grants_tokens_clients_and_profile_choices() {
+    let _serial = plx_base::testlock::serial();
+    for change in ["identity", "network", "token", "endpoint", "disabled", "import", "ambiguous"] {
+        let _reset = Reset;
+        let mut app = setup();
+        let sid = register_native_account(&mut app, "account-machine");
+        let (owner, id) = begin_plex(&mut app, "plex_library", json!({"op":"list"}));
+        let result = proposal(owner, sid, prepare::Prepared::Libraries { rows: vec![queue::LibraryRow {
+            id: "17".into(), title: "Movies".into(), kind: queue::LibraryKind::Movie,
+        }] });
+        match change {
+            "identity" => plx_plex::plex::grant::identity_changed(),
+            "network" => plx_plex::plex::grant::network_changed(),
+            "token" => plx_plex::plex::client_for(sid).unwrap().set_token("replacement-token"),
+            "endpoint" => {
+                let origin = plx_plex::plex::Origin::parse("https://replacement.invalid:443").unwrap();
+                plx_plex::plex::register_pinned_with_client_id("account-machine", &origin,
+                    "synthetic-token", None, "synthetic-client", Default::default());
+            }
+            "disabled" => plx_plex::plex::client_for(sid).unwrap().disable_data_io(),
+            "import" => { register_source(&mut app, "new-import"); }
+            "ambiguous" => { register_native_account(&mut app, "other-machine"); }
+            _ => unreachable!(),
+        }
+        let before = saved_value(&app);
+        app.ott.as_ref().unwrap().tx.send(Job::PlexPrepared(owner,
+            transient::plex_remote::PreparationId::Remote(id.clone()), Ok(result)))
+            .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
+        runtime_tick(&mut app);
+        let r = app.ott.as_ref().unwrap();
+        assert!(r.transient.candidate.is_none() && r.transient.accepted.is_none(), "{change} must retire old work");
+        assert!(r.play_target.is_none());
+        assert!(!plx_media::route::has_url(&app.player.session));
+        let response = r.remote.response_for_id_for_test(&id).expect("retired preparation response");
+        assert_ne!(response["data"]["state"], "ready", "{change} must reject its prepared library response");
+        assert_eq!(saved_value(&app), before, "{change} must not import or rewrite credentials");
+    }
+}
+
+#[test]
+fn native_account_library_completion_uses_same_worker_receipt_and_keeps_current_provider() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset;
+    let mut app = setup();
+    let sid = register_native_account(&mut app, "account-machine");
+    let before = saved_value(&app);
+    let (owner, id) = begin_plex(&mut app, "plex_library", json!({"op":"list"}));
+    app.ott.as_ref().unwrap().tx.send(Job::PlexPrepared(owner,
+        transient::plex_remote::PreparationId::Remote(id.clone()),
+        Ok(proposal(owner, sid, prepare::Prepared::Libraries { rows: vec![queue::LibraryRow {
+            id: "17".into(), title: "Movies".into(), kind: queue::LibraryKind::Movie,
+        }] }))))
+        .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
+    runtime_tick(&mut app);
+    let r = app.ott.as_ref().unwrap();
+    assert!(r.transient.candidate.is_none() && r.transient.accepted.is_none());
+    assert!(r.play_target.is_none());
+    assert_eq!(saved_value(&app), before);
+    assert_eq!(r.active().unwrap().id, "permanent");
+    let response = r.remote.response_for_id_for_test(&id).expect("completed native library response");
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["data"]["state"], "ready");
+    assert_eq!(response["data"]["libraries"][0]["title"], "Movies");
+}
+
+#[test]
+fn native_account_initial_admission_rejects_blank_or_disabled_client_without_side_effects() {
+    let _serial = plx_base::testlock::serial();
+    for disable in [false, true] {
+        let _reset = Reset;
+        let mut app = setup();
+        let sid = register_native_account(&mut app, "account-machine");
+        let client = plx_plex::plex::client_for(sid).unwrap();
+        if disable { client.disable_data_io(); } else { client.set_token(""); }
+        let before = saved_value(&app);
+        let response = command(&mut app, "plex_library", json!({"op":"list"})).unwrap();
+        assert_eq!(response["data"]["error"], queue::QueueError::ServerUnavailable.message());
+        assert!(app.ott.as_ref().unwrap().transient.candidate.is_none());
+        assert_eq!(saved_value(&app), before);
+    }
+}
+
 fn selection(ids: &[&str]) -> prepare::Selection {
     selection_for(ids, false)
 }
