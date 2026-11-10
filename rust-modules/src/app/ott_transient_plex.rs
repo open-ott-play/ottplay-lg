@@ -103,6 +103,14 @@ fn durable_queue_matches(runtime: &Runtime, target: &stored::Stored) -> bool {
                     && entries.iter().zip(expected).all(|(actual, expected)| actual.equals(expected))))
 }
 
+/// Private credential provenance. Native accounts retain only the admitted
+/// client receipt and grant scope; their token never enters OTT saved settings.
+#[derive(Clone)]
+pub(in crate::app::ott_runtime) enum SourceBinding {
+    Stored(plx_plex::plex::session::SourceRef),
+    NativeAccount(plx_plex::plex::grant::GrantScope),
+}
+
 #[derive(Clone)]
 pub(in crate::app::ott_runtime) struct Preparation {
     pub owner: OwnerToken,
@@ -110,7 +118,7 @@ pub(in crate::app::ott_runtime) struct Preparation {
     pub navigation_epoch: u64,
     pub purpose: Purpose,
     pub profile: ProviderProfile,
-    pub source: plx_plex::plex::session::SourceRef,
+    pub source: SourceBinding,
     pub client: &'static Client,
     pub authority: Arc<prepare::CapturedAuthority>,
     pub deadline: Deadline,
@@ -413,64 +421,9 @@ pub(in crate::app::ott_runtime) fn command(
             QueueError::Busy,
         ));
     }
-    let Some(source) = commands::stored_plex(runtime) else {
-        return Some(failure_version(
-            version,
-            runtime.remote.runtime(),
-            &request,
-            QueueError::Configuration,
-        ));
-    };
-    let profiles: Vec<_> = runtime
-        .saved
-        .profiles
-        .profiles
-        .iter()
-        .filter(|p| p.enabled && p.kind == ProviderKind::Plex && p.source == source.machine_id)
-        .cloned()
-        .collect();
-    let profile = if let Some(active) = runtime.active().filter(|p| {
-        p.enabled && p.kind == ProviderKind::Plex && profiles.iter().any(|v| v.id == p.id)
-    }) {
-        active.clone()
-    } else if profiles.len() == 1 {
-        profiles[0].clone()
-    } else {
-        return Some(failure_version(
-            version,
-            runtime.remote.runtime(),
-            &request,
-            QueueError::Configuration,
-        ));
-    };
-    let Some(client) =
-        plx_plex::plex::id_of_machine(&profile.source).and_then(plx_plex::plex::client_for)
-    else {
-        return Some(failure_version(
-            version,
-            runtime.remote.runtime(),
-            &request,
-            QueueError::ServerUnavailable,
-        ));
-    };
-    if source.origin().as_ref() != Some(client.origin()) || !client.uses_token(&source.token) {
-        return Some(failure_version(
-            version,
-            runtime.remote.runtime(),
-            &request,
-            QueueError::ServerUnavailable,
-        ));
-    }
-    let authority = match prepare::CapturedAuthority::capture(client) {
-        Ok(value) if value.matches(client) => Arc::new(value),
-        _ => {
-            return Some(failure_version(
-                version,
-                runtime.remote.runtime(),
-                &request,
-                QueueError::ServerUnavailable,
-            ))
-        }
+    let (profile, source, client, authority) = match remote_binding(runtime) {
+        Ok(binding) => binding,
+        Err(error) => return Some(failure_version(version, runtime.remote.runtime(), &request, error)),
     };
     let Some(clock) = runtime.clock_sample else {
         return Some(failure_version(
@@ -592,7 +545,7 @@ pub(in crate::app::ott_runtime) fn kiosk_restore_queue(
         runtime,
         purpose,
         profile,
-        source,
+        SourceBinding::Stored(source),
         client,
         authority,
         clock.deadline_at_unix_ms(expires_ms),
@@ -614,7 +567,7 @@ fn begin_preparation(
     runtime: &mut Runtime,
     purpose: Purpose,
     profile: ProviderProfile,
-    source: plx_plex::plex::session::SourceRef,
+    source: SourceBinding,
     client: &'static Client,
     authority: Arc<prepare::CapturedAuthority>,
     deadline: Deadline,
@@ -785,11 +738,71 @@ fn current(runtime: &Runtime, c: &PlexCandidate) -> bool {
             .is_some_and(|v| c.work.authority.matches(v))
 }
 
+/// An active Plex profile is an explicit choice. Otherwise every configured
+/// enabled Plex profile participates, including unavailable ones: never guess
+/// another account just because its server currently answers.
+fn selected_profile<'a>(runtime: &'a Runtime, machine: Option<&str>) -> Result<&'a ProviderProfile, QueueError> {
+    let eligible = |profile: &&ProviderProfile| profile.enabled && profile.kind == ProviderKind::Plex
+        && machine.is_none_or(|id| profile.source == id);
+    if let Some(active) = runtime.active().filter(|profile| profile.enabled && profile.kind == ProviderKind::Plex
+        && machine.is_none_or(|id| profile.source == id)) {
+        let count = runtime.saved.profiles.profiles.iter().filter(eligible)
+            .filter(|profile| profile.id == active.id).count();
+        return if count == 1 { Ok(active) } else { Err(QueueError::Configuration) };
+    }
+    let mut profiles = runtime.saved.profiles.profiles.iter().filter(eligible);
+    let profile = profiles.next().ok_or(QueueError::Configuration)?;
+    if profiles.next().is_some() { return Err(QueueError::Configuration); }
+    Ok(profile)
+}
+
+fn remote_binding(runtime: &Runtime) -> Result<(ProviderProfile, SourceBinding, &'static Client,
+    Arc<prepare::CapturedAuthority>), QueueError>
+{
+    // Malformed or explicitly imported credentials must never be downgraded to
+    // a different native account when the exact stored-source guard refuses.
+    let sources = runtime.saved.plex_sources().map_err(|_| QueueError::Configuration)?;
+    let native_scope = plx_plex::plex::grant::scope();
+    let source = if sources.is_empty() { None }
+        else { Some(commands::stored_plex(runtime).ok_or(QueueError::Configuration)?) };
+    let profile = selected_profile(runtime, source.as_ref().map(|source| source.machine_id.as_str()))?.clone();
+    let client = plx_plex::plex::id_of_machine(&profile.source)
+        .and_then(plx_plex::plex::client_for).ok_or(QueueError::ServerUnavailable)?;
+    let binding = if let Some(source) = source {
+        if source.origin().as_ref() != Some(client.origin()) || !client.uses_token(&source.token) {
+            return Err(QueueError::ServerUnavailable);
+        }
+        SourceBinding::Stored(source)
+    } else {
+        if !client.has_token()
+            || !plx_plex::plex::grant::credential_allowed_for(&profile.source, client.origin()) {
+            return Err(QueueError::ServerUnavailable);
+        }
+        SourceBinding::NativeAccount(native_scope)
+    };
+    let authority = prepare::CapturedAuthority::capture(client).map_err(|_| QueueError::ServerUnavailable)?;
+    if !authority.matches(client) || (matches!(binding, SourceBinding::NativeAccount(_))
+        && native_scope != plx_plex::plex::grant::scope()) {
+        return Err(QueueError::ServerUnavailable);
+    }
+    Ok((profile, binding, client, Arc::new(authority)))
+}
+
 fn source_current(runtime: &Runtime, work: &Preparation) -> bool {
+    let expected = match &work.source {
+        SourceBinding::Stored(source) => source,
+        SourceBinding::NativeAccount(scope) => return matches!(work.purpose, Purpose::Remote { .. })
+            && *scope == plx_plex::plex::grant::scope()
+            && runtime.saved.plex_sources().is_ok_and(|sources| sources.is_empty())
+            && selected_profile(runtime, None).ok() == Some(&work.profile)
+            && work.client.has_token()
+            && plx_plex::plex::grant::credential_allowed_for(
+                &work.profile.source, work.client.origin()),
+    };
     let same = |source: &plx_plex::plex::session::SourceRef| {
-        source.machine_id == work.source.machine_id
-            && source.origin() == work.source.origin()
-            && source.token == work.source.token
+        source.machine_id == expected.machine_id
+            && source.origin() == expected.origin()
+            && source.token == expected.token
     };
     match &work.purpose {
         Purpose::Remote { .. } => commands::stored_plex(runtime).as_ref().is_some_and(same),
@@ -798,7 +811,7 @@ fn source_current(runtime: &Runtime, work: &Preparation) -> bool {
                 && runtime.saved.plex_sources().is_ok_and(|sources| {
                     let mut matches = sources
                         .iter()
-                        .filter(|source| source.machine_id == work.source.machine_id);
+                        .filter(|source| source.machine_id == expected.machine_id);
                     matches.next().is_some_and(same) && matches.next().is_none()
                 })
         }

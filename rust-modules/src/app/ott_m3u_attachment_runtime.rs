@@ -59,6 +59,7 @@ impl Runtime {
     }
 
     pub(super) fn take_completed_play_target(&mut self) -> Option<PlaybackRequest> {
+        self.live_retry_generation = None;
         self.play_attachment = None;
         self.play_target.take()
     }

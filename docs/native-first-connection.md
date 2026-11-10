@@ -15,3 +15,9 @@ The Device ID is a public receiver identifier, not a credential. After configura
 Choosing Plex remotely restores missing profile metadata from the same currently credential-eligible native server snapshot used by the interface. This is one protected profile save with the original remote receipt; it does not copy or replace native account credentials or start a sign-in flow. Existing usable profiles retain their IDs and deliberately disabled duplicates are not enabled unnecessarily.
 
 A Home preset carrying another Plex origin or token is a different configuration even if it reaches the same server. The import refuses to overwrite an existing native authorization; exact `settings_compare` remains false. Use native Plex sign-in for an intentional account change. Functional recovery of the existing native Plex catalogue is reported separately from exact preset credential equality.
+
+## Plex commands after native sign-in
+
+Once the existing native Plex sign-in has created a saved server profile, library and queue commands can use that account directly. For example, `ott PLAYER plex shuffle "Movies"` prepares a shuffled library using the same authorized server as the native player. It does not require importing another copy of the account credentials.
+
+An active Plex profile supplies the exact server. When a different provider is active, there must be exactly one enabled saved Plex profile; multiple candidates require an explicit profile choice rather than guessing. Unavailable, signed-out or replaced clients are rejected, including if authorization changes while preparation is running. Existing imported Plex settings remain bound to their exact saved origin and token; an invalid import cannot silently fall back to another account. Read-only list and preview operations preserve playback and saved settings.

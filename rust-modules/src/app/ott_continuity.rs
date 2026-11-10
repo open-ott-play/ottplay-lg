@@ -64,6 +64,8 @@ pub(super) enum Reason {
     First,
     Restore,
     Next,
+    /// Retry the exact live source; admission refusal must never choose a successor.
+    LiveRetry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -474,7 +476,7 @@ impl Continuity {
                 self.failed_continuation = FailedContinuation::Halted;
                 return Decision::Idle;
             };
-            return self.start(&id, 0, Reason::Next);
+            return self.start(&id, 0, Reason::LiveRetry);
         }
         self.failed_continuation = FailedContinuation::Discovery;
         self.catalog_updated(generation, ids, complete)
@@ -1379,7 +1381,7 @@ mod live_recovery_tests {
             let due = policy.pending_retry().unwrap().not_before_ms;
             assert_eq!(policy.tick(7, due - 1, &ids, true), Decision::Wait);
             assert!(matches!(policy.tick(7, due, &ids, true),
-                Decision::Start { entry_id, .. } if entry_id == "third"));
+                Decision::Start { entry_id, reason: Reason::LiveRetry, .. } if entry_id == "third"));
             now = due + 1;
         }
         assert_eq!(policy.live_disconnected(7, "third", now), Decision::Idle);
@@ -1388,5 +1390,28 @@ mod live_recovery_tests {
         assert_eq!(policy.live_disconnected(7, "fourth", now), Decision::Wait);
         policy.stop(7);
         assert_eq!(policy.tick(7, u64::MAX, &ids, true), Decision::Idle);
+    }
+}
+
+
+#[cfg(test)]
+mod live_retry_cancellation_tests {
+    use super::*;
+    #[test]
+    fn live_retry_deadline_cannot_cross_pause_suspend_source_or_manual_selection() {
+        for boundary in 0..5 {
+            let mut policy = Continuity::new(7, None);
+            policy.user_selected(7, "first");
+            assert_eq!(policy.live_disconnected(7, "first", 100), Decision::Wait);
+            match boundary {
+                0 => policy.pause(7),
+                1 => { policy.suspend(7); policy.resume_after_suspend(7); }
+                2 => policy.stop(7),
+                3 => policy.user_selected(7, "second"),
+                _ => { assert_eq!(policy.tick(8, u64::MAX, &["first", "second"], true), Decision::Idle); continue; }
+            }
+            assert!(policy.pending_retry().is_none());
+            assert_eq!(policy.tick(7, u64::MAX, &["first", "second"], true), Decision::Idle);
+        }
     }
 }

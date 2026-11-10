@@ -111,7 +111,7 @@ fn classify_curl_open_err_matches_its_plaintext_sibling() {
     SHARED.dg_http_status.store(0, Ordering::Relaxed);
     assert!(matches!(
         classify_curl_open_err(crate::curlio::OpenErr::Status(500)),
-        HlsExit::Failed(_)
+        HlsExit::OpenFailed { outcome: TraceOutcome::ServerState, .. }
     ));
     assert_eq!(
         SHARED.dg_http_status.load(Ordering::Relaxed),
@@ -120,7 +120,7 @@ fn classify_curl_open_err_matches_its_plaintext_sibling() {
     );
     assert!(matches!(
         classify_curl_open_err(crate::curlio::OpenErr::Local),
-        HlsExit::Failed(_)
+        HlsExit::OpenFailed { outcome: TraceOutcome::Inconclusive, .. }
     ));
 }
 
@@ -909,4 +909,56 @@ fn a_pause_projection_spends_neither_reserve_nor_transport_liveness() {
     assert!(classify_hls_deadline(wake).is_none());
     assert!(!reserve.expired);
     assert_eq!(watchdog.deadline, liveness_deadline);
+}
+
+#[test]
+fn hls_open_cause_whitelists_only_exact_current_request_evidence() {
+    let _serial = plx_base::testlock::serial();
+    struct StatusRestore(i32);
+    impl Drop for StatusRestore {
+        fn drop(&mut self) { SHARED.dg_http_status.store(self.0, Ordering::Relaxed); }
+    }
+    let _restore = StatusRestore(SHARED.dg_http_status.load(Ordering::Relaxed));
+    use crate::curlio::OpenErr;
+    for code in 0..=120 {
+        let expected = match code {
+            5 | 6 | 7 | 16 | 18 | 52 | 55 | 56 | 92 => TraceOutcome::Transport,
+            28 => TraceOutcome::Deadline,
+            1 | 3 | 33 | 35 | 36 | 47 | 51 | 53 | 54 | 58 | 59 | 60 | 64 | 66
+                | 77 | 80 | 82 | 83 | 90 | 91 | 98 => TraceOutcome::Refused,
+            _ => TraceOutcome::Inconclusive,
+        };
+        assert!(matches!(classify_curl_open_err(OpenErr::Transport(code)),
+            HlsExit::OpenFailed { reason: "HTTPS request failed", outcome } if outcome == expected),
+            "curl code {code}");
+    }
+    for status in [301, 400, 401, 403, 408, 410, 416, 425, 429, 500, 501, 502, 503, 504, 505, 511] {
+        let expected = if matches!(status, 429 | 500 | 502 | 503 | 504) {
+            TraceOutcome::ServerState
+        } else { TraceOutcome::Refused };
+        assert!(matches!(classify_curl_open_err(OpenErr::Status(status)),
+            HlsExit::OpenFailed { outcome, .. } if outcome == expected));
+        assert!(matches!(classify_plaintext_open_failure(plx_net::stream::HttpOpenError::Status(status)),
+            HlsExit::OpenFailed { outcome, .. } if outcome == expected));
+    }
+    for error in [OpenErr::Local, OpenErr::Unavailable, OpenErr::Multi(6)] {
+        assert!(matches!(classify_curl_open_err(error), HlsExit::OpenFailed {
+            outcome: TraceOutcome::Inconclusive, .. }));
+    }
+    assert!(matches!(classify_curl_open_err(OpenErr::RangeIgnored),
+        HlsExit::OpenFailed { outcome: TraceOutcome::Refused, .. }));
+    assert!(matches!(classify_plaintext_open_failure(plx_net::stream::HttpOpenError::Transport),
+        HlsExit::OpenFailed { outcome: TraceOutcome::Inconclusive, .. }));
+    // A final fresh-open error is classified from itself, not from an earlier
+    // failed reused connection or the last successful/failed status mirror.
+    SHARED.dg_http_status.store(401, Ordering::Relaxed);
+    assert!(matches!(classify_curl_open_err(OpenErr::Transport(7)),
+        HlsExit::OpenFailed { outcome: TraceOutcome::Transport, .. }));
+    assert!(matches!(classify_curl_open_err(OpenErr::Status(503)),
+        HlsExit::OpenFailed { outcome: TraceOutcome::ServerState, .. }));
+    // Explicit reserve/checkpoint deadlines retain their accounting owner.
+    assert!(matches!(classify_curl_open_err(OpenErr::Deadline), HlsExit::PrimeExpired));
+    assert!(matches!(classify_plaintext_open_failure(plx_net::stream::HttpOpenError::Deadline), HlsExit::PrimeExpired));
+    assert!(matches!(classify_curl_open_err(OpenErr::Stopped), HlsExit::Failed(_)));
+    assert!(matches!(classify_curl_open_err(OpenErr::Status(404)), HlsExit::NotReady));
 }

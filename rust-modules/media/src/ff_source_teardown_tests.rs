@@ -394,6 +394,7 @@ fn lookahead_errors_are_not_fatal_except_teardown() {
     )));
     assert!(!hls_prefetch_is_fatal(&HlsExit::NotReady));
     assert!(!hls_prefetch_is_fatal(&HlsExit::PrimeExpired));
+    assert!(!hls_prefetch_is_fatal(&HlsExit::OpenFailed { reason: "HTTPS request failed", outcome: TraceOutcome::Transport }));
     assert!(!hls_prefetch_is_fatal(&HlsExit::StallAbort(
         SegmentTransfer {
             bytes: 1,
@@ -1126,4 +1127,57 @@ fn hls_terminal_context_preserves_failure_flags_and_closed_classes() {
     assert!(!SHARED.demux_io_failed.load(Ordering::Acquire));
     assert!(SHARED.demux_failed.load(Ordering::Acquire));
     assert_eq!(SHARED.dg_demux_exit.load(Ordering::Acquire), DemuxExitClass::DemuxPanicked.latch());
+}
+
+#[test]
+fn typed_hls_open_failure_settles_detail_and_flags_under_one_native_owner_fence() {
+    let _serial = plx_base::testlock::serial();
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) { SHARED.reset_session(); PUSHED_ANY.store(false, Ordering::Relaxed); }
+    }
+    let _reset = Reset;
+    for pushed in [false, true] {
+        for duplicate in [false, true] {
+            SHARED.reset_session();
+            let epoch = SHARED.begin_native_session().expect("owner");
+            PUSHED_ANY.store(pushed, Ordering::Relaxed);
+            let first = IoFailureDetails::Hls { exit: DemuxExitClass::Other, outcome: None };
+            if duplicate { assert!(SHARED.note_io_failure_for(epoch, first)); }
+            settle_hls_demux(epoch, Ok(Err(HlsExit::OpenFailed {
+                reason: "HTTPS request failed", outcome: TraceOutcome::Transport,
+            })));
+            assert_eq!(SHARED.io_failure(), Some(if duplicate { first } else {
+                IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportOpenFailed,
+                    outcome: Some(TraceOutcome::Transport) }
+            }));
+            assert_eq!(SHARED.demux_io_failed.load(Ordering::Acquire), pushed);
+            assert_eq!(SHARED.demux_failed.load(Ordering::Acquire), !pushed);
+            assert_eq!(SHARED.dg_demux_exit.load(Ordering::Acquire),
+                if pushed { 0 } else { DemuxExitClass::HlsTransportOpenFailed.latch() });
+        }
+        SHARED.reset_session();
+        let retired = SHARED.begin_native_session().expect("old owner");
+        let mut old_video = crate::aq::aq_new(1024);
+        let mut old_audio = crate::aq::aq_new(1024);
+        // The real lifecycle aborts the old lanes before joining/resetting the
+        // owner. A late terminal reducer then completes those retired queues.
+        crate::aq::aq_abort(&mut *old_video);
+        crate::aq::aq_abort(&mut *old_audio);
+        SHARED.reset_session();
+        let current = SHARED.begin_native_session().expect("replacement");
+        assert_ne!(retired, current);
+        PUSHED_ANY.store(pushed, Ordering::Relaxed);
+        settle_hls_demux(retired, Ok(Err(HlsExit::OpenFailed {
+            reason: "HTTP request failed", outcome: TraceOutcome::ServerState,
+        })));
+        finish_demux_queues(&mut *old_video, &mut *old_audio, pushed, false);
+        assert!(!SHARED.demux_empty_failed.load(Ordering::Acquire));
+        assert_eq!(SHARED.io_failure(), None);
+        assert!(!SHARED.demux_io_failed.load(Ordering::Acquire));
+        assert!(!SHARED.demux_failed.load(Ordering::Acquire));
+        assert_eq!(SHARED.dg_demux_exit.load(Ordering::Acquire), 0);
+        crate::aq::aq_destroy(&mut *old_video);
+        crate::aq::aq_destroy(&mut *old_audio);
+    }
 }
