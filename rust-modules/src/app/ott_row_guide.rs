@@ -199,7 +199,10 @@ impl Runtime {
     pub(super) fn current_row_programme(&self, entry: &CatalogEntry) -> Option<CurrentProgramme> {
         let cache = self.row_guide.as_ref()?;
         let now_s = self.wall_now_s()?;
-        if !cache.request.current(self) || !cache.fresh(now_s) || !cache.request.matches_entry(entry) {
+        // The earliest catalogue transition schedules refresh work; it does not
+        // expire every other channel's still-current programme while IO runs.
+        if !cache.request.current(self) || now_s < cache.snapshot.now_s
+            || !cache.request.matches_entry(entry) {
             return None;
         }
         let programme = cache.snapshot.programmes.get(&entry.id)?;

@@ -95,6 +95,21 @@ impl Runtime {
                 self.metadata_generation, self.metadata_target.as_ref(), self.metadata_query).is_some())) {
             return false;
         }
+        // A failed refresh cannot revoke already admitted, still-useful facts
+        // for the exact same source and selection. A successful empty reply is
+        // authoritative and deliberately replaces them below.
+        if candidate.as_ref().is_some_and(|candidate| candidate.failed
+            && self.metadata_guide.as_ref().is_some_and(|retained|
+                retained.source_generation == self.generation
+                    && retained.candidate.target == candidate.target
+                    && retained.candidate.source_profile == candidate.source_profile
+                    && retained.candidate.entry_id == candidate.entry_id
+                    && retained.candidate.media == candidate.media
+                    && retained.candidate.live == candidate.live
+                    && self.wall_now_s().is_some_and(|now| retained.candidate.facts.as_ref()
+                        .and_then(|facts| guide_projection::advance(facts, now))
+                        .is_some_and(|facts| facts.current.is_some() || facts.next.is_some()))))
+        { return true; }
         self.metadata_guide = candidate.filter(|candidate| candidate.facts.is_some() || candidate.failed)
             .map(|candidate| Retained { source_generation: self.generation, candidate });
         self.changed();
@@ -123,9 +138,7 @@ impl Runtime {
         if !self.loaded || self.persistence_uncertain
             || !matches!(self.page, "channels" | "favorites")
             || retained.source_generation != self.generation
-            || candidate.metadata_generation != self.metadata_generation
             || self.metadata_target.as_ref() != Some(&candidate.target)
-            || self.metadata_query != Some(candidate.query)
             || candidate.target.1 != id
             || self.metadata_cancel.load(Ordering::Acquire)
             || !self.metadata_attachment_current()
@@ -133,6 +146,9 @@ impl Runtime {
                 && guide_ui::is_live(&candidate.source_profile, entry))
             || !candidate.source_current(self)
         { return None; }
+        // Admission already checked the completed request's query/generation.
+        // A same-target refresh owns a new worker, not the lifetime of these
+        // source-bound display facts; their own programme intervals apply.
         let now_s = i64::try_from(self.wall_clock_ms / 1000).ok()?;
         guide_projection::advance(candidate.facts.as_ref()?, now_s)
     }

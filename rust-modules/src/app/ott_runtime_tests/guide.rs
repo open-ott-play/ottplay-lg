@@ -369,7 +369,7 @@ fn copy_guide(reply: &Guide) -> Guide {
 }
 
 #[test]
-fn classic_current_error_clears_facts_but_stale_error_cannot_clear_newer_facts() {
+fn classic_current_and_stale_errors_keep_still_current_admitted_facts() {
     let _serial = plx_base::testlock::serial();
     let (mut app, sample, reply) = fixture();
     let mut current_error = copy_guide(&reply); current_error.result = Err("Fixture guide unavailable");
@@ -381,7 +381,76 @@ fn classic_current_error_clears_facts_but_stale_error_cannot_clear_newer_facts()
     deliver(&mut app, sample, stale_error);
     assert_eq!(app.ott.as_ref().unwrap().raw_view().rows[0].guide, before);
     deliver(&mut app, sample, current_error);
-    assert!(app.ott.as_ref().unwrap().raw_view().rows[0].guide.is_none());
+    assert_eq!(app.ott.as_ref().unwrap().raw_view().rows[0].guide, before);
+}
+
+#[test]
+fn classic_same_target_refresh_keeps_description_during_pending_and_failed_work() {
+    let _serial = plx_base::testlock::serial();
+    let (mut app, sample, reply) = fixture();
+    let mut failed = copy_guide(&reply);
+    failed.result = Err("Fixture refresh unavailable");
+    deliver(&mut app, sample, reply);
+    let runtime = app.ott.as_mut().unwrap();
+    let before = runtime.raw_view().rows[0].guide.clone().unwrap();
+    let old_cancel = runtime.metadata_cancel.clone();
+    let generation = runtime.metadata_generation;
+    runtime.wall_clock_ms += 10_000;
+    runtime.metadata_refresh_ms = 1;
+    runtime.refresh_metadata();
+    assert!(old_cancel.load(Ordering::Acquire));
+    assert_ne!(runtime.metadata_generation, generation);
+    assert!(runtime.metadata_next.is_some(), "healthy busy slot keeps refresh queued without IO");
+    let during = runtime.raw_view().rows[0].guide.clone().expect("pending refresh retains admitted facts");
+    assert_eq!(during.current, before.current);
+    assert_eq!(during.current.as_ref().unwrap().description, "Complete accepted programme description");
+    failed.generation = runtime.metadata_generation;
+    failed.request.context.generation = failed.generation;
+    failed.request.query = runtime.metadata_query.unwrap();
+    // Keep the fixture worker held and let the normal receiver admit the failure.
+    runtime.metadata_next = None;
+    deliver(&mut app, sample, failed);
+    assert_eq!(app.ott.as_ref().unwrap().raw_view().rows[0].guide.as_ref().unwrap().current,
+        before.current);
+}
+
+#[test]
+fn classic_retained_refresh_facts_cannot_cross_source_or_selection_boundaries() {
+    let _serial = plx_base::testlock::serial();
+    for change in 0..8 {
+        let (mut app, sample, reply) = fixture();
+        deliver(&mut app, sample, reply);
+        let runtime = app.ott.as_mut().unwrap();
+        runtime.wall_clock_ms += 10_000;
+        runtime.metadata_refresh_ms = 1;
+        runtime.refresh_metadata();
+        match change {
+            0 => runtime.generation = runtime.generation.wrapping_add(2),
+            1 => runtime.metadata_target.as_mut().unwrap().1 = "other-channel".into(),
+            2 => runtime.saved.profiles.profiles[0].source = "https://media.invalid/replaced.m3u".into(),
+            3 => runtime.catalog.entries[0].media = MediaLocator::Http { url: "https://media.invalid/replaced.m3u8".into() },
+            4 => runtime.catalog.entries[0].live.as_mut().unwrap().guide_shift_seconds = 60,
+            5 => runtime.metadata_cancel.store(true, Ordering::Release),
+            6 => runtime.persistence_uncertain = true,
+            _ => runtime.metadata_target.as_mut().unwrap().0 = "other-profile".into(),
+        }
+        assert!(runtime.raw_view().rows.iter().all(|row| row.guide.is_none()), "change {change}");
+    }
+}
+
+#[test]
+fn classic_failed_refresh_cannot_keep_an_expired_programme() {
+    let _serial = plx_base::testlock::serial();
+    let (mut app, sample, reply) = fixture();
+    let mut failed = copy_guide(&reply);
+    failed.result = Err("Fixture expired guide unavailable");
+    deliver(&mut app, sample, reply);
+    let runtime = app.ott.as_mut().unwrap();
+    runtime.wall_clock_ms = (sample.unix_ms() / 1000 + 60) * 1000;
+    let candidate = selected_guide::Candidate::from_reply(&failed,
+        (runtime.wall_clock_ms / 1000) as i64);
+    assert!(runtime.retain_selected_guide(Some(candidate), None));
+    assert!(runtime.raw_view().rows[0].guide.is_none(), "failure cannot extend the programme interval");
 }
 
 #[test]
