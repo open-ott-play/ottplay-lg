@@ -1,6 +1,6 @@
 {
   "id": "com.openottplay.player.native",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "vendor": "OTTPlay",
   "type": "native",
   "main": "plxnative",
