@@ -804,3 +804,6 @@ fn newer_explicit_selection_is_not_cancelled_by_old_live_retry_pause_receipt() {
     assert_eq!(runtime.play_target.as_ref().unwrap().id, "second");
     assert!(runtime.live_retry_generation.is_none());
 }
+
+#[path = "player_startup_feedback.rs"]
+mod startup_feedback;

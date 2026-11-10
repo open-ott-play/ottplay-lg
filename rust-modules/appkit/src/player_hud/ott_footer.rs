@@ -8,11 +8,12 @@ use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::label::HAlign;
 use plx_ui::{theme, Painter, Rect};
 
-/// Keep the channel name as context beside the centred startup/buffering
-/// readout, without its catalogue ordinal. The current-playing identity and
-/// ordinary list/transport numbering retain their existing values.
+/// Keep the channel name without its catalogue ordinal while either loading
+/// indicator is visible: the central startup readout or the transport spinner
+/// used after a frame has already been presented. Settled transport/list
+/// numbering and the current-playing identity retain their existing values.
 pub(super) fn visible_ordinal(ordinal: Option<u32>, busy: Busy) -> Option<u32> {
-    if matches!(busy, Busy::Readout(plx_ui::widgets::StatusKind::Working, _)) {
+    if matches!(busy, Busy::Readout(plx_ui::widgets::StatusKind::Working, _) | Busy::Transport) {
         None
     } else {
         ordinal
@@ -573,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_startup_spinner_keeps_channel_title_without_its_catalogue_number() {
+    fn classic_loading_spinners_keep_channel_title_without_its_catalogue_number() {
         let mut playing = live_playing();
         playing.ott.as_mut().unwrap().live.as_mut().unwrap().channel_title = "123 Channel A".into();
         let measure = plx_ui::fixture::FixtureMeasure;
@@ -584,7 +585,7 @@ mod tests {
             (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), false),
             (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), false),
             (Busy::None, true),
-            (Busy::Transport, true),
+            (Busy::Transport, false),
             (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), true),
         ] {
             let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(),

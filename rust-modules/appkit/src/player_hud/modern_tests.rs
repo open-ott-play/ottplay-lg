@@ -372,7 +372,7 @@ fn modern_live_footer_has_real_clock_raster_and_read_only_broadcast_rail() {
 }
 
 #[test]
-fn modern_startup_spinner_keeps_channel_title_without_its_catalogue_number() {
+fn modern_loading_spinners_keep_channel_title_without_its_catalogue_number() {
     use plx_data::metadata::OttLivePlaying;
     let mut playing = footer_playing();
     playing.ott.as_mut().unwrap().live = Some(OttLivePlaying {
@@ -388,7 +388,7 @@ fn modern_startup_spinner_keeps_channel_title_without_its_catalogue_number() {
         (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), false),
         (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), false),
         (Busy::None, true),
-        (Busy::Transport, true),
+        (Busy::Transport, false),
         (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), true),
     ] {
         let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
