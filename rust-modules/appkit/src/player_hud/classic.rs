@@ -1017,7 +1017,7 @@ pub fn draw_hud_in_mode(
     if chrome {
         if let Some(playing) = meta.now_playing() {
             super::ott_footer::draw_classic(pc, playing, playing.ott.as_ref(), &mut row.ott_clock_labels,
-                &layout, measure, model.wall_now_s, decoder);
+                &layout, measure, model.wall_now_s, decoder, busy);
         } else {
             draw_route_title(pc, plx_media::route::title_cptr(ps),
                 plx_media::route::ctxline_cptr(ps), &layout);
@@ -1078,7 +1078,7 @@ fn draw_modern(
     if transport {
         if chrome {
             super::modern::draw_information(pc, &layout, meta.now_playing(), model.wall_now_s,
-                &mut row.ott_clock_labels, measure);
+                &mut row.ott_clock_labels, measure, busy);
             match slot {
                 _ if failure_row_drawn(busy) => {},
                 ControlSlot::Discs(controls) => super::modern::draw_controls(pc, &layout,
