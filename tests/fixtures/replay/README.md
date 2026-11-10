@@ -131,6 +131,28 @@ reviewed exception for a census-only change in an unused type is documented belo
 every recorded payload and still requires full replay validation. The D1 results below describe
 that earlier build, not current all-domain acceptance.
 
+**Unused OTT pending-Play census migration (2026-11-09, source-only).**
+`Ott::SHAPE` and its canonical writer gain the opaque `pending_play: Option<str>`
+identity, distinguishing an admission cover from the interactive catalogue.
+The screen fingerprint moves from `0xa2a2f6e88fc772fa` to
+`0xf5724bfade86f69f`; the product fingerprint moves from
+`2784988197135039552` to `17310966664370474601`.
+
+The same three controlled anchors below cannot instantiate OTT (controlled
+boot has no OTT runtime, and the controlled navigation codec rejects OTT).
+Only their manifest `state_fp` fields change. Initial data and hashes, segment
+bytes, input edges, measurements, frame grades and anchor flags stay unchanged.
+The Classic-only list-motion changes preserve the Modern geometry used by
+these anchors. `pre_ott_pending_play_recording_headers_remain_refused` proves
+that arbitrary predecessor headers still fail before segment parsing; strict
+initial/request checks remain enabled.
+
+This reviewed unused-type migration does not assert runtime replay success.
+Full controlled Targets and Resolve replay remains mandatory, with complete
+frame counts and zero differences. A later divergence requires ordinary fresh
+capture; initial and per-frame hashes must not be edited to hide it. Recordings
+that instantiate OTT must be recorded afresh.
+
 **Unused OTT category-shelf census migration (2026-11-08, source-only).**
 The Modern shelf state adds category membership, source-bound occurrence focus
 and shelf motion to `Ott::SHAPE`. Comparing `5610a22` and `97c1498` changes only

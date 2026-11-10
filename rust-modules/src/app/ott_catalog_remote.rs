@@ -764,7 +764,16 @@ pub(super) fn play(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Op
         return Some(unsupported("Random catalog playback is not supported"));
     }
     let result = (|| {
-        if !fields(&inv.params, &["catalog", "id"]) {
+        let receipt_random = inv.params.get("receipt_random");
+        if let Some(options) = receipt_random {
+            if !fields(&inv.params, &["catalog", "receipt_random"])
+                || !fields(options, &["version", "scope"])
+                || options["version"].as_u64() != Some(2)
+                || options["scope"].as_str() != Some("receipt")
+            {
+                return Err("Use receipt_random version 2 with receipt scope");
+            }
+        } else if !fields(&inv.params, &["catalog", "id"]) {
             return Err("Use one catalog receipt and exact ID");
         }
         if !app.running
@@ -774,18 +783,33 @@ pub(super) fn play(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Op
         {
             return Err("Playback is suspended or settings are being committed");
         }
-        let id = text(&inv.params["id"], 2048, false).ok_or("Invalid catalog ID")?;
+        let exact_id = if receipt_random.is_none() {
+            Some(text(&inv.params["id"], 2048, false).ok_or("Invalid catalog ID")?)
+        } else { None };
         available(runtime).map_err(|_| "Catalog is unavailable")?;
         let receipt = read_receipt(runtime, &inv.params)?;
         let snapshot = &receipt.snapshot;
         let Scope::Channels { indices, .. } = &receipt.scope else {
             return Err("Use a channel-page receipt");
         };
-        let item = indices
-            .iter()
-            .map(|index| &snapshot.items[*index])
-            .find(|item| item.wire.id == id)
-            .ok_or("The ID is not in this catalog selection")?;
+        let item = if receipt_random.is_some() {
+            // A complete immutable receipt is the entire population. Classification,
+            // legacy weighting and title inference are deliberately absent in v2.
+            if snapshot.loading || runtime.catalog_loading || !runtime.catalog_complete {
+                return Err("The complete random-selection catalog is unavailable");
+            }
+            let entropy = runtime.entropy.ok_or("Random entropy is unavailable")?;
+            let seed_bytes = plx_base::sha256::sha256(
+                format!("{:?}:{}:{}", entropy, inv.id, receipt.token).as_bytes());
+            let seed = u64::from_le_bytes(seed_bytes[..8].try_into().unwrap());
+            let index = super::super::random::index(seed, indices.len())
+                .ok_or("The catalog selection is empty")?;
+            &snapshot.items[indices[index]]
+        } else {
+            indices.iter().map(|index| &snapshot.items[*index])
+                .find(|item| Some(item.wire.id.as_str()) == exact_id)
+                .ok_or("The ID is not in this catalog selection")?
+        };
         // Already-discovered exact IDs may play while discovery continues.
         // Partial title matches remain a controller-side admission decision.
         let selection = item.selection.as_deref().unwrap_or(&item.wire.id);

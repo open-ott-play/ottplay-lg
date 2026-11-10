@@ -14,6 +14,7 @@ const PLAYLIST_SEGMENTS: usize = 20_000;
 struct Variant {
     url: String,
     bandwidth: u64,
+    subtitles: Option<String>,
 }
 #[derive(Clone)]
 struct MediaSegment {
@@ -28,22 +29,44 @@ struct Media {
     independent: bool,
 }
 
+#[derive(Clone)]
+enum VideoState {
+    H264(H264SegmentState),
+    Hevc(super::hevc_ts::State),
+}
+impl VideoState {
+    fn codec(&self) -> &'static str {
+        match self { Self::H264(_) => "h264", Self::Hevc(_) => "hevc" }
+    }
+    fn fresh(codec: &str) -> Result<Self, &'static str> {
+        match codec {
+            "h264" => Ok(Self::H264(H264SegmentState::default())),
+            "hevc" => Ok(Self::Hevc(super::hevc_ts::State::default())),
+            _ => Err("Unsupported external HLS video codec"),
+        }
+    }
+}
 /// Only a completely fed segment can authorize dependent frames in its successor.
 struct VideoContinuation {
     source: String,
     sequence: u64,
     discontinuity_sequence: u64,
-    state: H264SegmentState,
+    state: VideoState,
+    clock: crate::hls::TransportClock,
 }
 impl VideoContinuation {
+    fn contiguous(&self, source: &str, segment: &MediaSegment, video_codec: &str) -> bool {
+        self.state.codec() == video_codec && self.source == source
+            && self.sequence.checked_add(1) == Some(segment.inner.sequence)
+            && self.discontinuity_sequence == segment.discontinuity_sequence
+    }
     fn candidate(previous: Option<&Self>, source: &str, segment: &MediaSegment,
-        independent: bool) -> H264SegmentState
+        independent: bool, video_codec: &str) -> Result<VideoState, &'static str>
     {
-        previous.filter(|previous| !independent
-            && previous.source == source
-            && previous.sequence.checked_add(1) == Some(segment.inner.sequence)
-            && previous.discontinuity_sequence == segment.discontinuity_sequence)
-            .map(|previous| previous.state.clone()).unwrap_or_default()
+        if let Some(previous) = previous.filter(|previous| !independent
+            && previous.contiguous(source, segment, video_codec))
+        { return Ok(previous.state.clone()); }
+        VideoState::fresh(video_codec)
     }
 }
 enum Playlist {
@@ -108,6 +131,7 @@ fn parse_with_limits(base: &str, text: &str, segment_limit: usize, uri_bytes_lim
     let mut variants = Vec::new();
     let mut segments = Vec::new();
     let mut pending_variant = None;
+    let mut pending_subtitles = None;
     let mut duration = None;
     let mut sequence = 0u64;
     let mut sequence_set = false;
@@ -139,6 +163,7 @@ fn parse_with_limits(base: &str, text: &str, segment_limit: usize, uri_bytes_lim
                 .filter(|v| *v > 0)
                 .ok_or("Missing HLS variant bandwidth")?;
             pending_variant = Some(bandwidth);
+            pending_subtitles = a.get("SUBTITLES").map(|v| (*v).to_owned());
         } else if let Some(raw) = line.strip_prefix("#EXTINF:") {
             if duration.is_some() || pending_variant.is_some() || !variants.is_empty() {
                 return Err("Mixed HLS playlist types");
@@ -241,7 +266,7 @@ fn parse_with_limits(base: &str, text: &str, segment_limit: usize, uri_bytes_lim
                 if variants.len() >= 64 {
                     return Err("Too many HLS variants");
                 }
-                variants.push(Variant { url, bandwidth });
+                variants.push(Variant { url, bandwidth, subtitles: pending_subtitles.take() });
             } else if let Some(duration) = duration.take() {
                 segments.push(MediaSegment {
                     inner: crate::hls::Segment { sequence, duration, resource: resource(&url)? },
@@ -426,10 +451,8 @@ fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: Play
 /// Unknown probe strings must never carry source text into a player error.
 fn codec_refusal(video: &str, audio: &str) -> Option<&'static str> {
     Some(match (video, audio) {
-        ("h264", "" | "aac") => return None,
+        ("h264", "" | "aac") | ("hevc", "aac" | "ac3") => return None,
         ("hevc", "") => "Native HLS does not support HEVC video without audio",
-        ("hevc", "aac") => "Native HLS does not support HEVC video with AAC audio",
-        ("hevc", "ac3") => "Native HLS does not support HEVC video with AC-3 audio",
         ("hevc", "eac3") => "Native HLS does not support HEVC video with E-AC-3 audio",
         ("hevc", "mp2") => "Native HLS does not support HEVC video with MP2 audio",
         ("h264", "ac3") => "Native HLS does not support H.264 video with AC-3 audio",
@@ -449,6 +472,7 @@ pub(super) fn inspect(
 ) -> Result<super::inspect::MediaInfo, &'static str> {
     let source_url = plx_data::ott::http_url(url).ok_or("Invalid HLS address")?;
     let mut url = source_url.clone();
+    let mut subtitle_master = None;
     for depth in 0..4 {
         let stage = if depth == 0 { PlaylistStage::Initial } else { PlaylistStage::Selected };
         let (landed, text) = fetch_traced(&url, &mut Owner::Inspect(&cancelled),
@@ -461,7 +485,11 @@ pub(super) fn inspect(
         match parse(&landed, &text)? {
             Playlist::Master(mut variants) => {
                 variants.sort_by_key(|v| v.bandwidth);
-                url = variants[0].url.clone();
+                let selected = &variants[0];
+                if selected.subtitles.is_some() {
+                    subtitle_master = Some((landed, text, selected.subtitles.clone()));
+                }
+                url = selected.url.clone();
             }
             Playlist::Media(media) => {
                 let segment = media
@@ -477,7 +505,7 @@ pub(super) fn inspect(
                     segment.inner.resource.origin.base(),
                     segment.inner.resource.path
                 );
-                let mut info = super::inspect::raw(&ExternalSource::Http(url), cancelled)?;
+                let mut info = super::inspect::raw(&ExternalSource::Http(url), Arc::clone(&cancelled))?;
                 let mp2 = info.video_codec == "h264" && info.audio_codec == "mp2"
                     && info.tracks.audio.first().is_some_and(|track|
                         hls_mp2::format(&track.codec, track.channels, track.sample_rate)
@@ -488,7 +516,7 @@ pub(super) fn inspect(
                 // This table describes one segment, not all variants/tracks in
                 // the presentation. Keep its rows for the existing manual menu.
                 info.tracks.mark_incomplete();
-                info.resolved_source = Some(ExternalSource::Hls(landed));
+                info.resolved_source = Some(ExternalSource::Hls(landed.clone()));
                 info.duration_ns = if media.ended {
                     media
                         .segments
@@ -500,6 +528,12 @@ pub(super) fn inspect(
                 } else {
                     0
                 };
+                if !media.ended {
+                    if let Some((master_url, master_text, group)) = subtitle_master.as_ref() {
+                        info.hls_playback = super::hls_presentation::live_presentation(
+                            &source_url, master_url, master_text, group.as_deref(), &landed, &info)?;
+                    }
+                }
                 return Ok(info);
             }
         }
@@ -507,6 +541,7 @@ pub(super) fn inspect(
     Err("HLS playlist nesting exceeds limit")
 }
 
+#[cfg(test)]
 pub(super) fn demux(
     url: &str,
     acodec: &str,
@@ -514,7 +549,28 @@ pub(super) fn demux(
     aq: *mut AuQueue,
     aqa: *mut AuQueue,
     hs: *mut HttpStream,
+    presentation: Option<&super::hls_presentation::HlsPlayback>,
 ) -> Result<(), HlsExit> {
+    demux_video(url, "h264", acodec, audio, aq, aqa, hs, presentation)
+}
+
+/// The inspected video codec is frozen for this native Load; segment discovery
+/// may validate it but must never silently change the sink declaration.
+pub(super) fn demux_video(
+    url: &str,
+    video_codec: &str,
+    acodec: &str,
+    audio: Option<&hls_audio::Selection>,
+    aq: *mut AuQueue,
+    aqa: *mut AuQueue,
+    hs: *mut HttpStream,
+    presentation: Option<&super::hls_presentation::HlsPlayback>,
+) -> Result<(), HlsExit> {
+    VideoState::fresh(video_codec).map_err(HlsExit::Failed)?;
+    if video_codec == "hevc" && !matches!(acodec, "aac" | "ac3") {
+        return Err(HlsExit::Failed("HEVC HLS requires AAC or AC-3 audio"));
+    }
+    if let Some(presentation) = presentation { presentation.invalidate_live_clock(); }
     let mut net = HlsNet { hs, curl: None };
     let mut next = None;
     let mut video_continuation: Option<VideoContinuation> = None;
@@ -570,18 +626,29 @@ pub(super) fn demux(
                 .begin(segment.inner.duration)
                 .map_err(|_| HlsExit::Failed("HLS timeline overflow"))?;
             let mut candidate = VideoContinuation::candidate(
-                video_continuation.as_ref(), &landed, segment, media.independent);
+                video_continuation.as_ref(), &landed, segment, media.independent, video_codec)
+                .map_err(HlsExit::Failed)?;
+            // Independent pictures reset decoder parameters, not the transport
+            // clock. A new epoch joins the actual committed sample end.
+            let mut transport_clock = match video_continuation.as_ref() {
+                Some(previous) if previous.contiguous(&landed, segment, video_codec) => previous.clock,
+                Some(previous) => crate::hls::TransportClock::restart_at(previous.clock.end_ns()),
+                None => crate::hls::TransportClock::default(),
+            };
             if video_continuation.as_ref().is_some_and(|previous|
                 previous.source != landed || previous.sequence.checked_add(1) != Some(segment.inner.sequence)
                     || previous.discontinuity_sequence != segment.discontinuity_sequence)
             {
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
             }
-            let output = unsafe {
+            let mut output = unsafe {
                 hls_demux_segment_path(
                     &segment.inner,
                     HlsSegmentRequest { path: &segment.inner.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(64 * 1024 * 1024), audio, rendition: None,
-                        video: HlsVideoEntry::External(&mut candidate), mp2: mp2.as_mut() },
+                        video: match &mut candidate {
+                            VideoState::H264(state) => HlsVideoEntry::External(state),
+                            VideoState::Hevc(state) => HlsVideoEntry::ExternalHevc(state),
+                        }, mp2: mp2.as_mut() },
                     &mut clock,
                     aq,
                     &mut net,
@@ -589,6 +656,7 @@ pub(super) fn demux(
                     SegmentAcquisition::for_cursor(None),
                 )
             }?;
+            output.remap_transport(&mut transport_clock)?;
             if !hls_feed_segment_interruptible(&output, aq, aqa, true)? {
                 video_continuation = None;
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
@@ -605,8 +673,21 @@ pub(super) fn demux(
             video_continuation = Some(VideoContinuation {
                 source: landed.clone(), sequence: segment.inner.sequence,
                 discontinuity_sequence: segment.discontinuity_sequence, state: candidate,
+                clock: transport_clock,
             });
             timeline.commit(clock);
+            if let Some(scope) = super::hls_observed_worker::scope(url, &landed, segment.discontinuity_sequence) {
+                if let Some(candidate) = output.observed.take() {
+                    // Observation is scoped to the worker that actually fed this whole segment.
+                    let _ = super::hls_observed::commit_observed(scope, segment.inner.sequence, candidate);
+                } else {
+                    super::hls_observed::retire_observed(u32::try_from(scope.worker()).unwrap_or(0));
+                }
+            }
+            if let Some(presentation) = presentation {
+                presentation.commit_live_clock(&landed, segment.discontinuity_sequence,
+                    output.webvtt_clock, transport_clock.end_ns().unwrap_or_else(|| timeline.end_ns()));
+            }
             next = Some(
                 segment.inner
                     .sequence
@@ -659,10 +740,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codec_diagnostics_preserve_the_existing_admission_rule() {
+    fn codec_admission_adds_only_hevc_with_native_aac_or_ac3_to_the_existing_rule() {
         for video in ["h264", "hevc", "mpeg2video", "H264", "", "https://private.invalid/source"] {
             for audio in ["", "aac", "ac3", "eac3", "mp2", "mp3", "opus", "AAC"] {
-                let previously_admitted = video == "h264" && (audio.is_empty() || audio == "aac");
+                let previously_admitted = (video == "h264" && (audio.is_empty() || audio == "aac"))
+                    || (video == "hevc" && matches!(audio, "aac" | "ac3"));
                 assert_eq!(codec_refusal(video, audio).is_none(), previously_admitted);
             }
         }
@@ -672,8 +754,6 @@ mod tests {
     fn codec_diagnostics_name_known_rejected_pairs_without_echoing_unknown_values() {
         for (video, audio, label) in [
             ("hevc", "", "HEVC video without audio"),
-            ("hevc", "aac", "HEVC video with AAC audio"),
-            ("hevc", "ac3", "HEVC video with AC-3 audio"),
             ("hevc", "eac3", "HEVC video with E-AC-3 audio"),
             ("hevc", "mp2", "HEVC video with MP2 audio"),
             ("h264", "ac3", "H.264 video with AC-3 audio"),
@@ -768,7 +848,56 @@ mod tests {
     }
 
     #[test]
+    fn hevc_continuation_reuses_only_committed_same_epoch_matching_codec() {
+        fn nal(kind:u8, rbsp:&[u8]) -> Vec<u8> {
+            let mut bytes=vec![0,0,0,1,kind<<1,1];
+            let mut zeros=0;
+            for &byte in rbsp {
+                if zeros>=2 && byte<=3 { bytes.push(3); zeros=0; }
+                bytes.push(byte);
+                zeros=if byte==0 { zeros+1 } else { 0 };
+            }
+            bytes
+        }
+        let mut sps=vec![1]; sps.extend_from_slice(&[0;12]); sps.push(0xc0);
+        let access=[nal(32,&[8]),nal(33,&sps),nal(34,&[0xe0]),nal(19,&[0xa0])].concat();
+        let mut state=super::super::hevc_ts::State::default();
+        super::super::hevc_ts::annexb(&access,&mut state,&mut Vec::new()).unwrap();
+        assert!(!state.needs_entry());
+        let source="https://a.invalid:443/m.m3u8";
+        let Playlist::Media(media)=parse(source,"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\n1.ts\n#EXTINF:4,\n2.ts").unwrap()
+            else { panic!("media") };
+        let previous=VideoContinuation { clock:Default::default(), source:source.into(), sequence:1, discontinuity_sequence:0,
+            state:VideoState::Hevc(state) };
+        fn candidate(previous: Option<&VideoContinuation>, source: &str,
+            segment: &MediaSegment, independent: bool) -> super::super::hevc_ts::State {
+            let VideoState::Hevc(state)=VideoContinuation::candidate(previous,source,segment,independent,"hevc").unwrap()
+                else { panic!("HEVC candidate") };
+            state
+        }
+        let next=&media.segments[1];
+        assert!(!candidate(Some(&previous),source,next,false).needs_entry());
+        assert!(candidate(None,source,next,false).needs_entry());
+        assert!(candidate(Some(&previous),source,next,true).needs_entry());
+        assert!(candidate(Some(&previous),"https://b.invalid:443/m.m3u8",next,false).needs_entry());
+        let mut changed=next.clone(); changed.discontinuity_sequence+=1;
+        assert!(candidate(Some(&previous),source,&changed,false).needs_entry());
+        changed=next.clone(); changed.inner.sequence+=1;
+        assert!(candidate(Some(&previous),source,&changed,false).needs_entry());
+        let VideoState::H264(state)=VideoContinuation::candidate(Some(&previous),source,next,false,"h264").unwrap()
+            else { panic!("H264 candidate") };
+        assert!(state.params.is_none());
+    }
+
+    #[test]
     fn only_committed_contiguous_same_source_same_epoch_reuses_video_state() {
+        fn candidate(previous: Option<&VideoContinuation>, source: &str,
+            segment: &MediaSegment, independent: bool) -> H264SegmentState
+        {
+            let VideoState::H264(state) = VideoContinuation::candidate(previous, source, segment, independent, "h264").unwrap()
+                else { panic!("H.264 candidate") };
+            state
+        }
         let source = "https://a.invalid:443/m.m3u8";
         let media = |body: &str| {
             let Playlist::Media(media) = parse(source,
@@ -780,25 +909,29 @@ mod tests {
         let new = media("#EXT-X-MEDIA-SEQUENCE:101\n#EXT-X-DISCONTINUITY-SEQUENCE:6\n#EXTINF:4,\n101.ts\n#EXTINF:4,\n102.ts");
         assert_eq!(old.segments[1].discontinuity_sequence, new.segments[0].discontinuity_sequence);
         let accepted = VideoContinuation {
+            clock: Default::default(),
             source: source.into(), sequence: old.segments[1].inner.sequence,
             discontinuity_sequence: old.segments[1].discontinuity_sequence,
-            state: H264SegmentState { params: Some(H264ParamSets {
+            state: VideoState::H264(H264SegmentState { params: Some(H264ParamSets {
                 sps: vec![0, 0, 0, 1, 0x67], pps: vec![0, 0, 0, 1, 0x68],
-            }) },
+            }) }),
         };
         let next = &new.segments[1];
-        let candidate = VideoContinuation::candidate(Some(&accepted), source, next, false);
-        assert_eq!(candidate.params.unwrap().sps, vec![0, 0, 0, 1, 0x67]);
-        assert!(VideoContinuation::candidate(None, source, next, false).params.is_none());
-        assert!(VideoContinuation::candidate(Some(&accepted), source, next, true).params.is_none());
-        assert!(VideoContinuation::candidate(Some(&accepted), "https://b.invalid:443/m.m3u8", next, false).params.is_none());
-        assert!(VideoContinuation::candidate(Some(&accepted), source, &new.segments[0], false).params.is_none());
+        let retained = candidate(Some(&accepted), source, next, false);
+        assert_eq!(retained.params.unwrap().sps, vec![0, 0, 0, 1, 0x67]);
+        assert!(candidate(None, source, next, false).params.is_none());
+        assert!(candidate(Some(&accepted), source, next, true).params.is_none());
+        assert!(candidate(Some(&accepted), "https://b.invalid:443/m.m3u8", next, false).params.is_none());
+        assert!(candidate(Some(&accepted), source, &new.segments[0], false).params.is_none());
         let mut changed = next.clone();
         changed.discontinuity_sequence += 1;
-        assert!(VideoContinuation::candidate(Some(&accepted), source, &changed, false).params.is_none());
+        assert!(candidate(Some(&accepted), source, &changed, false).params.is_none());
         changed = next.clone();
         changed.inner.sequence += 1;
-        assert!(VideoContinuation::candidate(Some(&accepted), source, &changed, false).params.is_none());
+        assert!(candidate(Some(&accepted), source, &changed, false).params.is_none());
+        assert!(matches!(VideoContinuation::candidate(Some(&accepted), source, next, false, "hevc"),
+            Ok(VideoState::Hevc(_))), "a codec change starts fresh state of the requested kind");
+        assert!(VideoContinuation::candidate(Some(&accepted), source, next, false, "vp9").is_err());
     }
 }
 
@@ -816,5 +949,27 @@ pub(super) fn vod_segments_bounded(base: &str, text: &str, segment_limit: usize,
     match parse_with_limits(base, text, segment_limit, Some(uri_bytes_limit))? {
         Playlist::Media(media) if media.ended => Ok(media.segments.into_iter().map(|segment| segment.inner).collect()),
         _ => Err("HLS subtitles require a complete VOD playlist"),
+    }
+}
+
+/// Subtitle window parser shares the exact transport feature refusals with A/V.
+pub(super) fn subtitle_window(base: &str, text: &str)
+    -> Result<Vec<(crate::hls::Segment, u64)>, &'static str>
+{
+    match parse_with_limits(base, text, 64, Some(1024 * 1024))? {
+        Playlist::Media(media) => Ok(media.segments.into_iter()
+            .map(|s| (s.inner, s.discontinuity_sequence)).collect()),
+        _ => Err("HLS subtitle address became a master playlist"),
+    }
+}
+
+/// Bounded full-segment window for paired live single-lane scheduling.
+pub(super) fn rendition_window(base: &str, text: &str)
+    -> Result<(Vec<(crate::hls::Segment, u64)>, Duration, bool), &'static str>
+{
+    match parse_with_limits(base, text, 256, Some(1024 * 1024))? {
+        Playlist::Media(media) => Ok((media.segments.into_iter()
+            .map(|s| (s.inner, s.discontinuity_sequence)).collect(), media.target, media.ended)),
+        _ => Err("HLS rendition address became a master playlist"),
     }
 }

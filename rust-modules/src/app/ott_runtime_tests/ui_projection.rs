@@ -290,6 +290,7 @@ fn projection_profile(kind: ProviderKind) -> ProviderProfile {
         ProviderKind::Stalker => r#"{"portal":"https://fixture.invalid/c/","mac":"00:1a:79:aa:bb:cc"}"#,
         ProviderKind::VPortal => "portal::[key:fixture]https://fixture.invalid/vportal",
         ProviderKind::Local => "/fixture/videos",
+        ProviderKind::Edem | ProviderKind::Operator(_) => r#"{"key":"fixture"}"#,
         ProviderKind::Plex => "fixture-server",
     };
     let profile = ProviderProfile { id: "projection-fixture".into(), name: "Fixture".into(),

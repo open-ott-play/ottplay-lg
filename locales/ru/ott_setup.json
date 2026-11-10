@@ -31,5 +31,5 @@
   "ott.profile_no_matches": "Совпадений нет. Очистите поиск, чтобы показать всё.",
   "ott.profile_empty": "Список пуст.",
   "ott.profile_provider_limit": "У этого провайдера уже 15 профилей.",
-  "ott.profile_total_limit": "Уже сохранено 90 профилей."
+  "ott.profile_total_limit": "Достигнут предел количества профилей на этом устройстве."
 }

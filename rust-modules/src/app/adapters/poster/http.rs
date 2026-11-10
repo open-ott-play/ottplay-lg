@@ -6,7 +6,9 @@ use crate::app::ott_local_session::{BoundSource, SourceKind};
 use plx_base::task::OffFrame;
 use std::sync::{Arc, Mutex};
 
-const CAP: usize = 16;
+// Classic supports 30 visible logos plus separately sized detail artwork.
+// Keep source metadata bounded while leaving room for the departing page.
+const CAP: usize = 64;
 const FIRST_KEY: u32 = 0x8000_0000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 struct Slot {
@@ -15,6 +17,7 @@ struct Slot {
     h: u32,
     key: PosterKey,
     touched: u64,
+    frame: Option<u64>,
     state: State,
 }
 // Private inputs never enter a UI/wire value. The descriptor is an identity
@@ -70,6 +73,7 @@ enum State {
 struct Store {
     slots: Vec<Slot>,
     clock: u64,
+    frame: u64,
     next: u32,
     generation: u64,
     busy: bool,
@@ -77,10 +81,18 @@ struct Store {
 static STORE: Mutex<Store> = Mutex::new(Store {
     slots: Vec::new(),
     clock: 0,
+    frame: 0,
     next: FIRST_KEY,
     generation: 0,
     busy: false,
 });
+
+// Main/GL thread, once before probing the new frame. Retain previous-frame
+// demand too: an early row must not evict a later row before it is touched again.
+pub(super) fn begin_frame() {
+    let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    store.frame = store.frame.wrapping_add(1);
+}
 
 pub(super) fn owns(key: PosterKey) -> bool {
     key.0 >= FIRST_KEY
@@ -223,17 +235,31 @@ fn register_input(input: Input, w: u32, h: u32) -> Option<PosterKey> {
     let mut store = STORE.lock().unwrap_or_else(|e| e.into_inner());
     store.clock = store.clock.wrapping_add(1);
     let clock = store.clock;
+    let frame = store.frame;
+    let visible = matches!(&input, Input::Http(_));
     if let Some(slot) = store
         .slots
         .iter_mut()
         .find(|s| s.input.same(&input) && s.w == w && s.h == h)
     {
         slot.touched = clock;
+        if visible { slot.frame = Some(frame); }
         return Some(slot.key);
     }
     if !input.live() {
         return None;
     }
+    let victim = if store.slots.len() < CAP {
+        None
+    } else {
+        // HTTP misses defer rather than tear down visible textures. Local
+        // registration is one-shot metadata admission: preserve its existing
+        // LRU fallback, but never evict the sole in-flight worker's identity.
+        Some(store.slots.iter().enumerate()
+            .filter(|(_, slot)| !matches!(slot.state, State::Loading)
+                && (!visible || slot.frame.is_none_or(|used| frame.wrapping_sub(used) > 1)))
+            .min_by_key(|(_, slot)| slot.touched)?.0)
+    };
     let next = store.next.checked_add(1)?;
     let key = PosterKey(store.next);
     store.next = next;
@@ -243,20 +269,17 @@ fn register_input(input: Input, w: u32, h: u32) -> Option<PosterKey> {
         h,
         key,
         touched: clock,
+        // Give one-shot local registration a bounded grace until its first draw.
+        // Re-registering metadata does not refresh it; an actual probe does.
+        frame: Some(frame),
         state: State::Evicted,
     };
     let mut evicted = None;
-    if store.slots.len() < CAP {
-        store.slots.push(new);
-    } else {
-        let i = store
-            .slots
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, s)| s.touched)?
-            .0;
+    if let Some(i) = victim {
         evicted = Some(store.slots[i].key);
         store.slots[i] = new;
+    } else {
+        store.slots.push(new);
     }
     drop(store);
     free_keys(evicted);
@@ -282,6 +305,8 @@ fn probe_registered_with_start(
     store.clock = store.clock.wrapping_add(1);
     let clock = store.clock;
     store.slots[index].touched = clock;
+    let frame = store.frame;
+    store.slots[index].frame = Some(frame);
     match &mut store.slots[index].state {
         State::Ready => return Some(key),
         State::Loading | State::Decoded(_) => return None,
@@ -591,6 +616,96 @@ mod tests {
     }
 
     #[test]
+    fn thirty_logos_and_separate_detail_art_load_once_across_repeated_frames() {
+        let _serial = plx_base::testlock::serial();
+        let _motion = plx_ui::card_motion::default_for_test();
+        tex::reset_for_test(MAX_BYTES);
+        reset();
+        let mut starts = 0;
+        let mut keys = vec![None; 31];
+        // One held worker at a time, exactly like production. No network or GL.
+        for _ in 0..36 {
+            begin_frame();
+            let mut completion = None;
+            for (row, expected) in keys.iter_mut().enumerate() {
+                let url = format!("https://example.invalid/art/{}.png", if row == 30 { 0 } else { row });
+                let (w, h) = if row == 30 { (250, 375) } else { (96, 64) };
+                let found = probe_with_start(&url, w, h, |_, _, _, generation, key| {
+                    starts += 1;
+                    assert!(completion.is_none());
+                    completion = Some(HeldCompletion(Some((generation, key))));
+                    true
+                });
+                if let Some(key) = found {
+                    if let Some(previous) = *expected { assert_eq!(key, previous); }
+                    *expected = Some(key);
+                }
+            }
+            if let Some(held) = completion { held.settle(Some(one_pixel(1))); }
+            drain();
+        }
+        assert_eq!(starts, 31, "visible artwork must not repeatedly restart");
+        assert!(keys.iter().all(Option::is_some));
+        assert_eq!(STORE.lock().unwrap().slots.len(), 31);
+        reset();
+    }
+
+    #[test]
+    fn saturated_current_and_previous_frame_slots_decline_without_freeing() {
+        let _serial = plx_base::testlock::serial();
+        tex::reset_for_test(MAX_BYTES);
+        reset();
+        begin_frame();
+        let mut keys = Vec::new();
+        for n in 0..CAP {
+            keys.push(register_input(Input::Http(format!("https://example.invalid/{n}")), 12, 12).unwrap());
+        }
+        for advance in 0..2 {
+            if advance > 0 { begin_frame(); }
+            assert!(register_input(Input::Http("https://example.invalid/overflow".into()), 12, 12).is_none());
+            assert_eq!(STORE.lock().unwrap().slots.iter().map(|s| s.key).collect::<Vec<_>>(), keys);
+        }
+        begin_frame();
+        // First row is visible again; a new identity may take only a stale row.
+        assert_eq!(register_input(Input::Http("https://example.invalid/0".into()), 12, 12), Some(keys[0]));
+        assert!(register_input(Input::Http("https://example.invalid/overflow".into()), 12, 12).is_some());
+        let store = STORE.lock().unwrap();
+        assert_eq!(store.slots.len(), CAP);
+        assert!(store.slots.iter().any(|s| s.key == keys[0]));
+        assert!(!store.slots.iter().any(|s| s.key == keys[1]));
+        drop(store);
+        reset();
+    }
+
+    #[test]
+    fn local_one_shot_registration_survives_http_reprobe_until_first_draw() {
+        let _serial = plx_base::testlock::serial();
+        tex::reset_for_test(MAX_BYTES);
+        reset();
+        begin_frame();
+        for n in 0..CAP {
+            register_input(Input::Http(format!("https://example.invalid/{n}")), 12, 12).unwrap();
+        }
+        let fixture = LocalFixture::new();
+        let local = fixture.register("one-shot.png");
+        assert_eq!(STORE.lock().unwrap().slots.len(), CAP);
+        let admitted = STORE.lock().unwrap().slots.iter().find(|s| s.key == local).unwrap().frame;
+        // The HTTP identity displaced by local registration is immediately
+        // requested again by the next draw. It cannot forget the local key.
+        assert!(register_input(Input::Http("https://example.invalid/0".into()), 12, 12).is_none());
+        assert!(STORE.lock().unwrap().slots.iter().any(|s| s.key == local));
+        begin_frame();
+        assert_eq!(fixture.register("one-shot.png"), local);
+        assert_eq!(STORE.lock().unwrap().slots.iter().find(|s| s.key == local).unwrap().frame, admitted);
+        // Another metadata registration can recycle an unprobed local slot.
+        for n in 0..CAP { fixture.register(&format!("replacement-{n}.png")); }
+        assert!(!STORE.lock().unwrap().slots.iter().any(|s| s.key == local));
+        assert!(probe_registered_with_start(local, true, |_, _, _, _, _| panic!("forgotten local key restarted")).is_none());
+        assert_eq!(STORE.lock().unwrap().slots.len(), CAP);
+        reset();
+    }
+
+    #[test]
     fn local_registration_has_no_io_and_reuses_only_the_exact_source_grant() {
         let _serial = plx_base::testlock::serial();
         tex::reset_for_test(MAX_BYTES);
@@ -759,24 +874,21 @@ mod tests {
         let key = fixture.register("first.png");
         let (input, held) = hold_local(key).unwrap();
         let (generation, _) = held.0.unwrap();
+        begin_frame();
+        begin_frame();
         for n in 0..CAP {
             fixture.register(&format!("other-{n}.png"));
         }
         assert_eq!(STORE.lock().unwrap().slots.len(), CAP);
-        assert!(!job_current(&input, generation, key));
-        assert!(
-            probe_registered_with_start(key, true, |_, _, _, _, _| panic!("evicted key restarted"))
-                .is_none()
-        );
+        assert!(job_current(&input, generation, key), "in-flight work is not a capacity victim");
         assert!(!idle());
         held.settle(Some(one_pixel(8)));
+        begin_frame();
+        begin_frame();
+        fixture.register("final.png");
+        assert!(!job_current(&input, generation, key));
+        assert!(probe_registered_with_start(key, true, |_, _, _, _, _| panic!("evicted key restarted")).is_none());
         assert!(idle());
-        assert!(STORE
-            .lock()
-            .unwrap()
-            .slots
-            .iter()
-            .all(|s| !matches!(s.state, State::Decoded(_))));
         reset();
     }
 

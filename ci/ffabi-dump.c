@@ -50,6 +50,7 @@ DUMP(version_avutil,   LIBAVUTIL_VERSION_MAJOR)
 
 /* AVStream — read by offset; the struct is large and mostly internal. */
 DUMP(off_stream_index,     offsetof(AVStream, index))
+DUMP(off_stream_id,        offsetof(AVStream, id))
 DUMP(off_stream_time_base, offsetof(AVStream, time_base))
 DUMP(off_stream_codecpar,  offsetof(AVStream, codecpar))
 DUMP(off_stream_metadata,  offsetof(AVStream, metadata))

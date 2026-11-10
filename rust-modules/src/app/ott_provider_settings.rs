@@ -111,6 +111,9 @@ fn compare(saved: &Saved, kind: ProviderKind, params: &Value) -> Value {
 /// Called only for provider_settings/settings_compare targeting these providers,
 /// or profile_settings while one of them is selected.
 pub(super) fn command(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
+    if super::provider_config::handles(inv) {
+        return super::provider_config::command(runtime, inv);
+    }
     if inv.action == "profile_settings" {
         return Some(unsupported(
             "Numbered profile editing is unavailable for this provider; use provider settings",

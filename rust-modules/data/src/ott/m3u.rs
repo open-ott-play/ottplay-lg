@@ -218,6 +218,7 @@ fn guide_metadata(
         })
     })();
     super::guide::ChannelMetadata {
+        guide_id: None, guide_feed: String::new(),
         tvg_name: text(field("tvg-name").unwrap_or(""), 1024),
         guide_shift_seconds: shift,
         catchup,
@@ -370,7 +371,7 @@ pub fn epg_urls(header: &str, base: &str) -> Vec<String> {
             .trim_start_matches('\u{feff}')
             .trim_start_matches("#EXTM3U"),
     );
-    ["url-tvg", "x-tvg-url"]
+    ["url-tvg", "x-tvg-url", "tvg-url"]
         .into_iter()
         .filter_map(|key| fields.get(key))
         .flat_map(|value| value.split(','))
@@ -556,5 +557,14 @@ mod guide_metadata_tests {
                 .catchup
                 .is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod advertised_guide_alias_tests {
+    #[test]
+    fn tvg_url_alias_remains_an_explicit_provider_guide() {
+        assert_eq!(super::epg_urls("#EXTM3U tvg-url=\"guide.xml\"", "https://provider.invalid/list.m3u"),
+            ["https://provider.invalid:443/guide.xml"]);
     }
 }

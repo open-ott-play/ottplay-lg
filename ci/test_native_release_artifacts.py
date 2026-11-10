@@ -368,5 +368,30 @@ class VerifyRcAssetTests(unittest.TestCase):
             self.assertIn("refusing to overwrite", second.stderr)
 
 
+
+
+class CompanionInventoryTests(unittest.TestCase):
+    def test_source_assets_are_required_only_for_companion_receipts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            self.assertEqual(set(artifacts._inventory_root(root, VERSION)), artifacts.expected_inventory(VERSION))
+            path = root / "candidate-provenance.json"
+            receipt = json.loads(path.read_text())
+            receipt["companion"] = {"metadata": {}, "source_revision": "a" * 40,
+                "source_assets": {name: "b" * 64 for name in artifacts.COMPANION_SOURCE_ASSETS}}
+            path.write_text(json.dumps(receipt))
+            artifacts._validate_receipt(receipt, VERSION)
+            with self.assertRaisesRegex(artifacts.ArtifactError, "missing assets"):
+                artifacts._inventory_root(root, VERSION)
+            for name in artifacts.COMPANION_SOURCE_ASSETS:
+                (root / name).write_bytes(b"source fixture")
+            self.assertEqual(set(artifacts._inventory_root(root, VERSION)),
+                artifacts.expected_inventory(VERSION) | artifacts.COMPANION_SOURCE_ASSETS)
+            del receipt["companion"]["source_assets"]["companion-source.tar.gz"]
+            with self.assertRaisesRegex(artifacts.ArtifactError, "missing fields"):
+                artifacts._validate_receipt(receipt, VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

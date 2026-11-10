@@ -9,6 +9,8 @@ pub enum CatchupMode {
     Append,
     Shift,
     Flussonic,
+    /// Authenticated provider archive resolution, never a URL template.
+    Provider,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,7 @@ pub fn plan(
     }
     let duration = end - start;
     let raw = match source.mode {
+        CatchupMode::Provider => return Err(CatalogError::InvalidFormat),
         CatchupMode::Template => expand(&source.source, start, end, now, duration)?,
         CatchupMode::Append => {
             if source.source.is_empty() {

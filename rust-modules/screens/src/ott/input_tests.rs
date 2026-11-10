@@ -145,7 +145,7 @@ fn frame(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32, inputs: Vec<I
 }
 
 fn boot(favorite: bool) -> (Dispatcher<TestHost>, TestRig) {
-    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: if favorite { "favorites" } else { "channels" }.into(),
         revision: 1, title: "Fixture videos".into(), description: String::new(),
         status: String::new(), selected_row: Some("video-one".into()),
@@ -191,7 +191,7 @@ fn navigation_row(id: &str, action: OttAction) -> OttRow {
 }
 
 fn navigation_view(page_id: &str, revision: u64, rows: Vec<OttRow>, selected: Option<&str>) -> Arc<OttView> {
-    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None, page_id: page_id.into(), revision, title: page_id.into(),
+    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None, page_id: page_id.into(), revision, title: page_id.into(),
         description: String::new(), status: String::new(), rows,
         selected_row: selected.map(str::to_owned) })
 }
@@ -489,7 +489,7 @@ fn dispatcher_description_follows_selected_row_and_async_metadata() {
             id: id.into(), title: id.into(), detail: String::new(), description: description.into(),
             poster: None, action: OttAction::Play(id.into()), enabled: true, favorite: false,
         }).collect();
-    let (mut d, mut rig) = boot_snapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let (mut d, mut rig) = boot_snapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: "channels".into(), revision: 1, title: "Fixture videos".into(),
         description: String::new(), status: String::new(), rows,
         selected_row: Some("empty-first".into()),
@@ -548,7 +548,7 @@ fn dispatcher_editor_save_keeps_draft_until_the_host_confirms_it() {
 #[test]
 fn dispatcher_editor_cancel_returns_to_add_profile_and_can_reopen_it() {
     let _guard = plx_base::testlock::serial();
-    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: "profiles:m3u".into(), revision: 1, title: "Profiles".into(),
         description: String::new(), status: String::new(), selected_row: Some("profile.add".into()),
         rows: vec![OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: "profile.add".into(), title: "Add profile".into(),
@@ -1228,7 +1228,7 @@ fn restored_or_reconciled_focus_is_not_new_persistent_user_intent() {
 }
 
 fn quality_view(context: &str, revision: u64, variants: &[&str], selected: &str) -> Arc<OttView> {
-    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false,
+    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None,
         classic_preferences: Default::default(), volume_available: false,
         page_id: format!("vportal-quality:{context}"), revision,
         title: msg::settings_playback_quality().into(),
@@ -2213,3 +2213,74 @@ fn dispatcher_classic_paging_retires_a_pre_actions_search_bookmark() {
 
 #[path = "shelf_tests.rs"]
 mod shelf_tests;
+
+
+#[test]
+fn classic_play_pause_open_category_selection_once_without_transport_or_browse() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for key_code in [plx_ui::consts::WCODE_PLAY, plx_ui::consts::WCODE_PAUSE, plx_ui::consts::WCODE_PLAYPAUSE] {
+            let (mut d, mut rig) = mount_snapshot_in_mode(classic_arrow_view(0, false), mode);
+            let remote = |edge, ms| InputEvent { at: tick(ms),
+                source: plx_machine::machine::Source::RemoteFifo,
+                kind: InputKind::Key { key: Key::Other, sym: 0, wcode: key_code, edge, at_edge: false } };
+            frame(&mut d, &mut rig, 256, vec![remote(Edge::Down, 256)]);
+            frame(&mut d, &mut rig, 272, vec![remote(Edge::Up, 272)]);
+            if mode == UiMode::Classic {
+                assert_eq!(rig.actions, vec![OttAction::ShowCategories]);
+                assert!(!d.nav.top_page().unwrap().inst.as_ref().unwrap().screen
+                    .as_any().unwrap().downcast_ref::<OttScreen>().unwrap().browse);
+            } else {
+                assert!(!rig.actions.contains(&OttAction::ShowCategories), "Modern keeps its established transport/focus policy");
+            }
+        }
+    }
+}
+
+
+#[test]
+fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut view = (*classic_arrow_view(0, false)).clone();
+        view.selected_row = Some("channel-17".into());
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(view.clone()), mode);
+        let selected = d.focus();
+        view.revision += 1;
+        view.pending_play = Some("channel-17".into());
+        view.status = "Opening video…".into();
+        publish_snapshot(&mut d, &mut rig, Arc::new(view.clone()), 256);
+        rig.actions.clear();
+        for (n, code) in [Key::Down, Key::Up, Key::Ok].into_iter().enumerate() {
+            let ms = 300 + n as u32 * 32;
+            frame(&mut d, &mut rig, ms, vec![key(code, tick(ms)), key_up(code, tick(ms))]);
+        }
+        let remote = |edge, ms| InputEvent { at: tick(ms),
+            source: plx_machine::machine::Source::RemoteFifo,
+            kind: InputKind::Key { key: Key::Other, sym: 0,
+                wcode: plx_ui::consts::WCODE_PLAYPAUSE, edge, at_edge: false } };
+        frame(&mut d, &mut rig, 420, vec![remote(Edge::Down, 420), remote(Edge::Up, 420)]);
+        frame(&mut d, &mut rig, 2200, vec![]);
+        assert!(rig.actions.is_empty(), "covered list must not Play, preview or navigate");
+        assert_eq!(d.focus(), selected);
+        // The actual draw must not publish pointer targets from the covered list.
+        let current = d.focus();
+        let page = d.nav.tabs.stack.top_mut().unwrap();
+        let screen = page.inst.as_mut().unwrap().screen.as_any_mut().unwrap().downcast_mut::<OttScreen>().unwrap();
+        let cx = Cx { views: rig.mode, tick: tick(2200), measure: &rig.measure,
+            press: Default::default(), focus: plx_machine::machine::FocusRead { current, ..Default::default() },
+            owner: InputOwner::Entry(page.id) };
+        let mut draw = DrawFrame::new(&cx, plx_ui::Painter::recording());
+        plx_ui::screen::record_stops_while_recording(|| {
+            plx_gfx::gfx::without_frame_clear(|| Screen::<TestHost>::draw(screen, &mut draw));
+        });
+        assert!(draw.into_stops().is_empty(), "pending cover exposes no hidden list controls");
+        frame(&mut d, &mut rig, 2216, vec![key(Key::Back, tick(2216)), key_up(Key::Back, tick(2216))]);
+        assert_eq!(rig.actions, vec![OttAction::Back]);
+        view.revision += 1;
+        view.pending_play = None;
+        view.status.clear();
+        publish_snapshot(&mut d, &mut rig, Arc::new(view), 2232);
+        assert_eq!(d.focus(), selected, "cancel/failure must reopen the exact original row");
+    }
+}

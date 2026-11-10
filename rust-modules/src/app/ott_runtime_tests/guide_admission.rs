@@ -28,7 +28,7 @@ fn fixture() -> (Box<App>, Runtime) {
     entry.duration_ms = None;
     entry.provider_id = Some("channel".into());
     entry.provider_id_field = Some("tvg-id".into());
-    entry.live = Some(ChannelMetadata {
+    entry.live = Some(ChannelMetadata { guide_id: None, guide_feed: String::new(),
         tvg_name: entry.title.clone(),
         guide_shift_seconds: 0,
         catchup: Some(CatchupSource {

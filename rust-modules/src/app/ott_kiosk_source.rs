@@ -198,7 +198,7 @@ fn origin(profile: &ProviderProfile) -> Origin {
                 profile.source_alias.clone()
             }
         } else {
-            profile.name.clone()
+            profile.alias().to_owned()
         },
         subprofile: None,
     }

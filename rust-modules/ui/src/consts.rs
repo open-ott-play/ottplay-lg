@@ -234,14 +234,19 @@ pub const WCODE_STOP_CD: c_uint = 260;
 pub const WCODE_PLAYPAUSE: c_uint = 261;
 /// evdev 174 `KEY_EXIT` -> 505. LG's checklist item 38 wants the app terminated on this press.
 pub const WCODE_EXIT: c_uint = 505;
-/// **The channel rocker, and since 2026-08-23 the ONLY spelling of it** — evdev 402/403
-/// `KEY_CHANNELUP`/`KEY_CHANNELDOWN` -> **300/301** in the television's own table. The digits
+/// Original channel-rocker SDL spellings: the earlier firmware maps evdev 402/403
+/// `KEY_CHANNELUP`/`KEY_CHANNELDOWN` to **300/301**. Newer aliases follow below. The digits
 /// 33/34 used to sit beside these in [`page_dir`], described as the rocker and hedged as "almost
 /// certainly NOT"; the note where they were deleted, a few dozen lines up, is why. The `_KEY`
 /// suffix is evdev's (`KEY_CHANNELUP`) and is kept precisely so these names stay distinct from the
 /// retired pair.
 pub const WCODE_CH_UP_KEY: c_uint = 300;
 pub const WCODE_CH_DOWN_KEY: c_uint = 301;
+/// The installed webOS SDL firmware's extended evdev table maps Linux
+/// KEY_CHANNELUP/DOWN (402/403) to 480/481. Keep the earlier SDL 300/301
+/// spelling too: these are native scancodes, not browser keycodes.
+pub const WCODE_CH_UP_FIRMWARE: c_uint = 480;
+pub const WCODE_CH_DOWN_FIRMWARE: c_uint = 481;
 
 /// Native remote color scancodes measured on the development television.
 /// These are not browser key codes (403–406); see `docs/remote-keys.md`.
@@ -270,10 +275,10 @@ pub fn remote_button(sym: c_uint, wcode: c_uint) -> Option<RemoteButton> {
     if classify(sym, wcode) != Key::Other { return None; }
     // Some webOS native input paths provide only the scancode and leave `sym`
     // empty. PageUp/PageDown are the same stable SDL scancodes in that form.
-    if sym == SDLK_PAGEUP || matches!(wcode, 75 | WCODE_CH_UP_KEY) {
+    if sym == SDLK_PAGEUP || matches!(wcode, 75 | WCODE_CH_UP_KEY | WCODE_CH_UP_FIRMWARE) {
         return Some(RemoteButton::ChannelUp);
     }
-    if sym == SDLK_PAGEDOWN || matches!(wcode, 78 | WCODE_CH_DOWN_KEY) {
+    if sym == SDLK_PAGEDOWN || matches!(wcode, 78 | WCODE_CH_DOWN_KEY | WCODE_CH_DOWN_FIRMWARE) {
         return Some(RemoteButton::ChannelDown);
     }
     Some(match wcode {
@@ -475,10 +480,10 @@ mod canonical_input_tests {
 /// [`is_bound`] is the predicate that answers that question.
 #[inline]
 pub fn page_dir(sym: c_uint, wcode: c_uint) -> Option<c_int> {
-    if sym == SDLK_PAGEUP || matches!(wcode, 75 | WCODE_CH_UP_KEY) {
+    if sym == SDLK_PAGEUP || matches!(wcode, 75 | WCODE_CH_UP_KEY | WCODE_CH_UP_FIRMWARE) {
         return Some(-1);
     }
-    if sym == SDLK_PAGEDOWN || matches!(wcode, 78 | WCODE_CH_DOWN_KEY) {
+    if sym == SDLK_PAGEDOWN || matches!(wcode, 78 | WCODE_CH_DOWN_KEY | WCODE_CH_DOWN_FIRMWARE) {
         return Some(1);
     }
     None
@@ -822,6 +827,7 @@ mod remote_button_tests {
     #[test]
     fn measured_remote_buttons_preserve_identity_separate_from_page_direction() {
         for (raw, expected) in [(300, RemoteButton::ChannelUp), (301, RemoteButton::ChannelDown),
+            (480, RemoteButton::ChannelUp), (481, RemoteButton::ChannelDown),
             (486, RemoteButton::Red), (487, RemoteButton::Green),
             (488, RemoteButton::Yellow), (489, RemoteButton::Blue)] {
             assert_eq!(remote_button(0, raw), Some(expected));
@@ -829,6 +835,9 @@ mod remote_button_tests {
         }
         assert_eq!(page_dir(0, 300), Some(-1), "paging direction is not playback stepping");
         assert_eq!(page_dir(0, 301), Some(1));
+        assert_eq!(page_dir(0, 480), Some(-1));
+        assert_eq!(page_dir(0, 481), Some(1));
+        assert!(is_bound(0, 480) && is_bound(0, 481));
     }
 
     #[test]

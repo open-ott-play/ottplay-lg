@@ -12,12 +12,13 @@ pub(super) enum Group {
     Infobar,
     Buttons,
     Menu,
+    Subtitles,
 }
 
 impl Group {
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 8] = [
         Self::Interface, Self::Colors, Self::Lists, Self::Channels,
-        Self::Infobar, Self::Buttons, Self::Menu,
+        Self::Infobar, Self::Buttons, Self::Menu, Self::Subtitles,
     ];
 
     pub(super) fn id(self) -> &'static str {
@@ -29,6 +30,7 @@ impl Group {
             Self::Infobar => "infobar",
             Self::Buttons => "buttons",
             Self::Menu => "menu",
+            Self::Subtitles => "subtitles",
         }
     }
 
@@ -41,6 +43,7 @@ impl Group {
             Self::Infobar => "Infobar",
             Self::Buttons => "Buttons",
             Self::Menu => "Menu items",
+            Self::Subtitles => "Native subtitles",
         }
     }
 
@@ -57,6 +60,7 @@ impl Group {
             Self::Buttons => &["arrowFun", "seek13Duration"],
             // The group owner handles the typed visibility document separately.
             Self::Menu => &["nativeMenuVisibility"],
+            Self::Subtitles => &["nativeSubtitleMode", "nativeSubtitleLanguage"],
         }
     }
 }
@@ -67,6 +71,9 @@ pub(super) fn candidate(
     value: u64,
     session: u64,
 ) -> Result<Saved, &'static str> {
+    if let Some(field) = subtitle_settings::selection::Field::find(key) {
+        return field.candidate(&runtime.saved, &field.choice_value(value)?);
+    }
     match key {
         "uiFontScale" => runtime.font_scale_candidate(&value.to_string(), session),
         "volumeStep" => runtime.volume_step_candidate(&value.to_string(), session),
@@ -83,6 +90,10 @@ pub(super) fn candidate(
 }
 
 pub(super) fn value(runtime: &Runtime, key: &str) -> Option<Value> {
+    if let Some(field) = subtitle_settings::selection::Field::find(key) {
+        let value = runtime.saved.settings.get(key).cloned().unwrap_or_else(|| field.default_value());
+        return field.index(&value).map(Value::from);
+    }
     match key {
         "uiColorConfig" => Some(json!(runtime.ui_color_config())),
         "uiFontScale" => Some(json!(runtime.font_scale_percent())),
@@ -116,11 +127,14 @@ pub(super) fn title(key: &str) -> &'static str {
         "arrowFun" => "Classic list arrows",
         "seek13Duration" => "Seek step for 1/3 (seconds)",
         "nativeMenuVisibility" => "Menu items",
+        "nativeSubtitleMode" => "Subtitle selection",
+        "nativeSubtitleLanguage" => "Preferred subtitle language",
         _ => "Unknown grouped setting",
     }
 }
 
 pub(super) fn choices(key: &str) -> Vec<(u64, String)> {
+    if let Some(field) = subtitle_settings::selection::Field::find(key) { return field.choices(); }
     match key {
         "uiFontScale" => (20..=200).map(|n| (n, format!("{n}%"))).collect(),
         "volumeStep" => (3..=10).map(|n| (n, format!("{n}%"))).collect(),

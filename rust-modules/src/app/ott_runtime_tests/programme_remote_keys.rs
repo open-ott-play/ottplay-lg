@@ -69,7 +69,7 @@ fn queued(app: &App) -> Option<&str> {
 fn native_channel_rocker_steps_from_playing_item_not_browse_focus() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
-    for (raw, wanted) in [(300, "a"), (301, "b")] {
+    for (raw, wanted) in [(300, "a"), (301, "b"), (480, "a"), (481, "b")] {
         let mut app = remote_app();
         app.ott.as_mut().unwrap().selected = Some("b".into());
         let identity = route::playback_identity(&app.player.session);
@@ -128,7 +128,7 @@ fn live_m3u_remote_app(mode: plx_machine::machine::UiMode, visible_hud: bool) ->
 fn live_m3u_rocker_case(visible_hud: bool) {
     use plx_machine::machine::UiMode;
     for mode in [UiMode::Classic, UiMode::Modern] {
-        for (raw, wanted) in [(300, "a"), (301, "b")] {
+        for (raw, wanted) in [(300, "a"), (301, "b"), (480, "a"), (481, "b")] {
             let mut app = live_m3u_remote_app(mode, visible_hud);
             let identity = route::playback_identity(&app.player.session);
             let owner = app.pages.top_page();
@@ -192,7 +192,7 @@ fn native_m3u_failed_channel_rocker_keeps_exact_list_authority_after_cleanup() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for mode in [UiMode::Classic, UiMode::Modern] {
-        for (raw, wanted) in [(300, "a"), (301, "b")] {
+        for (raw, wanted) in [(300, "a"), (301, "b"), (480, "a"), (481, "b")] {
             let mut app = live_m3u_remote_app(mode, true);
             bridge::player_mut(&mut app.pages).unwrap().scrub.reveal = true;
             fail_live_m3u(&mut app);
@@ -225,7 +225,7 @@ fn failed_channel_recovery_rechecks_source_view_and_exact_media_before_dispatch(
         let request = OttPlayerRequest { owner: app.pages.top_page().unwrap(),
             source: app.bridge.ott_player_offer().unwrap().source.clone(), action: Action::Next };
         if change == 0 {
-            for action in [Action::SeekForward, Action::TogglePause, Action::OpenMenu, Action::OpenCatalog] {
+            for action in [Action::SeekForward, Action::TogglePause, Action::OpenMenu] {
                 assert!(crate::app::ott_runtime::remote_player_action(&mut app,
                     OttPlayerRequest { action, ..request.clone() }).is_err(),
                     "a retained failure grants no transport or menu authority");
@@ -241,7 +241,10 @@ fn failed_channel_recovery_rechecks_source_view_and_exact_media_before_dispatch(
             5 => runtime.failed_playback = None,
             _ => app.adapters.player.install(player::engine::engine_after_reload_for_test()),
         }
-        assert!(crate::app::ott_runtime::remote_player_action(&mut app, request).is_err(), "change {change}");
+        for action in [Action::Next, Action::OpenCatalog] {
+            assert!(crate::app::ott_runtime::remote_player_action(&mut app,
+                OttPlayerRequest { action, ..request.clone() }).is_err(), "change {change}, action {action:?}");
+        }
         let runtime = app.ott.as_ref().unwrap();
         assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
         assert_eq!(player::seek_pending(), -1);
@@ -596,5 +599,149 @@ fn notifications_overlay_preserves_physical_channel_dispatch_and_normal_selectio
             "banner must preserve the ordinary channel-step selection");
         assert_eq!(app.pages.top_page(),owner);
         assert_eq!(route::playback_identity(&app.player.session),identity);
+    }
+}
+
+#[test]
+fn native_hud_step_commands_use_the_owned_ott_list_instead_of_plex_queue() {
+    use plx_appkit::player_hud::command::HudCommand;
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for (command, wanted) in [(HudCommand::Next, "a"), (HudCommand::Previous, "b")] {
+        let mut app = remote_app();
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        let source = app.bridge.ott_player_offer().unwrap().source.clone();
+        let result = crate::app::playback::perform_hud_command(command, &mut app.player,
+            &mut app.adapters.player, &mut app.repause_at, 1_000, &mut app.refresh_hubs,
+            &mut app.pages, &mut app.bridge);
+        assert_eq!(result, crate::app::playback::ViewerTransport::None, "no generic queue transport");
+        assert!(queued(&app).is_none(), "step waits for ordinary source-bound command admission");
+        let tick = next_tick(&mut app);
+        let fr = run::Frame { ctrl: player_hud::slot(&app.player.session, app.bridge.metadata_view()),
+            now: tick.ms, dt: 0.016, underlay_moving: false, player: true, present: false,
+            deferred: false, rn: "player" };
+        content::content_requests(&mut app, &fr);
+        assert_eq!(queued(&app), Some(wanted));
+        assert!(route::playback_identity_matches(&app.player.session, &source));
+        assert!(!app.ott.as_ref().unwrap().play_target.as_ref().unwrap().advance_on_failure);
+    }
+}
+
+#[test]
+fn native_hud_step_rechecks_source_before_deferred_dispatch() {
+    use plx_appkit::player_hud::command::HudCommand;
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let mut app = remote_app();
+    crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+    crate::app::playback::perform_hud_command(HudCommand::Next, &mut app.player,
+        &mut app.adapters.player, &mut app.repause_at, 1_000, &mut app.refresh_hubs,
+        &mut app.pages, &mut app.bridge);
+    // Withdraw the captured source's authority before the normal request drain.
+    app.ott.as_mut().unwrap().catalog_revision += 1;
+    app.ott.as_mut().unwrap().saved.profiles.profiles.clear();
+    let tick = next_tick(&mut app);
+    let fr = run::Frame { ctrl: player_hud::slot(&app.player.session, app.bridge.metadata_view()),
+        now: tick.ms, dt: 0.016, underlay_moving: false, player: true, present: false,
+        deferred: false, rn: "player" };
+    content::content_requests(&mut app, &fr);
+    assert!(queued(&app).is_none(), "retired source must not step a replacement or PMS queue");
+}
+
+#[test]
+fn failed_live_channel_keeps_bound_header_without_leaving_fullscreen_or_advancing() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Classic, true);
+    let title = app.ott.as_ref().unwrap().playing.as_ref().unwrap().entry.title.clone();
+    let owner = app.pages.top_page();
+    let started = app.ott.as_ref().unwrap().playing.as_ref().unwrap().identity.as_ref()
+        .and_then(|identity| app.player.programme.started_at(identity));
+    fail_live_m3u(&mut app);
+    let mut runtime = app.ott.take().unwrap();
+    assert!(crate::app::ott_runtime::live_hud::publish(&mut runtime, &mut app, true));
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert!(matches!(app.route(), AppArg::Player));
+    assert_eq!(app.pages.top_page(), owner);
+    let projection = app.bridge.metadata_view().now_playing().unwrap().ott.as_ref().unwrap();
+    assert_eq!(projection.live.as_ref().unwrap().channel_title, title);
+    assert_eq!(projection.confirmed_start_unix_ms, started, "failure cannot manufacture or replace a confirmed playback start");
+    runtime.saved.profiles.active_profile = None;
+    assert!(!crate::app::ott_runtime::live_hud::publish(&mut runtime, &mut app, true), "retired source cannot retain header authority");
+    app.ott = Some(runtime);
+}
+
+#[test]
+fn explicit_step_inspection_failure_does_not_reuse_outgoing_channel_anchor() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Classic, false);
+    let original = route::playback_identity(&app.player.session);
+    native_edge(&mut app, 0, 480, Edge::Down);
+    assert_eq!(queued(&app), Some("a"));
+    let runtime = app.ott.as_mut().unwrap();
+    let resolver = runtime.resolver_next.take().expect("held real resolver request");
+    runtime.tx.send(Job::Play(resolver.generation, resolver.profile, Err("fixture inspection rejection"))).unwrap();
+    runtime_tick(&mut app);
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(runtime.play_target.is_none());
+    assert_eq!(runtime.playing.as_ref().unwrap().selection_id, "c");
+    assert_eq!(route::playback_identity(&app.player.session), original,
+        "refusal does not replace the still-valid outgoing native source");
+    assert_eq!(runtime.selected.as_deref(), Some("a"));
+    assert_eq!(playback_step::target(runtime, &app, 1).unwrap(), "b",
+        "next explicit CH must advance from failed destination a, not retry it forever");
+    assert_eq!(playback_step::target(runtime, &app, -1).unwrap(), "c",
+        "previous explicit CH must return to outgoing c, not skip behind it");
+}
+
+#[test]
+fn explicit_failed_step_anchor_rejects_profile_media_catalog_and_navigation_changes() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for change in ["profile", "media", "catalog", "navigation", "playback", "choice", "stop"] {
+        let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Classic, false);
+        native_edge(&mut app, 0, 480, Edge::Down);
+        let runtime = app.ott.as_mut().unwrap();
+        let resolver = runtime.resolver_next.take().unwrap();
+        runtime.tx.send(Job::Play(resolver.generation, resolver.profile, Err("inspection refused"))).unwrap();
+        runtime_tick(&mut app);
+        assert_eq!(playback_step::target(app.ott.as_ref().unwrap(), &app, 1).unwrap(), "b");
+        let mut runtime = app.ott.take().unwrap();
+        match change {
+            "profile" => runtime.saved.profiles.profiles[0].source.push_str("?replacement"),
+            "media" => runtime.catalog.entries.iter_mut().find(|row|row.id=="a").unwrap().media =
+                MediaLocator::Http { url:"https://replacement.invalid/other.m3u8".into() },
+            "catalog" => runtime.catalog_revision += 1,
+            "navigation" => runtime.navigation_epoch += 1,
+            "playback" => runtime.playback_epoch += 1,
+            "choice" => { runtime.play_with_policy(&mut app, "b", false).unwrap(); },
+            "stop" => runtime.stop_catalog(&mut app),
+            _ => unreachable!(),
+        }
+        let next = playback_step::target(&runtime, &app, 1);
+        assert_ne!(next.ok().as_deref(), Some("b"), "retired failed intent cannot steer {change}");
+        app.ott = Some(runtime);
+    }
+}
+
+#[test]
+fn failed_live_center_opens_bound_catalogue_without_restart_or_implicit_navigation() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        let mut app = live_m3u_remote_app(mode, true);
+        fail_live_m3u(&mut app);
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        assert!(app.bridge.ott_player_offer().unwrap().recovery_only);
+        assert!(matches!(app.route(), AppArg::Player));
+        assert!(app.ott.as_ref().unwrap().play_target.is_none());
+        native_edge(&mut app, consts::SDLK_RETURN, 40, Edge::Down);
+        idle(&mut app);
+        assert!(ott_surface(&app).is_some(), "explicit center must open the source-owned Channel list");
+        assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+        assert!(app.ott.as_ref().unwrap().play_target.is_none());
+        assert!(app.ott.as_ref().unwrap().resolver_next.is_none());
+        assert!(!app.adapters.player.is_live(), "browsing is not playback retry or resume");
     }
 }

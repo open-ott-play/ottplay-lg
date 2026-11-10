@@ -65,7 +65,13 @@ def main():
     parser.add_argument('--rust-toolchain', default=pinned(),
                         help='default: the channel of rust-modules/rust-toolchain.toml (or $RUST_TOOLCHAIN)')
     parser.add_argument('--inventory', type=Path, help='reviewed project inventory; otherwise derive source-set runtime licenses from supplied upstream declarations')
+    parser.add_argument('--runtime-coverage', type=Path,
+                        help='verified native_runtime_sources output including actual pinned SDK source archives')
+    parser.add_argument('--runtime-package', type=Path,
+                        help='exact IPK bound by --runtime-coverage')
     args = parser.parse_args()
+    if (args.runtime_coverage is None) != (args.runtime_package is None):
+        parser.error('--runtime-coverage and --runtime-package must be supplied together')
     root, output = args.root.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     source_rows, deps = [], []
@@ -172,6 +178,30 @@ def main():
                  'license_scope': 'Supplied source-set aggregate; final binary inclusion remains unproven',
                  'license_evidence': ['rust-notices/source-license-map.json', 'rust-notices/COPYRIGHT-library.html',
                                       'rust-src/library/compiler-builtins/compiler-builtins/Cargo.toml']})
+    runtime_coverage = None
+    if args.runtime_coverage is not None:
+        if args.runtime_package is None:
+            fail('--runtime-coverage requires its exact --runtime-package')
+        import native_runtime_sources
+        coverage_path = args.runtime_coverage / 'runtime-source-coverage.json'
+        observed = json.loads(coverage_path.read_text())
+        runtime_coverage = native_runtime_sources.verify(args.runtime_coverage, args.runtime_package,
+                                                       expected_sdk_hash=observed.get('sdk_archive_sha256'))
+        runtime_sources = []
+        for name, row in runtime_coverage['sources'].items():
+            data, _ = read_regular(args.runtime_coverage, name)
+            if digest(data) != row['sha256']:
+                fail('runtime source changed after verification')
+            (output / name).write_bytes(data)
+            runtime_sources.append({'path': name, 'sha256': row['sha256']})
+        data, _ = read_regular(args.runtime_coverage, 'runtime-source-coverage.json')
+        (output / 'runtime-source-coverage.json').write_bytes(data)
+        runtime_sources.append({'path': 'runtime-source-coverage.json', 'sha256': digest(data)})
+        deps.append({'id': 'webos-sdk-runtime-sources', 'version': runtime_coverage['toolchain_revision'],
+                     'license': 'Upstream per-file licenses retained in exact GCC, glibc, Buildroot and toolchain source archives',
+                     'license_scope': 'Source-set notices; not a new conclusion about the complete binary license',
+                     'sources': runtime_sources,
+                     'recipes': ['ci/native_runtime_sources.py', 'ci/native-runtime-sources.json'], 'patches': []})
     for dep in deps:
         for entry in dep['sources']:
             data = (output / entry['path']).read_bytes()
@@ -188,6 +218,12 @@ def main():
                  'reason': 'Exact linked runtime objects and source/exception coverage require final linker and toolchain evidence.'},
                 {'component': 'LG firmware/sysroot', 'status': 'BLOCKED',
                  'reason': 'Proprietary firmware not copied; source acquisition does not establish GPL exclusion/distribution basis.'}]}
+    if runtime_coverage is not None:
+        spec['excluded_inputs'] = [{'component': 'LG firmware runtime libraries', 'status': 'NOT_DISTRIBUTED',
+                                   'evidence': 'runtime-source-coverage.json',
+                                   'package_sha256': runtime_coverage['package_sha256']}]
+        spec['runtime_source_coverage'] = {'status': 'PASS', 'evidence': 'runtime-source-coverage.json',
+                                          'package_sha256': runtime_coverage['package_sha256']}
     (output / 'source-inputs.json').write_bytes(canonical(spec) + b'\n')
     (output / 'source-collection.json').write_bytes(canonical(source_rows) + b'\n')
     print(json.dumps({'source_inputs': str(output / 'source-inputs.json'), 'archives': source_rows,

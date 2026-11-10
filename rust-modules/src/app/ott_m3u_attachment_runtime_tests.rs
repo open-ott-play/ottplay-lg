@@ -95,7 +95,7 @@ fn favorite(runtime: &Runtime) -> Favorite {
         origin: Origin {
             provider: "m3u".into(),
             profile: runtime.saved.profiles.profiles[0].name.clone(),
-            source_alias: runtime.saved.profiles.profiles[0].name.clone(),
+            source_alias: runtime.saved.profiles.profiles[0].alias().to_owned(),
             subprofile: Some("Films/Family".into()),
         },
         locator: Locator::VPortal {
@@ -219,7 +219,9 @@ fn prepare_nested_favorite_projects_vportal_but_keeps_parent_policy_and_tv() {
     let request = PlaybackRequest::ordinary(&id, 1200);
     let (prepared, effective, entry, bound) =
         runtime.prepare_play_request(request.clone()).unwrap();
-    assert_eq!(prepared, request);
+    let mut exact_request = request;
+    exact_request.advance_on_failure = false;
+    assert_eq!(prepared, exact_request);
     assert_eq!(effective.kind, ProviderKind::VPortal);
     assert_eq!(effective.id, "attached-1");
     assert_eq!(effective.source, LINK);

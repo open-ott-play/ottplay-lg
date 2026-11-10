@@ -129,7 +129,7 @@ fn hidden_fullscreen_buttons_emit_one_owned_action_in_both_themes() {
 }
 
 #[test]
-fn failed_source_offer_only_dispatches_physical_channel_steps() {
+fn failed_source_offer_dispatches_channel_steps_and_explicit_catalogue_only() {
     let _lock = plx_base::testlock::serial();
     let (_, mut offer) = playback();
     offer.recovery_only = true;
@@ -162,8 +162,17 @@ fn failed_source_offer_only_dispatches_physical_channel_steps() {
                 assert!(ott(&requests).is_empty(), "a covering surface still owns input");
             }
         }
+        for visible in [false, true] {
+            for (edge, expected) in [(Edge::Down, 1), (Edge::Repeat, 0), (Edge::Up, 0)] {
+                let mut page = PlayerScreen::new(ENTRY); page.hud.visible_at_press = visible;
+                let (_, requests) = send(&mut page, &session, Some(&offer), mode,
+                    consts::SDLK_RETURN, 40, edge, false, None);
+                assert_eq!(ott(&requests).len(), expected);
+                if expected == 1 { assert_eq!(ott(&requests)[0].action, Action::OpenCatalog); }
+            }
+        }
         for (sym, code) in [(consts::SDLK_UP, 82), (consts::SDLK_DOWN, 81),
-            (consts::SDLK_LEFT, 80), (consts::SDLK_RIGHT, 79), (consts::SDLK_RETURN, 40),
+            (consts::SDLK_LEFT, 80), (consts::SDLK_RIGHT, 79),
             (0, consts::WCODE_RED), (0, consts::WCODE_BLUE), (0, consts::WCODE_YELLOW)] {
             let (_, requests) = send(&mut PlayerScreen::new(ENTRY), &session, Some(&offer), mode,
                 sym, code, Edge::Down, false, None);
@@ -502,3 +511,27 @@ fn native_blue_does_not_promote_a_transport_tap_seed_to_catalog_navigation() {
 
 #[path = "ott_info_cycle_tests.rs"]
 mod info_cycle;
+
+#[test]
+fn failed_current_source_keeps_catalogue_and_channel_keys_but_never_seeks() {
+    let _lock = plx_base::testlock::serial();
+    let (session, mut offer) = playback();
+    struct Restore(u8);
+    impl Drop for Restore { fn drop(&mut self) { plx_media::player::restore_state_for_test(self.0); } }
+    let _state = Restore(plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Error));
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut page = PlayerScreen::new(ENTRY);
+        page.hud.visible_at_press = true;
+        let (_, requests) = send(&mut page, &session, Some(&offer), mode, consts::SDLK_RETURN, 40, Edge::Down, false, None);
+        assert_eq!(ott(&requests).len(), 1);
+        assert_eq!(ott(&requests)[0].action, Action::OpenCatalog);
+        let (_, requests) = send(&mut page, &session, Some(&offer), mode, 0, consts::WCODE_CH_DOWN_KEY, Edge::Down, false, None);
+        assert_eq!(ott(&requests)[0].action, Action::Previous);
+        offer.seek_arrows = true;
+        for sym in [consts::SDLK_LEFT, consts::SDLK_RIGHT] {
+            let (_, requests) = send(&mut page, &session, Some(&offer), mode, sym, 0, Edge::Down, false, None);
+            assert!(requests.is_empty(), "dead source cannot receive seek or play/pause");
+        }
+        offer.seek_arrows = false;
+    }
+}

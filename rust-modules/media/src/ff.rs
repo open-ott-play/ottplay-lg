@@ -24,6 +24,9 @@ use std::sync::Once;
 
 pub mod inspect;
 pub mod hls_audio;
+mod h264_recovery;
+mod hevc_ts;
+mod hls_ac3;
 pub(crate) mod hls_mp2;
 mod hls_rendition;
 mod adts_timing;
@@ -36,6 +39,10 @@ pub mod hls_presentation;
 mod file_source;
 pub use file_source::HeldLocalFile;
 mod external_hls;
+pub mod hls_observed;
+mod hls_observed_worker;
+pub use hls_observed_worker::with_observed_hls_worker;
+pub mod hls_embedded_subtitles;
 mod hls_failure;
 #[cfg(test)]
 #[path = "ff/external_tests.rs"]
@@ -158,6 +165,10 @@ pub enum AVStream {}
 // wrong for, and `HOST=1 tools/ffabi-dump.sh` prints the 64-bit half.
 #[cfg(target_pointer_width = "32")]
 const OFF_STREAM_INDEX: usize = 4; // NB not 0 — FFmpeg 5.0 put `const AVClass *av_class` first
+#[cfg(target_pointer_width = "32")]
+const OFF_STREAM_ID: usize = 8;
+#[cfg(target_pointer_width = "64")]
+const OFF_STREAM_ID: usize = 12;
 #[cfg(target_pointer_width = "32")]
 const OFF_STREAM_CODECPAR: usize = 12;
 #[cfg(target_pointer_width = "32")]
@@ -595,6 +606,8 @@ const AVMEDIA_TYPE_ATTACHMENT: c_int = 4;
 // with the av1 parser absent the packets arrive raw. `av1_packet_to_tu` frames the OBUs itself.
 // Enabling the parser would pull in cbs_av1 for nothing.
 pub const AV_CODEC_ID_AAC: c_int = 0x15002;
+// Asserted against the bundled headers by ci/ffabi-assert.c.
+pub const AV_CODEC_ID_AC3: c_int = 0x15003;
 pub const AV_CODEC_ID_H264: c_int = 27;
 // FF_API_XVMC and FF_API_VOXWARE both died before FFmpeg 6, which is why these differ from the
 // values the n3.3 televisions use (28 / 174 / 0x15029).
@@ -634,6 +647,14 @@ pub const AV_PKT_DATA_CONTENT_LIGHT_LEVEL: c_int = 22;
 #[inline]
 unsafe fn stream_codecpar(s: *mut AVStream) -> *mut AVCodecParameters {
     *((s as *const u8).add(OFF_STREAM_CODECPAR) as *const *mut AVCodecParameters)
+}
+/// MPEG-TS demuxer stream id is the transport PID, not AVStream.index.
+/// The caller still proves program membership from the validated PAT/PMT.
+#[inline]
+unsafe fn stream_transport_pid(s: *mut AVStream) -> Option<u16> {
+    if s.is_null() { return None; }
+    let id = *((s as *const u8).add(OFF_STREAM_ID) as *const c_int);
+    (1..0x1fff).contains(&id).then_some(id as u16)
 }
 #[inline]
 unsafe fn stream_time_base(s: *mut AVStream) -> AVRational {
@@ -2375,6 +2396,7 @@ fn exploration_timeout_is_final(
 /// AVIO backing state: wraps the demux transport so libavformat reads through it and can seek by
 /// byte offset. Boxed so its address is stable for the C callbacks.
 struct AvioState {
+    hls_ts: Option<hls_observed::TsProbe>,
     src: Src,
     aq: *mut AuQueue,
     off: i64,
@@ -2766,6 +2788,9 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
             }
             let bounced = s.take_bounce(std::slice::from_raw_parts_mut(dst, n.max(0) as usize));
             if bounced > 0 {
+                if let Some(probe) = &mut s.hls_ts {
+                    let _ = probe.feed_at(s.off, std::slice::from_raw_parts(dst, bounced));
+                }
                 s.off += bounced as i64;
                 s.body_bytes = s.body_bytes.saturating_add(bounced as u64);
                 return bounced as c_int;
@@ -2963,6 +2988,9 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
                 .saturating_add(elapsed_since(read_started).as_micros().max(1) as u64);
             if s.first_byte_at.is_none() {
                 s.first_byte_at = Some(std::time::Instant::now());
+            }
+            if let Some(probe) = &mut s.hls_ts {
+                let _ = probe.feed_at(s.off, std::slice::from_raw_parts(dst, r as usize));
             }
             s.body_bytes = s.body_bytes.saturating_add(r as u64);
             s.off += r as i64;
@@ -4143,10 +4171,12 @@ enum HlsVideoEntry<'a> {
     /// PMS and independently inspected rendition transport retain their strict contract.
     Independent,
     External(&'a mut H264SegmentState),
+    ExternalHevc(&'a mut hevc_ts::State),
 }
 
 struct H264AccessUnit {
     idr: bool,
+    recovery: bool,
     vcl: bool,
     params_changed: bool,
 }
@@ -4158,7 +4188,7 @@ fn external_h264_entry(needs_entry: &mut bool, seen_vcl: &mut bool, info: &H264A
     -> H264EntryDecision
 {
     // Retained AUD/SEI packets are not a picture and cannot end the entry guard.
-    if !*seen_vcl && info.params_changed && !info.idr {
+    if !*seen_vcl && info.params_changed && !(info.idr || info.recovery) {
         *needs_entry = true;
     }
     if !*needs_entry {
@@ -4167,7 +4197,7 @@ fn external_h264_entry(needs_entry: &mut bool, seen_vcl: &mut bool, info: &H264A
         *seen_vcl |= info.vcl;
         return H264EntryDecision::Continue;
     }
-    if !info.idr { return H264EntryDecision::Skip; }
+    if !(info.idr || info.recovery) { return H264EntryDecision::Skip; }
     *needs_entry = false;
     *seen_vcl |= info.vcl;
     H264EntryDecision::Start
@@ -4250,7 +4280,8 @@ fn ts_h264_access_unit_info(
         }
     }
 
-    if is_key {
+    let recovery = !is_key && h264_recovery::recovery_entry(data, &params.sps, &params.pps);
+    if is_key || recovery {
         if !has_sps {
             if params.sps.is_empty() {
                 return Err("IDR has no in-band or cached SPS");
@@ -4265,7 +4296,7 @@ fn ts_h264_access_unit_info(
         }
     }
     out.extend_from_slice(data);
-    Ok(H264AccessUnit { idr: is_key, vcl: has_vcl, params_changed })
+    Ok(H264AccessUnit { idr: is_key, recovery, vcl: has_vcl, params_changed })
 }
 
 fn packet_has_adts(data: &[u8]) -> bool {
@@ -4294,6 +4325,9 @@ enum HlsExit {
     /// observation: PMS production, response pacing and network service are not identifiable
     /// separately before the response completes.
     StallAbort(SegmentTransfer),
+    /// The exact current open failed. Closed diagnostic outcome only: never a
+    /// URL, an inferred previous HTTP status, or a retry policy decision.
+    OpenFailed { reason: &'static str, outcome: TraceOutcome },
     Failed(&'static str),
 }
 
@@ -4311,15 +4345,43 @@ fn hls_prefetch_is_fatal(err: &HlsExit) -> bool {
     matches!(err, HlsExit::Aborted)
 }
 
+fn hls_open_status_outcome(status: c_int) -> TraceOutcome {
+    match status {
+        429 | 500 | 502 | 503 | 504 => TraceOutcome::ServerState,
+        _ => TraceOutcome::Refused,
+    }
+}
+
+fn hls_curl_open_outcome(error: crate::curlio::OpenErr) -> TraceOutcome {
+    use crate::curlio::OpenErr;
+    match error {
+        OpenErr::Status(status) => hls_open_status_outcome(status),
+        // Explicit DNS/connect/HTTP2/partial/empty/send/receive failures only.
+        OpenErr::Transport(5 | 6 | 7 | 16 | 18 | 52 | 55 | 56 | 92) => TraceOutcome::Transport,
+        OpenErr::Transport(28) | OpenErr::Deadline => TraceOutcome::Deadline,
+        // Unsupported/malformed URL, unsafe redirect, range and TLS trust/setup
+        // refusals are never evidence that a transient retry will repair them.
+        OpenErr::Transport(1 | 3 | 33 | 35 | 36 | 47 | 51 | 53 | 54 | 58 | 59 | 60
+            | 64 | 66 | 77 | 80 | 82 | 83 | 90 | 91 | 98)
+        | OpenErr::RangeIgnored | OpenErr::Aborted => TraceOutcome::Refused,
+        OpenErr::Transport(_) | OpenErr::Multi(_) | OpenErr::Local
+        | OpenErr::Unavailable | OpenErr::Stopped => TraceOutcome::Inconclusive,
+    }
+}
+
 fn classify_plaintext_open_failure(error: plx_net::stream::HttpOpenError) -> HlsExit {
     match error {
         plx_net::stream::HttpOpenError::Deadline => HlsExit::PrimeExpired,
         plx_net::stream::HttpOpenError::Status(404) => HlsExit::NotReady,
         plx_net::stream::HttpOpenError::Aborted => HlsExit::Aborted,
         plx_net::stream::HttpOpenError::Stopped => UNLATCHED_STOP,
-        plx_net::stream::HttpOpenError::Status(_) | plx_net::stream::HttpOpenError::Transport => {
-            HlsExit::Failed("HTTP request failed")
-        }
+        plx_net::stream::HttpOpenError::Status(status) => HlsExit::OpenFailed {
+            reason: "HTTP request failed", outcome: hls_open_status_outcome(status),
+        },
+        // This combines malformed input/headers, local setup and network errors.
+        plx_net::stream::HttpOpenError::Transport => HlsExit::OpenFailed {
+            reason: "HTTP request failed", outcome: TraceOutcome::Inconclusive,
+        },
     }
 }
 
@@ -4338,7 +4400,7 @@ fn classify_curl_open_err(e: crate::curlio::OpenErr) -> HlsExit {
     } else if e == crate::curlio::OpenErr::Stopped {
         UNLATCHED_STOP
     } else {
-        HlsExit::Failed("HTTPS request failed")
+        HlsExit::OpenFailed { reason: "HTTPS request failed", outcome: hls_curl_open_outcome(e) }
     }
 }
 
@@ -4441,11 +4503,7 @@ fn hls_open_curl(
             Err(crate::curlio::OpenErr::Status(status)) => {
                 SHARED.dg_http_status.store(status, Ordering::Relaxed);
                 net.curl = Some(cs);
-                return Err(if status == 404 {
-                    HlsExit::NotReady
-                } else {
-                    HlsExit::Failed("HTTPS request failed")
-                });
+                return Err(classify_curl_open_err(crate::curlio::OpenErr::Status(status)));
             }
             Err(_) => {
                 // Idle TLS session or a broken multi: drop it and dial as a first open.
@@ -4456,7 +4514,7 @@ fn hls_open_curl(
         if e == crate::curlio::OpenErr::Aborted {
             HlsExit::Aborted
         } else {
-            HlsExit::Failed("HTTPS reservation failed")
+            HlsExit::OpenFailed { reason: "HTTPS reservation failed", outcome: hls_curl_open_outcome(e) }
         }
     })?;
     if unsafe { crate::aq::aq_is_aborted(aq) } {
@@ -4917,11 +4975,13 @@ unsafe fn hls_input(
     transport_watchdog: TransportWatchdog,
     mut acquisition: AcquisitionRuntime,
     single_rendition: bool,
+    observe_transport: bool,
 ) -> Result<HlsInput, HlsExit> {
     let request_started = acquisition.request_started();
     acquisition.enter(Phase::Body);
     let mut input = HlsInput {
         state: Box::new(AvioState {
+            hls_ts: observe_transport.then(hls_observed::TsProbe::new),
             src,
             aq,
             off: 0,
@@ -5102,12 +5162,35 @@ std::thread_local! {
 }
 
 struct HlsSegmentOutput {
+    transport_timing: Option<(i64, i64, i64, Option<i64>)>, // raw origin, local base, actual lane ends
+    // Anchor from the actual decoded video PES clock, never playlist wall time.
+    webvtt_clock: Option<hls_webvtt::Clock>,
+    observed: Option<hls_observed::Candidate>,
     aus: Vec<HlsAu>,
     transfer: SegmentTransfer,
     video_width: i32,
     video_height: i32,
     video_tail_ns: i64,
     audio_tail_ns: Option<i64>,
+}
+impl HlsSegmentOutput {
+    /// Muxed external HLS alone uses this persistent epoch clock. Separate
+    /// renditions retain their proved lane join; PMS retains its existing clock.
+    fn remap_transport(&mut self, clock: &mut crate::hls::TransportClock) -> Result<(), HlsExit> {
+        let Some((raw, local, video_end, audio_end)) = self.transport_timing else { return Ok(()); };
+        let end = audio_end.map_or(video_end, |audio| audio.max(video_end));
+        let offset = clock.offset(raw, local, end)
+            .map_err(HlsExit::Failed)?;
+        let shifted = |pts: i64| pts.checked_add(offset)
+            .ok_or(HlsExit::Failed("HLS transport timestamp overflow"));
+        for au in &mut self.aus { au.pts_ns = shifted(au.pts_ns)?; }
+        if let Some(anchor) = &mut self.webvtt_clock {
+            anchor.presentation_ns = shifted(anchor.presentation_ns)?;
+        }
+        self.video_tail_ns = shifted(video_end)?;
+        self.audio_tail_ns = audio_end.map(shifted).transpose()?;
+        Ok(())
+    }
 }
 
 /// A body with a declared length is complete only after every declared byte reached AVIO.  FFmpeg
@@ -5149,6 +5232,18 @@ struct HlsSegmentRequest<'a> {
 
 /// Shared MPEG-TS decoder; callers own authentication and pass the exact request path.
 /// The PMS entry above still validates and appends its own immutable credential.
+unsafe fn hls_bound_inventory(input: &HlsInput, vi: i32) -> Result<inspect::TrackInventory, &'static str> {
+    let raw = inspect::collect_tracks(input.fmt)?;
+    let Some(table) = input.state.hls_ts.as_ref().and_then(|probe| probe.table().ok()) else { return Ok(raw); };
+    let streams = (*input.fmt).streams;
+    let pids: Vec<_> = (0..(*input.fmt).nb_streams).filter_map(|index| {
+        let stream = *streams.add(index as usize);
+        Some((stream_index(stream), stream_transport_pid(stream)?))
+    }).collect();
+    let Some(video_pid) = (vi >= 0).then(|| stream_transport_pid(*streams.add(vi as usize))).flatten() else { return Ok(raw); };
+    table.bind_inventory_for_video(&raw, &pids, video_pid)
+}
+
 unsafe fn hls_demux_segment_path(
     segment: &crate::hls::Segment,
     request: HlsSegmentRequest<'_>,
@@ -5294,7 +5389,7 @@ unsafe fn hls_demux_segment_path(
         return Err(HlsExit::Failed("HLS segment exceeds size limit"));
     }
     let body_started = std::time::Instant::now();
-    let mut input = hls_input(src, size, aq, reserve_deadline, transport_watchdog, runtime, lane.is_some())?;
+    let mut input = hls_input(src, size, aq, reserve_deadline, transport_watchdog, runtime, lane.is_some(), matches!(transport, HlsSegmentTransport::External) && lane.is_none())?;
     if let Some(capture) = rendition.as_mut() {
         capture.begin(input.fmt).map_err(HlsExit::Failed)?;
     }
@@ -5311,7 +5406,14 @@ unsafe fn hls_demux_segment_path(
         0,
     );
     let ai = if let Some(selection) = audio {
-        let inventory = inspect::collect_tracks(input.fmt).map_err(HlsExit::Failed)?;
+        // Legacy choices freeze the complete per-container inventory. Observed
+        // choices instead require the checked program/PID-scoped snapshot;
+        // that snapshot deliberately makes no whole-presentation claim.
+        let inventory = if selection.requires_transport_identity() {
+            hls_bound_inventory(&input, vi)
+        } else {
+            inspect::collect_tracks(input.fmt)
+        }.map_err(HlsExit::Failed)?;
         selection.select(&inventory).map_err(HlsExit::Failed)?
     } else {
         // Preserve the PMS/default path. It already receives the selected codec
@@ -5323,11 +5425,12 @@ unsafe fn hls_demux_segment_path(
     if vi < 0 && lane != Some(hls_rendition::Lane::Audio) {
         return Err(HlsExit::Failed("HLS segment has no video stream"));
     }
+    let hevc = matches!(&video, HlsVideoEntry::ExternalHevc(_));
     let (vst, video_width, video_height) = if vi >= 0 {
         let vst = *streams.add(vi as usize);
         let vcp = stream_codecpar(vst);
-        if (*vcp).codec_id != AV_CODEC_ID_H264 {
-            return Err(HlsExit::Failed("HLS segment video is not H.264"));
+        if (*vcp).codec_id != if hevc { AV_CODEC_ID_HEVC } else { AV_CODEC_ID_H264 } {
+            return Err(HlsExit::Failed("HLS segment video codec changed from the declared sink"));
         }
         if (*vcp).width <= 0 || (*vcp).height <= 0 {
             return Err(HlsExit::Failed("HLS segment has invalid video dimensions"));
@@ -5337,6 +5440,7 @@ unsafe fn hls_demux_segment_path(
     // AVStream objects remain owned by the format context. Retain this object,
     // not the streams array: a late PMT can grow/reallocate the array during reads.
     let ast = if ai >= 0 { *streams.add(ai as usize) } else { std::ptr::null_mut() };
+    let mut ac3_shape = None;
     let aac_adts = if ai >= 0 {
         let acp = stream_codecpar(ast);
         if let Some(decoder) = mp2.as_deref_mut() {
@@ -5344,6 +5448,14 @@ unsafe fn hls_demux_segment_path(
                 i64::from((*acp).ch_layout.nb_channels), i64::from((*acp).sample_rate))
             { return Err(HlsExit::Failed("MP2 HLS segment audio format changed")); }
             if FEED_AUDIO.load(Ordering::Relaxed) { decoder.prepare(acp).map_err(HlsExit::Failed)?; }
+            None
+        } else if acodec == "ac3" {
+            let channels = i64::from((*acp).ch_layout.nb_channels);
+            let rate = i64::from((*acp).sample_rate);
+            if (*acp).codec_id != AV_CODEC_ID_AC3 || !hls_ac3::format("ac3", channels, rate) {
+                return Err(HlsExit::Failed("AC3 HLS segment audio format changed"));
+            }
+            ac3_shape = Some((channels, rate));
             None
         } else {
         if (*acp).codec_id != AV_CODEC_ID_AAC {
@@ -5357,17 +5469,19 @@ unsafe fn hls_demux_segment_path(
 
     // Work on a candidate: neither a failed read nor an interrupted feed may
     // carry these parameter sets into a subsequent external segment.
-    let (mut params, mut needs_entry, external_state) = match video {
-        HlsVideoEntry::Independent => (H264ParamSets::default(), false, None),
+    let (mut params, mut needs_entry, external_state, mut hevc_state) = match video {
+        HlsVideoEntry::Independent => (H264ParamSets::default(), false, None, None),
         HlsVideoEntry::External(state) => (
-            state.params.clone().unwrap_or_default(), state.params.is_none(), Some(state),
+            state.params.clone().unwrap_or_default(), state.params.is_none(), Some(state), None,
         ),
+        HlsVideoEntry::ExternalHevc(state) => (H264ParamSets::default(), false, None, Some(state)),
     };
-    let external = external_state.is_some();
+    let external = external_state.is_some() || hevc_state.is_some();
     let mut seen_vcl = false;
     let mut trim_audio_before_raw_ns = None;
     let mut aubuf = Vec::with_capacity(4 * 1024 * 1024);
     let mut video_packets = 0usize;
+    let mut dropped_untimed_hevc = 0usize;
     let mut audio_packets = 0usize;
     let mut audio_stamps = Vec::new();
     let mut video_stamps = Vec::new();
@@ -5403,20 +5517,45 @@ unsafe fn hls_demux_segment_path(
             if let Some(capture) = rendition.as_mut() {
                 capture.packet(input.pkt, vst).map_err(HlsExit::Failed)?;
             }
-            let Some(raw_pts) = pts_ns_opt(input.pkt, vst) else {
+            let raw_stamp = pts_ns_opt(input.pkt, vst);
+            let packet = std::slice::from_raw_parts((*input.pkt).data, (*input.pkt).size.max(0) as usize);
+            let (is_key, raw_pts) = if let Some(state) = hevc_state.as_deref_mut() {
+                let previous = raw_stamp.is_none().then(|| state.clone());
+                let info = hevc_ts::annexb(packet, state, &mut aubuf).map_err(HlsExit::Failed)?;
+                let Some(raw_pts) = raw_stamp else {
+                    if let Some(previous) = previous { *state = previous; }
+                    if info.disposable && dropped_untimed_hevc == 0 {
+                        dropped_untimed_hevc += 1;
+                        crate::player::log("hls: omitted one untimed non-reference HEVC picture");
+                        av_packet_unref(input.pkt);
+                        continue;
+                    }
+                    av_packet_unref(input.pkt);
+                    return Err(HlsExit::Failed("HLS video packet has no timestamp"));
+                };
+                first_video_raw_pts.get_or_insert(raw_pts);
+                match info.decision {
+                    hevc_ts::Decision::Skip => { av_packet_unref(input.pkt); continue; }
+                    hevc_ts::Decision::Start => trim_audio_before_raw_ns = Some(raw_pts),
+                    hevc_ts::Decision::Continue => {}
+                }
+                seen_vcl |= info.vcl;
+                (info.key, raw_pts)
+            } else {
+            let Some(raw_pts) = raw_stamp else {
                 av_packet_unref(input.pkt);
                 return Err(HlsExit::Failed("HLS video packet has no timestamp"));
             };
-            // Preserve the source clock even if the external H.264 entry prefix is skipped.
+            // Preserve the source clock even if entry preroll is skipped.
             first_video_raw_pts.get_or_insert(raw_pts);
             let info = ts_h264_access_unit_info(
-                std::slice::from_raw_parts((*input.pkt).data, (*input.pkt).size.max(0) as usize),
+                packet,
                 &mut params,
                 &mut aubuf,
             )
             .map_err(HlsExit::Failed)?;
-            let is_key = info.idr;
-            if !external && video_packets == 0 && !is_key {
+            let is_key = info.idr || (external && info.recovery);
+            if !external && video_packets == 0 && !info.idr {
                 av_packet_unref(input.pkt);
                 return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
             }
@@ -5430,6 +5569,8 @@ unsafe fn hls_demux_segment_path(
                     H264EntryDecision::Continue => {}
                 }
             }
+            (is_key, raw_pts)
+            };
             au_bytes = au_bytes.saturating_add(aubuf.len() as u64);
             if body_limit.is_some_and(|limit| au_bytes > limit) {
                 return Err(HlsExit::Failed("HLS access units exceed size limit"));
@@ -5441,7 +5582,10 @@ unsafe fn hls_demux_segment_path(
                 key: if is_key { 1 } else { 0 },
                 es: 1,
             });
-            video_stamps.push((au, raw_pts));
+            let duration = ((*input.pkt).duration > 0)
+                .then(|| av_rescale_q((*input.pkt).duration, stream_time_base(vst), NS_TB))
+                .unwrap_or(0).max(0);
+            video_stamps.push((au, raw_pts, duration));
             video_packets += 1;
             first_au_at.get_or_insert_with(std::time::Instant::now);
             av_packet_unref(input.pkt);
@@ -5478,6 +5622,11 @@ unsafe fn hls_demux_segment_path(
                 raw_pts = Some(stamp);
                 duration_ns = Some((pcm.len() / 4) as i64 * 1_000_000_000 / 48_000);
                 pcm
+            } else if let Some((channels, rate)) = ac3_shape {
+                let frame = hls_ac3::frame(raw, channels, rate).map_err(HlsExit::Failed)?;
+                if raw_pts.is_none() { return Err(HlsExit::Failed("AC3 HLS packet has no timestamp")); }
+                duration_ns = Some(frame.duration_ns);
+                raw.to_vec()
             } else if packet_has_adts(raw) {
                 raw.to_vec()
             } else if let Some((freq_idx, chan_cfg)) = aac_adts {
@@ -5533,7 +5682,7 @@ unsafe fn hls_demux_segment_path(
         return Err(HlsExit::Failed("segment body ended before Content-Length"));
     }
 
-    if external && needs_entry {
+    if external && (needs_entry || hevc_state.as_deref().is_some_and(hevc_ts::State::needs_entry)) {
         return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
     }
     if (video_packets == 0 || (external && !seen_vcl))
@@ -5551,7 +5700,11 @@ unsafe fn hls_demux_segment_path(
     if let Some(selection) = audio {
         // FFmpeg may discover a changed PMT while reading. Nothing in this segment
         // has been emitted yet, so discard the entire output if its identity moved.
-        let inventory = inspect::collect_tracks(input.fmt).map_err(HlsExit::Failed)?;
+        let inventory = if selection.requires_transport_identity() {
+            hls_bound_inventory(&input, vi)
+        } else {
+            inspect::collect_tracks(input.fmt)
+        }.map_err(HlsExit::Failed)?;
         if selection.select(&inventory).map_err(HlsExit::Failed)? != ai {
             return Err(HlsExit::Failed("Selected HLS audio changed within the segment"));
         }
@@ -5571,7 +5724,7 @@ unsafe fn hls_demux_segment_path(
     );
     let audio_origin = if audio_has_transport_clock { origin } else { first_audio_raw_pts };
     if let Some(origin) = origin {
-        for (au, raw) in &video_stamps {
+        for (au, raw, _) in &video_stamps {
             let pts = clock.normalize_shared_ns(*raw, origin);
             aus[*au].pts_ns = pts;
             video_tail_ns = video_tail_ns.max(pts);
@@ -5585,12 +5738,18 @@ unsafe fn hls_demux_segment_path(
         let segment_pts = audio_origin
             .map(|origin| clock.normalize_shared_ns(raw, origin))
             .unwrap_or_else(|| clock.end().0.saturating_mul(1_000_000));
-        let pts = if let Some(decoder) = mp2.as_deref_mut() {
-            decoder.map_stamp(raw, segment_pts).map_err(HlsExit::Failed)?
-        } else { segment_pts };
+        let pts = segment_pts;
         aus[stamp.au].pts_ns = pts;
         audio_tail_ns = Some(audio_tail_ns.map_or(pts, |tail: i64| tail.max(pts)));
     }
+    // Exact sample endpoints precede the legacy EXTINF-based health floor below.
+    let actual_video_end = video_stamps.iter().map(|(au, _, duration)|
+        aus[*au].pts_ns.saturating_add(*duration)).max();
+    let actual_audio_end = audio_stamps.iter()
+        .filter(|stamp| trim_audio_before_ns.is_none_or(|entry| aus[stamp.au].pts_ns >= entry))
+        .map(|stamp| aus[stamp.au].pts_ns.saturating_add(stamp.duration_ns.unwrap_or(0))).max();
+    let transport_timing = origin.zip(actual_video_end).map(|(raw, end)|
+        (raw, clock.normalize_shared_ns(raw, raw), end, actual_audio_end));
     if let Some(entry_ns) = trim_audio_before_ns {
         // Both clocks share the same segment origin. Discard
         // only audio preceding the retained random-access entry, never an entire
@@ -5646,7 +5805,26 @@ unsafe fn hls_demux_segment_path(
     if let Some(state) = external_state {
         state.params = Some(params);
     }
+    let webvtt_clock = first_video_raw_pts.zip(origin).and_then(|(raw, origin)| {
+        let ticks = (i128::from(raw) * 90_000 + 500_000_000).div_euclid(1_000_000_000);
+        Some(hls_webvtt::Clock { pts_90k: i64::try_from(ticks).ok()?,
+            presentation_ns: clock.normalize_shared_ns(raw, origin) })
+    });
+    let observed = input.state.hls_ts.take().and_then(|probe| probe.finish().ok()).and_then(|table| {
+        let inventory = inspect::collect_tracks(input.fmt).ok()?;
+        let streams = (*input.fmt).streams;
+        let pids: Vec<_> = (0..(*input.fmt).nb_streams).filter_map(|index| {
+            let stream = *streams.add(index as usize);
+            Some((stream_index(stream), stream_transport_pid(stream)?))
+        }).collect();
+        let video_pid = (vi >= 0).then(|| stream_transport_pid(*streams.add(vi as usize))).flatten()?;
+        let selected_audio_pid = (ai >= 0 && audio_packets > 0).then(|| stream_transport_pid(*streams.add(ai as usize))).flatten();
+        hls_observed::Candidate::new(&table, &inventory, &pids, video_pid, selected_audio_pid).ok()
+    });
     Ok(HlsSegmentOutput {
+        transport_timing,
+        webvtt_clock,
+        observed,
         aus,
         transfer,
         video_width,
@@ -6940,7 +7118,7 @@ fn publish_hls_candidate(
 fn abr_reject_for_hls_exit(exit: HlsExit) -> crate::abr::RejectCause {
     match exit {
         HlsExit::PrimeExpired | HlsExit::StallAbort(_) => crate::abr::RejectCause::Censored,
-        HlsExit::Aborted | HlsExit::NotReady | HlsExit::Failed(_) => {
+        HlsExit::Aborted | HlsExit::NotReady | HlsExit::Failed(_) | HlsExit::OpenFailed { .. } => {
             crate::abr::RejectCause::Circumstance
         }
     }
@@ -7062,6 +7240,9 @@ fn hls_stall_abort_outcome(
     (
         segment,
         HlsSegmentOutput {
+            transport_timing: None,
+            webvtt_clock: None,
+            observed: None,
             aus: Vec::new(),
             transfer,
             video_width: 0,
@@ -9348,6 +9529,13 @@ mod pre_audio_headroom_tests {
 fn settle_hls_demux(native_epoch: u32, outcome: std::thread::Result<Result<(), HlsExit>>) {
     match outcome {
         Ok(Ok(())) | Ok(Err(HlsExit::Aborted)) => {}
+        Ok(Err(HlsExit::OpenFailed { reason, outcome })) => {
+            crate::player::log(&format!("hls: demux open failed: {reason} outcome={}", outcome.code()));
+            // Attribute even pre-feed failures, with the same captured epoch fence.
+            // Existing pre/post-feed terminal flags retain their original semantics.
+            SHARED.fail_hls_open_for(native_epoch, hls_failure::classify(reason), outcome,
+                PUSHED_ANY.load(Ordering::Relaxed));
+        }
         Ok(Err(HlsExit::Failed(why))) => {
             crate::player::log(&format!("hls: demux failed: {why}"));
             if PUSHED_ANY.load(Ordering::Relaxed) {
@@ -9416,7 +9604,7 @@ pub fn demux(
     hs: SendPtr<HttpStream>,
     text_style: crate::player::text_style::TextStyle,
 ) {
-    demux_inner(off,native_epoch,Some(origin),path,None,None,acodec,abr,auto_original,aq,aqa,hs,text_style)
+    demux_inner(off,native_epoch,Some(origin),path,None,None,None,acodec,abr,auto_original,aq,aqa,hs,text_style)
 }
 
 /// Distinct selection namespaces: an embedded TS track is not an external
@@ -9425,10 +9613,11 @@ pub fn demux(
 pub enum HlsTrackSelection {
     Embedded(hls_audio::Selection),
     Rendition(hls_presentation::HlsPlayback),
+    Live { playback: hls_presentation::HlsPlayback, audio: Option<hls_audio::Selection> },
 }
 
 pub fn demux_external(
-    off:&plx_base::task::OffFrame, native_epoch:u32, source:ExternalSource, acodec:String,
+    off:&plx_base::task::OffFrame, native_epoch:u32, source:ExternalSource, video_codec:String, acodec:String,
     audio:Option<HlsTrackSelection>, aq:SendPtr<AuQueue>,aqa:SendPtr<AuQueue>,hs:SendPtr<HttpStream>,
     text_style: crate::player::text_style::TextStyle,
 ) {
@@ -9438,12 +9627,12 @@ pub fn demux_external(
             let parsed=plx_plex::plex::StreamUrl::parse(url);(Some(parsed.origin),parsed.path)
         }
     };
-    demux_inner(off,native_epoch,origin,path,Some(source),audio,acodec,None,None,aq,aqa,hs,text_style)
+    demux_inner(off,native_epoch,origin,path,Some(source),Some(video_codec),audio,acodec,None,None,aq,aqa,hs,text_style)
 }
 
 fn demux_inner(
     off:&plx_base::task::OffFrame, native_epoch:u32, origin:Option<plx_plex::plex::Origin>,path:String,
-    external:Option<ExternalSource>,audio:Option<HlsTrackSelection>,acodec:String,
+    external:Option<ExternalSource>,external_video:Option<String>,audio:Option<HlsTrackSelection>,acodec:String,
     abr:Option<(crate::route::HlsAbrControl,crate::route::WorkerTicket)>,
     auto_original:Option<crate::route::AutoOriginalWatch>,
     aq:SendPtr<AuQueue>,aqa:SendPtr<AuQueue>,hs:SendPtr<HttpStream>,
@@ -9475,12 +9664,19 @@ fn demux_inner(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(ExternalSource::Hls(url))=&external {
                 match audio.as_ref() {
+                    Some(HlsTrackSelection::Live { playback, audio }) if playback.matches_source(url) && playback.is_live_subtitles() =>
+                        external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback)),
+                    Some(HlsTrackSelection::Live { .. }) => Err(HlsExit::Failed("HLS live presentation source changed")),
+                    Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_renditions() =>
+                        hls_presentation::live_audio::demux(playback, aq_p, aqa_p, hs_p),
+                    Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_subtitles() =>
+                        external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, Some(playback)),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) =>
                         hls_vod::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(_)) => Err(HlsExit::Failed("HLS presentation source changed")),
                     Some(HlsTrackSelection::Embedded(selection)) =>
-                        external_hls::demux(url, &acodec, Some(selection), aq_p, aqa_p, hs_p),
-                    None => external_hls::demux(url, &acodec, None, aq_p, aqa_p, hs_p),
+                        external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, Some(selection), aq_p, aqa_p, hs_p, None),
+                    None => external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, None),
                 }
             } else {
                 hls_demux(off, origin.as_ref().expect("HTTP HLS origin"), &path, &acodec, abr, aq_p, aqa_p, hs_p)
@@ -9651,6 +9847,7 @@ fn demux_inner(
                 crate::player::log(&format!("ff: open ms={}", open_began.elapsed().as_millis()));
 
                 let mut state = Box::new(AvioState {
+                    hls_ts: None,
                     src,
                     aq: aq_p,
                     off: 0,
@@ -10704,6 +10901,30 @@ mod h264_continuation_metadata_tests {
     use super::*;
 
     #[test]
+    fn zero_recovery_entry_is_distinct_from_idr_and_restores_cached_parameters() {
+        let mut params = H264ParamSets::default();
+        let mut output = Vec::new();
+        ts_h264_access_unit_info(&[0, 0, 0, 1, 0x67, 0x42, 0, 0x1e, 0xc0,
+            0, 0, 0, 1, 0x68, 0xe0], &mut params, &mut output).unwrap();
+        let recovery = [0, 0, 0, 1, 6, 6, 1, 0xc4, 0x80,
+            0, 0, 0, 1, 0x61, 0xbc];
+        let info = ts_h264_access_unit_info(&recovery, &mut params, &mut output).unwrap();
+        assert!(!info.idr, "recovery must not broaden independent/PMS IDR admission");
+        assert!(info.recovery && info.vcl);
+        assert!(output.starts_with(&params.sps));
+        assert!(output[params.sps.len()..].starts_with(&params.pps));
+        assert!(output.ends_with(&recovery), "decoder still receives the recovery SEI");
+        let mut needs_entry = true;
+        let mut seen_vcl = false;
+        assert_eq!(external_h264_entry(&mut needs_entry, &mut seen_vcl, &info), H264EntryDecision::Start);
+        assert!(!needs_entry && seen_vcl);
+        let no_evidence = ts_h264_access_unit_info(&[0, 0, 0, 1, 0x61, 0xbc],
+            &mut params, &mut output).unwrap();
+        assert!(!no_evidence.recovery);
+        assert_eq!(external_h264_entry(&mut true, &mut false, &no_evidence), H264EntryDecision::Skip);
+    }
+
+    #[test]
     fn an_entered_external_stream_keeps_changed_parameter_packets_before_dependent_frames() {
         let idr = [0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2, 0, 0, 1, 0x65, 3];
         let changed_pps = [0, 0, 1, 0x68, 4];
@@ -10771,3 +10992,7 @@ mod h264_continuation_metadata_tests {
         assert_eq!(retained[1], expected_idr, "new parameters travel with the first retained VCL");
     }
 }
+
+#[cfg(test)]
+#[path = "ff/hls_transport_tests.rs"]
+mod hls_transport_tests;

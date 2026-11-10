@@ -15,6 +15,31 @@ fn choice(ps: &route::PlaybackSession, index: usize) -> route::HlsTrackChoice {
     catalog.choice(catalog.rows()[index].id).unwrap()
 }
 #[test]
+fn automatic_subtitles_share_worker_and_manual_off_supersedes_their_result() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = route::HlsTrackRequest::test_globals_guard();
+    let mut ps = admitted(&HlsPlayback::fixture_with_subtitles_for_test());
+    route::restore_hls_subtitle_policy(&mut ps, route::HlsSubtitlePolicy {
+        mode: route::HlsSubtitleMode::Auto, language: "en".into(),
+    });
+    let mut state = State::default();
+    enqueue_automatic(&mut state, &mut ps);
+    let (id, _) = state.slots.start().expect("automatic selection uses existing worker slot");
+    let automatic = state.slots.running.as_ref().unwrap().value.as_ref().unwrap().route.clone();
+    enqueue_automatic(&mut state, &mut ps);
+    assert!(state.slots.queued.is_none(), "tick cannot accumulate automatic jobs");
+    let off = route::hls_track_catalog(&ps).unwrap().subtitle_choice(None).unwrap();
+    let manual = route::begin_hls_track_request(&mut ps, &off).unwrap();
+    state.slots.replace(Pending { route: manual.clone(), reply: Recipient::Ui(None) });
+    assert!(state.slots.finish(id).is_none(), "cancelled automatic preparation has no publication authority");
+    assert_eq!(apply_ready(&mut ps, &automatic, Ok(automatic.prepared_for_test())), Outcome::Rejected(Failure::StalePlayback));
+    let (manual_id, _) = state.slots.start().unwrap();
+    assert_eq!(apply_ready(&mut ps, &manual, Ok(manual.prepared_for_test())), Outcome::Admitted);
+    state.slots.finish(manual_id);
+    enqueue_automatic(&mut state, &mut ps);
+    assert!(state.slots.queued.is_none(), "manual Off is authoritative for the item");
+}
+#[test]
 fn a_running_worker_is_cancelled_and_only_the_latest_choice_waits() {
     let mut slots = Slots::default();
     assert!(slots.replace("english").is_empty());

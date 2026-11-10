@@ -182,7 +182,8 @@ simulator before the fix — the digit `5` moved the grid focus a full page, and
 in the script acting on a different item. The real rocker, 300/301, was already bound beside them,
 so the two constants are **deleted**, not repointed: a constant that silently changes value is how a
 doc or a log predating the change comes to read as the opposite of what it says. `page_dir` now
-answers `SDLK_PAGEUP`/`SDLK_PAGEDOWN` and 300/301 and nothing else.
+accepts `SDLK_PAGEUP`/`SDLK_PAGEDOWN`, the original 300/301 rocker codes and
+the verified 480/481 firmware aliases documented below.
 
 Graded three ways: `page_dir(digit) == None` and `is_bound(digit) == true` in `ui::consts`' host
 tests, and the `k:53,34` row of `tests/keytable.json`, which is inert on all three recorded screens.
@@ -473,3 +474,37 @@ The physical Q release belongs to the same gesture even if focus or modifiers ch
 never become fresh Quit requests. Injected remote Q and native television Back/Q keep their
 existing Back mapping; Escape remains Back. Physical desktop Quit is not encoded in the current
 controlled recording format and therefore refuses recording rather than creating a misleading tape.
+
+### Installed firmware channel-rocker compatibility
+
+The television's Linux input events report `KEY_CHANNELUP`/`KEY_CHANNELDOWN`
+(402/403). Its installed SDL `keyboard_handle_key` extended lookup translates
+those events to native SDL scancodes **480/481**. Both the earlier 300/301 and
+this firmware pair are accepted. Browser keycodes and raw Linux 402/403 are
+not substituted for SDL events. The same native mapping pages a catalogue and
+steps the source-owned playback list in full video.
+
+The firmware proof used SHA-256
+`27845ce9efe8b47e8dedc8dfaf9f203cb1d91eeb03435d344e4af8849bd6b057`.
+Its `keyboard_handle_key` callback at `0x90044` uses the sparse 351–428
+lookup at `0xc3308 + 0x3e0 + 4 * (evdev - 351)`: offsets `0xc37b4` and
+`0xc37b8` contain 480 and 481; the default keymap at `0xbd970` supplies
+symbol zero for both. This was checked against physical Linux events 402/403.
+No firmware binary is included in the repository.
+
+For future firmware diagnostics, the read-only `nativeInputProbeV1` player
+setting exposes a one-line JSON string with the last 16 nonprintable physical
+SDL key events from an existing native playback diagnostic capture. Without
+such a capture it is empty. Input is recorded only while that bounded capture
+is active and its playback source matches; printable characters, Unicode text,
+numeric typing and injected remote commands are excluded. Completed captures
+retain their evidence until the normal capture owner is replaced. This setting
+cannot start capture or persist input.
+
+## Classic catalogue navigation (0.4.10)
+
+Classic channel, category and Favorites lists move the selection and visible rows together in one update. Modern presentation retains its existing animation. Play/Pause opens Category selection from the Classic channel or Favorites list.
+
+Selecting an item immediately covers the catalogue with the standard loading indicator. Back cancels a pending selection and restores its original list and focus; a late response cannot reopen the cancelled video. After playback has actually started, Back follows the normal source-bound browsing flow. A failed explicit selection does not skip to another item; normal video end-of-file advancement is unchanged.
+
+Magic Remote wheel events keep every notch: one notch moves one row, up to eight rows in one event. There is no time-based wheel debounce or accumulated scrolling tail. Physical wheel feel must still be checked on the television separately from synthetic input tests.

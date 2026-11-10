@@ -13,6 +13,8 @@ const SIZE: &str = "nativeSubtitleSize";
 const POSITION: &str = "nativeSubtitlePosition";
 const TONE: &str = "nativeSubtitleTone";
 pub(super) const REVISION: &str = "nativeSubtitleRevision";
+#[path = "ott_subtitle_selection.rs"]
+pub(super) mod selection;
 
 fn revision(saved: &Saved) -> Result<u64, &'static str> {
     match saved.settings.get(REVISION) {
@@ -66,9 +68,10 @@ impl Edit {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Stored {
     pub appearance: TextAppearance,
+    selection: plx_media::route::HlsSubtitlePolicy,
     size: Option<SubtitleSize>,
     position: Option<SubtitlePosition>,
     tone: Option<SubtitleTone>,
@@ -86,6 +89,7 @@ impl Stored {
         revision(saved)?;
         Ok(Self {
             appearance: optional(saved, APPEARANCE)?.unwrap_or_default(),
+            selection: selection::read(saved)?,
             size: optional(saved, SIZE)?,
             position: optional(saved, POSITION)?,
             tone: optional(saved, TONE)?,
@@ -93,7 +97,7 @@ impl Stored {
     }
 
     /// Missing geometry keys preserve the effective value chosen for this playback.
-    pub(super) fn effective(self, fallback: NativeSubtitlePreferences) -> NativeSubtitlePreferences {
+    pub(super) fn effective(&self, fallback: NativeSubtitlePreferences) -> NativeSubtitlePreferences {
         NativeSubtitlePreferences {
             size: self.size.unwrap_or(fallback.size),
             position: self.position.unwrap_or(fallback.position),
@@ -105,6 +109,7 @@ impl Stored {
     /// preparing a newly admitted source from the already verified Saved record.
     pub(super) fn apply(self, app: &mut super::App, initialize: bool) {
         let ps = &mut app.player.session;
+        plx_media::route::restore_hls_subtitle_policy(ps, self.selection.clone());
         plx_media::route::restore_subtitle_text_appearance(ps, self.appearance);
         if let Some(current) = plx_media::route::native_subtitle_preferences(ps) {
             let fallback = if initialize {

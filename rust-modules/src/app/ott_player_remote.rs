@@ -64,7 +64,7 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
 }
 
 fn action_allowed(offer: &OttPlayerOffer, action: Action) -> bool {
-    if offer.recovery_only { return matches!(action, Action::Previous | Action::Next); }
+    if offer.recovery_only { return matches!(action, Action::Previous | Action::Next | Action::OpenCatalog); }
     match action {
         Action::SeekBackward | Action::SeekForward => offer.seek_arrows,
         Action::OpenGuide => offer.guide,
@@ -116,7 +116,13 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
         Action::OpenCatalog | Action::OpenCategories => {
             let page = if request.action == Action::OpenCategories { "categories" }
                 else if runtime.view_selection().1 { "favorites" } else { "channels" };
-            if runtime.playing.is_none() {
+            if current.recovery_only {
+                // A failed live occurrence retains catalogue authority only.
+                // Recheck its exact source/media row at this explicit boundary;
+                // browsing cannot reopen or resume the failed decoder.
+                failed_playback::admissible(runtime, app).ok_or(CHANGED)?;
+                player_browse::present(runtime, app, None, page);
+            } else if runtime.playing.is_none() {
                 player_browse::open_native(runtime, app, &request.source, None, page)?;
             } else {
                 player_browse::present(runtime, app, None, page);

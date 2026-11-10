@@ -12,6 +12,7 @@ pub(super) struct Poll {
     pub(super) value: Value,
     pub(super) media_tracks_raw: Option<String>,
     pub(super) plex_servers_raw: Option<String>,
+    pub(super) provider_settings_raw: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -41,18 +42,28 @@ pub(super) fn decode_poll(bytes: &[u8]) -> Result<Poll, serde_json::Error> {
     let value = decode_unique(bytes)?;
     let mut media_tracks_raw = None;
     let mut plex_servers_raw = None;
+    let mut provider_settings_raw = None;
     // Preserve existing envelope validation in Delivery. In particular, absent,
     // null or wrongly typed requests retain their existing admission semantics.
     if let Some(requests) = value.get("requests").and_then(Value::as_array).filter(|items| {
-        items.iter().any(|request| matches!(request.get("action").and_then(Value::as_str), Some("media_tracks" | "plex_servers")))
+        items.iter().any(|request| matches!(request.get("action").and_then(Value::as_str), Some("media_tracks" | "plex_servers" | "settings_compare" | "provider_settings")))
     }) {
         let raw: RawRequests<'_> = serde_json::from_slice(bytes)?;
         for (index, request) in requests.iter().enumerate() {
             // Decode the action before recognition: escapes cannot bypass validation.
             let action = request.get("action").and_then(Value::as_str);
-            if !matches!(action, Some("media_tracks" | "plex_servers")) { continue; }
+            if !matches!(action, Some("media_tracks" | "plex_servers" | "settings_compare" | "provider_settings")) { continue; }
             let received = raw.requests.get(index)
                 .ok_or_else(|| <serde_json::Error as de::Error>::custom("invalid raw request index"))?;
+            if matches!(action, Some("settings_compare" | "provider_settings")) {
+                if request.get("params").and_then(|p|p.get("version")).is_some() {
+                    if received.get().len() > 16 * 1024 {
+                        return Err(de::Error::custom("provider configuration envelope exceeds the limit"));
+                    }
+                    if index == 0 { provider_settings_raw = Some(received.get().to_owned()); }
+                }
+                continue;
+            }
             let fields: RawActionFields<'_> = serde_json::from_str(received.get())?;
             // Check raw field lengths before allocating the projection. The full
             // poll was already bounded by BODY_LIMIT and checked for duplicate keys.
@@ -75,7 +86,7 @@ pub(super) fn decode_poll(bytes: &[u8]) -> Result<Poll, serde_json::Error> {
             }
         }
     }
-    Ok(Poll { value, media_tracks_raw, plex_servers_raw })
+    Ok(Poll { value, media_tracks_raw, plex_servers_raw, provider_settings_raw })
 }
 
 pub(super) fn decode_unique(bytes: &[u8]) -> Result<Value, serde_json::Error> {
@@ -149,5 +160,39 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 
     fn visit_unit<E: de::Error>(self) -> Result<Unique, E> {
         Ok(Unique(Value::Null))
+    }
+}
+
+#[cfg(test)]
+mod provider_settings_tests {
+    use super::*;
+    fn envelope()->String {
+        r#"{"id":"0123456789abcdef0123456789abcdef","expires_at":1020,"action":"settings_compare","params":{"version":1,"runtime":"fixture","provider":"edem","number":1,"settings":{"key":"fixture_key"}}}"#.into()
+    }
+    fn poll(request:&str)->String {format!("{{\"commands\":[],\"server_time\":1000,\"requests\":[{request}]}}")}
+    #[test]
+    fn provider_config_v1_ingress_bounds_original_entire_envelope_before_projection(){
+        let base=envelope();
+        for extra in [0,1]{
+            let received=format!("{}{}{}",&base[..base.len()-1]," ".repeat(16*1024-base.len()+extra),"}");
+            let result=decode_poll(poll(&received).as_bytes());
+            if extra==0 {assert_eq!(result.unwrap().provider_settings_raw.as_deref(),Some(received.as_str()));}
+            else{assert!(result.is_err());}
+        }
+    }
+    #[test]
+    fn provider_config_v1_ingress_rejects_duplicate_decoded_fields_and_malformed_unicode(){
+        for received in [envelope().replace("\"version\":1","\"version\":0,\"version\":1"),
+            envelope().replace("\"fixture_key\"","\"fixture_key\",\"key\":\"other_key\""),
+            envelope().replace("fixture_key",r"\ud800")]{
+            assert!(decode_poll(poll(&received).as_bytes()).is_err());
+        }
+    }
+    #[test]
+    fn provider_config_v1_retains_received_bytes_and_legacy_does_not_acquire_proof(){
+        let received=envelope().replace("settings_compare",r"\u0073ettings_compare");
+        assert_eq!(decode_poll(poll(&received).as_bytes()).unwrap().provider_settings_raw.as_deref(),Some(received.as_str()));
+        let legacy=envelope().replace("\"version\":1,","");
+        assert!(decode_poll(poll(&legacy).as_bytes()).unwrap().provider_settings_raw.is_none());
     }
 }

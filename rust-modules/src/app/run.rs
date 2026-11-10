@@ -639,6 +639,7 @@ fn hud_model(
     let playpos_ns = plx_media::player::playpos_ns();
     plx_appkit::player_hud::model::HudModel {
         wall_now_s,
+        video_raster: plx_media::player::video_raster(),
         osd_opacity: Default::default(),
         permanent_clock: Default::default(),
         paused: plx_media::player::TX.paused.load(Relaxed),
@@ -1182,6 +1183,12 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     } else if et == SDL_KEYDOWN || et == SDL_KEYUP {
         let (state, wcode, sym) = decode_key(&app.ev);
         let key_source = super::events::key_source(&app.ev);
+        if !cfg!(feature = "hostsim") {
+            let playback = plx_media::route::playback_identity(&app.player.session);
+            if let Some(runtime) = app.ott.as_mut() {
+                runtime.note_native_input(state, wcode, sym, clock::now(), key_source, playback.as_ref());
+            }
+        }
         // The press's IDENTITY, resolved once from the two raw fields
         // (`ui::consts::classify`, which is where the spellings live and where they
         // are tested). `sym` and `wcode` are still read raw by the arms below — the
@@ -1702,62 +1709,61 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         app.ptr.button_down = false;
     } else if et == SDL_MOUSEWHEEL {
         app.last_input = clock::now();
-        if app.last_input.wrapping_sub(app.ptr.last_wheel) > 250 {
-            app.ptr.last_wheel = app.last_input;
-            // **The host reads a DIFFERENT offset, and this one is not the LG-fork
-            // shift `decode_key` documents — it is macOS `libSDL2` again being
-            // sdl2-compat forwarding into SDL3.** `SDL_MouseWheelEvent` on real SDL2
-            // (what the television runs) carries a plain `Sint32 y` at +20, which is
-            // what production code always read. Measured 2026-09-02 by dumping the
-            // polled bytes of an injected -40 tick on this host: `+20` came back 0, and
-            // -40.0 arrived instead as the FLOAT `preciseY` field at `+32` — SDL2's own
-            // struct gained that field in 2.0.18 for fractional trackpad scroll, and
-            // sdl2-compat's round trip apparently only forwards it, leaving the legacy
-            // integer field zeroed for both a genuine trackpad tick and anything
-            // `SDL_PushEvent`d in this shape (item 13's `wheel:<dy>` FIFO token hit
-            // this the first time anything synthesized a wheel event at all — nothing
-            // needed one before). `cfg!`, not `#[cfg]`, so both arms keep compiling.
-            let dy = if cfg!(feature = "hostsim") {
-                rd_f32(&app.ev, 32).round() as i32
-            } else {
-                rd_i32(&app.ev, 20)
-            };
-            app.rec.input(super::recorder::enc_pointer("wheel", 0, dy));
-            // the wheel scrolls VERTICALLY only, and only on routes with a vertical
-            // flow (it used to drive home's focus behind every other screen)
-            //
-            // Item 13: an owned surface takes the wheel BEFORE the route dispatch below
-            // ever sees it — otherwise a wheel tick over Settings/Privacy/Legal fell
-            // through to whatever route sat behind it (Home's own hero/grid dive, a
-            // Detail scroll, …), which is the same ownership question the key ladder
-            // answers for a fresh press, asked here for the wheel instead. It is the
-            // same `owns_input` the other three arms ask, so the four cannot drift.
-            if dy == 0 {
-                // a fractional trackpad tick that rounded to nothing (hostsim), or a
-                // `wheel:0` token — not a step in either direction
-                return;
-            }
-            if super::bridge::search_owns_input(&app.pages) {
-                app.inputs.push(plx_machine::machine::InputEvent {
-                    at: plx_machine::machine::Tick { ms: app.last_input, dt_us: 0 },
-                    source: plx_machine::machine::Source::Sdl,
-                    kind: plx_machine::machine::InputKind::Wheel { dy: dy as f32 },
-                });
-            } else if super::bridge::owns_input(&app.pages) {
-                // A tick becomes the DIRECTION KEY it stands for (`bridge::wheel_input`),
-                // rather than a `Wheel` the family's tables would each have to interpret:
-                // one tick is one row, which is what `on_updown(±1)` meant. `RepeatGate`
-                // is deliberately NOT applied — a wheel gesture's ticks are the user's own
-                // cadence and the gate is armed against the remote's 50 ms hardware
-                // repeat, so sharing it would let a held key mute a scroll and vice versa.
-                app.inputs.extend(super::bridge::wheel_input(
-                    dy,
-                    plx_machine::machine::Tick { ms: app.last_input, dt_us: 0 },
-                ));
-            }
-            // `Route::Search` is deliberately absent here: `search_owns_input()` above
-            // already took every wheel tick on this route and returned.
+        // Wheel events already represent the user's physical cadence. Dropping
+        // them behind a 250ms key-style debounce made a fast turn crawl at 4 rows/s.
+        // **The host reads a DIFFERENT offset, and this one is not the LG-fork
+        // shift `decode_key` documents — it is macOS `libSDL2` again being
+        // sdl2-compat forwarding into SDL3.** `SDL_MouseWheelEvent` on real SDL2
+        // (what the television runs) carries a plain `Sint32 y` at +20, which is
+        // what production code always read. Measured 2026-09-02 by dumping the
+        // polled bytes of an injected -40 tick on this host: `+20` came back 0, and
+        // -40.0 arrived instead as the FLOAT `preciseY` field at `+32` — SDL2's own
+        // struct gained that field in 2.0.18 for fractional trackpad scroll, and
+        // sdl2-compat's round trip apparently only forwards it, leaving the legacy
+        // integer field zeroed for both a genuine trackpad tick and anything
+        // `SDL_PushEvent`d in this shape (item 13's `wheel:<dy>` FIFO token hit
+        // this the first time anything synthesized a wheel event at all — nothing
+        // needed one before). `cfg!`, not `#[cfg]`, so both arms keep compiling.
+        let dy = super::bridge::bounded_wheel_delta(if cfg!(feature = "hostsim") {
+            rd_f32(&app.ev, 32).round() as i32
+        } else {
+            rd_i32(&app.ev, 20)
+        });
+        app.rec.input(super::recorder::enc_pointer("wheel", 0, dy));
+        // the wheel scrolls VERTICALLY only, and only on routes with a vertical
+        // flow (it used to drive home's focus behind every other screen)
+        //
+        // Item 13: an owned surface takes the wheel BEFORE the route dispatch below
+        // ever sees it — otherwise a wheel tick over Settings/Privacy/Legal fell
+        // through to whatever route sat behind it (Home's own hero/grid dive, a
+        // Detail scroll, …), which is the same ownership question the key ladder
+        // answers for a fresh press, asked here for the wheel instead. It is the
+        // same `owns_input` the other three arms ask, so the four cannot drift.
+        if dy == 0 {
+            // a fractional trackpad tick that rounded to nothing (hostsim), or a
+            // `wheel:0` token — not a step in either direction
+            return;
         }
+        if super::bridge::search_owns_input(&app.pages) {
+            app.inputs.push(plx_machine::machine::InputEvent {
+                at: plx_machine::machine::Tick { ms: app.last_input, dt_us: 0 },
+                source: plx_machine::machine::Source::Sdl,
+                kind: plx_machine::machine::InputKind::Wheel { dy: dy as f32 },
+            });
+        } else if super::bridge::owns_input(&app.pages) {
+            // A tick becomes the DIRECTION KEY it stands for (`bridge::wheel_input`),
+            // rather than a `Wheel` the family's tables would each have to interpret:
+            // each notch is one row, with a bounded number per event. `RepeatGate`
+            // is deliberately NOT applied — a wheel gesture's ticks are the user's own
+            // cadence and the gate is armed against the remote's 50 ms hardware
+            // repeat, so sharing it would let a held key mute a scroll and vice versa.
+            app.inputs.extend(super::bridge::wheel_input(
+                dy,
+                plx_machine::machine::Tick { ms: app.last_input, dt_us: 0 },
+            ));
+        }
+        // `Route::Search` is deliberately absent here: `search_owns_input()` above
+        // already took every wheel tick on this route and returned.
     } else if et == SDL_TEXTINPUT {
         // The television's own keyboard committing text. Route-UNCONDITIONAL, and
         // `textinput::on_event` queues unconditionally too — it does NOT check
@@ -4246,6 +4252,35 @@ pub(crate) mod lifecycle_regression_tests {
             assert!(seat.is_some_and(|k| Some(k.entry) == page && k.elem < plx_ui::dispatch::STRIP_BASE),
                 "{route}: the arrival seats in the page, not on the strip: {seat:?}");
         }
+    }
+
+    #[test]
+    fn consecutive_magic_wheel_events_keep_the_users_cadence() {
+        let _serial = plx_base::testlock::serial();
+        let mut app = app();
+        super::super::bridge::show_page(&mut app.pages,
+            AppArg::Settings(plx_screens::family::SettingsPage::Root));
+        frame(&mut app, 0);
+        assert!(super::super::bridge::owns_input(&app.pages));
+        app.inputs.clear();
+        let mut fr = Frame::begin(&app.player.session, app.bridge.metadata_view());
+        app.ev.fill(0);
+        app.ev[..4].copy_from_slice(&SDL_MOUSEWHEEL.to_ne_bytes());
+        app.ev[20..24].copy_from_slice(&(-1i32).to_ne_bytes());
+        app.ev[32..36].copy_from_slice(&(-1.0f32).to_ne_bytes());
+        // Two events from the same physical turn must survive even when they
+        // arrive in one frame, rather than lose the second to a 250ms debounce.
+        unsafe { ingest_sdl_event_with_window(&mut app, &mut fr, |_| {}); }
+        unsafe { ingest_sdl_event_with_window(&mut app, &mut fr, |_| {}); }
+        assert_eq!(app.inputs.len(), 4);
+        for pair in app.inputs.chunks_exact(2) {
+            assert!(matches!(pair[0].kind, plx_machine::machine::InputKind::Key {
+                key: plx_machine::machine::Key::Down, edge: plx_machine::machine::Edge::Down, .. }));
+            assert!(matches!(pair[1].kind, plx_machine::machine::InputKind::Key {
+                key: plx_machine::machine::Key::Down, edge: plx_machine::machine::Edge::Up, .. }));
+        }
+        assert!(!app.ptr.button_down && !app.ptr.ok_from_click,
+            "scrolling cannot arm a pointer click");
     }
 
     #[test]

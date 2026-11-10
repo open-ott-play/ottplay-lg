@@ -2866,7 +2866,12 @@ pub const SCREEN_SHAPES: &[&str] = &[
 /// screen census gains category membership, stable presentation source, retained
 /// occurrence focus and shelf motion. Old recording headers remain incompatible;
 /// only reviewed fixtures that never mount OTT may migrate their census header.
-const SCREEN_SHAPES_PIN: u64 = 0xa2a2_f6e8_8fc7_72fa;
+/// **OTT pending Play cover**: `Ott` adds the runtime-published opaque
+/// `pending_play: Option<str>` identity to its canonical state, in the same order
+/// as `LogicalState::write`. It distinguishes the blocked catalogue cover from
+/// the interactive list during asynchronous source admission. Existing OTT
+/// recordings require fresh recording rather than silently changing this state.
+const SCREEN_SHAPES_PIN: u64 = 0xf572_4bfa_de86_f69f;
 
 #[cfg(test)]
 mod arg_tests {

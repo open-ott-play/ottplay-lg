@@ -57,7 +57,7 @@ fn rename_candidate_preserves_uuid_resume_portability_and_exact_owner() {
     let restored: Saved = serde_json::from_value(serde_json::to_value(&candidate).unwrap()).unwrap();
     let favorite = &restored.favorites.entries()[0];
     assert_eq!(favorite.origin.profile, "Home");
-    assert_eq!(favorite.origin.source_alias, "Home", "capture used the old name, not the explicit alias");
+    assert_eq!(favorite.origin.source_alias, "Stable alias", "renaming preserves the explicit source identity");
     assert_eq!(favorite.locator, old.locator);
     assert_eq!(favorite.title, old.title);
     assert_eq!(favorite_item_ids::ordered(&restored).unwrap(), old_ids);
@@ -187,7 +187,7 @@ fn rename_refuses_collateral_binding_or_document_change_atomically() {
     for collision in [false, true] {
         let mut runtime = runtime_fixture();
         let (_, mut missing) = fixture(&mut runtime);
-        missing.origin.profile = "Home".into(); missing.origin.source_alias = "Home".into();
+        missing.origin.profile = "Home".into(); missing.origin.source_alias = profile().source_alias;
         if !collision { missing.locator = Locator::ChannelName { name: "Unrelated".into(), group: None }; }
         runtime.saved.favorites.toggle(missing).unwrap();
         ids(&mut runtime.saved);
@@ -227,7 +227,7 @@ fn rename_checks_attachment_bindings_and_kiosk_origin_outside_document() {
     let mut runtime = runtime_fixture();
     let (_, mut attachment) = fixture(&mut runtime);
     attachment.origin.profile = "Home".into();
-    attachment.origin.source_alias = "Home".into();
+    attachment.origin.source_alias = profile().source_alias;
     attachment.locator = Locator::VPortal { id_field: "id".into(), id: "42".into() };
     runtime.saved.favorites.toggle(attachment).unwrap(); ids(&mut runtime.saved);
     let mut candidate = runtime.saved.clone(); candidate.profiles.profiles[0].name = "Home".into();
@@ -361,4 +361,38 @@ fn rename_uncertain_event_never_publishes_usable_authority() {
         assert_eq!(runtime.checkpoints["favorites"].source_fingerprint, old_fingerprint);
         assert!(runtime.settings_write_refusal().is_some());
     }
+}
+
+#[test]
+fn rename_does_not_acquire_favorite_with_display_name_instead_of_explicit_alias() {
+    let _serial = plx_base::testlock::serial();
+    let mut runtime = runtime_fixture();
+    let (mut candidate, mut foreign) = fixture(&mut runtime);
+    foreign.origin.profile = "Home".into();
+    foreign.origin.source_alias = "Home".into();
+    foreign.locator = Locator::ChannelName { name: "Unrelated".into(), group: None };
+    runtime.saved.favorites.toggle(foreign.clone()).unwrap();
+    ids(&mut runtime.saved);
+    candidate.favorites = runtime.saved.favorites.clone();
+    candidate.favorite_items = runtime.saved.favorite_items.clone();
+    assert!(selection::resolve_profile(&runtime.saved.profiles, &foreign).is_err());
+    assert_eq!(selection::resolve_profile(&candidate.profiles, &foreign).unwrap().id, profile().id,
+        "legacy name/name playback compatibility would acquire this unrelated Favorite after rename");
+    let before = serde_json::to_value(&runtime.saved).unwrap();
+    let staged = serde_json::to_value(&candidate).unwrap();
+    let checkpoints = serde_json::to_value(&runtime.checkpoints).unwrap();
+    let uuids = favorite_item_ids::ordered(&runtime.saved).unwrap();
+    let selected = runtime.selected.clone();
+    assert_eq!(profile_rename::prepare(&runtime, &mut candidate).err(),
+        Some("Profile rename cannot preserve its current Favorites bindings"),
+        "a display-name collision must refuse the rename rather than acquire or rewrite another identity");
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+    assert_eq!(serde_json::to_value(&candidate).unwrap(), staged);
+    assert_eq!(serde_json::to_value(&runtime.checkpoints).unwrap(), checkpoints);
+    assert_eq!(favorite_item_ids::ordered(&runtime.saved).unwrap(), uuids);
+    assert_eq!(favorite_item_ids::ordered(&candidate).unwrap(), uuids);
+    assert_eq!(runtime.selected, selected);
+    assert_eq!(candidate.favorites.entries()[1], foreign);
+    assert!(selection::resolve_profile(&runtime.saved.profiles, &foreign).is_err(),
+        "only the uncommitted proposed name could bind it; the live source remains untouched");
 }

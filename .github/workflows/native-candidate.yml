@@ -131,12 +131,38 @@ jobs:
         with:
           install-root: ${{ runner.temp }}/webos-ndk
 
+      - name: Build source-pinned app-owned companion
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+        run: |
+          set -euo pipefail
+          sdk_archive=$(python3 ci/deps.py fetch webos-ndk --asset linux-aarch64)
+          python3 ci/native_companion.py build --sdk "$WEBOS_SDK" --sdk-archive "$sdk_archive" \
+            --source "$RUNNER_TEMP/companion-source" --bundle "$RUNNER_TEMP/companion-bundle" \
+            --target-dir "$RUNNER_TEMP/companion-target"
+
       - name: Build and verify release package
         env:
           WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
-        run: make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk
+        run: |
+          set -euo pipefail
+          make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk-stage
+          python3 ci/native_companion.py stage --sdk "$WEBOS_SDK" \
+            --source "$RUNNER_TEMP/companion-source" --bundle "$RUNNER_TEMP/companion-bundle"
+          make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk-pack
+
+      - name: Bind complete companion sources to the final package and pinned SDK
+        env:
+          WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+        run: |
+          set -euo pipefail
+          sdk_archive=$(python3 ci/deps.py fetch webos-ndk --asset linux-aarch64)
+          package=$(find pkg -maxdepth 1 -type f -name 'com.openottplay.player.native_*_arm.ipk' -print -quit)
+          python3 ci/native_companion.py qualify-sources --sdk "$WEBOS_SDK" --sdk-archive "$sdk_archive" \
+            --source "$RUNNER_TEMP/companion-source" --bundle "$RUNNER_TEMP/companion-bundle" \
+            --package "$package" --output-sources "$RUNNER_TEMP/companion-corresponding-source-qualified"
 
       - name: Assemble immutable candidate and provenance receipt
         env:
@@ -153,7 +179,8 @@ jobs:
             --run-attempt "$RUN_ATTEMPT" \
             --sdk "$WEBOS_SDK" \
             --ipk "$(find pkg -maxdepth 1 -type f -name 'com.openottplay.player.native_*_arm.ipk' -print -quit)" \
-            --output-dir "$OUTPUT_DIR"
+            --output-dir "$OUTPUT_DIR" \
+            --companion-sources "$RUNNER_TEMP/companion-corresponding-source-qualified"
           cp "$RUNNER_TEMP/native-release-plan/native-release-plan.json" \
             "$OUTPUT_DIR/native-release-plan.json"
 

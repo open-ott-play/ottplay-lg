@@ -35,8 +35,14 @@ pub(super) fn list_label(row: &OttRow, preferences: plx_appkit::classic_settings
     parts.join("  ")
 }
 
-/// A numbered live channel keeps its identity on the primary line; the
-/// current programme is a separate row detail so long titles cannot hide it.
+/// The same one-line channel/programme projection as the Classic web client.
+/// Keep the localized identity when both visible fields have no accepted text.
+pub(super) fn catalogue_label(row: &OttRow, preferences: plx_appkit::classic_settings::Preferences, now: Option<i64>) -> String {
+    let label=list_label(row, preferences, now);
+    if label.is_empty() { catalogue_title(row, preferences) } else { label }
+}
+
+/// A live channel keeps its own identity independently of current EPG text.
 pub(super) fn catalogue_live(row: &OttRow) -> bool {
     if row.media.as_ref().is_some_and(|media| media.kind == super::OttMediaKind::LiveChannel) {
         return true;

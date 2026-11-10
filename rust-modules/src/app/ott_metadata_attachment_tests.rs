@@ -26,7 +26,7 @@ fn nested_preview_keeps_parent_identity_and_uses_portal_metadata_snapshot() {
     let worker = OffFrame::for_test();
     let (tx,rx) = channel();
     assert!(run_favorite(source.owner(),&favorite,41,&cancel,&tx,||Ok(row.clone()),
-        |entry|source.inspect(&worker,&favorite,entry,41,Query::CurrentNext { now: 0 },&cancel)));
+        |entry|source.inspect(&worker,&favorite,entry,41,Query::CurrentNext { now: 0 },None,&cancel)));
     let Event::Preview(value)=rx.try_recv().unwrap() else { panic!("expected preview"); };
     assert_eq!(value.profile_id,"m3u-9");
     assert_eq!(value.generation,41);

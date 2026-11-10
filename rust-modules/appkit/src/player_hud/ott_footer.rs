@@ -16,6 +16,9 @@ pub(super) struct ClockLabels {
     next: String,
     wall_key: Option<(Option<i64>, usize)>,
     wall: String,
+    raster: String,
+    raster_key: (i32, i32),
+    technical: String,
     end_key: Option<(Option<i64>, Option<i64>)>,
     remaining: String,
     next_duration: String,
@@ -44,7 +47,7 @@ impl ClockLabels {
             plx_platform::i18n::local_clock_parts(ms / 1000).and_then(|parts| locale.time(parts)));
         self.refresh_wall(wall_now_s);
     }
-    fn refresh_wall(&mut self, wall_now_s: Option<i64>) {
+    pub(super) fn refresh_wall(&mut self, wall_now_s: Option<i64>) {
         let locale = plx_platform::i18n::current();
         // The sampled runtime clock is the only wall-clock input. No draw-time
         // clock read and no reformat while the sample/locale remain unchanged.
@@ -53,12 +56,24 @@ impl ClockLabels {
             self.wall = wall_now_s.and_then(plx_platform::i18n::local_clock_parts)
                 .and_then(|parts| locale.time(parts)).unwrap_or_default();
             self.wall_key = Some(key);
+            self.refresh_technical();
         }
     }
+    pub(super) fn refresh_raster(&mut self, raster: (i32, i32)) {
+        let raster = if raster.0 > 0 && raster.1 > 0 { raster } else { (0, 0) };
+        if self.raster_key == raster { return; }
+        self.raster_key = raster;
+        self.raster = if raster == (0, 0) { String::new() } else { format!("{}×{}", raster.0, raster.1) };
+        self.refresh_technical();
+    }
+    fn refresh_technical(&mut self) {
+        self.technical = [&self.wall, &self.raster].into_iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join(" · ");
+    }
+    pub(super) fn technical(&self) -> &str { &self.technical }
     /// Match Classic's minute columns, using only the admitted guide or the
     /// supplied decoder sample. A finite successor has no duration in this
     /// descriptor, so its column stays empty instead of reusing today's file.
-    fn refresh_ends(&mut self, info: Option<&OttNowPlaying>, wall_now_s: Option<i64>,
+    pub(super) fn refresh_ends(&mut self, info: Option<&OttNowPlaying>, wall_now_s: Option<i64>,
         decoder: Option<(i64, i64)>) {
         let minutes = |value: i128, units_per_second: i128| -> i64 {
             ((value.max(0) + 30 * units_per_second) / (60 * units_per_second))
@@ -104,6 +119,8 @@ impl ClockLabels {
     }
     pub(super) fn current(&self) -> &str { &self.current }
     pub(super) fn next(&self) -> &str { &self.next }
+    pub(super) fn remaining(&self) -> &str { &self.remaining }
+    pub(super) fn next_duration(&self) -> &str { &self.next_duration }
 
 }
 
@@ -207,7 +224,7 @@ fn classic_band(info: &ClassicInfo<'_>, clocks: &ClockLabels,
     let ordinal_x = layout.heading.x;
     let x = ordinal_x + if ordinal_width > 0.0 { ordinal_width + gap } else { 0.0 };
     let width = (layout.heading.x + layout.heading.w - x).max(0.0);
-    let wall_w = measure.width_str(&clocks.wall, theme::size::BODY, false).min(width * 0.4);
+    let wall_w = measure.width_str(&clocks.technical, theme::size::BODY, false).min(width * 0.4);
     let mut heading = layout.heading; heading.x = x; heading.w = width;
     let wall = Rect::new(x + width - wall_w, heading.y, wall_w, heading.h);
     heading.w = (width - if wall_w > 0.0 { wall_w + gap } else { 0.0 }).max(0.0);
@@ -282,7 +299,7 @@ pub(super) fn draw_classic(
         TextView::new(&ordinal.to_string(), content.lines[0].size, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
             .bold().max_lines(1).with_measure(measure).draw(painter, band.ordinal);
     }
-    TextView::new(&clocks.wall, theme::size::BODY, plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
+    TextView::new(&clocks.technical, theme::size::BODY, plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
         .max_lines(1).with_measure(measure).draw(painter, band.wall);
     for (i, line) in content.lines.iter().enumerate() {
         if line.title.is_empty() { continue; }
@@ -709,6 +726,25 @@ mod tests {
         assert!(next.at.x + next.at.w <= duration.at.x - duration.at.w);
         assert!(current.at.y < next.at.y && remaining.at.y < duration.at.y);
         assert!(!runs.iter().any(|run| run.text.starts_with('-')));
+    }
+
+    #[test]
+    fn classic_footer_resolution_is_actual_sample_and_no_guide_keeps_header() {
+        let _serial = plx_base::testlock::serial();
+        let mut playing = live_playing();
+        playing.ott.as_mut().unwrap().live.as_mut().unwrap().guide = None;
+        let measure = plx_ui::fixture::FixtureMeasure;
+        let plan = layout(&playing, &measure);
+        let mut clocks = ClockLabels::default();
+        clocks.refresh_raster((1920, 1080));
+        let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(), &playing,
+            playing.ott.as_ref(), &mut clocks, &plan, &measure, Some(150), None));
+        assert!(runs.iter().any(|run| run.text == "Channel A"));
+        assert!(runs.iter().any(|run| run.text == "7"));
+        assert!(runs.iter().any(|run| run.text.contains("1920×1080")));
+        assert!(!runs.iter().any(|run| run.text == "Current programme"));
+        clocks.refresh_raster((0, 0));
+        assert!(!clocks.technical().contains('×'), "unknown raster cannot reuse previous stream resolution");
     }
 
 }

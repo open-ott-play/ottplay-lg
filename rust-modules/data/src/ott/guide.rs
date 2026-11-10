@@ -9,15 +9,28 @@ use std::collections::BTreeSet;
 #[path = "guide_rows.rs"]
 pub mod rows;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelMetadata {
     #[serde(default)]
     pub tvg_name: String,
+    /// Provider programme identifier when it differs from the live stream identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub guide_feed: String,
     #[serde(default)]
     pub guide_shift_seconds: i64,
     #[serde(default)]
     pub catchup: Option<super::archive::CatchupSource>,
+}
+
+impl std::fmt::Debug for ChannelMetadata {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("ChannelMetadata").field("tvg_name",&self.tvg_name)
+            .field("guide_shift_seconds",&self.guide_shift_seconds).field("catchup",&self.catchup)
+            .field("guide_id_present",&self.guide_id.is_some()).field("guide_feed_present",&!self.guide_feed.is_empty()).finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

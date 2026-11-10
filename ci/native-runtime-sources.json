@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "toolchain_revision": "a2787d6c9607f70a5946454fcd06d99909a7a604",
+  "buildroot_revision": "79af0e655b4ae9252a93ec55a2cd786b335c4a6c",
+  "glibc_revision": "ddbe4400ebed0b7fb34e989a3ac7a73a71669bf9",
+  "gcc_version": "12.2.0",
+  "sources": {
+    "native-toolchain-a2787d6.tar.gz": {
+      "url": "https://codeload.github.com/webosbrew/native-toolchain/tar.gz/a2787d6c9607f70a5946454fcd06d99909a7a604",
+      "sha256": "73f7de7567205f2425d6427b64685372a5f95f50d82bcbd4190dd6634926bc2d"
+    },
+    "buildroot-nc4-79af0e6.tar.gz": {
+      "url": "https://codeload.github.com/openlgtv/buildroot-nc4/tar.gz/79af0e655b4ae9252a93ec55a2cd786b335c4a6c",
+      "sha256": "f74dfa02569049e9ddffdf23909bbf1f469f1c23f248fc2b13921ecb5792cee2"
+    },
+    "glibc-ddbe440.tar.gz": {
+      "url": "https://codeload.github.com/openlgtv/glibc/tar.gz/ddbe4400ebed0b7fb34e989a3ac7a73a71669bf9",
+      "sha256": "33fdcbc103f02ff1088f1bd3448d67885e7e4c0abf47eda53dc3bc4015111a60"
+    },
+    "gcc-12.2.0.tar.xz": {
+      "url": "https://gcc.gnu.org/pub/gcc/releases/gcc-12.2.0/gcc-12.2.0.tar.xz",
+      "sha256": "e549cf9cf3594a00e27b6589d4322d70e0720cdd213f39beb4181e06926230ff",
+      "sha512": "e9e857bd81bf7a370307d6848c81b2f5403db8c7b5207f54bce3f3faac3bde63445684092c2bc1a2427cddb6f7746496d9fbbef05fbbd77f2810b2998f1f9173"
+    }
+  },
+  "sdk_version": "webos-d7ed7ee.6",
+  "sdk_archives": {
+    "darwin-arm64": "954333694ab1fe1f7737e81a0be1e3188cdfffc1a119c81c86f5fcebf1857c45",
+    "darwin-x86_64": "75e7451ac39604872ae7f07894cbe8edb62b2091664a1781cb193e7ebe56aa75",
+    "linux-aarch64": "45a2d12ff557457d92cde4fddaa77a6f1090fca03adc43bb74397e5e0c379501"
+  }
+}

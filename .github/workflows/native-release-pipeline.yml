@@ -168,7 +168,7 @@ jobs:
               RC_DIR="$RUNNER_TEMP/rc-assets"
               mkdir -p "$RC_DIR"
               gh release download "$RC_TAG" --dir "$RC_DIR"
-              python3 ci/native_release_artifacts.py verify-rc \
+              python3 ci/native_release_artifacts.py verify-rc --require-complete-companion-source \
                 --artifact-dir "$RC_DIR" --repository "$GITHUB_REPOSITORY" \
                 --version "$VERSION" --tag "$RC_TAG" \
                 --output-json "$RUNNER_TEMP/rc-identity.json"
@@ -224,7 +224,7 @@ jobs:
           ORIGINAL_DIR: ${{ runner.temp }}/original-rc-candidate
           RC_DIR: ${{ runner.temp }}/rc-assets
         run: |
-          python3 ci/native_release_artifacts.py verify-rc \
+          python3 ci/native_release_artifacts.py verify-rc --require-complete-companion-source \
             --artifact-dir "$RC_DIR" --candidate-artifact-dir "$ORIGINAL_DIR" \
             --repository "$GITHUB_REPOSITORY" --version "$VERSION" --tag "$RC_TAG" \
             --output-json "$RUNNER_TEMP/rc-identity-verified.json"
@@ -377,6 +377,12 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "::error::tag appeared after preflight: $TAG"; exit 1
           fi
+          companion_assets=()
+          if test -f "$CANDIDATE_DIR/companion-source.tar.gz"; then
+            for asset in companion-source.tar.gz companion-source-closure.json companion-source-manifest.json; do
+              companion_assets+=("$CANDIDATE_DIR/$asset")
+            done
+          fi
           gh release create "$TAG" --target "$SOURCE_SHA" --prerelease \
             --title "OTTPlay LG $VERSION ${CHANNEL^^} $(echo "$TAG" | sed -E 's/^.*\.([0-9]+)$/\1/')" \
             --notes-file "$RUNNER_TEMP/prerelease-notes.md" \
@@ -386,7 +392,7 @@ jobs:
             "$CANDIDATE_DIR/candidate-provenance.json" \
             "$CANDIDATE_DIR/candidate-provenance.json.sha256" \
             "$CANDIDATE_DIR/native-release-plan.json" \
-            "$CANDIDATE_DIR/link-evidence.tar.gz"
+            "$CANDIDATE_DIR/link-evidence.tar.gz" "${companion_assets[@]}"
 
       - name: Verify published prerelease identity and bytes
         env:
@@ -418,6 +424,11 @@ jobs:
             link-evidence.tar.gz; do
             cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/published-candidate/$asset"
           done
+          if test -f "$CANDIDATE_DIR/companion-source.tar.gz"; then
+            for asset in companion-source.tar.gz companion-source-closure.json companion-source-manifest.json; do
+              cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/published-candidate/$asset"
+            done
+          fi
 
   promote-stable:
     name: Promote qualified RC bytes to stable
@@ -485,7 +496,7 @@ jobs:
           RC_DIR="$RUNNER_TEMP/rc-assets"
           mkdir -p "$RC_DIR"
           gh release download "$RC_TAG" --dir "$RC_DIR"
-          python3 ci/native_release_artifacts.py verify-rc \
+          python3 ci/native_release_artifacts.py verify-rc --require-complete-companion-source \
             --artifact-dir "$RC_DIR" --candidate-artifact-dir "$ORIGINAL_DIR" \
             --repository "$GITHUB_REPOSITORY" \
             --version "$VERSION" --tag "$RC_TAG" \
@@ -550,6 +561,18 @@ jobs:
           Path(output).write_text(prefix + body, encoding="utf-8")
           PY
 
+      - name: Generate Homebrew manifest from the approved RC bytes
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
+          APPROVED_SHA256: ${{ needs.preflight.outputs.ipk_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 ci/native_hbc_manifest.py \
+            --package "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
+            --version "$VERSION" --sha256 "$APPROVED_SHA256" \
+            --output "$RUNNER_TEMP/com.openottplay.player.native.manifest.json"
+
       - name: Publish stable from the exact RC package bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -558,6 +581,12 @@ jobs:
           CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
         run: |
           set -euo pipefail
+          companion_assets=()
+          if test -f "$CANDIDATE_DIR/companion-source.tar.gz"; then
+            for asset in companion-source.tar.gz companion-source-closure.json companion-source-manifest.json; do
+              companion_assets+=("$CANDIDATE_DIR/$asset")
+            done
+          fi
           gh release create "v$VERSION" --target "$SOURCE_SHA" --title "OTTPlay LG $VERSION" \
             --notes-file "$RUNNER_TEMP/stable-notes.md" \
             "$CANDIDATE_DIR/com.openottplay.player.native_${VERSION}_arm.ipk" \
@@ -567,7 +596,8 @@ jobs:
             "$CANDIDATE_DIR/candidate-provenance.json.sha256" \
             "$CANDIDATE_DIR/native-release-plan.json" \
             "$CANDIDATE_DIR/link-evidence.tar.gz" \
-            "ci/ottplay-integration/release/qualifications/v${VERSION}.json"
+            "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
+            "$RUNNER_TEMP/com.openottplay.player.native.manifest.json" "${companion_assets[@]}"
           git fetch --no-tags origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
           test "$(git rev-parse "v$VERSION^{commit}")" = "$SOURCE_SHA"
           gh release download "v$VERSION" --dir "$RUNNER_TEMP/stable-public"
@@ -582,8 +612,15 @@ jobs:
             link-evidence.tar.gz; do
             cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/stable-public/$asset"
           done
+          if test -f "$CANDIDATE_DIR/companion-source.tar.gz"; then
+            for asset in companion-source.tar.gz companion-source-closure.json companion-source-manifest.json; do
+              cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/stable-public/$asset"
+            done
+          fi
           cmp "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
             "$RUNNER_TEMP/stable-public/v${VERSION}.json"
+          cmp "$RUNNER_TEMP/com.openottplay.player.native.manifest.json" \
+            "$RUNNER_TEMP/stable-public/com.openottplay.player.native.manifest.json"
           stable_release=$(gh release view "v$VERSION" --json tagName,isDraft,isPrerelease)
           STABLE_RELEASE_JSON="$stable_release" python3 - <<'PY'
           import json, os
