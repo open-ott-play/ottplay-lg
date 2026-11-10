@@ -127,9 +127,11 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     if runtime.playing.is_none() && runtime.failed_playback.is_none() {
         let source = player_browse::native_identity(runtime, app)
             .ok_or("The playing source is no longer current")?;
-        player_browse::native_list_step(runtime, app, &source, offset)?;
-        if let Some(page) = bridge::player_mut(&mut app.pages) {
-            page.begin_channel_change(clock::now());
+        let queued = player_browse::native_list_step(runtime, app, &source, offset)?;
+        if queued {
+            if let Some(page) = bridge::player_mut(&mut app.pages) {
+                page.begin_channel_change(clock::now());
+            }
         }
         return Ok(());
     }

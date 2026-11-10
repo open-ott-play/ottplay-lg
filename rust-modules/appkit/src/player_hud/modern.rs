@@ -199,10 +199,11 @@ fn draw_programme_text(p: Painter, mut frame: Rect, clock: &str, end: &str,
 }
 
 pub(super) fn draw_information(p: Painter, layout: &Layout, playing: Option<&NowPlaying>,
-    wall_now_s: Option<i64>, clocks: &mut super::ott_footer::ClockLabels, measure: &dyn Measure, busy: Busy) {
+    wall_now_s: Option<i64>, clocks: &mut super::ott_footer::ClockLabels, measure: &dyn Measure, busy: Busy,
+    mark: super::TransportMark) {
     let Some(playing) = playing else { return; };
     let mut content = now_playing_context(playing, wall_now_s);
-    content.ordinal = super::ott_footer::visible_ordinal(content.ordinal, busy);
+    content.ordinal = super::ott_footer::visible_ordinal(content.ordinal, busy, mark);
     clocks.refresh_context(&content);
     clocks.refresh_wall(wall_now_s);
     clocks.refresh_ends(playing.ott.as_ref(), wall_now_s, None);

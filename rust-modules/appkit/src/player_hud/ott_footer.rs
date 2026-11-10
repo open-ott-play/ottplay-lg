@@ -1,6 +1,6 @@
 //! Linear OTT information in the existing transport title region. No timers,
 //! focus, playback policy or metadata fetching belong to this presentation.
-use super::Busy;
+use super::{Busy, TransportMark};
 use plx_data::metadata::{NowPlaying, OttNowPlaying};
 use plx_machine::machine::Measure;
 use plx_ui::text_view::TextView;
@@ -8,12 +8,13 @@ use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::label::HAlign;
 use plx_ui::{theme, Painter, Rect};
 
-/// Keep the channel name without its catalogue ordinal while either loading
-/// indicator is visible: the central startup readout or the transport spinner
-/// used after a frame has already been presented. Settled transport/list
-/// numbering and the current-playing identity retain their existing values.
-pub(super) fn visible_ordinal(ordinal: Option<u32>, busy: Busy) -> Option<u32> {
-    if matches!(busy, Busy::Readout(plx_ui::widgets::StatusKind::Working, _) | Busy::Transport) {
+/// Keep the channel name without its catalogue ordinal during the central
+/// loading readout or a transport spinner. A directional seek owns an arrow,
+/// not a spinner, and keeps its ordinary number. The caller supplies the same
+/// resolved mark used by its transport; this projection does not rederive it.
+pub(super) fn visible_ordinal(ordinal: Option<u32>, busy: Busy, mark: TransportMark) -> Option<u32> {
+    if matches!(busy, Busy::Readout(plx_ui::widgets::StatusKind::Working, _))
+        || (busy == Busy::Transport && mark == TransportMark::Working) {
         None
     } else {
         ordinal
@@ -277,7 +278,7 @@ pub(super) fn live_timeline(playing: &NowPlaying, wall_now_s: Option<i64>) -> Op
 pub(super) fn draw_classic(
     painter: Painter, playing: &NowPlaying, info: Option<&OttNowPlaying>,
     clocks: &mut ClockLabels, layout: &super::classic::OttClassicLayout, measure: &dyn Measure, wall_now_s: Option<i64>,
-    decoder: Option<(i64, i64)>, busy: Busy,
+    decoder: Option<(i64, i64)>, busy: Busy, mark: TransportMark,
 ) {
     if let Some(info) = info {
         clocks.refresh_classic(info, wall_now_s);
@@ -298,7 +299,7 @@ pub(super) fn draw_classic(
             ordinal: None,
         },
     };
-    content.ordinal = visible_ordinal(content.ordinal, busy);
+    content.ordinal = visible_ordinal(content.ordinal, busy, mark);
     let band = classic_band(&content, clocks, layout, measure);
     let _clip = plx_ui::screen::ClipScope::open_in(painter, band.ground);
     if let Some(art) = info.and_then(|info| info.art.as_ref()) {
@@ -436,7 +437,7 @@ mod tests {
                     plx_platform::i18n::current() as *const _ as usize)),
                     current: current.into(), next: next.into(), ..ClockLabels::default() };
                 let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(),
-                    &playing, Some(info), &mut clocks, &layout(&playing, &measure), &measure, None, None, Busy::None));
+                    &playing, Some(info), &mut clocks, &layout(&playing, &measure), &measure, None, None, Busy::None, TransportMark::None));
                 for expected in [current, next] {
                     assert!(runs.iter().any(|run| run.text == expected), "missing complete {expected:?} at {scale}%: {runs:?}");
                 }
@@ -493,7 +494,7 @@ mod tests {
         let mut clocks = ClockLabels::default();
         let runs = plx_ui::draw_census::capture_runs(|| draw_classic(
             Painter::recording(), &playing, playing.ott.as_ref(), &mut clocks,
-            &layout(&playing, &plx_ui::fixture::FixtureMeasure), &plx_ui::fixture::FixtureMeasure, None, None, Busy::None));
+            &layout(&playing, &plx_ui::fixture::FixtureMeasure), &plx_ui::fixture::FixtureMeasure, None, None, Busy::None, TransportMark::None));
         for title in ["Series / Season 2", "Current episode", "The next episode"] {
             assert!(runs.iter().any(|run| run.text == title), "missing {title}: {runs:?}");
         }
@@ -512,7 +513,7 @@ mod tests {
         let runs = plx_ui::draw_census::capture_runs(|| draw_classic(
             Painter::recording(), &playing, None, &mut clocks,
             &layout(&playing, &plx_ui::fixture::FixtureMeasure), &plx_ui::fixture::FixtureMeasure,
-            None, Some((90_000_000_000, 600_000_000_000)), Busy::None));
+            None, Some((90_000_000_000, 600_000_000_000)), Busy::None, TransportMark::None));
         assert!(runs.iter().any(|run| run.text == "Episode one"));
         assert!(runs.iter().any(|run| run.text == "+9"));
         assert!(!runs.iter().any(|run| run.text == "Show name" || run.text.contains("EPG")));
@@ -566,7 +567,7 @@ mod tests {
         let playing = live_playing(); let mut clocks = ClockLabels::default();
         let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(),
             &playing, playing.ott.as_ref(), &mut clocks, &layout(&playing, &plx_ui::fixture::FixtureMeasure),
-            &plx_ui::fixture::FixtureMeasure, Some(150), None, Busy::None));
+            &plx_ui::fixture::FixtureMeasure, Some(150), None, Busy::None, TransportMark::None));
         for expected in ["Channel A", "7", "Current programme", "Next programme"] {
             assert!(runs.iter().any(|run| run.text == expected), "missing {expected}: {runs:?}");
         }
@@ -574,22 +575,26 @@ mod tests {
     }
 
     #[test]
-    fn classic_loading_spinners_keep_channel_title_without_its_catalogue_number() {
+    fn classic_spinner_hides_ordinal_but_directional_seek_keeps_it() {
         let mut playing = live_playing();
         playing.ott.as_mut().unwrap().live.as_mut().unwrap().channel_title = "123 Channel A".into();
         let measure = plx_ui::fixture::FixtureMeasure;
         let frame = layout(&playing, &measure);
         let mut clocks = ClockLabels::default();
-        for (busy, numbered) in [
-            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), false),
-            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), false),
-            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), false),
-            (Busy::None, true),
-            (Busy::Transport, false),
-            (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), true),
+        for (busy, displayed_ns, expected_mark, numbered) in [
+            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), 10, TransportMark::None, false),
+            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), 10, TransportMark::None, false),
+            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), 10, TransportMark::None, false),
+            (Busy::None, 10, TransportMark::None, true),
+            (Busy::Transport, 10, TransportMark::Working, false),
+            (Busy::Transport, 5, TransportMark::Rewind, true),
+            (Busy::Transport, 15, TransportMark::FastForward, true),
+            (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), 10, TransportMark::None, true),
         ] {
+            let mark = crate::player_hud::transport_mark(false, busy, false, displayed_ns, 10, None);
+            assert_eq!(mark, expected_mark);
             let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(),
-                &playing, playing.ott.as_ref(), &mut clocks, &frame, &measure, Some(150), None, busy));
+                &playing, playing.ott.as_ref(), &mut clocks, &frame, &measure, Some(150), None, busy, mark));
             assert!(runs.iter().any(|run| run.text == "123 Channel A"), "missing title for {busy:?}");
             assert!(runs.iter().any(|run| run.text == "Current programme"), "missing programme for {busy:?}");
             assert_eq!(runs.iter().any(|run| run.text == "7"), numbered, "{busy:?}: {runs:?}");
@@ -749,7 +754,7 @@ mod tests {
         let frame = layout(&playing, &measure);
         let mut clocks = ClockLabels::default();
         let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(), &playing,
-            playing.ott.as_ref(), &mut clocks, &frame, &measure, Some(150), None, Busy::None));
+            playing.ott.as_ref(), &mut clocks, &frame, &measure, Some(150), None, Busy::None, TransportMark::None));
         for expected in ["Channel A", "Current programme", "Next programme", "+1", "2"] {
             assert!(runs.iter().any(|run| run.text == expected), "missing {expected}: {runs:?}");
         }
@@ -776,7 +781,7 @@ mod tests {
         let mut clocks = ClockLabels::default();
         clocks.refresh_raster((1920, 1080));
         let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(), &playing,
-            playing.ott.as_ref(), &mut clocks, &plan, &measure, Some(150), None, Busy::None));
+            playing.ott.as_ref(), &mut clocks, &plan, &measure, Some(150), None, Busy::None, TransportMark::None));
         assert!(runs.iter().any(|run| run.text == "Channel A"));
         assert!(runs.iter().any(|run| run.text == "7"));
         assert!(runs.iter().any(|run| run.text.contains("1920×1080")));

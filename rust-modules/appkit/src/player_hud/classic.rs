@@ -1017,7 +1017,7 @@ pub fn draw_hud_in_mode(
     if chrome {
         if let Some(playing) = meta.now_playing() {
             super::ott_footer::draw_classic(pc, playing, playing.ott.as_ref(), &mut row.ott_clock_labels,
-                &layout, measure, model.wall_now_s, decoder, busy);
+                &layout, measure, model.wall_now_s, decoder, busy, bar.mark);
         } else {
             draw_route_title(pc, plx_media::route::title_cptr(ps),
                 plx_media::route::ctxline_cptr(ps), &layout);
@@ -1076,9 +1076,10 @@ fn draw_modern(
     let pc = p.alpha(row.preview.motion.chrome_alpha(now));
     row.reset_title();
     if transport {
+        let mut bar = Playbar::live(model, busy, focus, row.since_play_ms(now), now);
         if chrome {
             super::modern::draw_information(pc, &layout, meta.now_playing(), model.wall_now_s,
-                &mut row.ott_clock_labels, measure, busy);
+                &mut row.ott_clock_labels, measure, busy, bar.mark);
             match slot {
                 _ if failure_row_drawn(busy) => {},
                 ControlSlot::Discs(controls) => super::modern::draw_controls(pc, &layout,
@@ -1090,7 +1091,6 @@ fn draw_modern(
             }
         }
         if !failure_row_drawn(busy) && super::modern::shows_timeline(model, meta.now_playing()) {
-            let mut bar = Playbar::live(model, busy, focus, row.since_play_ms(now), now);
             bar.clock_grow = row.preview.motion.clock_grow(now);
             bar.pos_ns = row.spring.apply(bar.pos_ns, now);
             let domain = rail_domain(plx_machine::machine::UiMode::Modern, model, meta.now_playing());
