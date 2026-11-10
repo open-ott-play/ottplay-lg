@@ -4,7 +4,7 @@
 
 The native player draws its own loading indicator through PlayerScreen, player_hud::classic::draw_readout, StatusOverlay and the shared Spinner widget. This is application-rendered UI, not a webOS decoder overlay. Classic and Modern use the same central readout. Radius, colour, dot count, placement and animation can be changed in the UI implementation; there is currently no dedicated user setting for these properties.
 
-The channel name and ordinal belong to the separate playback information area. During the central working readout and inline transport buffering, the name remains and the ordinal is hidden. Normal playback information, channel lists and explicit numeric entry preserve their existing numbering. A numeric prefix that is part of the actual channel name is not stripped.
+The channel name and ordinal belong to the separate playback information area. During the central working readout and inline transport buffering, the name remains and the ordinal is hidden. The already-derived transport mark distinguishes a real loading spinner from directional seek arrows, which retain ordinary numbering. Normal playback information, channel lists and explicit numeric entry preserve their existing numbering. A numeric prefix that is part of the actual channel name is not stripped.
 
 ## Acquisition and first frame
 
@@ -22,6 +22,6 @@ Historical diagnostics show that inspection and whole-segment processing can be 
 
 ## Channel-change information
 
-An accepted fullscreen next/previous request reveals the information footer without publishing a new playing identity. The outgoing channel facts remain until the replacement is admitted, at which point the normal source-bound metadata publication updates them. Acquisition keeps the footer alive, normal auto-hide resumes after settling, and deliberate dismissal is respected.
+An accepted fullscreen next/previous request that queues a replacement reveals the information footer without publishing a new playing identity. The outgoing channel facts remain until the replacement is admitted, at which point the normal source-bound metadata publication updates them. Acquisition keeps the footer alive, normal auto-hide resumes after settling, and deliberate dismissal is respected.
 
 The application resolver can run before the media route marks itself busy. During that exact current request, or a current bounded same-channel recovery cooldown, the player displays loading rather than an outgoing decoder error. Cancellation, expiry, source/profile replacement and terminal failure retire that presentation. It does not clear native error flags or change playback authority.

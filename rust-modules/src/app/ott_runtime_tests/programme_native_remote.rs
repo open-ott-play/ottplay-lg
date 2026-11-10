@@ -204,7 +204,10 @@ fn native_plex_step_uses_visible_category_order_and_wrap_not_highlight_or_queue(
         // No new full-scan wait: these are already the visible rows.
         r.catalog_complete = false;
         r.catalog_loading = true;
+        bridge::player_mut(&mut app.pages).unwrap().hud.hide(false);
         assert!(perform(&mut app, action).unwrap().is_none());
+        assert!(!bridge::player_mut(&mut app.pages).unwrap().hud.dismissed,
+            "an accepted new target reveals its channel-change footer");
         let r = app.ott.as_ref().unwrap();
         assert_eq!(r.play_target.as_ref().unwrap().id, format!("{prefix}:{expected}"));
         assert_eq!(r.resolver_next.as_ref().unwrap().entry.as_ref().unwrap().id, format!("{prefix}:{expected}"));
@@ -284,9 +287,21 @@ fn native_plex_single_visible_item_never_restarts_on_either_direction() {
     let mut app = list_app(&[42], 42);
     let identity = route::playback_identity(&app.player.session);
     let epoch = app.ott.as_ref().unwrap().playback_epoch;
+    let generation = app.ott.as_ref().unwrap().play_generation;
     for action in [Action::Previous, Action::Next] {
+        let page = bridge::player_mut(&mut app.pages).unwrap();
+        page.hud.hide(false);
+        page.publish();
+        let until = page.hud.until;
+        let published_until = player::TX.hud_until.load(Ordering::Acquire);
         assert!(perform(&mut app, action).unwrap().is_none());
+        let page = bridge::player_mut(&mut app.pages).unwrap();
+        assert!(page.hud.dismissed,
+            "a singleton no-op must not announce a channel change or reveal the footer");
+        assert_eq!(page.hud.until, until, "no channel-change linger may be armed");
+        assert_eq!(player::TX.hud_until.load(Ordering::Acquire), published_until);
     }
+    assert_eq!(app.ott.as_ref().unwrap().play_generation, generation);
     let r = app.ott.as_ref().unwrap();
     assert!(r.playing.is_none() && r.play_target.is_none() && r.resolver_next.is_none());
     assert_eq!(r.playback_epoch, epoch);

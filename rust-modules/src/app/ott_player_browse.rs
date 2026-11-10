@@ -79,9 +79,10 @@ pub(super) fn open_native(runtime: &mut Runtime, app: &mut App,
 /// Step the currently visible Classic list, anchored to installed media rather
 /// than the browse highlight. Missing authority never falls back to a different
 /// native queue. The target enters the ordinary source-bound Play admission.
+/// Returns true only when that target was queued; a singleton wrap is a no-op.
 pub(super) fn native_list_step(runtime: &mut Runtime, app: &mut App,
     expected: &plx_media::route::PlaybackIdentity, offset: i64)
-    -> Result<(), &'static str>
+    -> Result<bool, &'static str>
 {
     const OPEN: &str = "Open the channel list for the playing source before changing items";
     if !matches!(offset, -1 | 1) { return Err(CHANGED); }
@@ -134,11 +135,11 @@ pub(super) fn native_list_step(runtime: &mut Runtime, app: &mut App,
         }
     { return Err(OPEN); }
     let target = commands::step_in_list(&ids, Some(current), offset).ok_or(OPEN)?;
-    if target == current { return Ok(()); }
+    if target == current { return Ok(false); }
     input_policy::ui(runtime, &OttAction::Play(target.clone()))?;
     runtime.play_with_policy(app, &target, false)?;
     runtime.cancel_setup();
-    Ok(())
+    Ok(true)
 }
 
 /// The first addressed refresh identifies the actual mounted panel created by
