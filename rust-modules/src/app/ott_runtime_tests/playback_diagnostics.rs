@@ -626,6 +626,9 @@ fn live_failure() -> Box<App> {
     assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
     signal_error(&app, FailureKind::PlaybackInterrupted);
     reconcile(&mut app);
+    // Real admission consumed its Job and freed the slot. Hold the next worker
+    // in the fixture, as the queued/late-result tests supply completion by hand.
+    app.ott.as_mut().unwrap().resolver_busy = true;
     app
 }
 
