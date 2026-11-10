@@ -1,5 +1,5 @@
 use super::model::{HudModel, OsdOpacity, PermanentClock};
-use super::{classic, modern, osd, ott_footer};
+use super::{classic, modern, osd, ott_footer, Busy};
 use plx_data::metadata::{NowPlaying, OttNowPlaying};
 use plx_machine::machine::{FontScale, TypographyMeasure};
 use plx_ui::fixture::FixtureMeasure;
@@ -65,7 +65,7 @@ fn modern_default_panel_matches_shared_sheet_and_opacity_does_not_change_text() 
     assert_eq!(normal, baseline);
     assert_eq!(normal.len(), 1);
     let text = draw_census::capture_runs(|| modern::draw_information(Painter::recording(),
-        &layout, Some(&item), None, &mut ott_footer::ClockLabels::default(), &FixtureMeasure));
+        &layout, Some(&item), None, &mut ott_footer::ClockLabels::default(), &FixtureMeasure, Busy::None));
     assert!(!text.is_empty());
     for level in [0, 3, 7, 10] {
         let opacity = OsdOpacity::from_level(level).unwrap();
@@ -76,7 +76,7 @@ fn modern_default_panel_matches_shared_sheet_and_opacity_does_not_change_text() 
         assert_eq!(ink[0].2, opacity.background_alpha(baseline[0].2));
         let rendered = draw_census::capture_runs(|| {
             modern::draw_panel(Painter::recording(), &layout, opacity);
-            modern::draw_information(Painter::recording(), &layout, Some(&item), None, &mut ott_footer::ClockLabels::default(), &FixtureMeasure);
+            modern::draw_information(Painter::recording(), &layout, Some(&item), None, &mut ott_footer::ClockLabels::default(), &FixtureMeasure, Busy::None);
         });
         assert_eq!(rendered, text);
     }

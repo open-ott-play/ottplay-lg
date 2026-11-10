@@ -256,7 +256,7 @@ fn modern_footer_draws_typed_ordinal_and_live_clocks_then_retires_stale_guide() 
         let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
         let layout = compose(base, slot, &motion, None, "", Some(&value), Some(now), &FixtureMeasure);
         let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-            &layout, Some(&value), Some(now), &mut clocks, &FixtureMeasure));
+            &layout, Some(&value), Some(now), &mut clocks, &FixtureMeasure, Busy::None));
         for expected in ["3450", "Channel A", title] {
             assert!(runs.iter().any(|run| run.text == expected), "missing {expected}: {runs:?}");
         }
@@ -277,7 +277,7 @@ fn modern_footer_draws_typed_ordinal_and_live_clocks_then_retires_stale_guide() 
     let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
     let layout = compose(base, slot, &motion, None, "", Some(&value), None, &FixtureMeasure);
     let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-        &layout, Some(&value), None, &mut clocks, &FixtureMeasure));
+        &layout, Some(&value), None, &mut clocks, &FixtureMeasure, Busy::None));
     assert!(clocks.current().is_empty() && clocks.next().is_empty());
     assert!(runs.iter().any(|run| run.text == "123 Channel A"));
     assert!(!runs.iter().any(|run| run.text == "3450" || run.text == "123"));
@@ -299,7 +299,7 @@ fn modern_footer_keeps_episode_identity_and_only_confirmed_finite_clocks() {
         }
         let layout = compose(base, slot, &motion, None, "", Some(&value), None, &FixtureMeasure);
         let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-            &layout, Some(&value), None, &mut clocks, &FixtureMeasure));
+            &layout, Some(&value), None, &mut clocks, &FixtureMeasure, Busy::None));
         for expected in ["Series / Season 2", "Current episode", "Next episode"] {
             assert!(runs.iter().any(|run| run.text == expected), "missing {expected}: {runs:?}");
         }
@@ -362,11 +362,39 @@ fn modern_live_footer_has_real_clock_raster_and_read_only_broadcast_rail() {
     let mut clocks = super::super::ott_footer::ClockLabels::default();
     clocks.refresh_raster(model.video_raster);
     let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(), &plan,
-        Some(&playing), Some(150), &mut clocks, &FixtureMeasure));
+        Some(&playing), Some(150), &mut clocks, &FixtureMeasure, Busy::None));
     for label in ["7", "Channel A", "Current programme", "+1"] {
         assert!(runs.iter().any(|run| run.text == label), "missing {label}: {runs:?}");
     }
     assert!(runs.iter().any(|run| run.text.contains("3840×2160")));
     playing.ott.as_mut().unwrap().live.as_mut().unwrap().guide = None;
     assert!(!shows_timeline(&model, Some(&playing)), "absent EPG is not a seek or broadcast interval");
+}
+
+#[test]
+fn modern_startup_spinner_keeps_channel_title_without_its_catalogue_number() {
+    use plx_data::metadata::OttLivePlaying;
+    let mut playing = footer_playing();
+    playing.ott.as_mut().unwrap().live = Some(OttLivePlaying {
+        channel_title: "123 Channel A".into(), ordinal: Some(3450), guide: None,
+    });
+    let motion = HudMotion::new();
+    let slot = ControlSlot::Discs(Controls::NONE);
+    let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
+    let layout = compose(base, slot, &motion, None, "", Some(&playing), Some(150), &FixtureMeasure);
+    let mut clocks = super::super::ott_footer::ClockLabels::default();
+    for (busy, numbered) in [
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), false),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), false),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), false),
+        (Busy::None, true),
+        (Busy::Transport, true),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), true),
+    ] {
+        let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
+            &layout, Some(&playing), Some(150), &mut clocks, &FixtureMeasure, busy));
+        assert!(runs.iter().any(|run| run.text == "123 Channel A"), "missing title for {busy:?}");
+        assert_eq!(runs.iter().any(|run| run.text == "3450"), numbered, "{busy:?}: {runs:?}");
+    }
+    assert_eq!(playing.ott.as_ref().unwrap().live.as_ref().unwrap().ordinal, Some(3450));
 }
