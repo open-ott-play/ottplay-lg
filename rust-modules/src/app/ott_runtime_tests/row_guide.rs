@@ -137,7 +137,7 @@ fn compact_batch_lookup_refuses_changed_source_selector_or_catalogue() {
 }
 
 #[test]
-fn compact_batch_expires_at_earliest_transition_and_clock_rollback() {
+fn compact_batch_refreshes_at_earliest_transition_but_keeps_other_current_rows() {
     let _serial = plx_base::testlock::serial();
     let (mut app, sample, reply) = batch_fixture();
     deliver(&mut app, sample, reply);
@@ -146,8 +146,13 @@ fn compact_batch_expires_at_earliest_transition_and_clock_rollback() {
     let entry = runtime.catalog.entries[0].clone();
     runtime.wall_clock_ms = (sample.unix_ms() / 1000 + 5) * 1000;
     assert!(runtime.current_row_programme(&runtime.catalog.entries[1]).is_none());
+    assert!(runtime.current_row_programme(&entry).is_some());
+    assert!(runtime.current_row_programme(&runtime.catalog.entries[2]).is_some());
     let query = Query::CurrentNext { now: (runtime.wall_clock_ms / 1000) as i64 };
     assert!(runtime.request_row_guide(&profile, &entry, query).is_some());
+    runtime.wall_clock_ms = (sample.unix_ms() / 1000 + 60) * 1000;
+    assert!(runtime.catalog.entries.iter().all(|row| runtime.current_row_programme(row).is_none()),
+        "each programme still expires at its own half-open end");
     runtime.wall_clock_ms = (sample.unix_ms() / 1000 - 1) * 1000;
     assert!(runtime.current_row_programme(&entry).is_none());
     assert!(runtime.request_row_guide(&profile, &entry, Query::CurrentNext { now: -1 }).is_none());
@@ -208,7 +213,10 @@ fn compact_batch_expiry_invalidates_view_once_while_refresh_worker_is_busy() {
     let metadata_generation = runtime.metadata_generation;
     runtime.tick_row_guide();
     assert_eq!(runtime.revision, revision.wrapping_add(1));
-    assert!(runtime.raw_view().rows.iter().all(|row| row.current_programme.is_none()));
+    let view = runtime.raw_view();
+    assert!(view.rows.iter().find(|row| row.id == "second").unwrap().current_programme.is_none());
+    assert!(view.rows.iter().filter(|row| row.id != "second").all(|row| row.current_programme.is_some()),
+        "one programme boundary must not blank unrelated still-current rows during refresh");
     runtime.tick_row_guide();
     assert_eq!(runtime.revision, revision.wrapping_add(1));
     assert_eq!(runtime.metadata_generation, metadata_generation);
