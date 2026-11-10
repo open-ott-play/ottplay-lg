@@ -9,6 +9,12 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+#[path = "ott_providers/operators.rs"]
+mod operators;
+#[path = "ott_providers/edem.rs"]
+mod edem;
+#[path = "ott_providers/hosted_epg.rs"]
+mod hosted_epg;
 #[path = "ott_providers/live.rs"]
 mod live;
 #[path = "ott_providers/stalker.rs"]
@@ -85,8 +91,10 @@ impl<'a> BoundedHttp<'a> {
         if self.cancelled() {
             return Err("Provider request cancelled");
         }
-        if request.body.is_some()
-            || !request.headers.is_empty()
+        let json_post = request.body.as_ref().is_some_and(|body| body.len() <= 512 * 1024)
+            && request.headers.len() == 1
+            && request.headers[0].eq_ignore_ascii_case("Content-Type: application/json");
+        if (request.body.is_some() || !request.headers.is_empty()) && !json_post
             || ott::http_url(&request.url).is_none()
         {
             return Err("Invalid provider request");
@@ -152,9 +160,11 @@ impl ProviderHttp for BoundedHttp<'_> {
     fn request(&mut self, request: &Request) -> Result<Response, &'static str> {
         let cancel = self.cancel;
         self.request_with(request, |timeouts, consume| {
-            plx_net::net::stream_tls_with_timeouts(
+            plx_net::net::stream_request_tls_with_timeouts(
                 &request.url,
-                &[],
+                &request.headers,
+                if request.body.is_some() { "POST" } else { "GET" },
+                request.body.as_deref(),
                 plx_net::net::Tls::Ca,
                 None,
                 timeouts,
@@ -336,6 +346,21 @@ fn visit_with(
             Ok(ott::M3uSourceKind::PortalOnly) => Ok(()),
             Err(_) => Err("Invalid provider profile"),
         },
+        ProviderKind::Operator(id) => operators::visit(profile,id,http,emit),
+        ProviderKind::Edem => {
+            let config = ott::edem::Config::parse(&profile.source).map_err(|_| "Invalid Edem profile")?;
+            m3u_with(&config.template_profile(profile), http, true, &mut |mut rows| {
+                for row in &mut rows {
+                    let MediaLocator::Http { url } = &row.media else { return Err("Invalid Edem channel"); };
+                    let id = ott::edem::channel_id(url).map_err(|_| "Invalid Edem channel")?;
+                    row.id = format!("{}:edem:{}", profile.id, id);
+                    if let Some(live) = row.live.as_mut() { live.guide_id = row.provider_id.clone(); }
+                    row.provider_id = Some(id.to_owned());
+                    row.media = MediaLocator::Http { url: config.stream(id).map_err(|_| "Invalid Edem channel")? };
+                }
+                emit(rows)
+            })
+        }
         ProviderKind::Xtream => xtream::visit(profile, http, emit),
         ProviderKind::Stalker => match ott::stalker::Config::parse(&profile.source)
             .map_err(|_| "Invalid Stalker profile")?
@@ -377,6 +402,10 @@ pub(super) fn resolve_with(
         MediaLocator::Xtream { .. } => xtream::resolve(profile, entry, http),
         MediaLocator::Stalker { .. } => stalker::resolve(profile, entry, http),
         MediaLocator::StalkerApi { .. } => stalker_api::resolve(profile, entry, http),
+        MediaLocator::Http { .. } if profile.kind == ProviderKind::Edem => {
+            let config=ott::edem::Config::parse(&profile.source).map_err(|_|"Invalid Edem profile")?;
+            config.stream(entry.provider_id.as_deref().ok_or("Invalid Edem channel")?).map_err(|_|"Invalid Edem channel")
+        }
         MediaLocator::Http { url } => ott::http_url(url).ok_or("Invalid media URL"),
         _ => Err("Provider uses another playback adapter"),
     }
@@ -405,6 +434,7 @@ fn metadata_with(
         return Err("Provider request cancelled");
     }
     let result = match profile.kind {
+        ProviderKind::Operator(id) => operators::metadata(profile,id,entry,http),
         ProviderKind::Xtream => xtream::metadata(profile, entry, http),
         ProviderKind::Stalker => stalker::metadata(profile, entry, http),
         _ => Ok(
@@ -427,6 +457,57 @@ pub(super) fn guide_cancellable(
     cancel: &AtomicBool,
 ) -> Result<ott::guide::ResultSet, &'static str> {
     guide_with(profile, entry, request, &mut NativeHttp { worker, cancel })
+}
+
+pub(super) fn guide_configured_cancellable(
+    worker: &OffFrame, profile: &ProviderProfile, entry: &CatalogEntry,
+    request: &ott::guide::Request, config: Option<&ott::hosted_epg::Config>, cancel: &AtomicBool,
+) -> Result<ott::guide::ResultSet, &'static str> {
+    if config.is_none() { return guide_cancellable(worker, profile, entry, request, cancel); }
+    let budget = Budget::start(worker, Duration::from_secs(30));
+    let mut http = BoundedHttp::new(worker, cancel, budget.deadline(), 8 * 1024 * 1024);
+    if let Some(config) = configured_hosted_fallback(profile, entry, config, &mut http)? {
+        hosted_epg::guide(config, profile, entry, request, &mut http)
+    } else { guide_cancellable(worker, profile, entry, request, cancel) }
+}
+
+fn configured_hosted_fallback<'a>(profile: &ProviderProfile, entry: &CatalogEntry,
+    config: Option<&'a ott::hosted_epg::Config>, http: &mut dyn ProviderHttp)
+    -> Result<Option<&'a ott::hosted_epg::Config>, &'static str> {
+    let Some(config) = config else { return Ok(None); };
+    if profile.kind != ProviderKind::M3u || entry.duration_ms.is_some()
+        || !matches!(entry.media, MediaLocator::Http { .. })
+        || ott::m3u_source_kind(&profile.source) != Ok(ott::M3uSourceKind::Playlist)
+    { return Ok(None); }
+    profile.validate().map_err(|_| "Invalid guide profile")?;
+    // A configured provider guide owns its errors too: fallback is only for a
+    // playlist that advertises no guide, never for a temporarily empty feed.
+    Ok(live::m3u_guide_sources(profile, http)?.is_empty().then_some(config))
+}
+
+pub(super) fn guide_rows_configured_cancellable(
+    worker: &OffFrame, profile: &ProviderProfile, entry: &CatalogEntry,
+    request: &ott::guide::Request, selectors: &[ott::guide::rows::Selector],
+    config: Option<&ott::hosted_epg::Config>, cancel: &AtomicBool,
+) -> (Result<ott::guide::ResultSet, &'static str>, ott::guide::rows::Outcome) {
+    if config.is_none() { return guide_rows_cancellable(worker, profile, entry, request, selectors, cancel); }
+    let budget = Budget::start(worker, Duration::from_secs(60));
+    let mut http = BoundedHttp::new(worker, cancel, budget.deadline(), 8 * 1024 * 1024);
+    match configured_hosted_fallback(profile, entry, config, &mut http) {
+        Ok(Some(config)) => match hosted_epg::rows(config, profile, entry, request, selectors, &mut http) {
+            Ok((selected, rows)) => (Ok(selected), rows),
+            Err(error) => hosted_rows_failure(error, selectors.len()),
+        },
+        Ok(None) => guide_rows_cancellable(worker, profile, entry, request, selectors, cancel),
+        Err(error) => hosted_rows_failure(error, selectors.len()),
+    }
+}
+
+fn hosted_rows_failure(error: &'static str, count: usize)
+    -> (Result<ott::guide::ResultSet, &'static str>, ott::guide::rows::Outcome) {
+    let mut report = ott::guide::rows::CoverageReport::new(count);
+    report.reasons.insert(ott::guide::rows::CoverageReason::SourceUnavailable);
+    (Err(error), ott::guide::rows::Outcome { snapshot: None, report })
 }
 
 /// Optional catalogue captions share the selected request and its cancellation.
@@ -485,17 +566,15 @@ fn guide_with(
             && ott::m3u_source_kind(&profile.source) == Ok(ott::M3uSourceKind::Playlist) => {
             live::m3u_guide(profile, entry, request, http)
         }
+        (ProviderKind::Edem, MediaLocator::Http { .. }) => edem::guide(profile,entry,request,http),
+        (ProviderKind::Operator(id), MediaLocator::Http { .. }) => operators::guide(profile,*id,entry,request,http),
         (ProviderKind::Stalker, MediaLocator::StalkerApi { .. }) => {
             stalker_api::guide(profile, entry, request, http)
         }
         (ProviderKind::Stalker, MediaLocator::Stalker { stream_kind, .. })
             if stream_kind == "itv" =>
         {
-            if matches!(request.query, ott::guide::Query::Day { .. }) {
-                Err("Provider offers only a short programme guide")
-            } else {
-                stalker::guide(profile, entry, request, http)
-            }
+            stalker::guide(profile, entry, request, http)
         }
         (ProviderKind::Xtream, MediaLocator::Xtream { stream_kind, .. })
             if stream_kind == "live" =>
@@ -515,6 +594,11 @@ fn m3u(
     http: &mut dyn ProviderHttp,
     emit: &mut dyn FnMut(Vec<CatalogEntry>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
+    m3u_with(profile, http, false, emit)
+}
+fn m3u_with(profile: &ProviderProfile, http: &mut dyn ProviderHttp, edem: bool,
+    emit: &mut dyn FnMut(Vec<CatalogEntry>) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
     let mut parser = ott::M3uParser::new(profile).map_err(|_| "Invalid M3U profile")?;
     let mut pending = Vec::new();
     let mut rows = Vec::new();
@@ -523,7 +607,7 @@ fn m3u(
     let result = http.stream(
         &Request {
             url: profile.source.clone(),
-            headers: Vec::new(),
+            headers: if edem { vec!["User-Agent: Mozilla/5.0".into()] } else {Vec::new()},
             body: None,
         },
         &mut |bytes| {
@@ -538,7 +622,7 @@ fn m3u(
                 }
                 let parsed = std::str::from_utf8(&pending)
                     .map_err(|_| "Invalid M3U text")
-                    .and_then(|line| parser.push_line(line).map_err(|_| "Invalid M3U playlist"));
+                    .and_then(|line| m3u_line(&mut parser, line, edem));
                 pending.clear();
                 match parsed {
                     Ok(Some(row)) => rows.push(row),
@@ -568,7 +652,7 @@ fn m3u(
     }
     if !pending.is_empty() {
         let line = std::str::from_utf8(&pending).map_err(|_| "Invalid M3U text")?;
-        if let Some(row) = parser.push_line(line).map_err(|_| "Invalid M3U playlist")? {
+        if let Some(row) = m3u_line(&mut parser, line, edem)? {
             rows.push(row);
         }
     }
@@ -576,6 +660,14 @@ fn m3u(
         emit(rows)?;
     }
     Ok(())
+}
+
+fn m3u_line(parser:&mut ott::M3uParser, line:&str, edem:bool)->Result<Option<CatalogEntry>,&'static str> {
+    if edem && line.trim_start().starts_with("#EXTINF:") && line.contains("tvg-rec=") {
+        // Provider tvg-rec is a number of days; Edem archive uses utc/lutc shift syntax.
+        let line=line.replacen("tvg-rec=", "catchup=\"shift\" catchup-days=", 1);
+        parser.push_line(&line).map_err(|_|"Invalid Edem playlist")
+    } else {parser.push_line(line).map_err(|_|"Invalid M3U playlist")}
 }
 
 #[cfg(all(test, feature = "hostsim"))]
@@ -708,5 +800,89 @@ mod bounded_http_tests {
             .unwrap();
         assert_eq!(retried.status, 200);
         assert_eq!(retried.body, b"{}");
+    }
+    #[test]
+    fn hosted_json_posts_keep_body_header_cancellation_and_size_bounds() {
+        let worker = OffFrame::for_test();
+        let cancel = AtomicBool::new(false);
+        let deadline = Deadline::after(&worker, Duration::from_secs(5));
+        let mut http = BoundedHttp::new(&worker, &cancel, deadline, 3);
+        let mut req = request();
+        req.headers = vec!["Content-Type: application/json".into()];
+        req.body = Some(b"{}".to_vec());
+        assert_eq!(http.request_with(&req, |_, consume| {
+            assert!(consume(b"{}")); StreamEnd::Closed
+        }).unwrap().body, b"{}");
+        assert_eq!(http.request_with(&req, |_, consume| {
+            assert!(!consume(b"too large")); StreamEnd::Consumer
+        }).err(), Some("Provider response exceeds limit"));
+        req.body = Some(vec![b' '; 512 * 1024 + 1]);
+        assert_eq!(http.request_with(&req, |_, _| panic!("oversized request dialled")).err(),
+            Some("Invalid provider request"));
+        req.body = Some(b"{}".to_vec());
+        req.headers.push("Authorization: never forward arbitrary headers".into());
+        assert_eq!(http.request_with(&req, |_, _| panic!("extra header dialled")).err(),
+            Some("Invalid provider request"));
+    }
+
+}
+
+/// UTC wire timestamps are independent of the television's UI timezone.
+fn utc_stamp(seconds: i64, with_time: bool) -> Result<String, &'static str> {
+    if seconds < 0 { return Err("Invalid provider timestamp"); }
+    let stamp = libc::time_t::try_from(seconds).map_err(|_| "Provider timestamp exceeds device range")?;
+    let mut output = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: valid input/output pointers; read the initialized tm only on success.
+    if unsafe { libc::gmtime_r(&stamp, output.as_mut_ptr()) }.is_null() { return Err("Invalid provider timestamp"); }
+    let time = unsafe { output.assume_init() };
+    let date = format!("{:04}-{:02}-{:02}", time.tm_year + 1900, time.tm_mon + 1, time.tm_mday);
+    Ok(if with_time { format!("{date}:{:02}-{:02}", time.tm_hour, time.tm_min) } else { date })
+}
+
+pub(super) fn resolve_archive_cancellable(worker: &OffFrame, profile: &ProviderProfile,
+    entry: &CatalogEntry, interval: ott::archive::ArchiveInterval, cancel: &AtomicBool) -> Result<String, &'static str> {
+    let mut http = NativeHttp { worker, cancel };
+    match profile.kind {
+        ProviderKind::Xtream => xtream::archive(profile, entry, interval, &mut http),
+        ProviderKind::Stalker => stalker::archive(profile, entry, interval, &mut http),
+        _ => Err("Provider archive adapter unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod hosted_fallback_admission_tests {
+    use super::*;
+    struct Header { text: Result<&'static str, &'static str>, reads: usize }
+    impl ProviderHttp for Header {
+        fn cancelled(&self) -> bool { false }
+        fn request(&mut self, _: &Request) -> Result<Response, &'static str> { panic!("header test must not request programme data") }
+        fn stream(&mut self, _: &Request, consume: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), &'static str> {
+            self.reads += 1;
+            consume(self.text?.as_bytes()); Ok(())
+        }
+    }
+    fn profile() -> ProviderProfile {
+        ProviderProfile { id:"m3u-1".into(), name:"Home".into(), kind:ProviderKind::M3u,
+            source:"https://provider.invalid/list.m3u".into(), source_alias:String::new(), enabled:true }
+    }
+    #[test]
+    fn hosted_fallback_only_admits_playlist_without_advertised_guide() {
+        let profile = profile();
+        let entry = ott::parse_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"1\",Channel\nhttps://provider.invalid/1.m3u8\n", &profile).unwrap().entries.remove(0);
+        let config = ott::hosted_epg::Config::parse(&serde_json::json!({"version":1,"url":"https://guide.invalid/epg/v1","source":"epg-one"})).unwrap();
+        for header in ["#EXTM3U url-tvg=\"guide.xml\"\n", "#EXTM3U x-tvg-url=\"guide.xml\"\n", "#EXTM3U tvg-url=\"guide.xml\"\n"] {
+            let mut http = Header { text:Ok(header), reads:0 };
+            assert!(configured_hosted_fallback(&profile, &entry, Some(&config), &mut http).unwrap().is_none());
+        }
+        let mut http = Header { text:Ok("#EXTM3U\n"), reads:0 };
+        assert!(configured_hosted_fallback(&profile, &entry, Some(&config), &mut http).unwrap().is_some());
+        let mut http = Header { text:Err("Source temporarily unavailable"), reads:0 };
+        assert!(configured_hosted_fallback(&profile, &entry, Some(&config), &mut http).is_err());
+        let mut http = Header { text:Ok("#EXTM3U\n"), reads:0 };
+        assert!(configured_hosted_fallback(&profile, &entry, None, &mut http).unwrap().is_none());
+        assert_eq!(http.reads, 0, "disabled fallback performs no new work");
+        let mut vod = entry.clone(); vod.duration_ms = Some(60_000);
+        assert!(configured_hosted_fallback(&profile, &vod, Some(&config), &mut http).unwrap().is_none());
+        assert_eq!(http.reads, 0, "finite media cannot acquire a broadcast guide");
     }
 }

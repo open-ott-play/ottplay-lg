@@ -1,3 +1,5 @@
+> Historical Plex-client comparison. This document is not the current OTTPlay LG capability inventory. Statements below may describe superseded code; see [native capability status](native-capability-status.md) and verify against the active OTT runtime and release source.
+
 # Movie & TV parity gaps vs. the official Plex clients
 
 Audited 2026-07-29 against reference screenshots of the **official webOS Plex client** (sign-in,

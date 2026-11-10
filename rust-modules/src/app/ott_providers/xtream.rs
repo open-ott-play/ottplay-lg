@@ -258,7 +258,23 @@ fn short_guide(
     xtream::short_epg(&value).map_err(|_| "Invalid Xtream programme guide")
 }
 
-/// Project the existing short-guide response, without inventing a day endpoint.
+pub(super) fn archive(profile: &ProviderProfile, entry: &CatalogEntry,
+    interval: ott::archive::ArchiveInterval, http: &mut dyn ProviderHttp) -> Result<String, &'static str> {
+    let config = Config::parse(&profile.source).map_err(|_| "Invalid Xtream profile")?;
+    let MediaLocator::Xtream { stream_id, stream_kind, .. } = &entry.media else { return Err("Invalid Xtream media locator"); };
+    if profile.kind != ott::ProviderKind::Xtream || stream_kind != "live" { return Err("Archive requires a live channel"); }
+    let mut requests = Requests { http, remaining: 1 };
+    requests.authenticate(&config)?;
+    let start = super::utc_stamp(interval.start, true)?;
+    let seconds = interval.end.checked_sub(interval.start).filter(|n| *n > 0).ok_or("Invalid archive interval")?;
+    let minutes = u64::try_from(seconds).ok()
+        .and_then(|seconds| seconds.checked_add(interval.start.rem_euclid(60) as u64))
+        .and_then(|seconds| seconds.checked_add(59)).map(|seconds| seconds / 60)
+        .ok_or("Invalid archive duration")?;
+    config.archive_url(stream_id, &start, minutes).map_err(|_| "Invalid Xtream archive identity")
+}
+
+/// Use the full channel EPG table for addressed day windows; short EPG for current/next.
 pub(super) fn guide(
     profile: &ProviderProfile,
     entry: &CatalogEntry,
@@ -272,9 +288,6 @@ pub(super) fn guide(
         .query
         .validate()
         .map_err(|_| "Invalid guide interval")?;
-    if matches!(request.query, ott::guide::Query::Day { .. }) {
-        return Err("Provider offers only a short programme guide");
-    }
     if profile.kind != ott::ProviderKind::Xtream {
         return Err("Invalid Xtream profile");
     }
@@ -294,7 +307,13 @@ pub(super) fn guide(
     config
         .stream_url(stream_kind, stream_id, extension)
         .map_err(|_| "Invalid Xtream stream identity")?;
-    let rows: Vec<_> = short_guide(&config, stream_id, http)?
+    let guide = if matches!(request.query, ott::guide::Query::Day { .. }) {
+        let mut requests = Requests { http, remaining: 2 };
+        requests.authenticate(&config)?;
+        let value = requests.json(config.api_url("get_simple_data_table", &[("stream_id", stream_id)]))?;
+        xtream::short_epg(&value).map_err(|_| "Invalid Xtream programme guide")?
+    } else { short_guide(&config, stream_id, http)? };
+    let rows: Vec<_> = guide
         .into_iter()
         .map(|row| ott::epg::Programme {
             channel: stream_id.clone(),
@@ -312,7 +331,9 @@ pub(super) fn guide(
     Ok(ott::guide::ResultSet {
         context: request.context.clone(),
         query: request.query,
-        coverage: ott::guide::Coverage::ProviderShortGuide,
+        coverage: if matches!(request.query, ott::guide::Query::Day { .. }) {
+            ott::guide::Coverage::RequestedWindow
+        } else { ott::guide::Coverage::ProviderShortGuide },
         programmes,
     })
 }
@@ -640,30 +661,20 @@ mod tests {
     }
 
     #[test]
-    fn short_guide_only_providers_reject_day_before_io() {
-        let (mut profile, mut fixture, _, mut entry, mut request) = guide_fixture();
+    fn day_guide_uses_full_channel_table() {
+        let (profile, mut fixture, _, entry, mut request) = guide_fixture();
         request.query = ott::guide::Query::Day {
             start: 100,
             end: 400,
         };
-        assert_eq!(
-            super::super::guide_with(&profile, &entry, &request, &mut fixture),
-            Err("Provider offers only a short programme guide")
-        );
-        assert!(fixture.calls.is_empty());
-        profile.kind = ott::ProviderKind::Stalker;
-        profile.source =
-            r#"{"portal":"https://portal.invalid/c/","mac":"00:1a:79:01:02:03"}"#.into();
-        entry.media = MediaLocator::Stalker {
-            cmd: "https://stream.invalid/live".into(),
-            stream_kind: "itv".into(),
-            series: String::new(),
-        };
-        assert_eq!(
-            super::super::guide_with(&profile, &entry, &request, &mut fixture),
-            Err("Provider offers only a short programme guide")
-        );
-        assert!(fixture.calls.is_empty());
+        let config = Config::parse(&profile.source).unwrap();
+        fixture.responses.insert(config.api_url("get_simple_data_table", &[("stream_id", "42")]),
+            json!({"epg_listings":[{"start_timestamp":100,"stop_timestamp":200,"title":"Past"}]}));
+        let result = super::super::guide_with(&profile, &entry, &request, &mut fixture).unwrap();
+        assert_eq!(result.coverage, ott::guide::Coverage::RequestedWindow);
+        assert_eq!(result.programmes.len(), 1);
+        assert!(fixture.calls.iter().any(|url| url.contains("get_simple_data_table")));
+
     }
 
     #[test]

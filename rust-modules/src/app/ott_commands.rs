@@ -57,6 +57,19 @@ mod kiosk;
 mod offline;
 #[path = "ott_provider_settings.rs"]
 mod provider_adapters;
+#[path = "ott_provider_config.rs"]
+mod provider_config;
+
+pub(super) fn provider_settings_before_saved(runtime: &mut Runtime, inv: Option<&Invocation>) -> bool {
+    provider_config::before_saved(runtime, inv)
+}
+pub(super) fn provider_settings_settled(runtime: &mut Runtime, inv: &Invocation, durable: bool, applied: bool) -> Option<Value> {
+    provider_config::settled(runtime, inv, durable, applied)
+}
+pub(super) fn provider_settings_uncertain(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
+    provider_config::uncertain(runtime, inv)
+}
+
 #[path = "ott_settings.rs"]
 mod settings;
 use crate::app::ott_remote::AfterReply;
@@ -65,6 +78,7 @@ use plx_machine::machine::{Edge, InputEvent, InputKind, Key, Source, Tick};
 
 #[derive(Default)]
 pub(super) struct Receipts {
+    native_provider: provider_config::State,
     kiosk: Option<kiosk::Pending>,
     media_tracks: media_tracks::State,
     rows: Vec<Receipt>,
@@ -236,37 +250,70 @@ fn provider_context(runtime: &Runtime) -> Value {
     })
 }
 
-fn provider_kind(value: &str) -> Option<ProviderKind> {
-    match value {
-        "m3u" => Some(ProviderKind::M3u),
-        "xtream" => Some(ProviderKind::Xtream),
-        "stalker" => Some(ProviderKind::Stalker),
-        "vportal" => Some(ProviderKind::VPortal),
-        "local" | "offline" => Some(ProviderKind::Local),
-        "plex" => Some(ProviderKind::Plex),
-        _ => None,
+fn provider_kind(value: &str) -> Option<ProviderKind> { ProviderKind::from_id(value) }
+fn kinds() -> Vec<ProviderKind> { ProviderKind::all() }
+
+/// Explicit IDs/indices outrank labels; complete labels outrank partial names.
+/// A provider name containing another provider's ID must not make that ID ambiguous.
+fn provider_matches(query: &str) -> Vec<ProviderKind> {
+    let candidates: Vec<_> = kinds().into_iter().enumerate().filter_map(|(i, kind)| {
+        let label = provider_name(kind).to_lowercase();
+        let rank = if query == wire_provider(kind) || query == kind.canonical_id()
+            || query == i.to_string() { 2 }
+            else if !query.is_empty() && query == label { 1 }
+            else if !query.is_empty() && label.contains(query) { 0 }
+            else { return None; };
+        Some((rank, kind))
+    }).collect();
+    let best = candidates.iter().map(|(rank, _)| *rank).max();
+    candidates.into_iter().filter(|(rank, _)| Some(*rank) == best)
+        .map(|(_, kind)| kind).collect()
+}
+
+fn provider_candidate(runtime: &Runtime, kind: ProviderKind,
+    servers: &[super::ott_plex_setup::PlexSetupServer]) -> Result<Saved, &'static str>
+{
+    let mut saved = runtime.saved.clone();
+    let usable = |profile: &&ProviderProfile| profile.enabled && profile.kind == kind
+        && !profile.source.is_empty();
+    let mut active = saved.profiles.profiles.iter().find(usable).map(|p| p.id.clone());
+    if kind == ProviderKind::Plex && !servers.is_empty()
+        && !saved.profiles.profiles.iter().any(|p| p.enabled && p.kind == kind
+            && servers.iter().any(|server| server.machine_id == p.source))
+    {
+        if let super::ott_plex_setup::PlexSetupPlan::Profiles { updated, first_profile_id, .. } =
+            super::ott_plex_setup::plan(&saved.profiles, servers)?
+        {
+            saved.profiles = updated;
+            active = Some(first_profile_id);
+        }
+    } else if kind == ProviderKind::Plex && !servers.is_empty() {
+        // Do not let an older stale row precede a currently authorized source.
+        active = saved.profiles.profiles.iter().find(|p| p.enabled && p.kind == kind
+            && servers.iter().any(|server| server.machine_id == p.source)).map(|p| p.id.clone());
     }
+    saved.profiles.active_profile = active;
+    saved.settings.insert("selectedProvider".into(), json!(kind.canonical_id()));
+    Ok(saved)
 }
-fn kinds() -> [ProviderKind; 6] {
-    [
-        ProviderKind::M3u,
-        ProviderKind::VPortal,
-        ProviderKind::Local,
-        ProviderKind::Plex,
-        ProviderKind::Xtream,
-        ProviderKind::Stalker,
-    ]
-}
-fn provider_name(kind: ProviderKind) -> &'static str {
+
+
+pub(super) fn provider_name(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::M3u => "M3U",
         ProviderKind::VPortal => "VPortal",
         ProviderKind::Local => "Local videos",
         ProviderKind::Plex => "Plex",
         ProviderKind::Xtream => "Xtream",
+        ProviderKind::Edem => "Edem.tv / iLook.tv",
+        ProviderKind::Operator(id) => id.name(),
         ProviderKind::Stalker => "Stalker",
     }
 }
+pub(super) fn default_profile_name(kind:ProviderKind,number:usize)->String {
+    if number==1 && matches!(kind,ProviderKind::Edem|ProviderKind::Operator(_)){provider_name(kind).into()}else{format!("{} {number}",provider_name(kind))}
+}
+
 fn fields(value: &Value, keys: &[&str]) -> bool {
     value
         .as_object()
@@ -387,13 +434,13 @@ fn insert_profile(
     let mut profile = if let Some(index) = existing {
         saved.profiles.profiles[index].clone()
     } else {
-        let mut id = format!("{}-{number}", kind.canonical_id());
+        let mut id = format!("{}-{number}", kind.canonical_id().replace('/', "_"));
         while saved.profiles.profiles.iter().any(|p| p.id == id) {
             id.push('_');
         }
         ProviderProfile {
             id,
-            name: format!("{} {number}", provider_name(kind)),
+            name: default_profile_name(kind,number),
             kind,
             source: String::new(),
             source_alias: String::new(),
@@ -403,7 +450,7 @@ fn insert_profile(
     profile.source = source;
     if let Some(name) = name {
         profile.name = if name.trim().is_empty() {
-            format!("{} {number}", provider_name(kind))
+            default_profile_name(kind,number)
         } else {
             name
         };
@@ -442,7 +489,7 @@ fn profiles(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
     if inv.action == "profile_settings"
         && matches!(
             runtime.provider,
-            ProviderKind::Xtream | ProviderKind::Stalker
+            ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)
         )
     {
         return provider_adapters::command(runtime, inv);
@@ -553,12 +600,13 @@ fn profiles(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
     defer(runtime, inv, saved, reload && changed, response)
 }
 fn provider_settings(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
+    if provider_config::handles(inv) { return provider_config::command(runtime, inv); }
     let now = runtime.now_ms();
     let p = &inv.params;
     let Some(kind) = p["provider"].as_str().and_then(provider_kind) else {
         return Some(rejected("Unknown provider"));
     };
-    if matches!(kind, ProviderKind::Xtream | ProviderKind::Stalker) {
+    if matches!(kind, ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)) {
         return provider_adapters::command(runtime, inv);
     }
     if kind == ProviderKind::Plex {
@@ -1073,7 +1121,8 @@ pub(super) fn settings_public_saved(runtime: &mut Runtime, inv: &Invocation, res
 }
 
 pub(super) fn settings_failure(inv: &Invocation, reason: &str) -> Option<Value> {
-    (inv.action == "player_settings").then(|| settings::failure(&inv.params, reason))
+    provider_config::failure(inv, reason)
+        .or_else(|| (inv.action == "player_settings").then(|| settings::failure(&inv.params, reason)))
 }
 
 /// Early fences use the same strict raw request as the track handler. A lossy
@@ -1163,7 +1212,8 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             return Some(favorites_items::error(inv, "expired"));
         }
         return Some(
-            category_select_rejection(runtime, inv, "unavailable")
+            provider_config::failure(inv, "expired")
+                .or_else(|| category_select_rejection(runtime, inv, "unavailable"))
                 .or_else(|| {
                     media_tracks_failure(
                         inv,
@@ -1214,6 +1264,12 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             };
             let mut value = state(app, runtime);
             value["row_guide"] = runtime.row_guide_diagnostics();
+            if let Some(guide) = value["row_guide"].as_object_mut() {
+                guide.insert("app_ui_mode".into(), json!(app.bridge.ui_mode().index()));
+                guide.insert("reply_current".into(), json!(runtime.reply.is_some()
+                    && runtime.reply == bridge::ott_ui_target(&app.pages)));
+                guide.insert("ui".into(), bridge::ott_guide_presentation(&app.pages).unwrap_or(Value::Null));
+            }
             value["provider_context"] = provider_context(runtime);
             value["uuid"] = json!(runtime.remote.device_id());
             if value.get("provider").is_none() {
@@ -1290,6 +1346,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             data["local_media"] = crate::app::ott_local_session::capability(true);
             data["local_media_session"] = crate::app::ott_local_session::extension_capability();
             data["local_media_progressive"] = crate::app::ott_local_session::extension_capability();
+            data["native_provider_settings"] = provider_config::capability();
             data["plex_queue"] = crate::app::ott_plex_queue::queue_capability();
             data["plex_queue_state_v2"] = crate::app::ott_plex_queue::queue_state_v2_capability();
             data["plex_queue_repeat"] = crate::app::ott_plex_queue::queue_repeat_capability();
@@ -1299,6 +1356,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 data["media_tracks"] = json!({"version":1});
             }
             if catalog_remote::capability(runtime) {
+                data["catalog_random"] = json!({"version":2,"scope":"receipt","request_field":"receipt_random"});
                 data["categories"] =
                     json!({"version":1,"operations":["list","select"],"maxPageSize":200});
             }
@@ -1353,31 +1411,17 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 .map(str::to_lowercase)
                 .or_else(|| p["query"].as_u64().map(|n| n.to_string()))
                 .unwrap_or_default();
-            let matches: Vec<_> = kinds()
-                .into_iter()
-                .enumerate()
-                .filter(|(i, k)| {
-                    query == wire_provider(*k)
-                        || query == k.canonical_id()
-                        || query == i.to_string()
-                        || (!query.is_empty() && provider_name(*k).to_lowercase().contains(&query))
-                })
-                .map(|(_, k)| k)
-                .collect();
+            let matches = provider_matches(&query);
             if matches.len() != 1 {
                 return Some(rejected("Choose one provider by ID or index"));
             }
             let kind = matches[0];
-            let mut saved = runtime.saved.clone();
-            saved.profiles.active_profile = saved
-                .profiles
-                .profiles
-                .iter()
-                .find(|p| p.enabled && p.kind == kind && !p.source.is_empty())
-                .map(|p| p.id.clone());
-            saved
-                .settings
-                .insert("selectedProvider".into(), json!(kind.canonical_id()));
+            let servers = if kind == ProviderKind::Plex { runtime.native_plex_setup_servers() }
+                else { Vec::new() };
+            let saved = match provider_candidate(runtime, kind, &servers) {
+                Ok(saved) => saved,
+                Err(error) => return Some(rejected(error)),
+            };
 
             let reload = saved.profiles.active_profile.is_some();
             defer(
@@ -1679,6 +1723,51 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_plex_candidate_uses_authorized_metadata_without_copying_credentials() {
+        use super::super::ott_plex_setup::PlexSetupServer;
+        let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        let servers = [PlexSetupServer { machine_id: "native-nas".into(), name: "Native NAS".into(), id_hint: 7 }];
+        let candidate = provider_candidate(&runtime, ProviderKind::Plex, &servers).unwrap();
+        let selected = candidate.profiles.profiles.iter().find(|p| Some(&p.id) == candidate.profiles.active_profile.as_ref()).unwrap();
+        assert_eq!(selected.kind, ProviderKind::Plex);
+        assert_eq!(selected.source, "native-nas");
+        assert_eq!(candidate.settings["selectedProvider"], "plex");
+        assert_eq!(candidate.plex_sources().unwrap().len(), 0, "metadata cannot copy account credentials");
+        assert!(runtime.saved.profiles.profiles.is_empty(), "planning does not write or change runtime");
+        runtime.saved = candidate;
+        let original_id = runtime.saved.profiles.active_profile.clone();
+        let current = runtime.saved.profiles.profiles.iter_mut().find(|p| p.kind == ProviderKind::Plex).unwrap();
+        current.enabled = false;
+        runtime.saved.profiles.active_profile = None;
+        let again = provider_candidate(&runtime, ProviderKind::Plex, &servers).unwrap();
+        assert_eq!(again.profiles.profiles.len(), 1);
+        assert_eq!(again.profiles.active_profile, original_id);
+        assert!(again.profiles.profiles[0].enabled);
+        runtime.saved = again;
+        let mut stale = runtime.saved.profiles.profiles[0].clone();
+        stale.id = "stale-first".into(); stale.source = "retired-machine".into();
+        runtime.saved.profiles.profiles.insert(0, stale);
+        let current = provider_candidate(&runtime, ProviderKind::Plex, &servers).unwrap();
+        assert_eq!(current.profiles.active_profile, original_id, "a stale first row cannot capture remote selection");
+        let absent = provider_candidate(&Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test()), ProviderKind::Plex, &[]).unwrap();
+        assert!(absent.profiles.profiles.is_empty());
+        assert!(absent.profiles.active_profile.is_none());
+    }
+
+
+    #[test]
+    fn provider_ids_and_indices_outrank_partial_labels() {
+        assert_eq!(provider_matches("stalker"), vec![ProviderKind::Stalker]);
+        for (index, kind) in kinds().into_iter().enumerate() {
+            assert_eq!(provider_matches(kind.canonical_id()), vec![kind]);
+            assert_eq!(provider_matches(&index.to_string()), vec![kind]);
+        }
+        assert!(provider_matches("").is_empty());
+        assert!(provider_matches("missing-provider").is_empty());
+    }
+
     #[test]
     fn binding_imported_folder_selects_exact_local_slot_without_changing_other_profiles() {
         let mut runtime =

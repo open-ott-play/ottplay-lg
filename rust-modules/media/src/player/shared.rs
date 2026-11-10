@@ -1058,6 +1058,22 @@ impl Shared {
         }).unwrap_or(false)
     }
 
+    /// Attribute a typed HLS open failure and its terminal flags under one
+    /// native-owner fence. A previous detail still wins, but cannot suppress
+    /// this owner's failure flag. Never nest `note_io_failure_for` here.
+    pub(crate) fn fail_hls_open_for(&self, epoch: u32,
+        exit: plx_telemetry::telemetry::classes::DemuxExitClass,
+        outcome: plx_telemetry::telemetry::classes::TraceOutcome, pushed: bool) -> bool
+    {
+        self.with_native_session(epoch, NativeEventClass::Other, 0, || {
+            let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
+            first.get_or_insert(super::report::IoFailureDetails::Hls { exit, outcome: Some(outcome) });
+            if pushed { self.demux_io_failed.store(true, Ordering::Release); }
+            else { self.fail_demux(exit); }
+            true
+        }).unwrap_or(false)
+    }
+
     /// A snapshot, never a live lookup by the remote reader. Native attribution
     /// is checked by `failure_details_now` before this is included in a reply.
     pub(crate) fn io_failure(&self) -> Option<super::report::IoFailureDetails> {

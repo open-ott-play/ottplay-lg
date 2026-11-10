@@ -1,0 +1,16 @@
+{
+  "id": "nativeEpgApiV1",
+  "type": "string",
+  "scope": "application",
+  "sensitive": false,
+  "access": {
+    "read": true,
+    "write": true
+  },
+  "default_value": "",
+  "apply": "immediate",
+  "constraints": {
+    "max_utf8_bytes": 4096
+  },
+  "description": "Optional hosted guide fallback. Empty disables it; otherwise enter JSON with version 1, url ending /epg/v1 and source epg-one. Provider-advertised guides keep priority."
+}

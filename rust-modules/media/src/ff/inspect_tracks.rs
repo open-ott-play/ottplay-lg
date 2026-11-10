@@ -47,6 +47,7 @@ pub struct TrackInventory {
     complete: bool,
     pub audio: Vec<InspectedTrack>,
     pub subtitles: Vec<InspectedTrack>,
+    transport: std::collections::BTreeMap<i32, crate::ff::hls_observed::TransportIdentity>,
 }
 
 impl TrackInventory {
@@ -60,7 +61,29 @@ impl TrackInventory {
     /// Known rows without evidence of a complete container inventory. Manual
     /// menus may use these rows; a complete remote catalog must not infer more.
     pub fn from_partial(audio: Vec<InspectedTrack>, subtitles: Vec<InspectedTrack>) -> Self {
-        Self { complete: false, audio, subtitles }
+        Self { complete: false, audio, subtitles, transport: std::collections::BTreeMap::new() }
+    }
+
+    /// Proven MPEG-TS identity for this observed container stream, when a
+    /// validated PAT/PMT was joined with the checked AVStream.id accessor.
+    pub fn transport_identity(&self, stream_index: i32) -> Option<crate::ff::hls_observed::TransportIdentity> {
+        self.transport.get(&stream_index).copied()
+    }
+    pub(crate) fn bind_transport_identity(&mut self, stream_index: i32, identity: crate::ff::hls_observed::TransportIdentity)
+        -> Result<(), &'static str>
+    {
+        if !self.audio.iter().chain(&self.subtitles).any(|row| row.stream_index==stream_index)
+            || self.transport.contains_key(&stream_index) || self.transport.values().any(|old| *old==identity) {
+            return Err("Invalid or duplicate HLS transport binding");
+        }
+        self.transport.insert(stream_index,identity); Ok(())
+    }
+    #[cfg(any(test, feature="test-support"))]
+    pub fn with_transport_for_test(mut self, bindings: &[(i32,crate::ff::hls_observed::TransportIdentity)])
+        -> Result<Self,&'static str>
+    {
+        for &(index,identity) in bindings { self.bind_transport_identity(index,identity)?; }
+        self.mark_incomplete(); Ok(self)
     }
 
     /// A probe of one segment cannot establish a whole presentation's inventory.

@@ -341,3 +341,32 @@ fn modern_clock_rows_preserve_complete_labels_and_the_reserved_line_count() {
         }
     }
 }
+
+#[test]
+fn modern_live_footer_has_real_clock_raster_and_read_only_broadcast_rail() {
+    let _serial = plx_base::testlock::serial();
+    use plx_data::metadata::{OttGuideProgramme, OttLivePlaying, OttNowNext};
+    let mut playing = footer_playing();
+    let info = playing.ott.as_mut().unwrap();
+    info.live = Some(OttLivePlaying { channel_title: "Channel A".into(), ordinal: Some(7),
+        guide: Some(OttNowNext { now_s: 150, current: Some(OttGuideProgramme {
+            title: "Current programme".into(), description: "Description".into(), start_s: 100, end_s: 200 }), next: None }) });
+    let model = HudModel { wall_now_s: Some(150), video_raster: (3840,2160), ..HudModel::default() };
+    assert!(shows_timeline(&model, Some(&playing)));
+    let domain = super::super::classic::rail_domain(plx_machine::machine::UiMode::Modern, &model, Some(&playing));
+    assert!(domain.is_read_only());
+    assert_eq!(domain.seek_duration(0), 0);
+    let motion = HudMotion::new(); let slot = ControlSlot::Discs(Controls::NONE);
+    let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
+    let plan = compose(base, slot, &motion, None, "", Some(&playing), Some(150), &FixtureMeasure);
+    let mut clocks = super::super::ott_footer::ClockLabels::default();
+    clocks.refresh_raster(model.video_raster);
+    let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(), &plan,
+        Some(&playing), Some(150), &mut clocks, &FixtureMeasure));
+    for label in ["7", "Channel A", "Current programme", "+1"] {
+        assert!(runs.iter().any(|run| run.text == label), "missing {label}: {runs:?}");
+    }
+    assert!(runs.iter().any(|run| run.text.contains("3840×2160")));
+    playing.ott.as_mut().unwrap().live.as_mut().unwrap().guide = None;
+    assert!(!shows_timeline(&model, Some(&playing)), "absent EPG is not a seek or broadcast interval");
+}

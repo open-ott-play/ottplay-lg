@@ -132,6 +132,8 @@ pub const CLASSIC_SECONDARY: [f32; 4] = STUDIO_350;
 pub const CLASSIC_SECONDARY_ON_SELECTION: [f32; 4] = STUDIO_650;
 /// Classic programme progress fill, matching Studio in the web player.
 pub const CLASSIC_PROGRESS: [f32; 4] = STUDIO_MINT;
+/// Availability marker for a channel with an archive.
+pub const CLASSIC_ARCHIVE_AVAILABLE: [f32; 4] = GREEN_400;
 /// Unfilled Classic programme progress track.
 pub const CLASSIC_PROGRESS_TRACK: [f32; 4] = STUDIO_800;
 /// Classic focused row fill.

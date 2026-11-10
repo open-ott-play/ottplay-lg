@@ -700,3 +700,59 @@ fn portal_only_m3u_never_requests_a_tv_catalogue_guide_or_direct_stream() {
     assert_eq!(http.streams, 0);
     assert_eq!(http.chunks_read, 0);
 }
+
+#[test]
+fn edem_dispatch_uses_latest_stream_host_and_separates_channel_from_guide_id() {
+    struct TemplateHttp { calls: Vec<String> }
+    impl ProviderHttp for TemplateHttp {
+        fn cancelled(&self)->bool {false}
+        fn request(&mut self, request:&Request)->Result<Response,&'static str> {
+            self.calls.push(request.url.clone());
+            assert_eq!(request.url,"https://epg.drm-play.com/edem/edem_epg_ico1.m3u8");
+            assert_eq!(request.headers, vec!["User-Agent: Mozilla/5.0"]);
+            assert!(request.body.is_none());
+            Ok(Response {status:200,body:b"#EXTM3U\n#EXTINF:-1 tvg-id=\"743\" tvg-rec=\"7\" group-title=\"News\",News HD\nhttp://localhost/iptv/000000000000/407/index.m3u8\n".to_vec()})
+        }
+    }
+    let mut profile=profile(r#"{"key":"first_key","list":1}"#.into());
+    profile.kind=ProviderKind::Edem;
+    let mut http=TemplateHttp{calls:Vec::new()};
+    let mut rows=Vec::new();
+    visit_with(&profile,&mut http,&mut |batch|{rows.extend(batch);Ok(())}).unwrap();
+    assert_eq!(rows.len(),1);
+    let row=&rows[0];
+    assert_eq!(row.provider_id.as_deref(),Some("407"));
+    assert_eq!(row.live.as_ref().unwrap().guide_id.as_deref(),Some("743"));
+    assert_eq!(row.id,"fixture:edem:407");
+    let url=resolve_with(&profile,row,&mut http).unwrap();
+    assert_eq!(url,format!("http://{}/iptv/first_key/407/index.m3u8",ott::edem::STREAM_HOST));
+    assert!(!http.calls.iter().any(|url|url.contains("first_key")));
+    let catchup=row.live.as_ref().unwrap().catchup.as_ref().unwrap();
+    assert_eq!(catchup.retention_seconds,7*86400);
+    let archive=ott::archive::plan(catchup,&url,ott::archive::ArchiveInterval{start:100,end:200},300).unwrap();
+    assert!(archive.url.ends_with("?utc=100&lutc=300"));
+    profile.source=r#"{"key":"second_key","list":1}"#.into();
+    let mut updated=Vec::new();
+    visit_with(&profile,&mut http,&mut |batch|{updated.extend(batch);Ok(())}).unwrap();
+    assert_eq!(updated[0].id,row.id,"key changes preserve stable channel identity");
+}
+
+#[test]
+fn edem_guide_uses_template_epg_id_and_current_list_namespace() {
+    struct JsonHttp;
+    impl ProviderHttp for JsonHttp {
+        fn cancelled(&self)->bool {false}
+        fn request(&mut self,request:&Request)->Result<Response,&'static str> {
+            assert_eq!(request.url,"https://epg.drm-play.com/iptv-e2-soveni/epg/743.json");
+            assert_eq!(request.headers,vec!["User-Agent: Mozilla/5.0"]);
+            Ok(Response{status:200,body:br#"{"epg_data":[{"time":100,"time_to":200,"name":"Now","descr":"Full synopsis"},{"time":"200","time_to":"300","name":"Next"}]}"#.to_vec()})
+        }
+    }
+    let mut p=profile(r#"{"key":"test_key","list":1}"#.into());p.kind=ProviderKind::Edem;
+    let mut row=ott::parse_m3u("#EXTM3U\n#EXTINF:-1 tvg-id=\"407\",News\nhttp://media.invalid/video\n",&ott::edem::Config::parse(&p.source).unwrap().template_profile(&p)).unwrap().entries.remove(0);
+    row.live.as_mut().unwrap().guide_id=Some("743".into());
+    let request=guide_request(&p,&row,150);
+    let result=guide_with(&p,&row,&request,&mut JsonHttp).unwrap();
+    assert_eq!(result.programmes.len(),2);
+    assert_eq!(result.programmes[0].description,"Full synopsis");
+}

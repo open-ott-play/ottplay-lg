@@ -151,3 +151,28 @@ fn hls_webvtt_expanded_uri_table_is_bounded_while_materializing() {
     let error = external_hls::vod_segments_bounded(&base, text, SEGMENT_LIMIT, 5000).err();
     assert_eq!(error, Some("HLS resource table exceeds size limit"), "stop retaining URIs before the later poison URI");
 }
+
+#[test]
+fn hls_webvtt_cancellation_during_cue_validation_does_not_publish_partial_output() {
+    let text = segment("X-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:900000",
+        "00:00.000", "00:01.000", "Caption");
+    let mut calls = 0;
+    let mut stop = || { calls += 1; calls >= 2 };
+    let mut assembly = Assembly::new(clock());
+    assert_eq!(assembly.push_cancellable(&text, window(0, 2), &mut stop),
+        Err("HLS subtitle preparation cancelled or timed out"));
+    assert!(assembly.cues.is_empty());
+    assert_eq!(calls, 2);
+}
+
+#[test]
+fn hls_webvtt_cancellation_during_serialization_returns_no_sidecar() {
+    let text = segment("X-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:900000",
+        "00:00.000", "00:01.000", "Caption");
+    let mut assembly = Assembly::new(clock());
+    assembly.push(&text, window(0, 2)).unwrap();
+    let mut calls = 0;
+    assert_eq!(assembly.finish_cancellable(&mut || { calls += 1; calls >= 2 }),
+        Err("HLS subtitle preparation cancelled or timed out"));
+    assert_eq!(calls, 2);
+}

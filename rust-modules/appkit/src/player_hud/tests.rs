@@ -1042,12 +1042,12 @@ fn every_forced_verdict_fits_the_reason_slot_in_every_language() {
 /// cold start, every reconnect and every pre-roll seek — states where the position is real and
 /// the transport is what the user reads the instant the first frame lands.
 #[test]
-fn only_a_failure_takes_the_frame_away_from_the_transport() {
+fn playback_failure_notice_keeps_transport_and_navigation_available() {
     let ps = plx_media::route::PlaybackSession::IDLE;
     for seen in [false, true] {
         assert!(
-            readout_owns_frame(busy_surface(&ps, S::Error, seen)),
-            "a failure hides the transport"
+            !readout_owns_frame(busy_surface(&ps, S::Error, seen)),
+            "a compact failure notice must not hide the transport"
         );
     }
     for st in [S::Resolving, S::Connecting, S::Buffering, S::Seeking] {

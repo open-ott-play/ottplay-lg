@@ -1,0 +1,10 @@
+{
+  "ott.records_more": {
+    "value": "Load older programmes",
+    "description": "Read the next bounded archive day while keeping the already loaded Records list."
+  },
+  "ott.records_partial": {
+    "value": "More archive days are available",
+    "description": "The visible Records list covers only the archive days loaded so far."
+  }
+}

@@ -4,7 +4,7 @@
 
 `.github/workflows/native-release-pipeline.yml` is the manually dispatched release entry point. It accepts `channel=beta|rc|stable` and runs only from `main`. The beta and RC paths freeze a release plan, run required CI, call the reusable `.github/workflows/native-candidate.yml` build, verify the resulting IPK and evidence, and publish an immutable GitHub prerelease. Stable promotion validates an accepted RC and its physical-device qualification, waits at the `release` environment, then publishes the exact RC package bytes without rebuilding.
 
-The pipeline and contracts are present in this source tree, but no release has been run or qualified by this change. In particular, no LG device record is supplied by this document. The first actual beta/RC run and physical acceptance must be recorded against the exact artifact before making release claims.
+The first pipeline beta, `v0.3.3-beta.1`, was published from source `14c5af1f09d35d71af5c179338c5deeb088ffb21` by Actions run `42617296886`. Its build and publication gates passed. No physical LG qualification record is supplied by this document. The first actual beta/RC run and physical acceptance must be recorded against the exact artifact before making release claims.
 
 ## Release identity and dispatch inputs
 
@@ -66,7 +66,7 @@ No qualification file or device result is added by the release-pipeline implemen
 
 ## Stable promotion and exact bytes
 
-Stable promotion uses `channel=stable` and an exact `rc_tag`. Before and after environment approval it verifies the RC release assets against the original Actions artifact fetched by run ID, package SHA-256, provenance, frozen plan, source SHA, run ID/attempt, successful producing workflow, source ancestry, and the qualification file. It then creates `vX.Y.Z` from the RC source SHA using the downloaded RC assets and qualification record.
+Stable promotion uses `channel=stable` and an exact `rc_tag`. If the RC embeds a companion, its hash-bound source closure must declare both complete corresponding-source coverage and passing SDK runtime-source coverage. Pending coverage blocks stable in preflight and after environment approval; beta and RC may retain the pending supplement. Before and after environment approval it verifies the RC release assets against the original Actions artifact fetched by run ID, package SHA-256, provenance, frozen plan, source SHA, run ID/attempt, successful producing workflow, source ancestry, and the qualification file. It then creates `vX.Y.Z` from the RC source SHA using the downloaded RC assets and qualification record.
 
 The stable job does not invoke the package build. It compares every published stable asset, including the IPK, checksum sidecars, receipt, plan, link evidence archive, and qualification JSON, against the approved files byte for byte; it also checks the final GitHub Release metadata and tag target. Beta and RC publication likewise downloads the created release and checks its tag, prerelease state, source target, and each uploaded artifact. Original Actions artifacts are retained for 90 days; if an RC artifact expires before stable promotion, create and qualify a fresh RC rather than weakening this check. A changed package, version, source, build input, dependency, toolchain, or package metadata requires a new RC, a new physical acceptance pass, and a new matching qualification record. Published tags and release assets are not replaced.
 
@@ -105,3 +105,7 @@ Host tests and ARM linking establish their own source/build contracts. They do n
 The workflow can automate dispatch validation, plan generation and verification, sequence monotonicity checks, source/version matching, quality gates, reproducible identity checks, package/link/checksum/provenance validation, prerelease publication, RC qualification-schema matching, protected stable approval, and exact-byte promotion.
 
 Physical acceptance is manual unless a future real-device lab can observe and attest to the same checks against the candidate hash. A successful compile, `ares-install`, remote-control connection, or playback status response is not proof that the TV rendered synchronized video or that app state survived an upgrade. The release environment protects the stable publishing step; it does not replace the operator's responsibility to test and record the RC.
+
+## Homebrew metadata on stable promotion
+
+Stable promotion generates `com.openottplay.player.native.manifest.json` directly from the approved RC package and verifies its SHA-256 before publication. The manifest is attached beside the unchanged IPK and downloaded again for a byte comparison. Its package URL names the exact stable version. This closes manifest delivery; admission into the external Homebrew catalogue still requires submitting the listing and passing its review.

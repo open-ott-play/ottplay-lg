@@ -2,6 +2,8 @@
 //! No native library, network, filesystem, module loader or host callback is
 //! installed in the VM. Callers retain admission and execution of returned plans.
 
+pub mod operators;
+
 use rquickjs::{Context, Function, Object, Runtime};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;

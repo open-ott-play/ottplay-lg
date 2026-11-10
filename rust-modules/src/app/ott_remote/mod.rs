@@ -821,6 +821,11 @@ impl Remote {
                     Ok((config, saved, runtime)) => {
                         self.runtime = runtime;
                         self.apply(config, saved);
+                        // A persisted public receiver ID supports first-time registration.
+                        // Never log provisional identity, control addresses or credentials.
+                        if let Some(id) = self.persisted_device_id() {
+                            plx_base::eventlog::log(&format!("ott-control: device_id={id}"));
+                        }
                     }
                     Err(message) => {
                         self.status = "error";
@@ -985,11 +990,11 @@ impl Remote {
                 }
                 let parsed = match &kind {
                     SendKind::Poll => ingress::decode_poll(&response.body)
-                        .map(|poll| (poll.value, poll.media_tracks_raw, poll.plex_servers_raw)),
+                        .map(|poll| (poll.value, poll.media_tracks_raw, poll.plex_servers_raw, poll.provider_settings_raw)),
                     _ => serde_json::from_slice::<Value>(&response.body)
-                        .map(|value| (value, None, None)),
+                        .map(|value| (value, None, None, None)),
                 };
-                let Ok((value, media_tracks_raw, plex_servers_raw)) = parsed else {
+                let Ok((value, media_tracks_raw, plex_servers_raw, provider_settings_raw)) = parsed else {
                     self.fail(now, "Invalid command server response");
                     return actions;
                 };
@@ -1004,6 +1009,9 @@ impl Remote {
                                 }
                                 if invocation.expects_response() && invocation.action == "plex_servers" {
                                     invocation.plex_servers_raw = plex_servers_raw.clone();
+                                }
+                                if invocation.expects_response() && matches!(invocation.action.as_str(), "settings_compare" | "provider_settings") {
+                                    invocation.provider_settings_raw = provider_settings_raw.clone();
                                 }
                             }
                             actions = incoming;

@@ -216,7 +216,24 @@ impl Runtime {
         else { return Value::Null; };
         let fresh = self.wall_now_s().is_some_and(|now| self.row_guide.as_ref()
             .is_some_and(|cache| cache.request.current(self) && cache.fresh(now)));
-        json!({"coverage": coverage.report, "fresh": fresh})
+        // Evaluated only for an authenticated status read, never per frame.
+        // Closed counts distinguish accepted HTTP facts from row projection;
+        // no channel IDs, programme text or source addresses leave this seam.
+        let view = self.view();
+        let selected = self.selected.as_ref().and_then(|id| view.rows.iter().find(|row| &row.id == id));
+        let now = self.wall_now_s();
+        json!({"coverage": coverage.report, "fresh": fresh,
+            "projection": {
+                "bound_current_rows": self.catalog.entries.iter().filter(|entry| self.current_row_programme(entry).is_some()).count(),
+                "rows": view.rows.len(),
+                "compact_current_rows": view.rows.iter().filter(|row| row.current_programme.is_some()).count(),
+                "full_guide_rows": view.rows.iter().filter(|row| row.guide.is_some()).count(),
+                "guide_available_rows": view.rows.iter().filter(|row| row.guide_available).count(),
+                "selected_compact": selected.is_some_and(|row| row.current_programme.is_some()),
+                "selected_full_current": selected.and_then(|row| row.guide.as_ref()).is_some_and(|guide| guide.at(now.unwrap_or(guide.now_s)).0.is_some()),
+                "show_program": view.classic_preferences.show_program(),
+                "revision": view.revision
+            }})
     }
 
     fn row_guide_retry_ready(&self) -> bool {

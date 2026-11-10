@@ -234,3 +234,54 @@ fn records_fallback_change_retires_old_window_without_rebinding_source() {
     assert_eq!(runtime.page, "channels");
     assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
 }
+
+#[test]
+fn provider_records_load_one_day_keep_partial_rows_and_reject_old_page_receipts() {
+    let _serial = plx_base::testlock::serial();
+    let (mut app, mut runtime)=records_fixture();
+    let profile=&mut runtime.saved.profiles.profiles[0];
+    profile.kind=ProviderKind::Xtream;
+    profile.source=r#"{"server":"https://archive.invalid","username":"fixture","password":"fixture"}"#.into();
+    runtime.provider=ProviderKind::Xtream;
+    runtime.catalog.entries[0].media=MediaLocator::Xtream {stream_id:"42".into(),stream_kind:"live".into(),
+        extension:"ts".into(),series_id:None,has_direct_source:false};
+    let source=runtime.catalog.entries[0].live.as_mut().unwrap().catchup.as_mut().unwrap();
+    source.mode=plx_data::ott::archive::CatchupMode::Provider;source.source="xtream".into();
+    handle_action(&mut runtime,&mut app,OttAction::OpenRecords("channel".into())).unwrap();
+    assert_eq!(runtime.metadata_query,Some(Query::Day{start:NOW-86400,end:NOW}));
+    let first=response(&runtime,vec![programme("Newest",NOW-1000,NOW-900,"First day")]);
+    assert!(guide_ui::accept(&mut runtime,&first));
+    assert_eq!(rows(&runtime).len(),1);
+    let more=runtime.view().rows.into_iter().find(|row|row.id=="records:more").unwrap().action;
+    handle_action(&mut runtime,&mut app,more.clone()).unwrap();
+    assert_eq!(runtime.metadata_query,Some(Query::Day{start:NOW-2*86400,end:NOW-86400}));
+    assert_eq!(rows(&runtime).len(),1,"loading an older day preserves the accepted list");
+    let second=response(&runtime,vec![programme("Older",NOW-100000,NOW-99000,"Second day")]);
+    assert!(guide_ui::accept(&mut runtime,&second));
+    assert_eq!(rows(&runtime).len(),2);
+    assert!(handle_action(&mut runtime,&mut app,more).is_err(),"old addressed cursor must not enqueue another day");
+    let generation=runtime.metadata_generation;
+    assert!(guide_ui::accept(&mut runtime,&first));
+    assert_eq!(runtime.metadata_generation,generation);
+    assert_eq!(rows(&runtime).len(),2,"late previous-day replies cannot replace accumulated rows");
+    let more=runtime.view().rows.into_iter().find(|row|row.id=="records:more").unwrap().action;
+    handle_action(&mut runtime,&mut app,more).unwrap();
+    assert!(runtime.view().status_working,"older-day loading uses the standard indicator");
+    assert_eq!(rows(&runtime).len(),2,"accepted rows remain visible during loading");
+    let cancelled_page=response(&runtime,vec![programme("Cancelled",NOW-200000,NOW-199000,"Late after Back")]);
+    handle_action(&mut runtime,&mut app,OttAction::Back).unwrap();
+    assert_eq!(runtime.page,"channels");
+    assert!(runtime.guide.is_none());
+    assert!(runtime.metadata_cancel.load(Ordering::Acquire));
+    assert!(runtime.metadata_query.is_none() && runtime.metadata_next.is_none());
+    assert!(guide_ui::accept(&mut runtime,&cancelled_page));
+    assert!(runtime.guide.is_none(),"cancelled page cannot reopen or repopulate the guide");
+    assert_eq!(runtime.page,"channels");
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    handle_action(&mut runtime,&mut app,OttAction::OpenRecords("channel".into())).unwrap();
+    let reopened=response(&runtime,vec![programme("Newest",NOW-1000,NOW-900,"Reopened")]);
+    assert!(guide_ui::accept(&mut runtime,&reopened));
+    runtime.saved.profiles.profiles[0].source=runtime.saved.profiles.profiles[0].source.replace("fixture","replacement");
+    let more=runtime.view().rows.into_iter().find(|row|row.id=="records:more").unwrap().action;
+    assert!(handle_action(&mut runtime,&mut app,more).is_err());
+}

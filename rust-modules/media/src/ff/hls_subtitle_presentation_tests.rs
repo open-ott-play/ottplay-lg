@@ -66,3 +66,50 @@ fn hls_subtitle_video_anchor_is_derived_and_reused_by_actual_lane_clock() {
     playback.restart();
     assert!(playback.map(raw(990_000), 1_000_000_000_000, 1_000_000_000_000, Some(1)).is_err());
 }
+
+#[test]
+fn live_master_retains_only_selected_subtitle_group_and_forced_metadata() {
+    let info = HlsPlayback::fixture_for_test().media_info_for_test();
+    let text = "#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"cc\",NAME=\"English\",LANGUAGE=\"en\",FORCED=YES,URI=\"cc.m3u8\"\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"other\",NAME=\"Other\",URI=\"other.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=100,SUBTITLES=\"cc\"\nvideo.m3u8\n";
+    let live = live_presentation("https://example.invalid/master.m3u8", "https://example.invalid/master.m3u8",
+        text, Some("cc"), "https://example.invalid/video.m3u8", &info).unwrap().unwrap();
+    assert!(live.is_live_subtitles());
+    assert!(live.rows().next().is_none());
+    assert!(live.matches_source("https://example.invalid/video.m3u8"));
+    let rows: Vec<_> = live.subtitle_rows().collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].1, rows[0].2), ("English", "en"));
+    assert!(live.subtitle_forced(rows[0].0));
+    assert_eq!(live.live_subtitle_revision(), None);
+}
+
+#[test]
+fn automatic_subtitles_rank_language_then_manifest_default_and_preserve_forced_policy() {
+    let mut playback = HlsPlayback::fixture_with_subtitles_for_test();
+    let rows: Vec<_> = playback.subtitle_rows().map(|(id,_,_)| id).collect();
+    assert!(playback.subtitle_default(rows[0]));
+    assert!(playback.subtitle_autoselect(rows[0]));
+    assert_eq!(playback.automatic_subtitle(None, false), Some(rows[0]));
+    assert_eq!(playback.automatic_subtitle(Some("ES-mx"), false), Some(rows[1]));
+    assert_eq!(playback.automatic_subtitle(Some("en"), true), Some(rows[1]));
+    // AUTOSELECT alone is eligible only when its language matches the policy.
+    let presentation = Arc::get_mut(&mut playback.presentation).unwrap();
+    for row in &mut presentation.subtitles { row.default = false; row.forced = false; }
+    assert_eq!(playback.automatic_subtitle(None, false), None);
+    assert_eq!(playback.automatic_subtitle(Some("fr"), false), None);
+    assert_eq!(playback.automatic_subtitle(Some("EN"), false), Some(rows[0]));
+    assert_eq!(playback.automatic_subtitle(Some("eng"), false), Some(rows[0]));
+    assert_eq!(playback.automatic_subtitle(Some("spa-MX"), false), Some(rows[1]));
+    assert_eq!(playback.automatic_subtitle(Some("en"), true), None);
+    Arc::get_mut(&mut playback.presentation).unwrap().subtitles[0].reference = Err("Unusable candidate");
+    assert_eq!(playback.automatic_subtitle(Some("en"), false), None);
+}
+#[test]
+fn subtitle_default_autoselect_and_forced_are_read_only_from_manifest_flags() {
+    let text = master().replace("NAME=\"English\",LANGUAGE=\"en\",URI=\"en-vtt.m3u8\"",
+        "NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,URI=\"en-vtt.m3u8\"");
+    let parsed = parse_master("https://example.invalid/master.m3u8", &text).unwrap();
+    assert!(parsed.subtitles[0].default && parsed.subtitles[0].autoselect);
+    assert!(!parsed.subtitles[0].forced);
+    assert!(!parsed.subtitles[1].default && !parsed.subtitles[1].autoselect && !parsed.subtitles[1].forced);
+}

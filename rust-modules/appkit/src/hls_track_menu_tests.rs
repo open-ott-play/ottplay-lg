@@ -160,3 +160,65 @@
         assert_ne!(audio, off);
         assert_ne!(audio, first);
     }
+
+    #[test]
+    fn hls_audio_rendition_labels_use_source_text_layout_policy() {
+        let _serial = plx_base::testlock::serial();
+        let _globals = route::HlsTrackRequest::test_globals_guard();
+        let ps = admitted(&HlsPlayback::fixture_for_test());
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let menu = TrackMenuState::new(&ps, meta.view(), 0, Vec::new());
+        let index = menu.form.index_of(&TrackRow::HlsAudio(0)).unwrap();
+        let row = menu.form.table.sections.iter().flat_map(|section| &section.rows).nth(index).unwrap();
+        assert_eq!(row.label_origin, plx_ui::table::Origin::Server);
+        assert_eq!(row.detail_origin, plx_ui::table::Origin::Server);
+        assert!(!row.label.is_empty());
+        assert!(!row.detail.is_empty());
+        assert!(row.checked);
+    }
+
+    #[test]
+    fn hls_subtitle_forced_badge_uses_retained_manifest_declaration() {
+        let _serial = plx_base::testlock::serial();
+        let _globals = route::HlsTrackRequest::test_globals_guard();
+        let ps = admitted(&HlsPlayback::fixture_with_subtitles_for_test());
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let menu = TrackMenuState::new(&ps, meta.view(), 1, Vec::new());
+        for (ordinal, forced) in [(0, false), (1, true)] {
+            let index = menu.form.index_of(&TrackRow::HlsSubtitle(ordinal)).unwrap();
+            let row = menu.form.table.sections.iter().flat_map(|section| &section.rows).nth(index).unwrap();
+            assert_eq!(row.badges.iter().any(|badge| matches!(badge, plx_ui::table::Badge::Forced)), forced);
+        }
+        assert_eq!(menu.selected_hls_row(), Some(TrackRow::SubOff));
+    }
+
+    #[test]
+    fn manifest_subtitles_and_same_language_observed_pids_are_distinct_picker_rows() {
+        let _serial = plx_base::testlock::serial();
+        let _globals = route::HlsTrackRequest::test_globals_guard();
+        let playback = HlsPlayback::fixture_live_with_subtitles_for_test();
+        let scope = plx_media::ff::hls_observed::Scope::new("https://example.invalid/master.m3u8",
+            "https://example.invalid/video.m3u8", 1, 0).unwrap();
+        let observed = plx_media::ff::hls_observed::Snapshot::fixture_for_test(scope);
+        let mut info = playback.media_info_for_test();
+        info.tracks = observed.inventory().clone();
+        let mut ps = route::PlaybackSession::IDLE;
+        route::reset_player_control_for_test(&ps);
+        route::request_external_source(&mut ps, &info,
+            plx_media::ff::ExternalSource::Hls("https://example.invalid/master.m3u8".into()),
+            "Fixture", "M3U", plx_platform::devcaps::assumed_shared()).unwrap();
+        route::reset_player_control_for_test(&ps);
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let mut menu = TrackMenuState::new(&ps, meta.view(), 0, Vec::new());
+        assert_eq!(menu.ids(), vec![TrackRow::Audio(0), TrackRow::Audio(1)]);
+        assert_eq!(menu.selected_hls_row(), Some(TrackRow::Audio(0)));
+        assert!(!route::external_tracks(&ps).unwrap().is_complete());
+        assert!(menu.focus_id(TrackRow::Audio(1)));
+        assert!(matches!(menu.on_ok_addressed(meta.view()), TrackOk::Commit { commit: TrackCommit::External(_), .. }));
+        menu.focus_tab(&ps, meta.view(), 1);
+        assert_eq!(menu.ids().iter().filter(|id| **id == TrackRow::SubOff).count(), 1);
+        assert!(menu.ids().contains(&TrackRow::HlsSubtitle(0)));
+        assert!(menu.ids().contains(&TrackRow::HlsSubtitle(1)));
+        assert!(menu.ids().contains(&TrackRow::Sub(0)), "unsupported observed teletext remains visible without becoming selectable");
+        assert!(matches!(menu.pick_external_track(plx_media::ff::inspect::TrackKind::Subtitle, Some(0)), TrackOk::Inert));
+    }

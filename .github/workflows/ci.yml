@@ -84,8 +84,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: >-
-          python3 -m unittest ci.test_native_release ci.test_native_release_artifacts
-          ci.test_native_release_workflows ci.test_native_candidate_receipt
+          python3 -m unittest ci.test_native_release ci.test_native_release_artifacts ci.test_native_companion_stable_coverage ci.test_native_runtime_sources
+          ci.test_native_release_workflows ci.test_native_hbc_manifest ci.test_native_candidate_receipt
           ci.test_package_product_config -v
 
   gate:

@@ -126,6 +126,49 @@ pub struct SegmentClock {
     next_start_ns: i64,
 }
 
+/// A committed MPEG transport epoch. EXTINF locates segments; it must not
+/// repeatedly retime their samples. Renew the wrap reference every segment so
+/// a long-lived stream can cross any number of 33-bit PTS wraps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransportClock {
+    anchor: Option<(i64, i64)>,
+    end_ns: Option<i64>,
+}
+impl TransportClock {
+    pub(crate) fn end_ns(self) -> Option<i64> { self.end_ns }
+    pub(crate) fn restart_at(end_ns: Option<i64>) -> Self { Self { anchor: None, end_ns } }
+
+    /// Mutate only a private candidate; publish it after the whole segment feeds.
+    pub(crate) fn offset(&mut self, raw: i64, local: i64, end: i64) -> Result<i64, &'static str> {
+        let mapped = match self.anchor {
+            Some((previous_raw, previous_mapped)) => {
+                let wrap = i128::from(SegmentClock::PTS_WRAP_NS);
+                let delta = (i128::from(raw) - i128::from(previous_raw) + wrap / 2)
+                    .rem_euclid(wrap) - wrap / 2;
+                // Segment origins progress; B-frame ordering inside a segment is
+                // untouched. Preserve advancing overlaps, refuse unannounced resets.
+                if delta <= 0 { return Err("HLS transport origin did not advance"); }
+                let mapped = i64::try_from(i128::from(previous_mapped) + delta)
+                    .map_err(|_| "HLS transport clock overflow")?;
+                if self.end_ns.is_some_and(|end| i128::from(end) - i128::from(mapped) > 1_000_000_000) {
+                    return Err("HLS transport overlap exceeds admission limit");
+                }
+                // Bounded admission of source gaps, never clock repair.
+                if self.end_ns.is_some_and(|end| i128::from(mapped) - i128::from(end) > 30_000_000_000) {
+                    return Err("HLS transport gap requires a discontinuity");
+                }
+                mapped
+            }
+            None => self.end_ns.unwrap_or(local),
+        };
+        let offset = mapped.checked_sub(local).ok_or("HLS transport clock overflow")?;
+        let end = end.checked_add(offset).ok_or("HLS transport clock overflow")?;
+        self.anchor = Some((raw, mapped));
+        self.end_ns = Some(self.end_ns.map_or(end, |previous| previous.max(end)));
+        Ok(offset)
+    }
+}
+
 impl SegmentClock {
     pub fn end(self) -> MediaTimeMs {
         MediaTimeMs(self.next_start_ns / 1_000_000)

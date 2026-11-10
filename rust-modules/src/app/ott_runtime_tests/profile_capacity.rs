@@ -4,7 +4,7 @@ use plx_platform::i18n::{self, msg};
 
 fn profile(kind: ProviderKind, slot: usize) -> ProviderProfile {
     ProviderProfile {
-        id: format!("{}-{slot}", kind.canonical_id()),
+        id: format!("{}-{slot}", kind.canonical_id().replace('/', "_")),
         name: format!("Fixture {slot}"),
         kind,
         source: match kind {
@@ -17,6 +17,7 @@ fn profile(kind: ProviderKind, slot: usize) -> ProviderProfile {
             }
             ProviderKind::VPortal => "portal::[key:fixture]https://fixture.invalid/portal",
             ProviderKind::Local => "/media/videos",
+            ProviderKind::Edem | ProviderKind::Operator(_) => r#"{"key":"fixture"}"#.into(),
             ProviderKind::Plex => "fixture-server",
         }
         .into(),
@@ -216,13 +217,7 @@ fn releasing_one_slot_reenables_add_for_both_editor_types() {
 fn total_capacity_is_reported_and_plex_connection_row_is_not_repurposed() {
     let _serial = plx_base::testlock::serial();
     let mut runtime = full_runtime(ProviderKind::Plex);
-    for kind in [
-        ProviderKind::M3u,
-        ProviderKind::Xtream,
-        ProviderKind::Stalker,
-        ProviderKind::VPortal,
-        ProviderKind::Local,
-    ] {
+    for kind in ProviderKind::all().into_iter().filter(|kind|*kind!=ProviderKind::Plex) {
         runtime
             .saved
             .profiles
@@ -231,7 +226,7 @@ fn total_capacity_is_reported_and_plex_connection_row_is_not_repurposed() {
     }
     assert_eq!(
         runtime.profile_add_refusal(),
-        Some("There are already 90 profiles")
+        Some("This installation has reached its profile limit")
     );
     assert!(
         runtime

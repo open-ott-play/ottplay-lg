@@ -83,6 +83,7 @@ fn field(key: &'static str) -> draft::Field {
         "showProgram" => Some("settingRevision:showProgram"),
         "showDescription" => Some("settingRevision:showDescription"),
         "showProgress" => Some("settingRevision:showProgress"),
+        "nativeSubtitleMode" | "nativeSubtitleLanguage" => Some(subtitle_settings::REVISION),
         _ => None,
     };
     draft::Field { key, revision_key }
@@ -134,7 +135,12 @@ fn action_row(runtime: &Runtime, command: &str, title: &str, detail: String) -> 
 }
 
 fn displayed(runtime: &Runtime, key: &str) -> Option<Value> {
-    runtime.settings_groups.draft.get(key).cloned().or_else(|| fields::value(runtime, key))
+    let value = runtime.settings_groups.draft.get(key).cloned();
+    if let Some(field) = subtitle_settings::selection::Field::find(key) {
+        return match value { Some(value) if value.is_string() => field.index(&value).map(Value::from),
+            Some(value) => Some(value), None => fields::value(runtime, key) };
+    }
+    value.or_else(|| fields::value(runtime, key))
 }
 
 fn menu_saved(runtime: &Runtime) -> Saved {
@@ -172,7 +178,10 @@ fn draft_rows(runtime: &Runtime, group: Group) -> Vec<OttRow> {
             let value = displayed(runtime, key).and_then(|value| value.as_u64());
             let label = value.map(|value| fields::choices(key).into_iter()
                 .find(|(candidate, _)| *candidate == value || (*key == "arrowFun" && value == 3 && *candidate == 0))
-                .map(|(_, label)| label).unwrap_or_else(|| value.to_string())).unwrap_or_default();
+                .map(|(_, label)| label).unwrap_or_else(|| {
+                    if *key == "nativeSubtitleLanguage" { runtime.saved.settings.get(*key).and_then(Value::as_str).unwrap_or("").to_owned() }
+                    else { value.to_string() }
+                })).unwrap_or_default();
             let mut row = action_row(runtime, &format!("pick:{key}"), fields::title(key), label);
             row.enabled = value.is_some();
             row
@@ -341,6 +350,8 @@ fn merge(runtime: &Runtime, address: draft::Address) -> Result<Option<Saved>, &'
         } else {
             let candidate = if key == plx_ui::palette::KEY {
                 runtime.ui_color_candidate(change.value.as_str().ok_or(STALE)?, address.id)?
+            } else if let Some(field) = subtitle_settings::selection::Field::find(key) {
+                field.candidate(&runtime.saved, &change.value)?
             } else {
                 fields::candidate(runtime, key, change.value.as_u64().ok_or(STALE)?, address.id)?
             };

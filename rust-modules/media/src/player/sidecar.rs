@@ -6,6 +6,7 @@
 //! Plex producer: fetch the whole file from PMS once. Local adjacent files instead arrive from
 //! the application's authorized-root metadata worker through [`install_local`]. Complete HLS
 //! WebVTT timelines arrive from the route-owned preparation worker through [`install_hls`];
+//! live windows subsequently use a selected-generation refresh token and decoder epoch guard.
 //! all three use the same store and renderer. ASS/SSA keeps its complete script for
 //! [`ass_source`] and the native styled renderer (styles, overlapping events, drawings and embedded
 //! fonts must never pass through a text parser). SubRip and WebVTT are converted on the fetch worker
@@ -45,7 +46,7 @@
 //! in `Pending::Local` until the application takes them for its existing metadata worker; the
 //! Plex worker cannot consume them. The application rechecks source authority before publishing,
 //! and [`install_local`] rechecks the selected request before accepting the prepared content.
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
 use super::text_ass;
@@ -144,7 +145,7 @@ enum Pending {
     Local(LocalReadRequest),
 }
 
-/// A converted, complete HLS WebVTT timeline, bound to its logical playback and
+/// A converted HLS WebVTT timeline/window, bound to its logical playback and
 /// rendition. Preparation grants no right to publish: the route must still check
 /// its presentation identity, user revision and worker ticket at commit time.
 pub struct PreparedHls {
@@ -205,13 +206,67 @@ pub fn install_hls(playback: &PlaybackIdentity, id: HlsSubtitleId, prepared: Pre
     if prepared.playback != *playback || prepared.id != id { return false; }
     let selection = Selection::Hls { playback: playback.clone(), id };
     let mut st = state();
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
+    st.hls_epoch = None;
     st.pending = None;
     st.want = Some(selection.clone());
     st.failed = None;
     st.loaded = Some((selection, prepared.content));
     // A previous Plex worker retains its occupancy until it actually finishes;
     // the advanced generation prevents its result from replacing this selection.
+    true
+}
+
+/// A refresh can replace content only for the exact committed selection generation.
+/// Cancellation is shared with the backend HTTP request, so Off/source changes
+/// interrupt in-flight downloads as well as preventing publication.
+#[derive(Clone)]
+pub(crate) struct HlsRefreshToken {
+    generation: u64,
+    playback: PlaybackIdentity,
+    id: HlsSubtitleId,
+    pub(crate) cancelled: Arc<AtomicBool>,
+}
+fn advance_generation(st: &mut State) {
+    if let Some(cancelled) = st.hls_cancel.take() { cancelled.store(true, Ordering::Release); }
+    st.generation = st.generation.wrapping_add(1);
+}
+pub(crate) fn hls_refresh_token(playback: &PlaybackIdentity, id: HlsSubtitleId) -> Option<HlsRefreshToken> {
+    let mut st = state();
+    let selection = Selection::Hls { playback: playback.clone(), id };
+    if st.want.as_ref() != Some(&selection) { return None; }
+    if let Some(cancelled) = st.hls_cancel.take() { cancelled.store(true, Ordering::Release); }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    st.hls_cancel = Some(cancelled.clone());
+    Some(HlsRefreshToken { generation: st.generation, playback: playback.clone(), id, cancelled })
+}
+fn hls_refresh_matches(st: &State, token: &HlsRefreshToken) -> bool {
+    !token.cancelled.load(Ordering::Acquire) && st.generation == token.generation
+        && st.want.as_ref() == Some(&Selection::Hls { playback: token.playback.clone(), id: token.id })
+}
+pub(crate) fn hls_refresh_is_current(token: &HlsRefreshToken) -> bool { hls_refresh_matches(&state(), token) }
+pub(crate) fn clear_hls_refresh(token: &HlsRefreshToken) -> bool {
+    let mut st = state();
+    if !hls_refresh_matches(&st, token) { return false; }
+    st.loaded = None;
+    st.failed = None;
+    true
+}
+pub(crate) fn bind_hls_epoch(token: &HlsRefreshToken, playback: &crate::ff::hls_presentation::HlsPlayback, epoch: u64) -> bool {
+    let mut st = state();
+    if !hls_refresh_matches(&st, token) || playback.live_subtitle_revision() != Some(epoch) { return false; }
+    st.hls_epoch = Some((playback.clone(), epoch));
+    true
+}
+pub(crate) fn refresh_hls(token: &HlsRefreshToken, prepared: PreparedHls,
+    playback: &crate::ff::hls_presentation::HlsPlayback, epoch: u64) -> bool {
+    if prepared.playback != token.playback || prepared.id != token.id { return false; }
+    let mut st = state();
+    if !hls_refresh_matches(&st, token) { return false; }
+    if playback.live_subtitle_revision() != Some(epoch) { return false; }
+    st.hls_epoch = Some((playback.clone(), epoch));
+    st.loaded = Some((Selection::Hls { playback: token.playback.clone(), id: token.id }, prepared.content));
+    st.failed = None;
     true
 }
 
@@ -226,8 +281,9 @@ pub fn selected_hls(playback: &PlaybackIdentity) -> Option<HlsSubtitleId> {
 /// the whole mapped timeline. A new logical item still uses the common reset().
 pub fn reset_hls() {
     let mut st = state();
+    st.hls_epoch = None;
     if st.want.as_ref().is_some_and(Selection::is_hls) {
-        st.generation = st.generation.wrapping_add(1);
+        advance_generation(&mut st);
         st.want = None;
     }
     if st.loaded.as_ref().is_some_and(|(selection, _)| selection.is_hls()) { st.loaded = None; }
@@ -259,6 +315,8 @@ struct TextHold {
 struct State {
     want: Option<Selection>,
     generation: u64,
+    hls_cancel: Option<Arc<AtomicBool>>,
+    hls_epoch: Option<(crate::ff::hls_presentation::HlsPlayback, u64)>,
     pending: Option<Pending>,
     running: bool,
     /// The complete selected file, kept across Off→On so re-picking is instant.
@@ -271,6 +329,8 @@ struct State {
 static STATE: Mutex<State> = Mutex::new(State {
     want: None,
     generation: 0,
+    hls_cancel: None,
+    hls_epoch: None,
     pending: None,
     running: false,
     loaded: None,
@@ -313,7 +373,7 @@ fn select_with_fetch(
     let selection = Selection::Plex { server, stream_id, key, codec: codec.to_ascii_lowercase() };
     {
         let mut st = state();
-        st.generation = st.generation.wrapping_add(1);
+        advance_generation(&mut st);
         st.want = Some(selection.clone());
         st.failed = None;
         st.pending = None;
@@ -376,7 +436,7 @@ fn select_with_fetch(
 /// Route-only commit after ordinary track-choice admission. Never starts a worker.
 pub(crate) fn select_local(playback: PlaybackIdentity, target: LocalSubtitleTarget, format: SidecarFormat, style: TextStyle) {
     let mut st = state();
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
     let request = LocalReadRequest { generation: st.generation, playback, target, format, style };
     let selection = request.selection();
     st.want = Some(selection.clone());
@@ -407,7 +467,7 @@ pub fn install_local(request: &LocalReadRequest, prepared: PreparedLocal) -> boo
     let mut st = state();
     if !request.same_request(&prepared.request) || !local_request_matches(&st, request) { return false; }
     // Consume the existing ticket. Duplicate terminal delivery cannot publish twice.
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
     st.pending = None;
     st.failed = None;
     st.loaded = Some((request.selection(), prepared.content));
@@ -416,7 +476,7 @@ pub fn install_local(request: &LocalReadRequest, prepared: PreparedLocal) -> boo
 pub fn fail_local(request: &LocalReadRequest, failure: LocalFailure) -> bool {
     let mut st = state();
     if !request.same_request(&failure.request) || !local_request_matches(&st, request) { return false; }
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
     st.pending = None;
     st.loaded = None;
     st.failed = Some((request.selection(), failure.why, Some(failure.at)));
@@ -429,7 +489,7 @@ pub fn fail_local(request: &LocalReadRequest, failure: LocalFailure) -> bool {
 pub fn fail_local_start(request: &LocalReadRequest) -> bool {
     let mut st = state();
     if !local_request_matches(&st, request) { return false; }
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
     st.pending = None;
     st.loaded = None;
     st.failed = Some((request.selection(), Failure::Fetch, None));
@@ -448,7 +508,7 @@ pub fn local_failed() -> bool {
 pub fn reset_local() {
     let mut st = state();
     if st.want.as_ref().is_some_and(Selection::is_local) {
-        st.generation = st.generation.wrapping_add(1);
+        advance_generation(&mut st);
         st.want = None;
     }
     if matches!(st.pending, Some(Pending::Local(_))) { st.pending = None; }
@@ -460,7 +520,7 @@ pub fn reset_local() {
 /// turning the same one back on is instant. MAIN THREAD.
 pub fn deselect() {
     let mut st = state();
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
     st.pending = None;
     st.want = None;
     st.failed = None;
@@ -478,7 +538,7 @@ pub fn selected() -> bool {
 #[cfg(any(test, feature = "test-support"))]
 pub fn select_without_fetch_for_test(stream_id: i64) {
     let mut st = state();
-    st.generation = st.generation.wrapping_add(1);
+    advance_generation(&mut st);
     st.pending = None;
     st.want = Some(Selection::Plex {
         server: plx_plex::plex::ServerId::UNSET, stream_id, key: String::new(), codec: String::new(),
@@ -500,7 +560,8 @@ pub fn fail_for_test(stream_id: i64, age: Duration) {
 /// A new item is starting: nothing of the previous one's may survive. MAIN THREAD.
 pub fn reset() {
     let mut st = state();
-    st.generation = st.generation.wrapping_add(1);
+    st.hls_epoch = None;
+    advance_generation(&mut st);
     st.pending = None;
     st.want = None;
     st.loaded = None;
@@ -567,6 +628,11 @@ pub fn ass_source(burned: bool, style: TextStyle) -> Option<Arc<super::ass::Sour
 fn ass_source_styled(burned: bool, style: TextStyle) -> Option<Arc<super::ass::Source>> {
     if burned { return None; }
     let mut st = state();
+    // No network: a short presentation-clock snapshot makes old-epoch cues
+    // unreachable even while the refresh worker is waiting on a bounded fetch.
+    if st.want.as_ref().is_some_and(Selection::is_hls) && st.hls_epoch.as_ref().is_some_and(|(playback, epoch)| playback.live_subtitle_revision() != Some(*epoch)) {
+        st.loaded = None;
+    }
     let State { want, loaded, .. } = &mut *st;
     let want = want.as_ref()?;
     let (selection, content) = loaded.as_mut()?;

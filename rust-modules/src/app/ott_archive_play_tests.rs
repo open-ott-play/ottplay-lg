@@ -23,7 +23,7 @@ fn fixture() -> (ProviderProfile, CatalogEntry, ArchiveInterval) {
         duration_ms: None,
         provider_id: Some("channel-id".into()),
         provider_id_field: Some("tvg-id".into()),
-        live: Some(ChannelMetadata {
+        live: Some(ChannelMetadata { guide_id: None, guide_feed: String::new(),
             tvg_name: "Channel".into(),
             guide_shift_seconds: 0,
             catchup: Some(CatchupSource {
@@ -271,4 +271,30 @@ fn fallback_does_not_grant_archive_to_files_or_other_provider_kinds() {
     let text = "#EXTM3U catchup=\"shift\"\n#EXTINF:120,Movie\nhttps://video.invalid/movie.mp4";
     let catalog = plx_data::ott::parse_m3u(text, &profile).unwrap();
     assert!(Intent::new_with_fallback(&profile, &catalog.entries[0], interval, 1500, 1).is_err());
+}
+
+#[test]
+fn provider_archive_requires_advertised_retention_and_exact_source() {
+    let (mut profile, mut entry, interval) = fixture();
+    profile.kind = ProviderKind::Xtream;
+    profile.source = r#"{"server":"https://provider.invalid","username":"user","password":"secret"}"#.into();
+    entry.media = MediaLocator::Xtream { stream_id: "42".into(), stream_kind: "live".into(),
+        extension: "ts".into(), series_id: None, has_direct_source: false };
+    let catchup = entry.live.as_mut().unwrap().catchup.as_mut().unwrap();
+    catchup.mode = CatchupMode::Provider;
+    catchup.source = "xtream".into();
+    let intent = Intent::new(&profile, &entry, interval, 1500).unwrap();
+    assert!(intent.validate(&profile, &entry, 1500).is_ok());
+    assert!(intent.validate(&profile, &entry, 3000).is_err());
+    let mut changed_profile = profile.clone();
+    changed_profile.source = changed_profile.source.replace("secret", "replacement");
+    assert!(intent.validate(&changed_profile, &entry, 1500).is_err());
+    let mut changed_entry = entry.clone();
+    if let MediaLocator::Xtream { stream_id, .. } = &mut changed_entry.media { *stream_id = "99".into(); }
+    assert!(intent.validate(&profile, &changed_entry, 1500).is_err());
+    changed_entry = entry.clone();
+    changed_entry.live.as_mut().unwrap().catchup = None;
+    assert!(intent.validate(&profile, &changed_entry, 1500).is_err());
+    // A provider marker cannot be interpreted as a direct HTTP template.
+    assert!(intent.apply(&profile, &entry, "https://live.invalid/stream", 1500).is_err());
 }

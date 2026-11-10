@@ -2,12 +2,29 @@
 use super::*;
 use plx_media::route::HlsTrackCatalog;
 
+fn embedded_rows(mut section: FormSection<TrackRow, (), TrackPage>, catalog: &plx_media::route::ExternalTracks,
+    kind: plx_media::ff::inspect::TrackKind) -> FormSection<TrackRow, (), TrackPage> {
+    use plx_media::ff::inspect::TrackKind;
+    let (rows, selected) = if kind == TrackKind::Audio { (&catalog.inventory().audio, catalog.selected_audio()) }
+        else { (&catalog.inventory().subtitles, catalog.selected_subtitle()) };
+    for track in rows {
+        let available = catalog.availability(kind, track.ordinal) == plx_media::route::TrackAvailability::Supported;
+        let id = if kind == TrackKind::Audio { TrackRow::Audio(track.ordinal as usize) } else { TrackRow::Sub(track.ordinal as usize) };
+        section = section.item(id, RowKind::Choice, (), super::external_track_menu::track_row(track, selected == Some(track.ordinal), available))
+            .disabled(!available);
+    }
+    section
+}
+
 impl TrackMenuState {
     pub(super) fn install_hls_catalog(&mut self, catalog: HlsTrackCatalog) {
-        self.external = None;
-        self.active_audio = -1;
-        self.active_sub = -1;
-        self.renderer = SubRenderer::Text;
+        self.external = catalog.embedded_tracks().cloned();
+        self.active_audio = self.external.as_ref().and_then(|c| c.selected_audio()).unwrap_or(-1);
+        self.active_sub = self.external.as_ref().and_then(|c| c.selected_subtitle()).unwrap_or(-1);
+        self.renderer = if catalog.selected_subtitle().is_some() { SubRenderer::Text } else {
+            self.external.as_ref().and_then(|c| c.selected_subtitle().and_then(|i| c.inventory().subtitles.get(i as usize)))
+                .map_or(SubRenderer::Text, |t| SubRenderer::of_codec(&t.codec))
+        };
         self.root_tracks.clear();
         self.forced_only = false;
         self.forced_lang.clear();
@@ -28,10 +45,12 @@ impl TrackMenuState {
         let catalog = self.hls.as_ref()?;
         if self.tab == 0 {
             catalog.rows().iter().position(|row| row.selected).map(TrackRow::HlsAudio)
+                .or_else(|| self.external.as_ref().and_then(|c| c.selected_audio()).map(|i| TrackRow::Audio(i as usize)))
         } else {
             let rows = catalog.subtitle_rows();
-            if rows.is_empty() { return None; }
-            Some(rows.iter().position(|row| row.selected).map_or(TrackRow::SubOff, TrackRow::HlsSubtitle))
+            if let Some(index) = rows.iter().position(|row| row.selected) { return Some(TrackRow::HlsSubtitle(index)); }
+            if let Some(ordinal) = self.external.as_ref().and_then(|c| c.selected_subtitle()) { return Some(TrackRow::Sub(ordinal as usize)); }
+            (!rows.is_empty() || self.external.as_ref().is_some_and(|c| !c.inventory().subtitles.is_empty())).then_some(TrackRow::SubOff)
         }
     }
 
@@ -41,7 +60,11 @@ impl TrackMenuState {
         let live = plx_media::route::hls_track_catalog(ps);
         let unchanged = match (&self.hls, &live) {
             (Some(old), Some(new)) => old.same_session(new) && old.rows() == new.rows()
-                && old.subtitle_rows() == new.subtitle_rows(),
+                && old.subtitle_rows() == new.subtitle_rows() && match (old.embedded_tracks(), new.embedded_tracks()) {
+                    (Some(a), Some(b)) => a.same_session(b) && a.selected_audio() == b.selected_audio()
+                        && a.selected_subtitle() == b.selected_subtitle(),
+                    (None, None) => true, _ => false,
+                },
             (None, None) => true,
             _ => false,
         };
@@ -75,21 +98,27 @@ impl TrackMenuState {
         } else { msg::widgets_tracks_subtitles() });
         if tab != 0 {
             let rows = catalog.subtitle_rows();
-            if rows.is_empty() { return Form::new().section(section.note(msg::widgets_tracks_unavailable())); }
+            let embedded = catalog.embedded_tracks();
+            let has_embedded = embedded.is_some_and(|c| !c.inventory().subtitles.is_empty());
+            if rows.is_empty() && !has_embedded { return Form::new().section(section.note(msg::widgets_tracks_unavailable())); }
             section = section.item(TrackRow::SubOff, RowKind::Choice, (),
-                Row::new(msg::widgets_tracks_off()).checked(catalog.selected_subtitle().is_none()));
+                Row::new(msg::widgets_tracks_off()).checked(catalog.selected_subtitle().is_none() && embedded.is_none_or(|c| c.selected_subtitle().is_none())));
             for (index, row) in rows.iter().enumerate() {
                 let name = row.name.trim();
                 let language = row.language.trim();
                 let label = if !name.is_empty() { name } else if !language.is_empty() { language }
                     else { msg::widgets_tracks_unknown() };
                 let mut display = Row::new(label).checked(row.selected);
+                if row.forced { display = display.badge(plx_ui::table::Badge::Forced); }
                 if !name.is_empty() || !language.is_empty() { display = display.server_label(); }
                 if !language.is_empty() && language != label { display = display.detail(language).server_detail(); }
                 section = section.item(TrackRow::HlsSubtitle(index), RowKind::Choice, (), display);
             }
+            if let Some(embedded) = embedded {
+                section = embedded_rows(section, embedded, plx_media::ff::inspect::TrackKind::Subtitle);
+            }
             let mut controls = FormSection::new("");
-            if catalog.selected_subtitle().is_some() {
+            if catalog.selected_subtitle().is_some() || embedded.is_some_and(|c| c.selected_subtitle().is_some()) {
                 controls = controls.item(TrackRow::Timing, RowKind::Button, (),
                     Row::new(msg::widgets_tracks_timing()).value(format_offset(self.offset_ms)));
             }
@@ -102,8 +131,15 @@ impl TrackMenuState {
             let label = if !name.is_empty() { name } else if !language.is_empty() { language }
                 else { msg::widgets_tracks_unknown() };
             let mut display = Row::new(label).checked(row.selected);
-            if !language.is_empty() && language != label { display = display.detail(language); }
+            // Rendition names and language tags are source text, as for subtitles.
+            if !name.is_empty() || !language.is_empty() { display = display.server_label(); }
+            if !language.is_empty() && language != label {
+                display = display.detail(language).server_detail();
+            }
             section = section.item(TrackRow::HlsAudio(index), RowKind::Choice, (), display);
+        }
+        if let Some(embedded) = catalog.embedded_tracks() {
+            section = embedded_rows(section, embedded, plx_media::ff::inspect::TrackKind::Audio);
         }
         Form::new().section(section)
     }
@@ -123,7 +159,12 @@ impl TrackMenuState {
     pub(super) fn pick_hls_subtitle(&self, index: Option<usize>) -> TrackOk {
         let Some(catalog) = &self.hls else { return TrackOk::Inert; };
         let rows = catalog.subtitle_rows();
-        if rows.is_empty() { return TrackOk::Inert; }
+        if index.is_none() && self.external.as_ref().is_some_and(|c| c.selected_subtitle().is_some()) {
+            return self.pick_external_track(plx_media::ff::inspect::TrackKind::Subtitle, None);
+        }
+        if rows.is_empty() {
+            return if index.is_none() { self.pick_external_track(plx_media::ff::inspect::TrackKind::Subtitle, None) } else { TrackOk::Inert };
+        }
         let target = match index {
             Some(index) => match rows.get(index) { Some(row) => Some(row.id), None => return TrackOk::Inert },
             None => None,

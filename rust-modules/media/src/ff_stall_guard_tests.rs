@@ -382,7 +382,9 @@ fn the_lookahead_wiring_aborts_through_the_shared_reducer_when_the_guard_is_arme
                     audio_expected: true,
                 }))
             } else {
-                Ok(HlsSegmentOutput {
+                Ok(HlsSegmentOutput { transport_timing: None,
+                    webvtt_clock: None,
+        observed: None,
                     aus: Vec::new(),
                     transfer: SegmentTransfer {
                         bytes: 5_400_000,
@@ -1128,7 +1130,7 @@ fn at_the_floor_the_not_ready_wait_asks_once_and_retries() {
     let run = demux_against_when(&mut pms, acquisition, fire, publish_accepted_hold);
     assert!(!run.torn_down, "{}", describe(&run.result));
     assert!(
-        matches!(run.result, Err(HlsExit::Failed("HTTP request failed"))),
+        matches!(run.result, Err(HlsExit::OpenFailed { reason: "HTTP request failed", outcome: TraceOutcome::Refused })),
         "the retry ran and PMS refused it: {}",
         describe(&run.result)
     );
@@ -1972,6 +1974,7 @@ fn avio_state_for(
     let (reserve_deadline, mut runtime) = acquisition.begin(aq);
     runtime.enter(Phase::Body);
     AvioState {
+        hls_ts: None,
         src,
         aq,
         off: 0,

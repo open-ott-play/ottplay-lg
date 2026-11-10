@@ -121,11 +121,11 @@ fn first_run_key(app: &mut App, key: Key) {
 
 fn first_run_open_body_action(app: &mut App, action: OttAction) {
     let view = app.ott.as_ref().unwrap().view();
-    // Disabled form rows still take focus; only activation is disabled.
-    // Count the complete body order, but require an enabled destination.
+    // Count the complete body order. Without an explicit selection the real
+    // screen starts on its first enabled metadata row, not a read-only heading.
     let start = view.selected_row.as_ref()
         .and_then(|id| view.rows.iter().position(|row| row.id == *id))
-        .unwrap_or(0);
+        .unwrap_or_else(|| view.rows.iter().position(|row| row.enabled).unwrap_or(0));
     let target = view.rows.iter().position(|row| row.enabled && row.action == action)
         .expect("first-run body must expose the requested enabled action");
     let direction = if target >= start { Key::Down } else { Key::Up };
@@ -144,9 +144,11 @@ fn first_run_settings_row_preserves_provider_and_setup_selection() {
         runtime.provider = provider;
         runtime.page = "providers";
         let view = runtime.view();
-        assert_eq!(view.rows.iter().filter_map(|row| match &row.action {
-            OttAction::SelectProvider(id) => Some(id.as_str()), _ => None,
-        }).collect::<Vec<_>>(), vec!["m3u", "xtream", "stalker", "vportal", "local", "plex"]);
+        let choices=view.rows.iter().filter_map(|row|match &row.action{OttAction::SelectProvider(id)=>Some(id.as_str()),_=>None}).collect::<Vec<_>>();
+        assert_eq!(&choices[..6], &["m3u","xtream","stalker","vportal","local","plex"]);
+        assert_eq!(choices.len(),ProviderKind::all().len());
+        assert!(choices.contains(&"edem"));
+        for id in plx_data::ott::OperatorId::ALL {assert!(choices.contains(&id.canonical_id()));}
         assert_eq!(view.selected_row.as_deref(), Some(provider.canonical_id()));
         let settings = view.rows.last().unwrap();
         assert_eq!(settings.id, "action/settings");

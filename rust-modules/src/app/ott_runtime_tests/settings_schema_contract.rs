@@ -5,6 +5,20 @@
 use super::*;
 use std::collections::BTreeSet;
 
+// Existing descriptor order is the receiver contract; selection policy only
+// appends two fields so saved pagination and established aliases stay stable.
+const EXPECTED_IDS: [&str; 45] = [
+    "uiFontScale", "players", "interfaceMode", "nativeSubtitleFont", "nativeSubtitleColor",
+    "nativeSubtitleOutline", "nativeSubtitleBackground", "menuShowProviders", "menuShowProfiles",
+    "menuShowCatalog", "menuShowCategories", "menuShowFavorites", "menuShowSearch",
+    "menuShowDescription", "menuShowPlay", "menuShowFavorite", "menuShowRefresh", "menuShowAudio",
+    "menuShowSubtitles", "menuShowQuality", "menuShowSpeed", "menuShowStats", "m3uMediaUrl",
+    "nativeSubtitleSize", "nativeSubtitlePosition", "nativeSubtitleTone", "volumeStep", "sleepTimeout",
+    "infoTimeout", "osdOpacity", "permanentTime", "pageSize", "listPosition", "seek13Duration",
+    "arrowFun", "showNumber", "showName", "showProgram", "showDescription", "showProgress", "uiColorConfig",
+    "nativeSubtitleMode", "nativeSubtitleLanguage", "nativeEpgApiV1", "nativeInputProbeV1",
+];
+
 fn keys(value: &Value, required: &[&str], optional: &[&str]) -> bool {
     value.as_object().is_some_and(|object| required.iter().all(|key| object.contains_key(*key))
         && object.keys().all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str())))
@@ -139,7 +153,7 @@ fn every_schema_page_obeys_controller_v1() {
         let mut context = None;
         let mut cursors = BTreeSet::new();
         let mut complete = false;
-        for _ in 0..41 {
+        for _ in 0..EXPECTED_IDS.len() {
             // request_for_test uses one fixed request ID; each independent
             // command probe gets a fresh receiver, retaining the runtime token.
             let mut remote = Remote::disabled_for_test("dev_fixture", "fixture");
@@ -167,7 +181,8 @@ fn every_schema_page_obeys_controller_v1() {
             request["cursor"] = json!(cursor);
         }
         assert!(complete, "schema pagination must terminate");
-        assert_eq!(rows.len(), 41, "every registered descriptor must be reachable");
+        assert_eq!(rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(),
+            EXPECTED_IDS, "every descriptor must be reachable in its established order");
         assert_eq!(rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>().len(), rows.len());
         if requested_limit.is_none() { expected = rows; } else { assert_eq!(rows, expected); }
     }

@@ -31,5 +31,5 @@
   "ott.profile_no_matches": "Keine Treffer. Suche leeren, um alles anzuzeigen.",
   "ott.profile_empty": "Diese Liste ist leer.",
   "ott.profile_provider_limit": "Dieser Anbieter hat bereits 15 Profile.",
-  "ott.profile_total_limit": "Es sind bereits 90 Profile vorhanden."
+  "ott.profile_total_limit": "Die maximale Anzahl an Profilen für dieses Gerät ist erreicht."
 }

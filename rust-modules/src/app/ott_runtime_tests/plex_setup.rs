@@ -327,3 +327,37 @@ fn plex_capacity_notice_survives_saved_alongside_errors_and_clears_on_provider_s
 
 #[path = "plex_origin_return.rs"]
 mod origin_return;
+
+
+#[test]
+fn remote_plex_recovery_has_one_addressed_writer_and_does_not_change_native_auth() {
+    let _serial = plx_base::testlock::serial();
+    let _registry = Registry::empty();
+    let server = register("remote-native-machine");
+    let sid = plx_plex::plex::id_of_machine(&server.machine_id).unwrap();
+    let client = plx_plex::plex::client_for(sid).unwrap();
+    let mut app = mounted();
+    let epoch = app.bridge.auth_read().0.flow_epoch;
+    let mut runtime = app.ott.take().unwrap();
+    let before = serde_json::to_value(&runtime.saved).unwrap();
+    let mut inv = runtime.remote.request_for_test("provider", json!({"query":"plex"}));
+    inv.deadline_ms = runtime.now_ms() + 60_000;
+    let response = commands::command(&mut runtime, &mut app, &inv);
+    assert!(response.is_none(), "no success before durable writer completion: {response:?}");
+    assert!(runtime.saving);
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+    let job = runtime.rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match job {
+        Job::Saved(Err(_), Some(request), reload, response) => {
+            assert_eq!(request.id, inv.id);
+            assert!(reload, "recovered active profile must mount its own catalogue");
+            assert_eq!(response["data"]["provider"], "plex");
+        }
+        _ => panic!("expected one addressed pre-IO writer refusal"),
+    }
+    assert!(runtime.rx.try_recv().is_err(), "no second unaddressed UI writer");
+    assert_eq!(app.bridge.auth_read().0.flow_epoch, epoch);
+    assert!(client.uses_token("synthetic-token"));
+    assert_eq!(plx_plex::plex::id_of_machine(&server.machine_id), Some(sid));
+    app.ott = Some(runtime);
+}

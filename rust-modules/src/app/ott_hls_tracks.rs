@@ -52,7 +52,7 @@ impl<T> Drop for Slots<T> {
         if let Some(active) = &self.running { active.cancelled.store(true, Ordering::Release); }
     }
 }
-enum Recipient { Ui(Option<TrackCommitRequest>), Remote(Remote) }
+enum Recipient { Ui(Option<TrackCommitRequest>), Remote(Remote), Automatic }
 struct Pending { route: HlsTrackRequest, reply: Recipient }
 #[derive(Default)]
 pub(super) struct State { slots: Slots<Pending> }
@@ -70,9 +70,18 @@ pub(super) fn source_available(runtime: &Runtime) -> bool {
         || runtime.active_lease.as_ref().is_some_and(super::HeldLease::is_playback)
 }
 fn gate(runtime: &Runtime, app: &App) -> Result<(), Failure> {
-    if !source_available(runtime) { return Err(Failure::Unavailable); }
-    if !super::playback_allowed(app) || !runtime.track_selection_kiosk()
+    automatic_gate(runtime, app)?;
+    if !runtime.track_selection_kiosk()
         .is_ok_and(super::super::ott_kiosk_policy::remote_track_selection_allowed)
+    { return Err(Failure::Unavailable); }
+    Ok(())
+}
+// A verified installation preference applies to the accepted playback even
+// when kiosk hides manual track controls. Source and foreground authority still
+// gate both kinds of work, and malformed/uncertain saved policy is refused.
+fn automatic_gate(runtime: &Runtime, app: &App) -> Result<(), Failure> {
+    if !source_available(runtime) { return Err(Failure::Unavailable); }
+    if !super::playback_allowed(app) || runtime.track_selection_kiosk().is_err()
     { return Err(Failure::Unavailable); }
     use plx_media::player::PlaybackState;
     match plx_media::player::state(&app.player.session) {
@@ -93,6 +102,7 @@ fn retire(runtime: &mut Runtime, app: &mut App, pending: Vec<Pending>, why: Fail
 {
     for pending in pending {
         match pending.reply {
+            Recipient::Automatic => {},
             Recipient::Ui(request) => reply(app, request, Outcome::Rejected(why)),
             Recipient::Remote(remote) => match remote.current(runtime, app, &pending.route, now_ms) {
                 Err(error) => remote.reject(runtime, error),
@@ -108,6 +118,7 @@ fn remote_now(runtime: &Runtime, app: &App) -> Option<u64> {
 }
 fn finish(runtime: &mut Runtime, app: &mut App, recipient: Recipient, outcome: Outcome) {
     match recipient {
+        Recipient::Automatic => {},
         Recipient::Ui(request) => reply(app, request, outcome),
         Recipient::Remote(remote) => remote.finish(runtime, outcome),
     }
@@ -118,7 +129,7 @@ pub(super) fn poll_remote(runtime: &mut Runtime, app: &mut App, now_ms: Option<u
     let mut state = std::mem::take(&mut runtime.hls_tracks);
     let retired = state.slots.retire_if(|pending| match &pending.reply {
         Recipient::Remote(remote) => remote.current(runtime, app, &pending.route, now_ms).is_err(),
-        Recipient::Ui(_) => false,
+        Recipient::Ui(_) | Recipient::Automatic => false,
     });
     runtime.hls_tracks = state;
     retire(runtime, app, retired, Failure::StalePlayback, now_ms);
@@ -214,10 +225,12 @@ fn apply_owned_ready(pages: &plx_ui::dispatch::Dispatcher<super::super::bridge::
     ps: &mut route::PlaybackSession, pending: &Pending,
     result: Result<PreparedHlsTrack, &'static str>) -> Outcome
 {
-    let Recipient::Ui(request) = &pending.reply else {
-        return Outcome::Rejected(Failure::StalePlayback);
+    let request = match &pending.reply {
+        Recipient::Ui(request) => request.as_ref(),
+        Recipient::Automatic => None,
+        _ => return Outcome::Rejected(Failure::StalePlayback),
     };
-    if !owner_pending(pages, request.as_ref()) {
+    if !owner_pending(pages, request) {
         return Outcome::Rejected(Failure::StalePlayback);
     }
     apply_ready(ps, &pending.route, result)
@@ -253,8 +266,11 @@ fn completed_at(runtime: &mut Runtime, app: &mut App, completion: Completion, no
                     }
                 }
             }
-            Recipient::Ui(_) => {
-                let outcome = match gate(runtime, app) {
+            Recipient::Ui(_) | Recipient::Automatic => {
+                let allowed = if matches!(&pending.reply, Recipient::Automatic) {
+                    automatic_gate(runtime, app)
+                } else { gate(runtime, app) };
+                let outcome = match allowed {
                     Ok(()) => apply_owned_ready(&app.pages, &mut app.player.session, &pending, completion.result),
                     Err(why) => Outcome::Rejected(why),
                 };
@@ -268,16 +284,32 @@ pub(super) fn completed(runtime: &mut Runtime, app: &mut App, completion: Comple
     completed_at(runtime, app, completion, now);
     tick(runtime, app);
 }
+fn enqueue_automatic(state: &mut State, ps: &mut route::PlaybackSession) {
+    let slots = &mut state.slots;
+    if slots.queued.is_some() || slots.running.as_ref().is_some_and(|active| active.value.is_some()) { return; }
+    if let Ok(Some(request)) = route::begin_automatic_hls_subtitle_request(ps) {
+        slots.queued = Some(Pending { route: request, reply: Recipient::Automatic });
+    }
+}
 pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
+    // Reconcile only committed segment facts before any UI/remote catalogue is captured.
+    let _ = route::reconcile_observed_hls_tracks(&mut app.player.session);
     let now = has_remote_pending(runtime).then(|| remote_now(runtime, app)).flatten();
     poll_remote(runtime, app, now);
     let allowed = gate(runtime, app).is_ok();
+    let automatic_allowed = automatic_gate(runtime, app).is_ok();
     let retired = runtime.hls_tracks.slots.retire_if(|pending| match &pending.reply {
         Recipient::Ui(request) => !allowed || !owner_pending(&app.pages, request.as_ref())
+            || !route::hls_track_request_is_current(&app.player.session, &pending.route),
+        Recipient::Automatic => !automatic_allowed
             || !route::hls_track_request_is_current(&app.player.session, &pending.route),
         Recipient::Remote(_) => false,
     });
     retire(runtime, app, retired, Failure::StalePlayback, now);
+    // Automatic selection shares the bounded worker, but never displaces an
+    // addressed manual/remote request. Route intent distinguishes initial Off
+    // from the viewer explicitly choosing Off.
+    if automatic_allowed { enqueue_automatic(&mut runtime.hls_tracks, &mut app.player.session); }
     pump(runtime, app);
 }
 pub(super) fn shutdown(runtime: &mut Runtime, app: &mut App) {

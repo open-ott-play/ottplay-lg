@@ -498,6 +498,14 @@ fn owned_io_failure_v3_keeps_closed_cause_after_cleanup() {
             json!({"hls":{"exit":"hls_short_body","outcome":null}})),
         (IoFailureDetails::Hls { exit: DemuxExitClass::Other, outcome: Some(TraceOutcome::Deadline) },
             json!({"hls":{"exit":"other","outcome":"deadline"}})),
+        (IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportOpenFailed, outcome: Some(TraceOutcome::Transport) },
+            json!({"hls":{"exit":"hls_transport_open_failed","outcome":"transport"}})),
+        (IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportFailed, outcome: Some(TraceOutcome::ServerState) },
+            json!({"hls":{"exit":"hls_transport_failed","outcome":"server_state"}})),
+        (IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportOpenFailed, outcome: Some(TraceOutcome::Refused) },
+            json!({"hls":{"exit":"hls_transport_open_failed","outcome":"refused"}})),
+        (IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportFailed, outcome: Some(TraceOutcome::Inconclusive) },
+            json!({"hls":{"exit":"hls_transport_failed","outcome":"inconclusive"}})),
         // The public diagnostic enums are wider than this closed wire contract.
         (IoFailureDetails::Hls { exit: DemuxExitClass::NoVideoStream, outcome: Some(TraceOutcome::Started) },
             json!({"hls":{"exit":"other","outcome":null}})),
@@ -585,3 +593,214 @@ mod eof_priority;
 
 #[path = "playback_video_evidence.rs"]
 mod video_evidence;
+
+
+fn make_live(app: &mut App) {
+    let runtime = app.ott.as_mut().unwrap();
+    let mut profile = profile();
+    profile.kind = ProviderKind::M3u;
+    profile.source = "https://diag.invalid/list.m3u".into();
+    let mut channel = entry("first");
+    channel.duration_ms = None;
+    channel.live = Some(Default::default());
+    channel.media = MediaLocator::Http { url: PRIVATE_URL.into() };
+    runtime.saved.profiles.profiles = vec![profile.clone()];
+    runtime.saved.profiles.active_profile = Some(profile.id.clone());
+    runtime.provider = ProviderKind::M3u;
+    runtime.catalog.entries[0] = channel.clone();
+    let playing = runtime.playing.as_mut().unwrap();
+    playing.profile = profile;
+    playing.entry = channel;
+    playing.advance_on_failure = false;
+}
+fn transient_hls() -> IoFailureDetails {
+    IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportOpenFailed,
+        outcome: Some(TraceOutcome::Transport) }
+}
+fn live_failure() -> Box<App> {
+    let mut app = fixture();
+    app.ott.as_mut().unwrap().saving = true;
+    admit(&mut app, "first");
+    make_live(&mut app);
+    let epoch = install_owned_engine(&mut app);
+    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+    signal_error(&app, FailureKind::PlaybackInterrupted);
+    reconcile(&mut app);
+    // Real admission consumed its Job and freed the slot. Hold the next worker
+    // in the fixture, as the queued/late-result tests supply completion by hand.
+    app.ott.as_mut().unwrap().resolver_busy = true;
+    app
+}
+
+#[test]
+fn live_transport_recovery_requires_precise_closed_transient_cause() {
+    use plx_media::player::report::FailureDetails;
+    for exit in [DemuxExitClass::HlsTransportOpenFailed, DemuxExitClass::HlsTransportFailed,
+        DemuxExitClass::HlsPlaylistInvalid, DemuxExitClass::Other, DemuxExitClass::NoVideoStream] {
+        for outcome in [None, Some(TraceOutcome::Transport), Some(TraceOutcome::Deadline),
+            Some(TraceOutcome::ServerState), Some(TraceOutcome::Refused),
+            Some(TraceOutcome::Inconclusive), Some(TraceOutcome::Started), Some(TraceOutcome::NoBody)] {
+            let expected = matches!(exit, DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed)
+                && matches!(outcome, Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState));
+            assert_eq!(recoverable_live_transport(Some(FailureDetails {
+                demux_exit: exit, pipeline_error: 0,
+                io_failure: Some(IoFailureDetails::Hls { exit, outcome }),
+            })), expected, "{exit:?} {outcome:?}");
+        }
+    }
+    assert!(!recoverable_live_transport(None));
+}
+
+#[test]
+fn owned_live_transient_failure_retries_only_exact_channel_without_new_viewer_intent() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure();
+    let runtime = app.ott.as_mut().unwrap();
+    let generation = runtime.generation;
+    let play_generation = runtime.play_generation;
+    let selected = runtime.selected.clone();
+    assert!(runtime.playing.is_none());
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    let retry = runtime.continuity.pending_retry().expect("attributed transient live failure");
+    assert_eq!(retry.after, "first");
+    let due = retry.not_before_ms;
+    assert!(matches!(runtime.retry_continuity(due - 1, &["first", "second"], true), continuity::Decision::Wait));
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    assert!(matches!(&decision, continuity::Decision::Start { entry_id, reason: continuity::Reason::LiveRetry, .. } if entry_id == "first"));
+    runtime.apply_continuity(decision);
+    assert_eq!(runtime.generation, generation);
+    assert_ne!(runtime.play_generation, play_generation);
+    assert_eq!(runtime.selected, selected);
+    let request = runtime.play_target.as_ref().unwrap();
+    assert_eq!(request.id, "first");
+    assert!(!request.advance_on_failure);
+    assert_eq!(runtime.resolver_next.as_ref().unwrap().generation, runtime.play_generation);
+    // Automatic admission must not reset the shared bounded failure budget.
+    assert_eq!(runtime.continuity.live_disconnected(generation, "first", due), continuity::Decision::Wait);
+    assert_eq!(runtime.continuity.pending_retry().unwrap().failures, 2);
+}
+
+#[test]
+fn live_retry_admission_refusal_never_falls_through_to_next_channel() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure();
+    let runtime = app.ott.as_mut().unwrap();
+    let due = runtime.continuity.pending_retry().unwrap().not_before_ms;
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    runtime.catalog.entries.retain(|entry| entry.id != "first");
+    runtime.apply_continuity(decision);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert!(runtime.continuity.pending_retry().is_none());
+    assert_eq!(runtime.continuity.tick(runtime.generation, u64::MAX, &["second"], true), continuity::Decision::Idle);
+}
+
+#[test]
+fn live_failure_cannot_borrow_unowned_cause_or_recover_finite_video() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    for live in [false, true] {
+        let mut app = fixture();
+        app.ott.as_mut().unwrap().saving = true;
+        admit(&mut app, "first");
+        if live { make_live(&mut app); }
+        if !live {
+            let epoch = install_owned_engine(&mut app);
+            assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+        } else {
+            // Global evidence without this attempt's native Engine is unowned.
+            let epoch = plx_media::player::SHARED.begin_native_session().unwrap();
+            assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+        }
+        signal_error(&app, FailureKind::PlaybackInterrupted);
+        reconcile(&mut app);
+        let runtime = app.ott.as_ref().unwrap();
+        assert!(runtime.continuity.pending_retry().is_none());
+        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    }
+}
+
+#[test]
+fn pause_after_live_failure_retires_cooldown_even_without_installed_playing() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure();
+    assert!(app.ott.as_ref().unwrap().continuity.pending_retry().is_some());
+    assert!(app.ott.as_ref().unwrap().playing.is_none());
+    app.adapters.player.install(plx_media::player::engine::engine_after_reload_for_test());
+    assert!(plx_media::player::pause(&mut app.adapters.player));
+    assert!(lifecycle::viewer_paused());
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    tick_with_start(&mut app, clock, |_, _, _, _, _| panic!("viewer Pause cannot launch a recovery"));
+    let runtime = app.ott.as_mut().unwrap();
+    assert!(runtime.continuity.pending_retry().is_none());
+    assert_eq!(runtime.continuity.tick(runtime.generation, u64::MAX, &["first", "second"], true), continuity::Decision::Idle);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+}
+
+
+fn issue_live_retry(app: &mut App) -> u64 {
+    let runtime = app.ott.as_mut().unwrap();
+    let due = runtime.continuity.pending_retry().unwrap().not_before_ms;
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    runtime.apply_continuity(decision);
+    let generation = runtime.play_generation;
+    assert_eq!(runtime.live_retry_generation, Some(generation));
+    runtime.resolver_next.take().expect("worker takes automatic retry");
+    generation
+}
+fn late_live_result(app: &App, generation: u64) {
+    let runtime = app.ott.as_ref().unwrap();
+    let profile = runtime.saved.profiles.profiles[0].clone();
+    let entry = runtime.catalog.entries[0].clone();
+    runtime.tx.send(Job::Play(generation, profile, Ok((entry,
+        ReadySource::External(plx_media::ff::ExternalSource::Http(PRIVATE_URL.into()), unsupported_info(), None)))))
+        .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
+}
+fn accepted_pause(app: &mut App) {
+    app.adapters.player.install(plx_media::player::engine::engine_after_reload_for_test());
+    assert!(plx_media::player::pause(&mut app.adapters.player));
+    assert!(lifecycle::viewer_paused());
+}
+#[test]
+fn pause_after_live_retry_was_queued_rejects_late_resolver_completion() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure();
+    let generation = issue_live_retry(&mut app);
+    late_live_result(&app, generation);
+    accepted_pause(&mut app);
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    tick_with_start(&mut app, clock, |_, _, _, _, _| panic!("Pause must fence the late automatic resolver"));
+    let runtime = app.ott.as_ref().unwrap();
+    assert_ne!(runtime.play_generation, generation);
+    assert!(runtime.live_retry_generation.is_none());
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert!(runtime.continuity.pending_retry().is_none());
+}
+#[test]
+fn newer_explicit_selection_is_not_cancelled_by_old_live_retry_pause_receipt() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure();
+    let generation = issue_live_retry(&mut app);
+    late_live_result(&app, generation);
+    let mut runtime = app.ott.take().unwrap();
+    let mut next = runtime.catalog.entries[0].clone();
+    next.id = "second".into();
+    runtime.catalog.entries[1] = next;
+    runtime.play_request_with_policy(&mut app, PlaybackRequest::ordinary("second", 0)).unwrap();
+    let selected_generation = runtime.play_generation;
+    assert_ne!(selected_generation, generation);
+    assert!(runtime.live_retry_generation.is_none());
+    runtime.resolver_next.take().expect("new selected resolver is held by the fixture");
+    app.ott = Some(runtime);
+    accepted_pause(&mut app);
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    tick_with_start(&mut app, clock, |_, _, _, _, _| panic!("old resolver cannot start either selection"));
+    let runtime = app.ott.as_ref().unwrap();
+    assert_eq!(runtime.play_generation, selected_generation);
+    assert_eq!(runtime.play_target.as_ref().unwrap().id, "second");
+    assert!(runtime.live_retry_generation.is_none());
+}

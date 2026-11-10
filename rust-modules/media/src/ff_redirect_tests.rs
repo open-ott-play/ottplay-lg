@@ -206,6 +206,7 @@ fn a_seek_reopen_follows_a_relative_302_and_keeps_its_range() {
     let mut hs = plx_net::stream::http_stream_boxed();
     let mut aq = crate::aq::aq_new(1 << 20);
     let mut state = AvioState {
+        hls_ts: None,
         src: Src::Socket {
             hs: &mut *hs,
             host: CString::new("127.0.0.1").unwrap(),

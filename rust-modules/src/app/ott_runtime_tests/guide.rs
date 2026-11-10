@@ -32,7 +32,7 @@ fn fixture() -> (App, ClockSample, Guide) {
     entry.media = MediaLocator::Http {
         url: "https://media.invalid/guide-fixture.m3u8".into(),
     };
-    entry.live = Some(ChannelMetadata {
+    entry.live = Some(ChannelMetadata { guide_id: None, guide_feed: String::new(),
         tvg_name: "Fixture channel".into(),
         guide_shift_seconds: 0,
         catchup: None,

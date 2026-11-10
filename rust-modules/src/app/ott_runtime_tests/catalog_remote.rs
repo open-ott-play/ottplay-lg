@@ -31,7 +31,7 @@ fn configure_archive(f: &mut Fixture) -> (ProviderProfile, CatalogEntry, archive
     let mut entry = synthetic_entry();
     entry.id = "archive-channel".into();
     entry.media = MediaLocator::Http { url: "https://media.invalid/live".into() };
-    entry.live = Some(ChannelMetadata {
+    entry.live = Some(ChannelMetadata { guide_id: None, guide_feed: String::new(),
         tvg_name: "Archive channel".into(), guide_shift_seconds: 0,
         catchup: Some(CatchupSource { mode: CatchupMode::Append,
             source: "?utc={utc}&end={utcend}".into(), retention_seconds: 86400,
@@ -312,8 +312,10 @@ fn catalog_remote_pages_cross_legacy_limit_without_starting_io() {
     assert_eq!(caps["data"]["local_media_progressive"], local["progressive_capability"]);
     assert!(
         caps["data"].get("random").is_none(),
-        "random policy is not negotiated"
+        "legacy random policy is not negotiated"
     );
+    assert_eq!(caps["data"]["catalog_random"],
+        json!({"version":2,"scope":"receipt","request_field":"receipt_random"}));
     let cats = f.categories();
     let first = f.channels(cats["catalog"].as_str().unwrap(), "all", 0);
     assert_eq!(first["total"], 10_201);
@@ -2073,4 +2075,66 @@ fn continuity_async_failure_waits_on_frame_clock_and_stop_cancels_it() {
     assert_eq!(runtime.continuity.catalog_updated(runtime.generation, &refs, true), continuity::Decision::Idle);
     assert!(runtime.play_target.is_none());
     f.app.ott = Some(runtime);
+}
+
+#[test]
+fn receipt_random_v2_admits_complete_channel_receipt_only() {
+    let _lock = plx_base::testlock::serial();
+    let mut f = Fixture::new(4);
+    f.app.ott.as_mut().unwrap().entropy = Some([7;16]);
+    let cats = f.categories();
+    let invalid = f.request("play_catalog", json!({"catalog":cats["catalog"],
+        "receipt_random":{"version":2,"scope":"receipt"}})).unwrap();
+    assert_eq!(invalid["status"], "rejected");
+    let series = cats["categories"].as_array().unwrap().iter()
+        .find(|row| row["name"] == "Series").unwrap()["id"].as_str().unwrap();
+    let page = f.channels(cats["catalog"].as_str().unwrap(), series, 0);
+    let result = f.request("play_catalog", json!({"catalog":page["catalog"],
+        "receipt_random":{"version":2,"scope":"receipt"}}));
+    assert!(result.is_none(), "accepted playback is asynchronous: {result:?}");
+    let runtime = f.app.ott.as_ref().unwrap();
+    let chosen = runtime.play_target.as_ref().unwrap();
+    assert!(chosen.id == "video-0" || chosen.id == "video-2");
+    assert!(!chosen.advance_on_failure);
+}
+
+#[test]
+fn receipt_random_v2_refuses_unknown_semantics_and_loading() {
+    let _lock = plx_base::testlock::serial();
+    let mut f = Fixture::new(2);
+    f.app.ott.as_mut().unwrap().entropy = Some([7;16]);
+    let cats = f.categories();
+    let page = f.channels(cats["catalog"].as_str().unwrap(), "all", 0);
+    for options in [json!({"version":1,"scope":"receipt"}),
+        json!({"version":2,"scope":"all"}),
+        json!({"version":2,"scope":"receipt","search":"Video"})] {
+        assert_eq!(f.request("play_catalog", json!({"catalog":page["catalog"],
+            "receipt_random":options})).unwrap()["status"], "rejected");
+    }
+    f.app.ott.as_mut().unwrap().catalog_loading = true;
+    assert_eq!(f.request("play_catalog", json!({"catalog":page["catalog"],
+        "receipt_random":{"version":2,"scope":"receipt"}})).unwrap()["status"], "rejected");
+    assert!(f.app.ott.as_ref().unwrap().play_target.is_none());
+}
+
+#[test]
+fn private_archive_source_never_enters_catalog_guide_or_portable_favorites() {
+    use plx_data::ott::{archive::{CatchupMode,CatchupSource},guide::{ChannelMetadata,Coverage,Context,Query,ResultSet}};
+    let _lock = plx_base::testlock::serial();
+    let mut f = Fixture::new(1);
+    let secret = "private-archive-facts-token-should-never-export";
+    let runtime = f.app.ott.as_mut().unwrap();
+    runtime.catalog.entries[0].live = Some(ChannelMetadata { guide_id:None,guide_feed:String::new(),tvg_name:String::new(),guide_shift_seconds:0,
+        catchup:Some(CatchupSource { mode:CatchupMode::Provider,source:secret.into(),retention_seconds:86400,correction_seconds:0 }) });
+    let favorite = selection::capture(&runtime.saved.profiles.profiles[0], &runtime.catalog.entries[0]).unwrap();
+    assert!(!serde_json::to_string(&favorite).unwrap().contains(secret));
+    let cats = f.categories();
+    let page = f.channels(cats["catalog"].as_str().unwrap(),"all",0);
+    assert!(!cats.to_string().contains(secret));
+    assert!(!page.to_string().contains(secret));
+    let result = ResultSet { context:Context {generation:1,profile_id:"profile".into(),entry_id:"item".into()},
+        query:Query::Day {start:0,end:86400},coverage:Coverage::RequestedWindow,programmes:Vec::new() };
+    // The public guide envelope serializes presentation facts, never ChannelMetadata.
+    let wire = json!({"query":result.query,"coverage":result.coverage,"programmes":result.programmes});
+    assert!(!wire.to_string().contains(secret));
 }

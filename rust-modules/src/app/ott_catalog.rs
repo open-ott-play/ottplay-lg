@@ -130,7 +130,10 @@ pub(super) fn resolve_typed(
     let mut failure = None;
     let resolved = match &entry.media {
         MediaLocator::Http { url } => Resolved {
-            url: ott::http_url(url).ok_or("Invalid media address")?,
+            url: if profile.kind == ProviderKind::Edem && entry.live.is_some() {
+                let config=ott::edem::Config::parse(&profile.source).map_err(|_|"Invalid Edem profile")?;
+                config.stream(entry.provider_id.as_deref().ok_or("Invalid Edem channel")?).map_err(|_|"Invalid Edem channel")?
+            } else { ott::http_url(url).ok_or("Invalid media address")? },
             lease: None,
         },
         MediaLocator::VPortal { .. } => {
@@ -381,8 +384,11 @@ fn visit(
 ) -> Result<(), &'static str> {
     profile.validate().map_err(|_| "Invalid provider profile")?;
     match profile.kind {
-        ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker => {
-            super::ott_provider_http::visit(worker, profile, cancel, emit)?
+        ProviderKind::M3u | ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_) => {
+            super::ott_provider_http::visit(worker, profile, cancel, emit)?;
+            if profile.kind == ProviderKind::Edem && ott::edem::Config::parse(&profile.source).is_ok_and(|c|!c.portal.is_empty()) {
+                vportal::visit(worker,profile,cancel,emit)?;
+            }
         }
         ProviderKind::VPortal => vportal::visit(worker, profile, cancel, emit)?,
         ProviderKind::Local if ott::http_url(&profile.source).is_some() => {
@@ -802,4 +808,18 @@ pub(super) fn vportal_resolution_with_fetch_for_test(
 ) -> Result<(String, usize, usize, Option<&'static str>), &'static str> {
     let parsed = vportal::resolve_choices_with_fetch_for_test(profile, entry, cancel, preferred, interactive, fetch)?;
     Ok((parsed.selected.url, parsed.variants.len(), parsed.sessions.len(), parsed.failure))
+}
+
+#[cfg(all(test,feature="hostsim"))]
+mod edem_resolution_tests {
+    use super::*;
+    #[test]
+    fn edem_portal_http_movie_without_duration_retains_its_resolved_address() {
+        let profile=ProviderProfile{id:"edem-1".into(),name:"Edem".into(),kind:ProviderKind::Edem,source:r#"{"key":"test_key"}"#.into(),source_alias:String::new(),enabled:true};
+        let template=ott::edem::Config::parse(&profile.source).unwrap().template_profile(&profile);
+        let mut row=ott::parse_m3u("#EXTM3U\n#EXTINF:-1,Movie\nhttps://movies.invalid/item.mp4\n",&template).unwrap().entries.remove(0);
+        row.live=None;row.duration_ms=None;row.provider_id=Some("47".into());row.provider_id_field=Some("id".into());
+        let result=resolve_typed(&OffFrame::for_test(),&profile,&row,&AtomicBool::new(false)).unwrap();
+        assert_eq!(result.url,"https://movies.invalid:443/item.mp4");
+    }
 }

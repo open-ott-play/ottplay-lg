@@ -1452,8 +1452,12 @@ fn sparse_file_session(state: &str, selected: Option<usize>) -> Session {
     crate::app::ott_companion::protocol::session_for_test(value).unwrap()
 }
 
-fn generic_file_fixture(provider: &'static str) -> (Runtime, App, String) {
+// Keep the large UI owner on the heap: nested by-value fixture returns plus
+// the real numeric-input dispatch exceed the default test thread stack in
+// unoptimized builds. Runtime and all input paths remain the production types.
+fn generic_file_fixture(provider: &'static str) -> (Runtime, Box<App>, String) {
     let (mut runtime, app, mut adapter) = fixture();
+    let app = Box::new(app);
     runtime.page = "torrent-files";
     adapter.media_provider = provider;
     adapter.session = Some(sparse_file_session("select", None));

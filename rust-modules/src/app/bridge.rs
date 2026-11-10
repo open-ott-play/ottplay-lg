@@ -921,6 +921,12 @@ impl Bridge {
         std::mem::take(&mut self.preference_reqs)
     }
 
+    /// A HUD step uses the same deferred, source-checked OTT command door as
+    /// native remote input. The content runner revalidates the owner and source.
+    pub(crate) fn queue_ott_player_request(&mut self, request: plx_screens::registry::OttPlayerRequest) {
+        self.player_reqs.push(plx_screens::registry::PlayerReq::OttAction(request));
+    }
+
     pub(crate) fn take_player_reqs(&mut self) -> Vec<plx_screens::registry::PlayerReq> {
         std::mem::take(&mut self.player_reqs)
     }
@@ -4314,6 +4320,14 @@ pub(crate) fn ott_private_text(d: &Dispatcher<AppHost>) -> bool {
         .is_some_and(plx_screens::ott::OttScreen::handles_private_text)
 }
 
+/// Read only the interactive OTT screen's closed presentation counters.
+pub(crate) fn ott_guide_presentation(d: &Dispatcher<AppHost>) -> Option<serde_json::Value> {
+    ott_ui_target(d).and_then(|owner| d.nav.instance(owner))
+        .and_then(|body| body.screen.as_any())
+        .and_then(|screen| screen.downcast_ref::<plx_screens::ott::OttScreen>())
+        .map(plx_screens::ott::OttScreen::guide_presentation_diagnostics)
+}
+
 /// Text-capable owned pages consume SDL/remote text directly. Legacy queue
 /// fallback remains for the other native text-entry surfaces.
 pub(crate) fn text_owns_input(d: &Dispatcher<AppHost>) -> bool {
@@ -4501,22 +4515,50 @@ pub(crate) fn drag_input(x: f32, y: f32, now: Tick) -> InputEvent<u32> {
     }
 }
 
-/// A wheel tick as the key it stands for on a vertical flow (the family's `on_updown`).
+/// Cap one physical wheel packet, shared by free scrolling and key-like lists.
+pub(crate) fn bounded_wheel_delta(dy: i32) -> i32 { dy.clamp(-8, 8) }
+
+/// Wheel notches as vertical keys at the wheel's own cadence. Keep magnitude,
+/// but bound one event to eight rows so a malformed/large delta cannot flood input.
 pub(crate) fn wheel_input(dy: i32, now: Tick) -> Vec<InputEvent<u32>> {
+    let count = bounded_wheel_delta(dy).unsigned_abs() as usize;
     let key = if dy < 0 { Key::Down } else { Key::Up };
-    let (sym, wcode) = (0, 0);
-    vec![
-        InputEvent {
-            at: now,
-            source: Source::Sdl,
-            kind: InputKind::Key { key, sym, wcode, edge: Edge::Down, at_edge: false },
-        },
-        InputEvent {
-            at: now,
-            source: Source::Sdl,
-            kind: InputKind::Key { key, sym, wcode, edge: Edge::Up, at_edge: false },
-        },
-    ]
+    let mut events = Vec::with_capacity(count * 2);
+    for _ in 0..count {
+        for edge in [Edge::Down, Edge::Up] {
+            events.push(InputEvent {
+                at: now,
+                source: Source::Sdl,
+                kind: InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false },
+            });
+        }
+    }
+    events
+}
+
+#[cfg(test)]
+mod wheel_input_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_keeps_each_notch_and_releases_between_rows() {
+        let at = Tick { ms: 120, dt_us: 0 };
+        assert!(wheel_input(0, at).is_empty());
+        for (dy, wanted, count) in [(1, Key::Up, 1), (-1, Key::Down, 1),
+            (5, Key::Up, 5), (-5, Key::Down, 5),
+            (i32::MIN, Key::Down, 8), (i32::MAX, Key::Up, 8)] {
+            let events = wheel_input(dy, at);
+            assert_eq!(events.len(), count * 2);
+            for pair in events.chunks_exact(2) {
+                for (event, expected_edge) in pair.iter().zip([Edge::Down, Edge::Up]) {
+                    assert_eq!(event.at.ms, at.ms);
+                    assert_eq!(event.source, Source::Sdl);
+                    assert!(matches!(event.kind, InputKind::Key { key, edge, sym: 0, wcode: 0, at_edge: false }
+                        if key == wanted && edge == expected_edge));
+                }
+            }
+        }
+    }
 }
 
 /// **A pointer button-UP as the press machine's release.** The dispatcher's `InputKind` has no
