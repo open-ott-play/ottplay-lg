@@ -32,6 +32,8 @@ mod overlay_tests;
 mod ott_remote_tests;
 #[cfg(test)]
 mod osd_tests;
+#[cfg(test)]
+mod channel_transition_tests;
 
 use std::borrow::Cow;
 
@@ -148,6 +150,8 @@ pub struct PlayerScreen {
     /// Who owns the "pipeline is working" signal this frame — resolved once, after `player::pump`,
     /// and handed to both the transport and the read-out so they can never both light.
     pub busy: plx_appkit::player_hud::Busy,
+    /// A viewer-requested channel change keeps its information visible through acquisition.
+    channel_change_hud: bool,
     /// Is the transport's MIDDLE drawn at all this frame? False while an Info card or Chapters
     /// strip has taken it — which panel is up is the container's answer, so the loop pushes it.
     pub transport: bool,
@@ -197,6 +201,7 @@ impl PlayerScreen {
             up_next: Countdown::default(),
             slot: ControlSlot::Discs(player_hud::Controls::NONE),
             busy: plx_appkit::player_hud::Busy::None,
+            channel_change_hud: false,
             transport: true,
             hud_policy: HudPolicy::Normal,
             osd_uncovered: false,
@@ -321,6 +326,29 @@ impl PlayerScreen {
         self.number_notice = true;
         self.volume_notice_until = Some(now.wrapping_add(VOLUME_NOTICE_MS));
         plx_machine::idle::invalidate();
+    }
+
+    /// Called only after the application accepts an explicit next/previous request.
+    /// Keep the installed channel's facts until the admitted replacement publishes its own.
+    pub fn begin_channel_change(&mut self, now: u32) {
+        self.channel_change_hud = true;
+        self.hud.dismissed = false;
+        self.hud.extend_default(now);
+        if self.number_notice { self.clear_volume_notice(); }
+        self.publish();
+    }
+
+    /// Presentation consumes the application's source-fenced loading fact, never clears media errors.
+    pub fn set_playback_feedback(&mut self, busy: player_hud::Busy, now: u32) {
+        self.busy = busy;
+        if self.channel_change_hud {
+            // A deliberate Back/dismiss remains authoritative even during a slow resolve.
+            if !self.hud.dismissed { self.hud.extend_default(now); }
+            if matches!(busy, player_hud::Busy::None
+                | player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Failed, _)) {
+                self.channel_change_hud = false;
+            }
+        }
     }
 
     fn clear_volume_notice(&mut self) {
@@ -2164,7 +2192,7 @@ impl LogicalState for PlayerScreen {
         c.option(self.reminder_notice_until.as_ref(), |c, until| { c.u32(*until); });
         c.bool(self.reminder_notice.is_open());
         c.option(self.volume_notice_until.as_ref(), |c, until| { c.u32(*until); });
-        c.bool(self.volume_notice.is_open()).bool(self.number_notice);
+        c.bool(self.volume_notice.is_open()).bool(self.number_notice).bool(self.channel_change_hud);
     }
     fn probe(&self, out: &mut String) {
         out.push_str(WORD);

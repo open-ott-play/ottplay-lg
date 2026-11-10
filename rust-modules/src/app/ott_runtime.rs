@@ -21,6 +21,8 @@ mod exit_confirmation;
 mod menu_settings;
 #[path = "ott_player_browse.rs"]
 mod player_browse;
+#[path = "ott_player_startup.rs"]
+mod player_startup;
 #[path = "ott_row_guide.rs"]
 pub(super) mod row_guide;
 #[path = "ott_vportal_quality.rs"]
@@ -4811,6 +4813,11 @@ pub(super) fn open_player_settings(
     }
     app.ott = Some(runtime);
     result
+}
+
+/// Presentation only: the admitted OTT resolver runs before the media route owns a flight.
+pub(super) fn player_startup_pending(app: &App) -> bool {
+    player_startup::pending(app)
 }
 
 /// Publish source authority before UI dispatch; AppHost admits each event namespace separately.

@@ -321,8 +321,24 @@ pub(super) fn publish_playback_frame(app: &mut App, was_player: bool) {
     super::player_viewport::sync(app);
     super::player_geometry::sync(app);
     app.bridge.publish_playback(&app.player.session, was_player);
+    let feedback = player_feedback(app);
+    if let Some(page) = super::bridge::player_mut(&mut app.pages) {
+        page.set_playback_feedback(feedback, clock::now());
+        page.publish();
+    }
     super::ott_runtime::publish_remote_player_offer(app);
     publish_info_presentation(app);
+}
+
+/// Resolving an admitted replacement does not inherit the outgoing decoder's error.
+/// This is a display projection; media failure flags and source authority remain unchanged.
+fn player_feedback(app: &App) -> plx_appkit::player_hud::Busy {
+    if super::ott_runtime::player_startup_pending(app) {
+        plx_appkit::player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Working,
+            plx_media::player::PlaybackState::Resolving.caption())
+    } else {
+        plx_appkit::player_hud::busy(&app.player.session)
+    }
 }
 
 /// Build an addressed display publication. Playback is outside the controlled tape
@@ -3120,7 +3136,7 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         // `transport` is the other per-frame fact the instance cannot resolve for
                         // itself: the transport's MIDDLE is hidden behind an open Info card or
                         // Chapters strip, and which panel is up is the container's answer.
-                        let busy = plx_appkit::player_hud::busy(&app.player.session);
+                        let busy = player_feedback(app);
                         let bare_middle = !matches!(
                             super::bridge::player_overlay_kind(&app.pages),
                             Some(plx_screens::player::overlay::OverlayKind::Info)

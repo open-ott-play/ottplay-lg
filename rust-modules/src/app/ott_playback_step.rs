@@ -127,13 +127,20 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     if runtime.playing.is_none() && runtime.failed_playback.is_none() {
         let source = player_browse::native_identity(runtime, app)
             .ok_or("The playing source is no longer current")?;
-        return player_browse::native_list_step(runtime, app, &source, offset);
+        player_browse::native_list_step(runtime, app, &source, offset)?;
+        if let Some(page) = bridge::player_mut(&mut app.pages) {
+            page.begin_channel_change(clock::now());
+        }
+        return Ok(());
     }
     let id = target(runtime, app, offset)?;
     input_policy::ui(runtime, &OttAction::Play(id.clone()))?;
     runtime.checkpoint(app, true);
     // A refused destination must not fall forward to unrelated media.
     runtime.play_with_policy(app, &id, false)?;
+    if let Some(page) = bridge::player_mut(&mut app.pages) {
+        page.begin_channel_change(clock::now());
+    }
     runtime.cancel_setup();
     arm(runtime, app);
     Ok(())
