@@ -2241,9 +2241,15 @@ fn classic_play_pause_open_category_selection_once_without_transport_or_browse()
 #[test]
 fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
     let _guard = plx_base::testlock::serial();
-    for mode in [UiMode::Classic, UiMode::Modern] {
+    for (mode, source_title, display_label) in [UiMode::Classic, UiMode::Modern].into_iter().flat_map(|mode| [
+        (mode, Some("123 Channel A"), "18  123 Channel A"),
+        (mode, None, "007 Channel"),
+        (mode, Some(""), "18  "),
+    ]) {
         let mut view = (*classic_arrow_view(0, false)).clone();
         view.selected_row = Some("channel-17".into());
+        view.rows[17].title = display_label.into();
+        view.rows[17].content_title = source_title.map(str::to_owned);
         let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(view.clone()), mode);
         let selected = d.focus();
         view.revision += 1;
@@ -2270,10 +2276,20 @@ fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
         let cx = Cx { views: rig.mode, tick: tick(2200), measure: &rig.measure,
             press: Default::default(), focus: plx_machine::machine::FocusRead { current, ..Default::default() },
             owner: InputOwner::Entry(page.id) };
-        let mut draw = DrawFrame::new(&cx, plx_ui::Painter::recording());
-        plx_ui::screen::record_stops_while_recording(|| {
-            plx_gfx::gfx::without_frame_clear(|| Screen::<TestHost>::draw(screen, &mut draw));
-        });
+        let mut draw = DrawFrame::new(&cx, plx_ui::Painter::root());
+        let (runs, waiting) = plx_ui::placeholder::capture_declared(||
+            plx_ui::draw_census::capture_runs(||
+                plx_ui::screen::record_stops_while_recording(|| {
+                    plx_gfx::gfx::without_frame_clear(|| Screen::<TestHost>::draw(screen, &mut draw));
+                })));
+        assert_eq!(waiting.of(plx_ui::placeholder::Reason::WorkingReadout), 1,
+            "the actual pending cover draws its loading spinner in {mode:?}");
+        assert!(runs.iter().any(|run| run.text == "Opening video…"), "missing loading caption in {mode:?}");
+        let expected_title = source_title.unwrap_or(display_label);
+        assert!(expected_title.is_empty() || runs.iter().any(|run| run.text == expected_title),
+            "missing original channel title {expected_title:?} in {mode:?}");
+        assert!(!runs.iter().any(|run| run.text.starts_with("18  ") || run.text == "18"),
+            "the catalogue ordinal must not enter the loading readout in {mode:?}");
         assert!(draw.into_stops().is_empty(), "pending cover exposes no hidden list controls");
         frame(&mut d, &mut rig, 2216, vec![key(Key::Back, tick(2216)), key_up(Key::Back, tick(2216))]);
         assert_eq!(rig.actions, vec![OttAction::Back]);

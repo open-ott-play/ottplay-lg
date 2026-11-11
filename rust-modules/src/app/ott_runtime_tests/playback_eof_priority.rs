@@ -208,9 +208,11 @@ fn exact_live_eof_retains_channel_and_queues_only_same_source_retry() {
     plx_media::player::swap_state_for_test(PlaybackState::Playing);
     mark_eof();
     assert!(finish_catalog_playback(&mut app));
-    let runtime = app.ott.as_mut().unwrap();
-    assert_eq!(runtime.playing.as_ref().unwrap().selection_id, selected);
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(runtime.playing.is_none(), "an ended decoder retains no active playback owner");
+    assert_eq!(failed_playback::current(runtime, &app).unwrap().selection_id, selected);
     assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    let runtime = app.ott.as_mut().unwrap();
     let due = runtime.continuity.pending_retry().unwrap().not_before_ms;
     assert!(matches!(runtime.continuity.tick(runtime.generation, due, &["first", "second"], true),
         continuity::Decision::Start { entry_id, .. } if entry_id == "first"));

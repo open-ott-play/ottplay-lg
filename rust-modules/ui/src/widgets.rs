@@ -798,6 +798,28 @@ pub fn card(p: Painter, frame: Rect, art: Art, rad: f32, focused: bool, scale: f
     card_named(p, frame, art, None, rad, focused, scale, f)
 }
 
+/// Centre the complete decoded image inside a bounded art slot. Logos must
+/// retain all their lettering; the ordinary poster card intentionally uses a
+/// cover crop instead. Invalid or not-yet-decoded sizes retain the slot.
+pub fn contained_art_frame(frame: Rect, image: ArtImage) -> Rect {
+    if !image.w.is_finite() || !image.h.is_finite() || image.w <= 0.0 || image.h <= 0.0 {
+        return frame;
+    }
+    let scale = (frame.w / image.w).min(frame.h / image.h);
+    let w = image.w * scale;
+    let h = image.h * scale;
+    Rect::new(frame.x + (frame.w - w) * 0.5, frame.y + (frame.h - h) * 0.5, w, h)
+}
+
+/// Draw complete artwork in its slot, resolving once so cache admission and
+/// arrival animation keep their ordinary identity. Used by channel logos and
+/// player identity art; poster shelves continue to use cover-cropped cards.
+pub fn card_contained(p: Painter, frame: Rect, art: Art<'_>, radius: f32) {
+    let image = resolve_card_art(p, frame, &art);
+    let fitted = contained_art_frame(frame, image);
+    card_named_led(p, fitted, art, None, radius, false, 1.0, 0.0, Some(image));
+}
+
 /// Ask for a card's art NOW, for [`card_named_led`] to draw later: what [`card_named`] resolves,
 /// at the rect it would resolve at (`frame` scaled by `scale` for a focused card), so the card's
 /// one motion occurrence is this call's. The source serves the newest frame's requests in the

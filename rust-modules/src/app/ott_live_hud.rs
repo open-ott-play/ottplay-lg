@@ -94,8 +94,7 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App, changed: bool) -> bo
     // a whole-runtime authority check, so own that exceptional fallback before
     // mutating presentation state; never clone healthy playback per frame.
     let failed = if runtime.playing.as_ref().is_some_and(|playing| playing_matches(playing, app)) { None }
-        else if failed_playback::ready(runtime, app) { failed_playback::current(runtime, app).cloned() }
-        else { None };
+        else { failed_playback::current(runtime, app).cloned() };
     let Some(playing) = runtime.playing.as_ref().filter(|p| playing_matches(p, app)).or(failed.as_ref()) else {
         runtime.live_hud = State::default();
         return false;

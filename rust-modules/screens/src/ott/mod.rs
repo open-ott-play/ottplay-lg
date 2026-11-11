@@ -1822,7 +1822,11 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
                 msg::browse_library_loading()
             } else { &self.snapshot.status }).unwrap_or_default();
             let title = std::ffi::CString::new(self.snapshot.rows.iter()
-                .find(|row| &row.id == id).map_or("", |row| row.title.as_str())).unwrap_or_default();
+                // Catalogue row labels carry their ordinal. This wait begins
+                // before the Player HUD exists, so use the separate source
+                // title here too; never strip digits from a real channel name.
+                .find(|row| &row.id == id).map_or("", |row|
+                    row.content_title.as_deref().unwrap_or(&row.title))).unwrap_or_default();
             plx_ui::widgets::StatusOverlay::new(Rect::FULL, &caption, plx_ui::widgets::StatusKind::Working)
                 .reason(&title).phase(frame.cx.tick.ms).draw(&plx_ui::Env::inert(), frame.painter);
             return;

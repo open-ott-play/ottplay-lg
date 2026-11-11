@@ -745,3 +745,57 @@ fn failed_live_center_opens_bound_catalogue_without_restart_or_implicit_navigati
         assert!(!app.adapters.player.is_live(), "browsing is not playback retry or resume");
     }
 }
+
+#[test]
+fn live_eof_exhaustion_preserves_header_and_explicit_catalogue_recovery() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        for revoke_source in [false, true] {
+            let mut app = live_m3u_remote_app(mode, true);
+            // Exhaust the four same-channel retries without starting a worker.
+            // The real EOF below is the terminal fifth disconnect.
+            let runtime = app.ott.as_mut().unwrap();
+            let generation = runtime.generation;
+            let mut now = runtime.now_ms();
+            for _ in 0..4 {
+                assert_eq!(runtime.continuity.live_disconnected(generation, "c", now), continuity::Decision::Wait);
+                let due = runtime.continuity.pending_retry().unwrap().not_before_ms;
+                assert!(matches!(runtime.continuity.tick(generation, due, &["c", "a", "b"], true),
+                    continuity::Decision::Start { entry_id, .. } if entry_id == "c"));
+                now = due + 1;
+            }
+            let title = runtime.playing.as_ref().unwrap().entry.title.clone();
+            let art = projection(&app).art;
+            assert!(art.is_some(), "fixture exercises actual retained artwork");
+            assert!(crate::app::ott_runtime::finish_catalog_playback(&mut app));
+            let mut runtime = app.ott.take().unwrap();
+            assert!(runtime.playing.is_none() && !app.adapters.player.is_live());
+            assert!(runtime.continuity.pending_retry().is_none());
+            assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+            assert!(failed_playback::current(&runtime, &app).is_some());
+            assert!(crate::app::ott_runtime::live_hud::publish(&mut runtime, &mut app, true));
+            app.ott = Some(runtime);
+            assert_eq!(projection(&app).live.unwrap().channel_title, title);
+            assert_eq!(projection(&app).art, art);
+            crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+            let offer = app.bridge.ott_player_offer().unwrap();
+            assert!(offer.recovery_only);
+            if revoke_source {
+                let request = plx_screens::registry::OttPlayerRequest {
+                    owner: app.pages.top_page().unwrap(), source: offer.source.clone(),
+                    action: plx_screens::registry::OttPlayerAction::OpenCatalog };
+                app.ott.as_mut().unwrap().saved.profiles.profiles[0].source = "https://other.invalid/list.m3u".into();
+                assert!(crate::app::ott_runtime::remote_player_action(&mut app, request).is_err());
+                assert!(!app.pages.has_pending_navigation());
+            } else {
+                native_edge(&mut app, consts::SDLK_RETURN, 40, Edge::Down);
+                idle(&mut app);
+                assert!(ott_surface(&app).is_some(), "terminal EOF must keep the explicit OK catalogue door");
+                assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+            }
+            assert!(app.ott.as_ref().unwrap().play_target.is_none());
+            assert!(!app.adapters.player.is_live(), "a recovery panel cannot restart a decoder");
+        }
+    }
+}

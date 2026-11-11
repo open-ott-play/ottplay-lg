@@ -392,7 +392,7 @@ fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: Play
     if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
     if Instant::now() >= deadline { return Err(trace.open_error(crate::curlio::OpenErr::Deadline)); }
     let deadline = deadline.min(Instant::now() + Duration::from_secs(15));
-    let mut source = match owner {
+    let source = match owner {
         Owner::Inspect(_) => {
             crate::curlio::CurlSource::open_private_checked(url, 0, Some(deadline), owner)
                 .map(|(s, _)| s)
@@ -414,11 +414,21 @@ fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: Play
     }
     .map_err(|error| trace.open_error(error))?;
     trace.record("open", "ok", 0);
-    if source.size() > PLAYLIST_BYTES as i64 {
+    finish_playlist_response(source, Vec::new(), owner, deadline, &trace)
+}
+
+/// Complete the response already admitted by the checked HTTP transport. A
+/// sniffed extensionless manifest carries its consumed prefix here; opening it
+/// again would discard the provider's admitted response and start a new session.
+fn finish_playlist_response(mut source: Box<crate::curlio::CurlSource>, mut bytes: Vec<u8>,
+    owner: &mut Owner<'_>, deadline: Instant, trace: &FetchTrace)
+    -> Result<(String, String), &'static str>
+{
+    if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
+    if source.size() > PLAYLIST_BYTES as i64 || bytes.len() > PLAYLIST_BYTES {
         return Err(trace.fail("body", "size", 0, "HLS playlist exceeds size limit"));
     }
     let landed = source.effective_url().to_owned();
-    let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         let n = source.read_until(&mut chunk, Some(deadline), owner);
@@ -470,13 +480,34 @@ pub(super) fn inspect(
     url: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<super::inspect::MediaInfo, &'static str> {
+    inspect_from_first(url, cancelled, None)
+}
+
+/// Continue a sniffed response without a duplicate GET. The original request's
+/// deadline, cancellation owner and final redirect URL remain authoritative.
+pub(super) fn inspect_opened(source: Box<crate::curlio::CurlSource>, prefix: Vec<u8>,
+    deadline: Instant, cancelled: Arc<AtomicBool>)
+    -> Result<super::inspect::MediaInfo, &'static str>
+{
+    let trace = FetchTrace { stage: PlaylistStage::Initial, depth: 0, started: Instant::now() };
+    let (landed, text) = finish_playlist_response(source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)?;
+    let source_url = landed.clone();
+    inspect_from_first(&source_url, cancelled, Some((landed, text)))
+}
+
+fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(String, String)>)
+    -> Result<super::inspect::MediaInfo, &'static str>
+{
     let source_url = plx_data::ott::http_url(url).ok_or("Invalid HLS address")?;
     let mut url = source_url.clone();
     let mut subtitle_master = None;
     for depth in 0..4 {
         let stage = if depth == 0 { PlaylistStage::Initial } else { PlaylistStage::Selected };
-        let (landed, text) = fetch_traced(&url, &mut Owner::Inspect(&cancelled),
-            Instant::now() + Duration::from_secs(15), stage, depth)?;
+        let (landed, text) = match first.take() {
+            Some(response) => response,
+            None => fetch_traced(&url, &mut Owner::Inspect(&cancelled),
+                Instant::now() + Duration::from_secs(15), stage, depth)?,
+        };
         if text.lines().any(|line| line.trim().strip_prefix("#EXT-X-STREAM-INF:")
             .and_then(|raw| attrs(raw).ok()).is_some_and(|a| a.contains_key("AUDIO")))
         {

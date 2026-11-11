@@ -302,3 +302,53 @@ fn live_hud_admitted_header_hands_off_to_presented_clock_without_metadata_change
     deliver(&mut app, sample, guide);
     assert_eq!(live(&app).unwrap().guide.unwrap().current.unwrap().title, "Programme after first frame");
 }
+
+#[test]
+fn failed_live_header_survives_ui_suspension_without_lending_command_authority() {
+    use plx_machine::machine::UiMode;
+    use plx_screens::registry::{OttPlayerAction, OttPlayerRequest};
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for (mode, revoke_source) in [UiMode::Classic, UiMode::Modern].into_iter()
+        .flat_map(|mode| [(mode, false), (mode, true)]) {
+        let (mut app, _) = ready_live();
+        app.bridge.apply_ui_mode(mode);
+        mount_player(&mut app);
+        let expected_title = live(&app).unwrap().channel_title;
+        let expected_art = projection(&app).art;
+        let mut runtime = app.ott.take().unwrap();
+        runtime.playing.as_mut().unwrap().advance_on_failure = false;
+        player::swap_state_for_test(player::PlaybackState::Error);
+        runtime.reconcile_failure(&mut app);
+        assert!(runtime.playing.is_none() && !app.adapters.player.is_live());
+        assert!(super::super::super::failed_playback::current(&runtime, &app).is_some());
+        app.ott = Some(runtime);
+        app.pages.nav.suspended = true;
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        assert!(app.bridge.ott_player_offer().is_none(), "suspended navigation grants no recovery action");
+        publish_without_runtime_change(&mut app);
+        assert_eq!(live(&app).unwrap().channel_title, expected_title);
+        assert_eq!(live(&app).unwrap().ordinal, Some(1));
+        assert_eq!(projection(&app).art, expected_art);
+        app.pages.nav.suspended = false;
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        let offer = app.bridge.ott_player_offer().unwrap();
+        assert!(offer.recovery_only);
+        let request = OttPlayerRequest { owner: app.pages.top_page().unwrap(),
+            source: offer.source.clone(), action: OttPlayerAction::OpenCatalog };
+        if revoke_source {
+            app.ott.as_mut().unwrap().saved.profiles.profiles[0].source = "https://other.invalid/list.m3u".into();
+            publish_without_runtime_change(&mut app);
+            assert!(live(&app).is_none(), "a different source cannot retain the failed channel header");
+            crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+            assert!(app.bridge.ott_player_offer().is_none());
+            assert!(crate::app::ott_runtime::remote_player_action(&mut app, request).is_err());
+        } else {
+            assert!(crate::app::ott_runtime::remote_player_action(&mut app, request).is_ok());
+            // Nav requests are queued effects, not an in-flight transition
+            // until the ordinary page frame has consumed them.
+            settle_pages(&mut app);
+            assert!(app.pages.surface_up(), "recovery is the ordinary source-bound catalogue door");
+        }
+    }
+}

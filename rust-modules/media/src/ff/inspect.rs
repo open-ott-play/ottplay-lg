@@ -309,9 +309,7 @@ fn raw_inner_capture(
                     .trim_start()
                     .starts_with("#EXTM3U")
                 {
-                    let landed = source.effective_url().to_owned();
-                    drop(source);
-                    return super::external_hls::inspect(&landed, cancelled);
+                    return super::external_hls::inspect_opened(source, prefix, deadline, cancelled);
                 }
             }
             InputSource::Http(source)
