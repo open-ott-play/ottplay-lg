@@ -107,8 +107,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
         Action::OpenMenu => Some(PlayerReq::OpenOverlay(
             plx_screens::player::overlay::OverlayKind::More { page: None })),
         Action::ShowInfo => Some(PlayerReq::ExtendDefaultHud),
-        Action::ShowDescription => Some(if app.bridge.ui_mode() == plx_machine::machine::UiMode::Classic
-            && plx_appkit::info_panel::live_channel(app.bridge.metadata_view())
+        Action::ShowDescription => Some(if plx_appkit::info_panel::live_channel(app.bridge.metadata_view())
             && !plx_appkit::info_panel::description(app.bridge.metadata_view()).trim().is_empty() {
             PlayerReq::OpenOverlay(plx_screens::player::overlay::OverlayKind::Info)
         } else { PlayerReq::ExtendDefaultHud }),

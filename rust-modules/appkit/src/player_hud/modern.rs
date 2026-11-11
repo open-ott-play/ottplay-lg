@@ -213,7 +213,7 @@ pub(super) fn draw_information(p: Painter, layout: &Layout, playing: Option<&Now
             plx_data::metadata::MediaArt::Http { url } => plx_ui::widgets::Art::Http { url, res: (240, 240) },
             plx_data::metadata::MediaArt::Local { key } => plx_ui::widgets::Art::Local { key },
         };
-        plx_ui::widgets::card_named(p, frame, art, None, theme::space::XS, false, 1.0, 0.0);
+        plx_ui::widgets::card_contained(p, frame, art, theme::space::XS);
     }
     let state = match content.kind {
         NowPlayingKind::Live => plx_platform::i18n::msg::modern_player_live(),

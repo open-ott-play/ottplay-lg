@@ -7672,8 +7672,18 @@ pub(super) fn finish_catalog_playback(app: &mut App) -> bool {
         let accepted = runtime.continuity.accepts_end(runtime.generation, &current);
         let decision = runtime.continuity.live_disconnected(runtime.generation, &current, runtime.now_ms());
         if accepted {
+            // A terminal live decoder has the same source-bound catalogue
+            // recovery as an attributed error, without lending transport
+            // authority or advancing to a different channel.
+            runtime.failed_playback = failed_playback::capture(&runtime, app);
+            runtime.playing = None;
+            runtime.resume_floor = None;
             runtime.release_active_lease();
             plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+            if let Some(page) = bridge::player_mut(&mut app.pages) {
+                page.transport_reset(false);
+            }
+            plx_media::route::cancel_play(&mut app.player.session);
             runtime.status = if runtime.continuity.pending_retry().is_some() {
                 "Live stream ended; retrying the same channel"
             } else { "Live stream ended" }.into();

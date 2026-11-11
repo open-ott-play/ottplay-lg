@@ -1381,8 +1381,12 @@ impl PlayerScreen {
         { return None; }
         // This is the PRE-press sample. note_global_press has already cleared
         // dismissal by this point and must not turn a bare press into HUD input.
-        let info_cycle = mode == plx_machine::machine::UiMode::Classic
-            && live_channel && !offer.seek_arrows && key == (Key::Right { alt: false });
+        // UP expands live programme information in either presentation. CH+/CH−
+        // retain channel stepping; finite Local/Plex/portal arrows keep their
+        // source-owned sequence behavior. Classic RIGHT retains its info cycle.
+        let info_cycle = live_channel && !offer.seek_arrows
+            && (key == Key::Up || (mode == plx_machine::machine::UiMode::Classic
+                && key == (Key::Right { alt: false })));
         // On a live channel, the center/OK button is the channel-list command. Keep
         // that action available while the transport HUD is visible too: otherwise
         // the first press only reveals the footer and every later press is consumed
@@ -1399,6 +1403,8 @@ impl PlayerScreen {
             return None;
         }
         let action = match key {
+            Key::Up if info_cycle => if self.hud.visible_at_press { Action::ShowDescription }
+                else { Action::ShowInfo },
             Key::Up => Action::Next,
             Key::Down => Action::Previous,
             Key::Left { alt: false } => if offer.seek_arrows { Action::SeekBackward } else { Action::OpenMenu },

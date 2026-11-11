@@ -71,8 +71,9 @@ impl Server {
                 if *status == 0 {
                     continue;
                 } // Close before a response: real transport failure.
+                let location = if *status == 302 { "Location: /landing/manifest\r\n" } else { "" };
                 let response = format!(
-                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} Fixture\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = socket.write_all(response.as_bytes());
@@ -366,4 +367,71 @@ fn open_error_mapping_is_closed_for_every_transport_variant() {
             assert_eq!(trace.open_error(error), message);
         }
     });
+}
+
+/// Model extensionless sniffing: the transport has already validated headers
+/// and consumed a prefix before handing the exact response to HLS inspection.
+fn opened_prefix(url: &str, cancel: &Arc<AtomicBool>, deadline: Instant)
+    -> (Box<crate::curlio::CurlSource>, Vec<u8>)
+{
+    let mut owner = Owner::Inspect(cancel);
+    let (mut source, _) = crate::curlio::CurlSource::open_private_checked(url, 0, Some(deadline), &mut owner).unwrap();
+    let mut prefix = [0; 16];
+    let n = source.read_until(&mut prefix, Some(deadline), &mut owner);
+    assert!(n > 0);
+    (source, prefix[..n as usize].to_vec())
+}
+
+#[test]
+fn sniffed_master_reuses_its_response_and_fetches_selected_only_once() {
+    let _serial = curl();
+    let server = Server::script(vec![
+        (200, b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\n/selected\n".to_vec()),
+        (403, b"private-response-sentinel".to_vec()),
+    ], Duration::ZERO, Duration::ZERO, None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (source, prefix) = opened_prefix(&server.url, &cancel, deadline);
+    let (result, lines) = captured(|| inspect_opened(source, prefix, deadline, cancel)
+        .map(|_| (String::new(), String::new())));
+    assert_eq!(result.unwrap_err(), "HLS playlist server returned HTTP 403");
+    assert_eq!(server.count.load(Ordering::Acquire), 2,
+        "one already-open master and one selected playlist; never a master refetch");
+    assert!(lines.iter().any(|line| line.contains("stage=initial depth=0 phase=complete")));
+    assert!(lines.iter().any(|line| line.contains("stage=selected depth=1 phase=open") && line.contains("code=403")));
+}
+
+#[test]
+fn sniffed_manifest_still_validates_body_and_honours_cancel_without_refetch() {
+    let _serial = curl();
+    for cancelled in [false, true] {
+        let server = Server::script(vec![(200, b"#EXTM3U\n#EXT-X-TARGETDURATION:not-a-number\n".to_vec())],
+            Duration::ZERO, Duration::ZERO, None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (source, prefix) = opened_prefix(&server.url, &cancel, deadline);
+        cancel.store(cancelled, Ordering::Relaxed);
+        let result = inspect_opened(source, prefix, deadline, cancel);
+        assert_eq!(result.unwrap_err(), if cancelled { "HLS request cancelled" } else { "Invalid HLS target duration" });
+        assert_eq!(server.count.load(Ordering::Acquire), 1);
+    }
+}
+
+
+#[test]
+fn sniffed_redirect_response_keeps_landed_url_without_reopening_it() {
+    let _serial = curl();
+    let server = Server::script(vec![
+        (302, Vec::new()),
+        (200, b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nselected\n".to_vec()),
+        (404, Vec::new()),
+    ], Duration::ZERO, Duration::ZERO, None);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (source, prefix) = opened_prefix(&server.url, &cancel, deadline);
+    assert!(source.effective_url().ends_with("/landing/manifest"));
+    let result = inspect_opened(source, prefix, deadline, cancel);
+    assert_eq!(result.unwrap_err(), "HLS playlist server returned HTTP 404");
+    assert_eq!(server.count.load(Ordering::Acquire), 3,
+        "redirect, its admitted master body, then the selected playlist exactly once");
 }

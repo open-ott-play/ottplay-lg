@@ -68,3 +68,93 @@ fn art_at_its_tiles_aspect_is_untouched_and_a_poster_in_a_landscape_tile_is_crop
     // an undecoded texture answers the whole window, never a NaN
     assert_eq!(art_uv(&headshot("k"), 0.0, 0.0, cast_circle(1.0)), plx_gfx::gfx::UV_FULL);
 }
+
+/// Channel row and footer slots must show a whole emblem or wordmark, unlike
+/// poster cards. Exercise the same decoded sizes for HTTP, Plex and local art;
+/// the fit must preserve aspect, stay centred and leave no sampled edge behind.
+#[test]
+fn channel_identity_art_fits_both_row_and_footer_without_cropping() {
+    let key = plx_machine::machine::PosterKey(701);
+    let arts = [Art::Http { url: "https://fixture.invalid/channel.png", res: (96, 64) },
+        Art::Thumb { sid: SRC, key: "/channel", res: (240, 240) },
+        Art::Local { key: &key }];
+    for slot in [Rect::new(81.0, 61.0, 48.0, 32.0), Rect::new(32.0, 900.0, 120.0, 120.0)] {
+        for (w, h) in [(1920.0, 240.0), (240.0, 1920.0), (512.0, 512.0), (96.0, 64.0)] {
+            let frame = contained_art_frame(slot, ArtImage { tex: 1, w, h, shown: 1.0 });
+            assert!(frame.x >= slot.x && frame.y >= slot.y);
+            assert!(frame.x + frame.w <= slot.x + slot.w + 1e-4);
+            assert!(frame.y + frame.h <= slot.y + slot.h + 1e-4);
+            assert!((frame.x + frame.w * 0.5 - (slot.x + slot.w * 0.5)).abs() < 1e-4);
+            assert!((frame.y + frame.h * 0.5 - (slot.y + slot.h * 0.5)).abs() < 1e-4);
+            assert!((frame.w / w - frame.h / h).abs() < 1e-5);
+            for art in &arts {
+                let uv = art_uv(art, w, h, frame);
+                for (actual, expected) in uv.into_iter().zip(plx_gfx::gfx::UV_FULL) {
+                    assert!((actual - expected).abs() < 1e-5,
+                        "logo loses an edge: source={w}×{h}, slot={slot:?}, uv={uv:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unresolved_or_invalid_identity_art_keeps_its_reserved_slot() {
+    let slot = Rect::new(10.0, 20.0, 48.0, 32.0);
+    for (w, h) in [(0.0, 0.0), (10.0, 0.0), (-1.0, 20.0), (f32::NAN, 20.0), (20.0, f32::INFINITY)] {
+        assert_eq!(contained_art_frame(slot, ArtImage { tex: 0, w, h, shown: 1.0 }), slot);
+    }
+}
+
+/// Draw through the actual cache and card renderer, rather than only asserting
+/// fit maths: a regression at either call boundary must not silently re-crop.
+#[test]
+fn resident_channel_logos_reach_renderer_whole_and_inside_the_slot() {
+    use plx_machine::machine::{PosterKey, PresentHandle};
+    use crate::tex::{Source, Warm, Uploader, Tex, Decoded, PosterReady};
+    struct Logos;
+    impl Source for Logos {
+        fn probe_local(&self, key: PosterKey) -> Option<PosterKey> { Some(key) }
+        fn probe_http(&self, _: &str, _: i32, _: i32) -> Option<PosterKey> { Some(PosterKey(1)) }
+        fn probe(&self, _: u16, _: &str, _: i32, _: i32, _: bool) -> Option<PosterKey> { Some(PosterKey(2)) }
+        fn warm(&self, _: u16, _: &str, _: i32, _: i32, _: bool) -> Warm { Warm::Known }
+        fn logo(&self, _: u16, _: &str) -> Option<PosterKey> { None }
+        fn logo_warm(&self, _: u16, _: &str) -> Warm { Warm::Known }
+        fn unresident(&self, _: PosterKey, _: bool) {}
+        fn idle(&self) -> bool { true }
+    }
+    struct Upload;
+    impl Uploader for Upload {
+        fn upload(&mut self, d: &Decoded) -> Tex { Tex { id: u32::from(d.w), w: d.w, h: d.h } }
+        fn warm(&mut self, _: Tex) {}
+        fn free(&mut self, _: Tex) {}
+    }
+    let _guard = plx_base::testlock::serial();
+    crate::tex::install(&Logos);
+    crate::tex::reset_for_test(1 << 20);
+    for (key, w, h) in [(1, 160, 20), (2, 20, 160), (3, 80, 80)] {
+        crate::tex::accept(PosterReady { key: PosterKey(key), result: Ok(Decoded {
+            w, h, rgba: vec![255; usize::from(w) * usize::from(h) * 4].into_boxed_slice(),
+        }) });
+    }
+    let mut budget = crate::frame::Budget::new();
+    budget.begin_frame(0);
+    let mut present = plx_machine::present::Present::new();
+    assert_eq!(crate::tex::prepare(&mut budget, &mut Upload, &mut PresentHandle::of(&mut present), || 0), 3);
+    let key = PosterKey(3);
+    for slot in [Rect::new(90.0, 90.0, 48.0, 32.0), Rect::new(32.0, 900.0, 120.0, 120.0)] {
+        let arts = [Art::Http { url: "https://fixture.invalid/logo", res: (96, 64) },
+            Art::Thumb { sid: SRC, key: "/logo", res: (240, 240) }, Art::Local { key: &key }];
+        for art in arts {
+            let quads = crate::draw_census::capture_card_quads(|| card_contained(Painter::root(), slot, art, 3.0));
+            assert_eq!(quads.len(), 1);
+            let (tex, uv, rect) = quads[0];
+            assert_ne!(tex, 0);
+            assert!(uv.into_iter().zip(plx_gfx::gfx::UV_FULL).all(|(a, b)| (a-b).abs() < 1e-5));
+            assert!(rect.x >= slot.x && rect.y >= slot.y);
+            assert!(rect.x + rect.w <= slot.x + slot.w + 1e-4);
+            assert!(rect.y + rect.h <= slot.y + slot.h + 1e-4);
+        }
+    }
+    crate::tex::reset_for_test(1 << 20);
+}

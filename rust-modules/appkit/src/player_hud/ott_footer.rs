@@ -308,7 +308,7 @@ pub(super) fn draw_classic(
             plx_data::metadata::MediaArt::Http { url } => plx_ui::widgets::Art::Http { url, res: (240, 240) },
             plx_data::metadata::MediaArt::Local { key } => plx_ui::widgets::Art::Local { key },
         };
-        plx_ui::widgets::card_named(painter, band.art, art, None, theme::space::XS, false, 1.0, 0.0);
+        plx_ui::widgets::card_contained(painter, band.art, art, theme::space::XS);
     }
     if let Some(ordinal) = content.ordinal {
         TextView::new(&ordinal.to_string(), content.lines[0].size, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))

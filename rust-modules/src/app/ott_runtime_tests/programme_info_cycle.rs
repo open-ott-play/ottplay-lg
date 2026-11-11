@@ -136,3 +136,31 @@ fn classic_live_without_description_stays_timed_and_repeats_do_not_expand_or_clo
 
 #[path = "programme_info_close.rs"]
 mod close_guards;
+
+
+fn press_up(app: &mut App) {
+    frame(app, Some(crate::app::events::encode_key(consts::SDLK_UP, 82, true)));
+    frame(app, Some(crate::app::events::encode_key(consts::SDLK_UP, 82, false)));
+    settle(app);
+}
+
+#[test]
+fn live_up_opens_current_programme_information_without_changing_playback_in_both_themes() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut app = app_with_description("Complete current programme synopsis.", mode);
+        let identity = route::playback_identity(&app.player.session);
+        let saved = serde_json::to_value(&app.ott.as_ref().unwrap().saved).unwrap();
+        press_up(&mut app);
+        assert!(visible(&app));
+        assert!(!app.pages.surface_up(), "first Up only reveals the information footer");
+        press_up(&mut app);
+        assert!(info(&app), "second Up expands the current programme information: {mode:?}");
+        assert_eq!(app.bridge.metadata_view().now_playing().unwrap().summary,
+            "Complete current programme synopsis.");
+        assert_eq!(route::playback_identity(&app.player.session), identity);
+        assert!(app.ott.as_ref().unwrap().play_target.is_none());
+        assert_eq!(serde_json::to_value(&app.ott.as_ref().unwrap().saved).unwrap(), saved);
+    }
+}

@@ -538,6 +538,23 @@ pub mod draw_census {
     thread_local! {
         static TEX: RefCell<Option<Vec<(u32, Rect, f32)>>> = const { RefCell::new(None) };
     }
+    thread_local! {
+        static CARD_QUADS: RefCell<Option<Vec<(u32, [f32; 4], Rect)>>> = const { RefCell::new(None) };
+    }
+    /// Card sampling at the renderer boundary, including its texture window.
+    pub fn note_card_quad(tex: u32, uv: [f32; 4], frame: Rect) -> bool {
+        CARD_QUADS.with(|quads| {
+            if let Some(quads) = quads.borrow_mut().as_mut() {
+                quads.push((tex, uv, frame));
+                true // capture the GPU-bound call without requiring a GL context
+            } else { false }
+        })
+    }
+    pub fn capture_card_quads(f: impl FnOnce()) -> Vec<(u32, [f32; 4], Rect)> {
+        CARD_QUADS.with(|quads| *quads.borrow_mut() = Some(Vec::new()));
+        f();
+        CARD_QUADS.with(|quads| quads.borrow_mut().take()).unwrap_or_default()
+    }
     /// A recorded textured quad: WHICH texture, where, at what cascaded alpha.
     pub fn note_tex(tex: u32, r: Rect, a: f32) {
         TEX.with(|l| {
@@ -1401,6 +1418,8 @@ impl Painter {
     /// every art tile gets its resting-and-rising shadow without a separate soft-shadow pass.
     /// `uv` is the window of the texture the card shows ([`tex_uv`](Self::tex_uv)).
     pub fn tex_carded(self, tex: u32, uv: [f32; 4], r: Rect, rad: f32, tint: [f32; 4], f: f32) {
+        #[cfg(any(test, feature = "test-support"))]
+        if draw_census::note_card_quad(tex, uv, self.place(r)) { return; }
         if self.declare({ let (b,o,_,_)=card_shadow_params(r.h,f,theme::CARD_SHADOW[3]); Rect::new(r.x-b,r.y+o-b,r.w+2.0*b,r.h+2.0*b) }, 14, |data| {
             use frame::backdrop::Value;
             tex.record(data);

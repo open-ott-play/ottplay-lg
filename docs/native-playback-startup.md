@@ -25,3 +25,11 @@ Historical diagnostics show that inspection and whole-segment processing can be 
 An accepted fullscreen next/previous request that queues a replacement reveals the information footer without publishing a new playing identity. The outgoing channel facts remain until the replacement is admitted, at which point the normal source-bound metadata publication updates them. Acquisition keeps the footer alive, normal auto-hide resumes after settling, and deliberate dismissal is respected.
 
 The application resolver can run before the media route marks itself busy. During that exact current request, or a current bounded same-channel recovery cooldown, the player displays loading rather than an outgoing decoder error. Cancellation, expiry, source/profile replacement and terminal failure retire that presentation. It does not clear native error flags or change playback authority.
+
+## Loading titles, artwork and live recovery
+
+The catalogue wait cover uses the source content title, not the numbered display label. Channel artwork in catalogue rows and the playback footer is fitted inside its slot with preserved aspect ratio; poster shelves retain their separate cover-crop layout. During live playback, Up first reveals the footer and a fresh second Up opens current programme information. Classic expands above the footer; Modern uses its information card. Finite-video and channel-rocker navigation retain their existing roles.
+
+A retained failed-channel receipt may supply presentation facts even while the UI cannot accept actions. This does not grant playback authority. Catalogue recovery still rechecks source, profile, category and input ownership, and a replaced source invalidates the old channel facts. Live EOF retains the same bounded recovery model rather than falling into a generic player footer.
+
+For extensionless HTTP sources, inspection completes the already-open response after recognizing an HLS header. It preserves the consumed prefix, validated final URL, body cap, cancellation and original deadline. This avoids a redundant initial manifest request; selected-manifest timeouts remain separately observable and are not automatically classified as fixed.
