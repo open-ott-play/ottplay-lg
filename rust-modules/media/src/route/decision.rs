@@ -47,7 +47,7 @@ pub use identity::PlaybackIdentity;
 
 #[path = "external.rs"]
 mod external;
-#[cfg(test)]
+#[cfg(all(test, feature = "hostsim"))]
 pub(crate) use external::external_hls_session_for_test;
 pub use external::{reconcile_observed_hls_tracks, install_observed_hls_tracks, observed_hls_tracks, observed_hls_subtitle_selection, HlsSubtitleMode, HlsSubtitlePolicy, HlsSubtitleIntent, hls_subtitle_policy, hls_subtitle_intent, restore_hls_subtitle_policy, begin_automatic_hls_subtitle_request, hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack, request_external, request_external_source, continue_external_source, external_source, external_hls, external_duration_ns, external_tracks, apply_external_track, apply_external_track_request, cancel_external_track_request, external_track_request_status, ExternalTrackRequest, ExternalTrackRequestStatus, install_external_local_subtitles, rearm_selected_local_subtitle, forget_external_source, ExternalError, ExternalTrackApplyError};
 
