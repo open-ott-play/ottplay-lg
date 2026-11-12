@@ -598,7 +598,7 @@ fn install_external_source(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hostsim"))]
 pub(crate) fn external_hls_session_for_test(duration_ns: i64) -> PlaybackSession {
     let mut ps = PlaybackSession::IDLE;
     reset_player_control_for_test(&ps);
