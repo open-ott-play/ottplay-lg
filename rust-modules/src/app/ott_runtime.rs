@@ -1,6 +1,8 @@
 //! Native OTT integration. The app owns IO and publishes immutable screen snapshots;
 //! provider parsing and portable identities remain independent of rendering and Plex.
 use super::*;
+#[path = "ott_system_tv.rs"]
+mod system_tv;
 #[path = "ott_auth_return.rs"]
 pub(super) mod auth_return;
 #[path = "ott_catalog_return.rs"]
@@ -549,6 +551,7 @@ struct SetupSession {
 }
 
 pub(super) struct Runtime {
+    system_tv: system_tv::State,
     settings_groups: settings_groups::State,
     classic_navigation: classic_navigation::State,
     auth_return: auth_return::State,
@@ -1127,6 +1130,7 @@ impl Runtime {
             archive_hours_editor: None,
             m3u_media_editor: None,
             remote: Remote::from_install("", ""),
+            system_tv: Default::default(),
             play_generation: 0,
             resolver_busy: false,
             resolver_next: None,
@@ -3111,6 +3115,7 @@ impl Runtime {
                     fields
                 })
                 .unwrap_or_default(),
+            "system-tv" => system_tv::rows(self),
             "providers" => ProviderKind::all()
             .into_iter()
             .map(|kind| {
@@ -3133,6 +3138,7 @@ impl Runtime {
                     false,
                 )
             })
+            .chain(std::iter::once(system_tv::entry(self)))
             .collect(),
             "profiles" => {
                 let mut profiles: Vec<_> = if self.classic_m3u_slots() {
@@ -3632,6 +3638,7 @@ impl Runtime {
             page_id,
             revision: self.revision,
             title: match self.page {
+                "system-tv" => "System television / LG Channels",
                 "providers" => "Providers",
                 "profiles" => "Profiles",
                 "profile-setup" => "Profile setup",
@@ -5275,6 +5282,7 @@ fn tick_with_start(
         app.rec
             .refuse("Nondefault UI typography is not bound in this recording format");
     }
+    system_tv::tick(&mut runtime, app);
     hls_tracks::tick(&mut runtime, app);
     // The cooldown may already have issued a resolver request. Accepted Pause
     // still wins over its late completion, without cancelling a newer explicit
@@ -7301,6 +7309,9 @@ fn handle_action(
             }
         }
         OttAction::Back => {
+            if runtime.page == "system-tv" {
+                system_tv::leave(runtime); runtime.page = "providers"; return Ok(());
+            }
             if runtime.usb_browsing() {
                 return runtime.usb_browser_back(app);
             }
@@ -7353,6 +7364,7 @@ fn handle_action(
             }
         }
         OttAction::EditSetting(key) => {
+            if let Some(result) = system_tv::action(runtime, app, &key) { return result; }
             if let Some(result) = runtime.usb_action(app, &key) {
                 return result;
             }

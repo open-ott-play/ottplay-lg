@@ -1,0 +1,13 @@
+{
+  "id": "org.ottplay.systemtv.overlayprobe",
+  "version": "0.0.1",
+  "vendor": "OTTPlay",
+  "type": "web",
+  "main": "index.html",
+  "title": "OTTPlay TV Overlay Probe",
+  "icon": "icon.png",
+  "transparent": true,
+  "defaultWindowType": "overlay",
+  "handlesRelaunch": true,
+  "requiredACG": []
+}

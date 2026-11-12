@@ -6,6 +6,7 @@ mod protocol;
 mod discovery;
 use discovery::{CatalogProfile, ControllerBase, DiscoveryTarget};
 mod transport;
+pub(super) mod television;
 mod display;
 pub(super) mod media_tracks;
 pub(super) mod plex_servers;
