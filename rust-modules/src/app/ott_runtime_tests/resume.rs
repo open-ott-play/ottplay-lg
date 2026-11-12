@@ -20,7 +20,7 @@ impl Drop for ResetMedia {
 }
 
 fn local_entry(id: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: id.into(),
         title: format!("{id}.mp4"),

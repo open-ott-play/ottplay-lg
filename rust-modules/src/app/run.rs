@@ -316,6 +316,11 @@ pub(super) fn publish_playback_frame(app: &mut App, was_player: bool) {
     plx_media::player::engine::reap_abandoned_load(&mut app.adapters.player);
     // …and a real stop's off-frame `Unload` gets its main-thread tail (gate, epoch, ACB,
     // D1) the first frame after it returns (`player::engine::PendingRelease`).
+    if app.adapters.player.release_has_queued_start()
+        && !super::ott_runtime::foreign_native_start_allowed(app)
+    {
+        plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+    }
     plx_media::player::engine::poll_release_frame(&mut app.player.session, &mut app.adapters.player);
     app.player.session.repair_status = app.player.repair.state();
     super::player_viewport::sync(app);
@@ -1499,7 +1504,9 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
                 super::ott_runtime::viewer_transport(app);
             }
         } else if matches!(key, Key::Play) {
-            if key_play(&mut app.player.session,
+            if (app.adapters.player.is_live() && !app.player.lifecycle.awaiting_load()
+                || super::ott_runtime::foreign_native_start_allowed(app))
+                && key_play(&mut app.player.session,
                 &mut app.adapters.player,
                 app.last_input,
                 &mut app.player.lifecycle,
@@ -1515,7 +1522,9 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             // toggle, so this arm picks; off the player route `key_play` is what starts
             // playback, which is the right answer for a PLAYPAUSE press on a card.
             if paused() || super::bridge::player(&app.pages).is_none() {
-                if key_play(&mut app.player.session,
+                if (app.adapters.player.is_live() && !app.player.lifecycle.awaiting_load()
+                    || super::ott_runtime::foreign_native_start_allowed(app))
+                    && key_play(&mut app.player.session,
                     &mut app.adapters.player,
                     app.last_input,
                     &mut app.player.lifecycle,
@@ -1943,6 +1952,7 @@ fn claim_press_after_decoder_release(app: &mut App, press: WakePress) -> bool {
 /// Claim the parked session's foreground Load with `input` and, when it launches, mount the
 /// player ([`finish_foreground_launch`]). `true` when the Load launched.
 pub(super) fn claim_parked_foreground(app: &mut App, input: ForegroundInput) -> bool {
+    if !super::ott_runtime::foreign_native_start_allowed(app) { return false; }
     let activation = drive_foreground(
         &mut app.player.lifecycle,
         &mut app.player.session,
@@ -2007,6 +2017,9 @@ fn did_foreground_with_link(app: &mut App) -> ForegroundActivation {
     } else {
         ForegroundInput::DidForeground
     };
+    if !out.leaves_playback && app.player.lifecycle.awaiting_load()
+        && !super::ott_runtime::foreign_native_start_allowed(app)
+    { return ForegroundActivation::Handled; }
     let activation = drive_foreground(
         &mut app.player.lifecycle,
         &mut app.player.session,
@@ -2100,7 +2113,8 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // ended it while its worker ran) is reaped here, every frame: a flight with no Engine has no
         // pump to do it, and the landing's replacement encoder runs on the server until it is.
         plx_media::route::discard_stale_flight_landing();
-        if app.window_activity.allow_present(true) && app.player.lifecycle.flight_pending() {
+        if app.window_activity.allow_present(true) && app.player.lifecycle.flight_pending()
+            && super::ott_runtime::foreign_native_start_allowed(app) {
             // The foreground restore waits on a flight (its resume's rebuild or an Original
             // rollback): the lifecycle machine drains it, not the pump (there is no Engine) and not
             // the cold-resume drain (`playback_may_run` is false while the restore is parked).
@@ -2116,12 +2130,14 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             if matches!(activation, ForegroundActivation::Launched) {
                 finish_foreground_launch(app);
             }
-        } else if playback_may_run(app) {
+        } else if playback_may_run(app) && plx_media::route::engineless_flight_outstanding()
+            && super::ott_runtime::foreign_native_start_allowed(app) {
             // An Original rollback no foreground machine owns (`start_original_trial_reload`'s
             // Load failed before an Engine existed): its landing reloads onto the restored HLS.
             plx_media::player::drain_engineless_rollback(&mut app.player.session, &mut app.adapters.player);
         }
-        if playback_may_run(app) {
+        if playback_may_run(app) && app.player.lifecycle.pending_load_attempt().is_some()
+            && super::ott_runtime::foreign_native_start_allowed(app) {
             let _ = poll_foreground_load(
                 &mut app.player.lifecycle,
                 &mut app.player.session,
@@ -2143,13 +2159,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // the player (back to the detail page or home, whichever is behind), instead of freezing
         // on the last frame.
         if playback_may_run(app) && super::bridge::player(&app.pages).is_some() && plx_media::player::ended() {
-            let handed_off_to_up_next = if super::ott_runtime::finish_catalog_playback(app) {true} else {finish_playback(&mut app.player,
-                &mut app.adapters.player,
-                &mut app.repause_at,
-                &mut app.refresh_hubs,
-                &mut app.pages,
-                &mut app.bridge,
-            )};
+            let handed_off_to_up_next = if super::ott_runtime::finish_catalog_playback(app) {true} else {finish_playback(app)};
             // dev: REPLAY AFTER COMPLETION (#46) — `crate::dev::scenarios::maybe_replay_after_eos`.
             // `finish_playback`'s return, not `app.route()`: `exit_player`'s `PopTo` only PARKS
             // the navigation (applied at the next commit), so the route still reads `Player` here
@@ -2173,12 +2183,7 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         if playback_may_run(app)
             && super::bridge::player(&app.pages).is_some_and(|p| p.up_next.expired(fr.now))
         {
-            if !play_up_next(&mut app.player.session,
-                &mut app.adapters.player,
-                HudStart::Ordinary,
-                &mut app.pages,
-                &mut app.bridge,
-            ) {
+            if !play_up_next(app, HudStart::Ordinary, false) {
                 if let Some(player) = super::bridge::player_mut(&mut app.pages) {
                     player.up_next.cancel(); // nothing queued after all — don't re-fire
                 }
@@ -2456,15 +2461,7 @@ pub(crate) unsafe fn land_results(app: &mut App, fr: &mut Frame) {
                             &mut app.bridge,
                         ))
                     }
-                    AppArg::Player => activate_player_row(&mut app.player,
-                        &mut app.adapters.player,
-                        &mut app.repause_at,
-                        fr.ctrl,
-                        fr.now,
-                        &mut app.refresh_hubs,
-                        &mut app.pages,
-                        &mut app.bridge,
-                    ),
+                    AppArg::Player => super::playback::activate_player_row_checked(app, fr.ctrl, fr.now),
                     _ => super::playback::ViewerTransport::None,
                 };
                 super::ott_runtime::viewer_action(app, viewer_transport);
@@ -2952,6 +2949,14 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         super::deeplink::frame(&mut app.pages, &mut app.deeplink, &mut app.menu_play_await,
             app.window_activity.allow_present(true), stands, fr.now);
         if app.menu_play_await.is_some() {
+            let target = app.menu_play_await.as_ref()
+                .and_then(|wait| wait.parental_target(app.bridge.metadata_view()));
+            let interactive = app.menu_play_await.as_ref().is_some_and(|wait| wait.parental_interactive());
+            if target.is_some_and(|(sid, key)| if interactive {
+                !super::ott_runtime::foreign_ui_play_allowed(app, sid, &key)
+            } else { !super::ott_runtime::foreign_play_allowed(app, sid, &key) }) {
+                app.menu_play_await = None;
+            }
             menu_play_tick(&mut app.player.session, &mut app.adapters.player,
                 &mut app.pages, &mut app.bridge, &mut app.menu_play_await, fr.now);
         }
@@ -3024,6 +3029,9 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
 /// What a landed play does once its resume is settled: the Load, and the off-route backstop. Reached
 /// from the frame that lands a plan whose resume settled on the spot, and from the frame that lands
 /// a cold resume's flight (`player::land_resume`) — the same step, taken after the rebuild landed.
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) fn finish_landed_play_for_test(app: &mut App) { finish_landed_play(app, true); }
+
 fn finish_landed_play(app: &mut App, resume_prepared: bool) {
     if !resume_prepared {
         if let Some(transaction) = plx_media::route::pending_route_start() {
@@ -3037,6 +3045,15 @@ fn finish_landed_play(app: &mut App, resume_prepared: bool) {
     // A preview is the exception: the detail page stays mounted, and an off-route
     // engine is the feature, not a violation.
     if resume_prepared {
+        if !super::ott_runtime::foreign_native_start_allowed(app) {
+            if let Some(transaction) = plx_media::route::pending_route_start() {
+                let _ = plx_media::route::reject_route_start_preparation(transaction);
+            }
+            let newer_selection = super::ott_runtime::newer_native_selection_pending(app);
+            plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+            if !newer_selection { plx_media::route::cancel_play(&mut app.player.session); }
+            return;
+        }
         let outcome = plx_media::player::start_bufferfeed_tracked(
             &mut app.player.session,
             &mut app.adapters.player,
@@ -5313,6 +5330,7 @@ pub(crate) mod lifecycle_regression_tests {
                 "lifecycle-fixture",
             );
             let mut app = app();
+            super::super::ott_runtime::install_legacy_lifecycle_test_runtime(&mut app, sid);
             super::super::bridge::nav_root(&mut app.pages, AppArg::Home);
             frame(&mut app, 0);
             Some(Self {
@@ -8084,6 +8102,26 @@ pub(crate) mod lifecycle_regression_tests {
                 }
             }
         });
+        // Test failures must release this intentionally silent worker before
+        // Serial::drop drains workers; otherwise every later test spends its
+        // full drain allowance on a server whose stop flag became unreachable.
+        struct SilentServer {
+            open: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl SilentServer {
+            fn finish(mut self) {
+                self.open.store(false, Ordering::SeqCst);
+                self.thread.take().expect("the silent server's thread").join().unwrap();
+            }
+        }
+        impl Drop for SilentServer {
+            fn drop(&mut self) {
+                self.open.store(false, Ordering::SeqCst);
+                if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+            }
+        }
+        let silent = SilentServer { open: hole_open, thread: holder };
         let slow = plx_plex::plex::register_for_test("slow-friend", "127.0.0.1", hole_port as i32,
             "synthetic", "slow-friend");
         // (Not in Browse's pin table, so undecided, so it feeds Home: `pms::feeds_home`.)
@@ -8103,8 +8141,7 @@ pub(crate) mod lifecycle_regression_tests {
         assert!(matches!(rig.app.route(), AppArg::Home), "Home is on top");
         assert!(t - at_floor < 150, "the slow source did not hold the return ({} ms past the floor, bound 300)", t - at_floor);
         assert_eq!(first_cw_rk(&rig.app), "2");
-        hole_open.store(false, Ordering::SeqCst);
-        holder.expect("the silent server's thread").join().unwrap();
+        silent.finish();
     }
 
     /// **10b/10c, the next episode comes first.** Continue Watching is ordered by last viewed, so

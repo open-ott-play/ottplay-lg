@@ -348,6 +348,15 @@ impl PlaylistStage {
 }
 
 /// Closed facts only. This object cannot hold a URL, header or server body.
+#[derive(Debug)]
+struct FetchFailure { reason: &'static str, outcome: TraceOutcome, cancelled: bool }
+impl FetchFailure {
+    fn into_hls(self) -> HlsExit {
+        if self.cancelled { HlsExit::Aborted }
+        else { HlsExit::OpenFailed { reason: self.reason, outcome: self.outcome } }
+    }
+}
+
 struct FetchTrace { stage: PlaylistStage, depth: u8, started: Instant }
 impl FetchTrace {
     fn record(&self, phase: &'static str, kind: &'static str, code: i32) {
@@ -358,11 +367,11 @@ impl FetchTrace {
             "hls: playlist stage={} depth={} phase={phase} elapsed_ms={} kind={kind} code={code}",
             self.stage.label(), self.depth.min(4), self.started.elapsed().as_millis()));
     }
-    fn fail(&self, phase: &'static str, kind: &'static str, code: i32, message: &'static str) -> &'static str {
+    fn fail(&self, phase: &'static str, kind: &'static str, code: i32, message: &'static str) -> FetchFailure {
         self.record(phase, kind, code);
-        message
+        FetchFailure { reason: message, outcome: TraceOutcome::Refused, cancelled: false }
     }
-    fn open_error(&self, error: crate::curlio::OpenErr) -> &'static str {
+    fn open_error(&self, error: crate::curlio::OpenErr) -> FetchFailure {
         use crate::curlio::OpenErr;
         let (kind, code, message) = match error {
             OpenErr::Deadline => ("deadline", 0, self.stage.timeout()),
@@ -381,12 +390,24 @@ impl FetchTrace {
             OpenErr::Unavailable => ("unavailable", 0, "HLS transport unavailable"),
             OpenErr::RangeIgnored => ("range", 0, "HLS playlist server refused the requested byte range"),
         };
-        self.fail("open", kind, code, message)
+        let mut failure = self.fail("open", kind, code, message);
+        failure.outcome = hls_curl_open_outcome(error);
+        failure.cancelled = matches!(error, OpenErr::Aborted | OpenErr::Stopped);
+        failure
     }
 }
 
 fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
     -> Result<(String, String), &'static str>
+{
+    fetch_traced_failure(url, owner, deadline, stage, depth).map_err(|failure| failure.reason)
+}
+
+/// Retain checked transport evidence through a live refresh. Admission callers
+/// keep their static display errors; an active producer must not erase a
+/// deadline/server/connection cause before the source-owned retry policy sees it.
+fn fetch_traced_failure(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
+    -> Result<(String, String), FetchFailure>
 {
     let trace = FetchTrace { stage, depth, started: Instant::now() };
     if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
@@ -422,7 +443,7 @@ fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: Play
 /// again would discard the provider's admitted response and start a new session.
 fn finish_playlist_response(mut source: Box<crate::curlio::CurlSource>, mut bytes: Vec<u8>,
     owner: &mut Owner<'_>, deadline: Instant, trace: &FetchTrace)
-    -> Result<(String, String), &'static str>
+    -> Result<(String, String), FetchFailure>
 {
     if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
     if source.size() > PLAYLIST_BYTES as i64 || bytes.len() > PLAYLIST_BYTES {
@@ -438,7 +459,14 @@ fn finish_playlist_response(mut source: Box<crate::curlio::CurlSource>, mut byte
             } else if n == crate::curlio::READ_DEADLINE {
                 ("deadline", "HLS playlist body transfer timed out")
             } else { ("transport", "HLS playlist transfer failed") };
-            return Err(trace.fail("body", kind, source.body_failure().map_or(0, |f| f.rc), message));
+            let code = source.body_failure().map_or(0, |failure| failure.rc);
+            let mut failure = trace.fail("body", kind, code, message);
+            failure.cancelled = kind == "cancelled";
+            failure.outcome = if kind == "cancelled" { TraceOutcome::Refused }
+                else if kind == "deadline" { TraceOutcome::Deadline }
+                else { source.body_failure().map_or(TraceOutcome::Inconclusive,
+                    |failure| hls_curl_open_outcome(crate::curlio::OpenErr::Transport(failure.rc))) };
+            return Err(failure);
         }
         if n == 0 {
             break;
@@ -449,7 +477,9 @@ fn finish_playlist_response(mut source: Box<crate::curlio::CurlSource>, mut byte
         bytes.extend_from_slice(&chunk[..n as usize]);
     }
     if source.size() >= 0 && bytes.len() as i64 != source.size() {
-        return Err(trace.fail("body", "truncated", 0, "Truncated HLS response"));
+        let mut failure = trace.fail("body", "truncated", 0, "Truncated HLS response");
+        failure.outcome = TraceOutcome::Transport;
+        return Err(failure);
     }
     let text = String::from_utf8(bytes)
         .map_err(|_| trace.fail("validate", "utf8", 0, "HLS playlist is not UTF-8"))?;
@@ -490,7 +520,8 @@ pub(super) fn inspect_opened(source: Box<crate::curlio::CurlSource>, prefix: Vec
     -> Result<super::inspect::MediaInfo, &'static str>
 {
     let trace = FetchTrace { stage: PlaylistStage::Initial, depth: 0, started: Instant::now() };
-    let (landed, text) = finish_playlist_response(source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)?;
+    let (landed, text) = finish_playlist_response(source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)
+        .map_err(|failure| failure.reason)?;
     let source_url = landed.clone();
     inspect_from_first(&source_url, cancelled, Some((landed, text)))
 }
@@ -612,8 +643,8 @@ pub(super) fn demux_video(
         if unsafe { crate::aq::aq_is_aborted(aq) } {
             return Err(HlsExit::Aborted);
         }
-        let (landed, text) = fetch_traced(url, &mut Owner::Playback(aq),
-            Instant::now() + Duration::from_secs(15), PlaylistStage::Playback, 0).map_err(HlsExit::Failed)?;
+        let (landed, text) = fetch_traced_failure(url, &mut Owner::Playback(aq),
+            Instant::now() + Duration::from_secs(15), PlaylistStage::Playback, 0).map_err(FetchFailure::into_hls)?;
         let Playlist::Media(media) = parse(&landed, &text).map_err(HlsExit::Failed)? else {
             return Err(HlsExit::Failed(
                 "HLS media address became a master playlist",

@@ -177,7 +177,7 @@ fn generic_row(profile: &ProviderProfile, channel: &Value) -> Result<CatalogEntr
     if id.is_empty() || id.len() > 1024 || title.len() > 1024 {
         return Err("Invalid operator channel");
     }
-    Ok(CatalogEntry {
+    Ok(CatalogEntry { protection: ott::protection::advertised(channel),
         id: ott::favorites_wire::hash(format!("{}\0{id}", profile.id).as_bytes()),
         title,
         category: text(&channel["groupName"]),
@@ -240,7 +240,7 @@ fn publish(
         if title.len() > 1024 || category.len() > 1024 {
             return Err("Operator channel metadata exceeds limit");
         }
-        rows.push(CatalogEntry {
+        rows.push(CatalogEntry { protection: ott::protection::advertised(channel),
             id: ott::favorites_wire::hash(format!("{}\0{key}", profile.id).as_bytes()),
             title,
             category,

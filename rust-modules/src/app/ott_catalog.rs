@@ -449,18 +449,29 @@ pub(super) fn find_favorite(
         _ => None,
     };
     if let Some(media) = direct {
-        return Ok(CatalogEntry {
+        let category = if let MediaLocator::Local { relative_path } = &media {
+            let root = std::path::Path::new(&profile.source).file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let folder = std::path::Path::new(relative_path).parent().and_then(|s| s.to_str()).unwrap_or("");
+            [root, folder].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" / ")
+        } else { String::new() };
+        let entry = CatalogEntry { protection: category.is_empty().then_some(true),
             synopsis: None,
             id: expected_item.map(str::to_owned).unwrap_or_else(|| favorite.identity()),
             title: favorite.title.clone(),
-            category: String::new(),
+            category,
             description: String::new(),
             poster: String::new(),
             media,
             duration_ms: None,
             provider_id: None,
             provider_id_field: None, live: None,
-        });
+        };
+        return if matches!(entry.media, MediaLocator::Plex { .. }) {
+            // Reset the synthetic unknown marker only within a successful,
+            // exact-source metadata lookup; missing metadata never plays.
+            let mut entry = entry; entry.protection = None;
+            super::ott_metadata::hydrate_plex(profile, entry, cancel)
+        } else { Ok(entry) };
     }
     find_catalog_favorite(worker, favorite, cancel, false, |accept, deadline| {
         if profile.kind == ProviderKind::VPortal {
@@ -675,7 +686,7 @@ mod tests {
 
     #[test]
     fn vportal_folder_aliases_share_favorite_identity() {
-        let item = |row: &str| CatalogEntry {
+        let item = |row: &str| CatalogEntry { protection: None,
             synopsis: None,
             id: row.into(),
             title: "Film".into(),

@@ -212,29 +212,59 @@ pub(super) fn write_partial(socket: &mut std::net::TcpStream, n: usize) {
     socket.write_all(&vec![0x55; n]).expect("partial body");
 }
 
-/// How long [`plan_pms`]'s server waits for the `n` requests it was told to expect.
-const PLAN_PMS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+/// Bound an accepted mock request's socket I/O. Ordinary fixture lifetime is
+/// owned by the synchronous caller, not by time spent preparing/logging a plan.
+const PLAN_PMS_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-type PlanPms = (
-    i32,
-    std::sync::mpsc::Receiver<Vec<String>>,
-    std::thread::JoinHandle<()>,
-);
+type MockWorker = std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
+pub(super) struct PlanRequests {
+    incoming: std::sync::mpsc::Receiver<Vec<String>>,
+    stop: std::sync::mpsc::Sender<()>,
+    worker: MockWorker,
+    complete_on_receive: bool,
+}
+pub(super) struct PlanServer { stop: std::sync::mpsc::Sender<()>, worker: MockWorker }
+fn join_mock(worker: &MockWorker) -> std::thread::Result<()> {
+    let handle = worker.lock().unwrap_or_else(|error| error.into_inner()).take();
+    handle.map_or(Ok(()), std::thread::JoinHandle::join)
+}
+impl PlanRequests {
+    /// The ordinary mock's caller has finished its synchronous resolve before
+    /// collecting evidence. Missing requests are checked now, without an idle
+    /// deadline racing filesystem/scheduler delays between valid client calls.
+    pub(super) fn recv_timeout(&self, timeout: std::time::Duration)
+        -> Result<Vec<String>, std::sync::mpsc::RecvTimeoutError>
+    {
+        if self.complete_on_receive { let _ = self.stop.send(()); }
+        self.incoming.recv_timeout(timeout)
+    }
+}
+impl Drop for PlanRequests {
+    fn drop(&mut self) { let _ = self.stop.send(()); let _ = join_mock(&self.worker); }
+}
+impl PlanServer {
+    pub(super) fn join(self) -> std::thread::Result<()> {
+        let _ = self.stop.send(());
+        join_mock(&self.worker)
+    }
+}
+impl Drop for PlanServer {
+    fn drop(&mut self) { let _ = self.stop.send(()); let _ = join_mock(&self.worker); }
+}
+type PlanPms = (i32, PlanRequests, PlanServer);
 
-/// Loopback PMS that answers PlayQueue / PUT / `/decision` long enough for `build_stream`.
-///
-/// **`n` is the exact number of requests the scenario makes, and the server enforces it.** It
-/// serves until it has seen `n`, then stops and publishes them; if its deadline passes first it
-/// PANICS (after publishing what it saw), so the caller's `server.join().unwrap()` fails the test
-/// naming the count it expected and the requests it got. A count that is too high used to be
-/// silent: the server sat out the whole deadline while the test held the crate-wide serial lock,
-/// every later test queued behind it, and the suite only paid the idle seconds (PR #446 found it
-/// at four requests where the code made three; six tests were doing it again at 8 s each). A
-/// scenario that legitimately makes FEWER requests under some outcomes says so with
-/// [`plan_pms_within`] with `exact = false`. A count that is too LOW is caught by the caller's own assertions, because
-/// the server stops answering at `n`.
+pub(super) fn plan_mock_waiting(seen: usize, expected: usize,
+    deadline: Option<std::time::Instant>, now: std::time::Instant) -> bool
+{
+    seen < expected && !deadline.is_some_and(|at| now >= at)
+}
+
+/// Loopback PMS whose lifetime follows its synchronous resolve caller.
+/// `n` remains exact: reaching the count stops immediately, and collecting
+/// evidence after a short resolve publishes the observed lines then fails join.
+/// Explicit deadline/upper-bound scenarios use [`plan_pms_within`] instead.
 pub(super) fn plan_pms(n: usize, mde_body: &'static [u8]) -> PlanPms {
-    serve_plan_pms(n, mde_body, None, PLAN_PMS_DEADLINE, true, None)
+    serve_plan_pms(n, mde_body, None, None, true, None)
 }
 
 /// What a loopback PMS answers a `/decision` with, chosen by the request line (U8): the body for
@@ -247,7 +277,7 @@ pub(super) type Respond = fn(&str) -> Option<&'static [u8]>;
 /// `mde_body` for any line it does not name.
 #[cfg(feature = "devtriggers")]
 pub(super) fn plan_pms_keyed(n: usize, mde_body: &'static [u8], respond: Respond) -> PlanPms {
-    serve_plan_pms(n, mde_body, None, PLAN_PMS_DEADLINE, true, Some(respond))
+    serve_plan_pms(n, mde_body, None, None, true, Some(respond))
 }
 
 /// Same as [`plan_pms`], plus a bounded `start.mkv` body so Remote Auto can probe a remux.
@@ -258,7 +288,7 @@ pub(super) fn plan_pms_with_start_mkv(
     mde_body: &'static [u8],
     start_bytes: usize,
 ) -> PlanPms {
-    serve_plan_pms(n, mde_body, Some(start_bytes), PLAN_PMS_DEADLINE, true, None)
+    serve_plan_pms(n, mde_body, Some(start_bytes), None, true, None)
 }
 
 /// [`plan_pms`] with its own deadline and its own say on the guard: `exact = false` is the
@@ -271,27 +301,32 @@ pub(super) fn plan_pms_within(
     deadline: std::time::Duration,
     exact: bool,
 ) -> PlanPms {
-    serve_plan_pms(n, mde_body, None, deadline, exact, None)
+    serve_plan_pms(n, mde_body, None, Some(deadline), exact, None)
 }
 
 fn serve_plan_pms(
     n: usize,
     mde_body: &'static [u8],
     start_bytes: Option<usize>,
-    deadline: std::time::Duration,
+    deadline: Option<std::time::Duration>,
     exact: bool,
     respond: Option<Respond>,
 ) -> PlanPms {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port() as i32;
     let (tx, rx) = std::sync::mpsc::channel();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let complete_on_receive = deadline.is_none();
     let handle = std::thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
-        let deadline = std::time::Instant::now() + deadline;
+        let deadline = deadline.map(|duration| std::time::Instant::now() + duration);
         let mut requests = Vec::new();
-        while requests.len() < n && std::time::Instant::now() < deadline {
+        while plan_mock_waiting(requests.len(), n, deadline, std::time::Instant::now()) {
+            if stopped.try_recv().is_ok() { break; }
             match plx_base::testnet::accept(&listener) {
                 Ok((mut socket, _)) => {
+                    socket.set_read_timeout(Some(PLAN_PMS_IO_TIMEOUT)).expect("mock read timeout");
+                    socket.set_write_timeout(Some(PLAN_PMS_IO_TIMEOUT)).expect("mock write timeout");
                     let first = drain_http(&mut socket);
                     if start_bytes.is_some() && first.contains("/library/parts/") {
                         write_status(&mut socket, 503);
@@ -333,15 +368,16 @@ fn serve_plan_pms(
             }
         }
         let seen = requests.len();
-        tx.send(requests.clone()).expect("publish plan requests");
+        let _ = tx.send(requests.clone());
         assert!(
             !exact || seen >= n,
-            "the mock PMS was told to expect {n} requests and saw {seen} before its deadline, so the \
-             test sat idle holding the serial lock: either the code makes fewer requests than the \
+            "the mock PMS was told to expect {n} requests and saw {seen} before completion/deadline: either the code makes fewer requests than the \
              count says (fix the count) or a request that should be made is missing: {requests:#?}"
         );
     });
-    (port, rx, handle)
+    let worker = std::sync::Arc::new(std::sync::Mutex::new(Some(handle)));
+    (port, PlanRequests { incoming: rx, stop: stop.clone(), worker: worker.clone(), complete_on_receive },
+        PlanServer { stop, worker })
 }
 
 /// Selection is PMS state, not a promise made by a GET's query parameters.

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 struct Information {
+    protection: Option<bool>,
     title: String,
     group: String,
     logo: String,
@@ -88,7 +89,7 @@ impl M3uParser {
             pending.group,
             stable_source(&url)
         );
-        Ok(Some(CatalogEntry {
+        Ok(Some(CatalogEntry { protection: pending.protection,
             id: identity(&self.profile.id, &key),
             title,
             category: pending.group,
@@ -152,6 +153,7 @@ fn information(input: &str, defaults: &BTreeMap<String, String>) -> Information 
         title
     };
     Information {
+        protection: super::protection::attributes(&fields),
         title: text(title, 1024),
         group: text(field("group-title"), 1024),
         logo: field("tvg-logo").into(),

@@ -14,6 +14,50 @@ mod reentry;
 pub(super) use reentry::{binding_profile, browse_active, capture_read, guard_catalog_event,
     guard_metadata_event, guard_profile, owns_retained_profile, record_catalog, record_metadata, resume_ui};
 
+/// The existing managed resource lifetime, independent of catalogue generation.
+#[derive(Clone)]
+pub(super) struct ParentalAuthority {
+    operation: u64,
+    cancelled: Arc<AtomicBool>,
+    retired: Arc<AtomicBool>,
+    scope: plx_plex::plex::grant::GrantScope,
+    client: Arc<crate::app::ott_plex_prepare::CapturedAuthority>,
+}
+impl ParentalAuthority {
+    pub(super) fn same_authority(&self, other: &Self) -> bool {
+        self.operation == other.operation && self.scope == other.scope
+            && Arc::ptr_eq(&self.cancelled, &other.cancelled)
+            && Arc::ptr_eq(&self.retired, &other.retired)
+            && self.client.server == other.client.server
+            && self.client.machine_id == other.client.machine_id
+            && self.client.client_key == other.client.client_key
+            && self.client.grant_epoch == other.client.grant_epoch
+    }
+}
+/// Pure observation of a retained resource. This does not activate its source,
+/// renew its import proof, or require a duplicate ordinary Saved profile.
+pub(super) fn parental_authority(runtime: &Runtime, profile: &ProviderProfile)
+    -> Result<Option<ParentalAuthority>, &'static str>
+{
+    if !owns_retained_profile(runtime, profile) { return Ok(None); }
+    let active = runtime.managed.active.as_ref().filter(|active| &active.profile == profile)
+        .ok_or("Managed parental source is unavailable")?;
+    if active.cancel.load(Ordering::Acquire) || active.source.retired.load(Ordering::Acquire)
+        || !active.source.verified.proof.current()
+    { return Err("Managed parental source was retired"); }
+    let source = &active.source.verified.source;
+    let client = plx_plex::plex::id_of_machine(&source.machine_id)
+        .and_then(plx_plex::plex::client_for).ok_or("Managed parental source is unavailable")?;
+    if source.origin().as_ref() != Some(client.origin()) || !client.uses_token(&source.token) {
+        return Err("Managed parental credentials changed");
+    }
+    let client = crate::app::ott_plex_prepare::CapturedAuthority::capture(client)
+        .map_err(|_| "Managed parental source is unavailable")?;
+    Ok(Some(ParentalAuthority { operation: active.operation,
+        cancelled: active.cancel.clone(), retired: active.source.retired.clone(),
+        scope: plx_plex::plex::grant::scope(), client: Arc::new(client) }))
+}
+
 pub(super) type CandidateResult = Result<Option<ManagedCandidate>, &'static str>;
 struct Authority { epoch: u64, credentials: CredentialPatch, disk: Identity }
 impl Authority {

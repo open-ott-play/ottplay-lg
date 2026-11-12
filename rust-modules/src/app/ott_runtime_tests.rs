@@ -132,7 +132,7 @@ fn synthetic_profile() -> ProviderProfile {
 }
 
 fn synthetic_entry() -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: "late-fixture".into(),
         title: "MUST NOT BE INSTALLED AFTER EXIT".into(),

@@ -353,11 +353,12 @@ fn pinned_plex_prepare_is_refused_before_any_catalog_or_native_mutation() {
     app.ott = Some(runtime);
 }
 #[test]
-fn plex_prepare_requires_parental_access_before_resolver_admission() {
+fn plex_prepare_requires_parental_provider_access_before_resolver_admission() {
     let _serial = plx_base::testlock::serial();
     let mut app = fixture();
     let r = app.ott.as_mut().unwrap();
     r.saved.settings.insert("parentPin".into(), json!(RECORD));
+    r.saved.settings.insert("requirePinForProviderSelection".into(), json!(1));
     for action in ["plex_queue", "plex_library"] {
         let params = if action == "plex_queue" {
             json!({"op":"play","ids":["1"]})

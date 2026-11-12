@@ -136,7 +136,7 @@ pub fn catalog(
             .unwrap_or("");
         // Validate the advertised URL now, but retain provider identity and resolve afresh at play time.
         stream_url(config, row, &id)?;
-        catalogue.entries.push(CatalogEntry {
+        catalogue.entries.push(CatalogEntry { protection: super::protection::advertised(row),
             synopsis: None,
             id: identity(&profile.id, &format!("stalker:api:live:{id}")),
             title: text(title, 1024),

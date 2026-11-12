@@ -202,7 +202,10 @@ fn records_archive_rechecks_parental_policy_source_and_expiry_before_resolver_ad
         let (mut app, mut runtime) = records_fixture();
         let action = archive_action(&mut app, &mut runtime);
         match change {
-            "parental" => { runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65")); }
+            "parental" => {
+                runtime.catalog.entries[0].protection = Some(true);
+                runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
+            }
             "source" => runtime.saved.profiles.profiles[0].source = "https://media.invalid/changed.m3u".into(),
             "expiry" => runtime.wall_clock_ms += DEPTH * 1000,
             "strict-kiosk" => pin(&mut runtime, &app, true),

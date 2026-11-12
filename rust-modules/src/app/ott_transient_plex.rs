@@ -938,7 +938,7 @@ pub(in crate::app::ott_runtime) fn build_session(
             {
                 return Err(WireError::InvalidResult);
             }
-            Ok(CatalogEntry {
+            Ok(CatalogEntry { protection: None,
                 synopsis: None,
                 id: session.id(index),
                 title: item.title.clone(),

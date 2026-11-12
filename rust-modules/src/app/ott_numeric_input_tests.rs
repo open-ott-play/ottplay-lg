@@ -1033,3 +1033,76 @@ fn modeled_successful_save_settles_classic_category_digits_and_global_favorites(
         assert!(screen.accepts_channel_number());
     }
 }
+
+#[test]
+fn fullscreen_protected_numeric_and_source_offer_step_open_owned_pin_without_stopping_video() {
+    let _lock = plx_base::testlock::serial();
+    let _reset = ResetPlayer;
+    for numeric in [false, true] {
+        let mut app = playing(true);
+        let before = app.ott.as_ref().unwrap().playing.as_ref().unwrap().identity.clone();
+        {
+            let r = app.ott.as_mut().unwrap();
+            r.entropy = Some([7; 16]);
+            r.saved.settings.remove("parentPin");
+            r.catalog.entries[1].protection = Some(true);
+        }
+        let ticket = plx_media::route::play_request_ticket();
+        if numeric {
+            let start = app.ott.as_ref().unwrap().now_ms();
+            tap(&mut app, b'2');
+            number_tick(&mut app, start + 2_000);
+        } else {
+            let mut r = app.ott.take().unwrap();
+            let offer = player_remote::offer(&r, &app).expect("real playing source offer");
+            app.bridge.publish_ott_player_offer(Some(offer.clone()));
+            let request = plx_screens::registry::OttPlayerRequest {
+                owner: app.pages.top_page().unwrap(), source: offer.source,
+                action: plx_screens::registry::OttPlayerAction::Next,
+            };
+            assert!(player_remote::perform(&mut r, &mut app, &request).is_err());
+            app.ott = Some(r);
+        }
+        assert!(plx_media::route::play_request_is_current(ticket));
+        assert!(requested(&app).is_none());
+        assert_eq!(app.ott.as_ref().unwrap().playing.as_ref().unwrap().identity, before);
+        settle_pages(&mut app);
+        assert!(matches!(app.route(), AppArg::Ott));
+        let owner = app.pages.top_page().unwrap();
+        let mut r = app.ott.take().unwrap();
+        r.reply = Some(owner);
+        parental_runtime::tick(&mut r, &mut app);
+        let editor = r.edit_session.clone().expect("PIN belongs to the actual mounted OTT owner");
+        assert_eq!(editor.owner, owner);
+        assert_eq!(editor.key, "parental.unlock");
+        assert!(r.play_target.is_none() && r.resolver_next.is_none());
+        handle_action(&mut r, &mut app, OttAction::SubmitSetting { session: editor.id,
+            key: editor.key.clone(), value: "0000".into() }).unwrap();
+        let Job::Parental(completion) = r.rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("bounded wrong-PIN verification") else { panic!("expected PIN completion"); };
+        parental_runtime::completed(&mut r, &mut app, completion);
+        assert!(r.play_target.is_none() && r.edit_session.is_some());
+        assert!(plx_media::route::play_request_is_current(ticket));
+        // Canceling this fullscreen prompt retains no playback continuation.
+        handle_action(&mut r, &mut app, OttAction::CancelSetting { session: editor.id }).unwrap();
+        parental_runtime::tick(&mut r, &mut app);
+        assert!(r.edit_session.is_none() && r.play_target.is_none());
+        assert_eq!(r.playing.as_ref().unwrap().identity, before);
+        assert!(r.require_parental_entry(&r.saved.profiles.profiles[0].clone(), Some(&r.catalog.entries[1].clone())).is_err());
+        if numeric {
+            // A new explicit choice may request a new addressed PIN. The old
+            // fullscreen request was canceled and cannot select a different row.
+            let wanted = r.catalog.entries[1].id.clone();
+            assert!(handle_action(&mut r, &mut app, OttAction::Play(wanted.clone())).is_err());
+            let fresh = r.edit_session.clone().unwrap();
+            handle_action(&mut r, &mut app, OttAction::SubmitSetting { session: fresh.id,
+                key: fresh.key.clone(), value: "1234".into() }).unwrap();
+            let Job::Parental(completion) = r.rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("bounded correct-PIN verification") else { panic!("expected PIN completion"); };
+            parental_runtime::completed(&mut r, &mut app, completion);
+            assert_eq!(r.play_target.as_ref().map(|request| request.id.as_str()), Some(wanted.as_str()));
+            assert_eq!(r.playing.as_ref().unwrap().identity, before);
+        }
+        app.ott = Some(r);
+    }
+}

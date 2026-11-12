@@ -178,7 +178,7 @@ fn back_to_profiles_fences_an_earlier_save_reload_and_its_first_batch() {
         .send(CatalogEvent::Batch(
             runtime.generation,
             Catalog { hierarchy: None,
-                entries: vec![CatalogEntry {
+                entries: vec![CatalogEntry { protection: None,
                     synopsis: None,
                     id: "first".into(),
                     title: "first.mp4".into(),

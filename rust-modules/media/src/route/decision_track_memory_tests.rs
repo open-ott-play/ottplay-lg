@@ -156,8 +156,21 @@ mod through_build_stream {
         ps: &mut PlaybackSession, case: Case, then: impl FnOnce(&mut PlaybackSession, Plan) -> T,
     ) -> (T, Vec<String>, String) {
         plx_base::eventlog::with_private_log(|| {
-            let (out, requests) = resolve_on_this_thread(ps, case, then);
+            let started = std::time::Instant::now();
+            let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                resolve_on_this_thread(ps, case, then)
+            }));
             let appended = std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default();
+            let (out, requests) = match resolved {
+                Ok(value) => value,
+                Err(panic) => {
+                    // Keep the event log's already-scrubbed diagnostic evidence before its
+                    // private scope deletes the file. Preserve the original failure and the
+                    // mock's request/deadline contract.
+                    eprintln!("track-memory resolve failed after {:?}; private event log:\n{appended}", started.elapsed());
+                    std::panic::resume_unwind(panic);
+                }
+            };
             (out, requests, appended)
         })
     }

@@ -24,7 +24,7 @@ fn fixture() -> Runtime {
     runtime.metadata_done.store(false, Ordering::Release);
     runtime.catalog_done.store(false, Ordering::Release);
     runtime.resolver_busy = true;
-    runtime.catalog.entries.push(CatalogEntry {
+    runtime.catalog.entries.push(CatalogEntry { protection: None,
         synopsis: None,
         id: "channel-one".into(),
         title: "Live channel".into(),

@@ -5,7 +5,7 @@ use super::*;
 use crate::app::ott_local_session as local;
 
 fn item(id: &str, title: &str, category: &str) -> CatalogEntry {
-    CatalogEntry { synopsis: None, id: id.into(), title: title.into(), category: category.into(),
+    CatalogEntry { protection: None, synopsis: None, id: id.into(), title: title.into(), category: category.into(),
         description: String::new(), poster: String::new(),
         media: MediaLocator::Http { url: format!("https://media.invalid/{id}.mp4") },
         duration_ms: Some(10_000), provider_id: None, provider_id_field: None, live: None }

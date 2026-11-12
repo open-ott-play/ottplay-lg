@@ -189,7 +189,7 @@ fn separate_plex_capture_arcs_compare_by_authority_not_allocation() {
     plex_source(runtime, "token-a");
     let first = capture(runtime);
     let second = capture(runtime);
-    let (Authority::Plex(a), Authority::Plex(b)) = (&first.0, &second.0) else {
+    let (Authority::Plex { authority: a, .. }, Authority::Plex { authority: b, .. }) = (&first.0, &second.0) else {
         panic!("Plex")
     };
     assert!(!Arc::ptr_eq(a, b));
