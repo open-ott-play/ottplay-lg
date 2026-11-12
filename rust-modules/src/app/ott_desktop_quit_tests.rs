@@ -25,7 +25,13 @@ fn playing(mode: UiMode) -> App {
     let saved = r.interface_mode_candidate(mode);
     r.save_navigation = SaveNavigation::Preserve;
     r.save_playback_epoch = r.playback_epoch;
-    // Keep the independent periodic checkpoint idle during settings publication.
+    // Isolate settings publication from both periodic and new-selection
+    // checkpoints. These tests exercise physical Q, not bookmark admission.
+    let playing = r.playing.as_ref().unwrap();
+    r.checkpoint_write_selection = Some((
+        playing.profile.id.clone(), playing.selection_id.clone(),
+        profile_fingerprint(&playing.profile),
+    ));
     r.last_checkpoint_ms = r.now_ms();
     r.tx.send(Job::Saved(Ok(saved), None, false, json!({"status":"ok"})))
         .unwrap_or_else(|_| panic!("fixture receiver disappeared"));

@@ -9,8 +9,9 @@ pub(in crate::app::ott_runtime) struct SourceAuthority(Authority);
 #[derive(Clone)]
 enum Authority {
     Local(LocalSourceRead),
-    Plex(Arc<CapturedAuthority>),
+    Plex { authority: Arc<CapturedAuthority>, scope: plx_plex::plex::grant::GrantScope },
     Classic(classic_source::ClassicAuthority),
+    Managed(managed::ParentalAuthority),
 }
 
 impl SourceAuthority {
@@ -25,13 +26,14 @@ impl SourceAuthority {
                     && a.source.descriptor().kind == b.source.descriptor().kind
                     && a.same_grant(b)
             }
-            (Authority::Plex(a), Authority::Plex(b)) => {
-                a.server == b.server
+            (Authority::Plex { authority: a, scope: a_scope }, Authority::Plex { authority: b, scope: b_scope }) => {
+                a_scope == b_scope && a.server == b.server
                     && a.machine_id == b.machine_id
                     && a.client_key == b.client_key
                     && a.grant_epoch == b.grant_epoch
             }
             (Authority::Classic(a), Authority::Classic(b)) => a.same_authority(b),
+            (Authority::Managed(a), Authority::Managed(b)) => a.same_authority(b),
             _ => false,
         }
     }
@@ -60,6 +62,25 @@ pub(in crate::app::ott_runtime) fn parental_source_authority(
             Ok(None)
         };
     };
+    parental_profile_authority(runtime, profile)
+}
+
+/// Reuse the same authority witness for a bound Favorite's target source.
+pub(in crate::app::ott_runtime) fn parental_profile_authority(
+    runtime: &Runtime, profile: &ProviderProfile,
+) -> Result<Option<SourceAuthority>, &'static str> {
+    let durable = runtime.saved.profiles.profiles.iter().any(|saved| saved == profile && saved.enabled);
+    // A durable target keeps one credential witness before and after its
+    // catalogue is installed. The active source separately retains the richer
+    // Classic session witness in parental_source_authority.
+    if !durable && classic_source::profile(runtime) == Some(profile) {
+        if let Some(authority) = classic_source::parental_authority(runtime)? {
+            return Ok(Some(SourceAuthority(Authority::Classic(authority))));
+        }
+    }
+    if let Some(authority) = managed::parental_authority(runtime, profile)? {
+        return Ok(Some(SourceAuthority(Authority::Managed(authority))));
+    }
     if !matches!(profile.kind, ProviderKind::Local | ProviderKind::Plex) {
         return Ok(None);
     }
@@ -67,7 +88,12 @@ pub(in crate::app::ott_runtime) fn parental_source_authority(
         return Err("Source profile is disabled");
     }
     if profile.kind == ProviderKind::Local {
-        if let Some(TransientMedia::Local(session)) = runtime.transient.accepted.as_ref() {
+        // A typed remote library has no filesystem grant to borrow. Its full
+        // configured source remains fenced by the profile/policy context.
+        if plx_data::ott::http_url(&profile.source).is_some() { return Ok(None); }
+        if let Some(TransientMedia::Local(session)) = runtime.transient.accepted.as_ref().filter(|media|
+            matches!(media, TransientMedia::Local(session)
+                if session.read.source.descriptor().canonical_path.as_deref() == Some(profile.source.as_str()))) {
             let source = runtime
                 .current_local_source(&session.read.selection)
                 .ok_or("Local source is unavailable")?;
@@ -87,13 +113,11 @@ pub(in crate::app::ott_runtime) fn parental_source_authority(
         return Ok(Some(local_authority(&read)));
     }
 
-    if !runtime
-        .saved
-        .profiles
-        .profiles
-        .iter()
-        .any(|saved| saved == profile && saved.enabled)
-    {
+    // Remote/kiosk Plex queue preparation always captures a configured
+    // profile. Retaining the accepted queue cannot authorize removal,
+    // replacement or ambiguity of that addressed source afterward.
+    let mut configured = runtime.saved.profiles.profiles.iter().filter(|saved| saved.id == profile.id);
+    if configured.next() != Some(profile) || configured.next().is_some() {
         return Err("Plex source profile changed");
     }
     let sources = runtime
@@ -103,26 +127,30 @@ pub(in crate::app::ott_runtime) fn parental_source_authority(
     let mut matching = sources
         .iter()
         .filter(|source| source.machine_id == profile.source);
-    let source = matching.next().ok_or("Plex source is unavailable")?;
+    let source = matching.next();
     if matching.next().is_some() {
         return Err("Plex source is ambiguous");
     }
     let client = plx_plex::plex::id_of_machine(&profile.source)
         .and_then(plx_plex::plex::client_for)
         .ok_or("Plex source is unavailable")?;
-    if source.origin().as_ref() != Some(client.origin()) || !client.uses_token(&source.token) {
+    if source.is_some_and(|source|
+        source.origin().as_ref() != Some(client.origin()) || !client.uses_token(&source.token)) {
         return Err("Plex source credentials changed");
     }
-    let authority = match runtime.transient.accepted.as_ref() {
-        Some(TransientMedia::Plex(session)) => session.authority.clone(),
-        _ => {
-            Arc::new(CapturedAuthority::capture(client).map_err(|_| "Plex source is unavailable")?)
+    // Account-authorized native profiles do not duplicate credentials into the
+    // OTT source list. Their existing bounded-read grant remains mandatory.
+    let read = crate::app::ott_plex::ClassicRead::capture(client)?;
+    let (authority, scope) = read.authority_scope().ok_or("Plex source is unavailable")?;
+    if let Some(TransientMedia::Plex(session)) = runtime.transient.accepted.as_ref() {
+        if session.authority.machine_id == profile.source && !session.authority.matches(client) {
+            return Err("Plex source authority changed");
         }
-    };
+    }
     if authority.machine_id != profile.source || !authority.matches(client) {
         return Err("Plex source authority changed");
     }
-    Ok(Some(SourceAuthority(Authority::Plex(authority))))
+    Ok(Some(SourceAuthority(Authority::Plex { authority, scope })))
 }
 
 #[cfg(all(test, feature = "hostsim"))]

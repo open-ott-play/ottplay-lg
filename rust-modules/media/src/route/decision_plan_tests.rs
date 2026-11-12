@@ -41,6 +41,44 @@ fn a_mock_pms_given_an_explicit_upper_bound_may_see_fewer() {
 }
 
 #[test]
+fn an_ordinary_mock_checks_a_short_count_when_the_resolve_completes() {
+    let (port, rx, server) = plan_pms(3, EMPTY_MC);
+    ping(port);
+    let seen = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("publish completed resolve");
+    assert_eq!(seen.len(), 1);
+    let failure = server.join().expect_err("completion does not waive the exact count");
+    let message = failure.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(message.contains("expect 3 requests and saw 1"), "{message}");
+}
+
+#[test]
+fn an_ordinary_mock_has_no_setup_or_inter_request_wall_clock_deadline() {
+    let start = std::time::Instant::now();
+    let after_stalled_setup = start + std::time::Duration::from_secs(60);
+    assert!(plan_mock_waiting(0, 2, None, after_stalled_setup));
+    assert!(plan_mock_waiting(1, 2, None, after_stalled_setup));
+    assert!(!plan_mock_waiting(2, 2, None, after_stalled_setup));
+    assert!(!plan_mock_waiting(1, 2, Some(start), after_stalled_setup), "explicit deadlines retain their contract");
+    let (port, rx, server) = plan_pms(2, EMPTY_MC);
+    ping(port);
+    ping(port);
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().len(), 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn dropping_an_unfinished_mock_joins_its_worker_during_caller_unwind() {
+    let (_, rx, server) = plan_pms(1, EMPTY_MC);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _owned_receiver = rx;
+        panic!("synthetic resolve failure");
+    })).is_err());
+    // Receiver Drop consumed and joined the worker, including its short-count
+    // panic. No server thread can outlive the unwound synchronous resolve.
+    server.join().unwrap();
+}
+
+#[test]
 fn a_mock_pms_that_sees_exactly_its_count_stops_at_once_and_passes() {
     let (port, rx, server) = plan_pms_within(2, EMPTY_MC, std::time::Duration::from_secs(30), true);
     let started = std::time::Instant::now();

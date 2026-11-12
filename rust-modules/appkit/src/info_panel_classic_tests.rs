@@ -87,6 +87,8 @@ fn classic_live_description_uses_current_programme_not_channel_or_plex_page() {
     assert_eq!(text.summary, "Full current programme description.");
     assert_eq!(text.duration_ms, 100_000);
     np.ott.as_mut().unwrap().live.as_mut().unwrap().guide = None;
+    assert_eq!(classic_copy(Some(&np), Some(&unrelated), None).summary, "Channel fallback",
+        "the playing source's own synopsis is distinct from an expired guide or unrelated detail");
     np.summary.clear();
     assert_eq!(classic_copy(Some(&np), Some(&unrelated), None).summary, "");
 }
@@ -275,6 +277,45 @@ fn classic_live_rollover_reconciles_reader_and_actual_paint_without_refetching_g
             assert!(summary.is_empty());
             assert_eq!(*duration, 0);
             assert!(!painted.contains("Second description"));
+        }
+    }
+}
+
+#[test]
+fn both_info_themes_paint_current_programme_from_the_same_wall_sample() {
+    let _guard = plx_base::testlock::serial();
+    let mut now = playing("Stale channel summary");
+    now.title = "Channel headline".into();
+    now.ott = Some(metadata::OttNowPlaying { live: Some(metadata::OttLivePlaying {
+        channel_title: "Channel headline".into(), ordinal: None,
+        guide: Some(metadata::OttNowNext { now_s: 150,
+            current: Some(metadata::OttGuideProgramme { title: "First programme".into(),
+                description: "First synopsis".into(), start_s: 100, end_s: 200 }),
+            next: Some(metadata::OttGuideProgramme { title: "Second programme".into(),
+                description: String::new(), start_s: 200, end_s: 300 }),
+        }),
+    }), archive: None, collection_label: "Television".into(), confirmed_start_unix_ms: None,
+        next: None, art: None });
+    let mut store = plx_data::stores::metadata::MetadataStore::default();
+    store.run(plx_data::stores::metadata::MetadataCmd::SetNowPlaying(Some(now)));
+    plx_data::metadata::set_current_for_test(store.state_mut(), Some(metadata::Detail {
+        title: "Unrelated film".into(), summary: "Unrelated synopsis".into(), ..Default::default()
+    }));
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut state = InfoPanelState::new();
+        for (seconds, expected, absent) in [(150, "First programme", "Second programme"),
+            (220, "Second programme", "First programme"), (300, "Channel headline", "Second programme")] {
+            let painted = plx_ui::draw_census::capture_text(|| plx_ui::record_walk(||
+                state.draw_for_mode(&plx_media::route::PlaybackSession::IDLE, 1.0, &FixtureMeasure,
+                    store.view(), mode, InfoPresentation { opacity: Default::default(), wall_now_s: Some(seconds) })))
+                .into_iter().map(|(text, _)| text).collect::<Vec<_>>().join(" ");
+            assert!(painted.contains(expected), "{mode:?}, wall={seconds}: {painted}");
+            assert!(!painted.contains(absent));
+            if seconds < 300 { assert!(!painted.contains("Channel headline")); }
+            assert_eq!(painted.contains("First synopsis"), seconds == 150,
+                "blank or expired synopsis must not reuse the previous programme text");
+            assert!(!painted.contains("Stale channel summary"));
+            assert!(!painted.contains("Unrelated film") && !painted.contains("Unrelated synopsis"));
         }
     }
 }

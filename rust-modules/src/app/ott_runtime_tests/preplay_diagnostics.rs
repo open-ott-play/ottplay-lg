@@ -15,7 +15,7 @@ fn profile() -> ProviderProfile {
 }
 
 fn entry(id: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: id.into(), title: "Preplay private title".into(), category: String::new(),
         description: String::new(), poster: String::new(), duration_ms: Some(10_000),

@@ -15,7 +15,7 @@ fn root(id: &str, name: &str, authority: u64) -> BoundSource {
 }
 
 fn media(path: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: "receiver-row".into(),
         title: "Film".into(),

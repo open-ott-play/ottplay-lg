@@ -38,7 +38,7 @@ pub fn catalog_from_local_files(files:&[LocalFile],profile:&ProviderProfile)->Re
         if !valid_local_relative_path(path) {return Err(CatalogError::InvalidPath);}
         if !is_local_video_path(path) {continue;}
         let (folder,name)=path.rsplit_once('/').unwrap_or(("",path));
-        entries.push(CatalogEntry{synopsis:None,id:identity(&profile.id,path),title:text(name,1024),category:if folder.is_empty(){profile.name.clone()}else{text(folder,4096)},description:String::new(),poster:String::new(),media:MediaLocator::Local{relative_path:path.clone()},duration_ms:file.duration_ms,provider_id_field: None, live: None, provider_id:None});
+        entries.push(CatalogEntry{ protection: None,synopsis:None,id:identity(&profile.id,path),title:text(name,1024),category:if folder.is_empty(){profile.name.clone()}else{text(folder,4096)},description:String::new(),poster:String::new(),media:MediaLocator::Local{relative_path:path.clone()},duration_ms:file.duration_ms,provider_id_field: None, live: None, provider_id:None});
     }
     let mut catalog=Catalog::default();catalog.merge(Catalog{ hierarchy: None,entries})?;Ok(catalog)
 }

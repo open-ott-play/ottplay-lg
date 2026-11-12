@@ -2,6 +2,7 @@
 //! The app runner owns IO and supplies complete, bounded responses or directory batches.
 
 pub mod favorites;
+pub mod protection;
 pub mod favorites_wire;
 pub mod local_metadata;
 pub mod xtream;
@@ -83,6 +84,10 @@ impl std::fmt::Debug for MediaLocator {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
+    /// Source-attested protection flag. Missing means no advertised flag;
+    /// category membership is still checked independently by the application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<bool>,
     pub id: String,
     pub title: String,
     pub category: String,

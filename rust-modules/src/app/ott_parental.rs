@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 const PREFIX: &str = "pbkdf2-sha256$600000$";
 const ITERATIONS: u32 = 600_000;
 const GRANT_MS: u64 = 3_600_000;
+// The public Classic bootstrap PIN is represented by a verified record too;
+// neither loading settings nor checking policy derives a PIN on the UI thread.
+const DEFAULT_RECORD: &str = "pbkdf2-sha256$600000$d31e359a309cba65c78598d5ef539f9f$478c66d8e80d7a82bd31b12e84856820ebb83159da63d7cf6c0f388abae81603";
 pub(super) const REVISION: &str = "nativeParentalRevision";
 type Settings = BTreeMap<String, Value>;
 
@@ -95,7 +98,8 @@ fn encode_hex(input: &[u8]) -> String {
     output
 }
 
-/// Application-wide Classic keys. Missing PIN is disabled, never a default PIN.
+/// Application-wide Classic keys. Missing PIN retains the Classic bootstrap;
+/// an explicit `*` is the authoritative disabled policy.
 /// Legacy plaintext is rejected here; any import migration must explicitly derive
 /// and durably save a fresh record before it can become authoritative.
 #[derive(Clone, PartialEq, Eq)]
@@ -109,7 +113,7 @@ pub(super) struct Policy {
 impl Policy {
     pub(super) fn read(settings: &Settings) -> Result<Self, Error> {
         let record = match settings.get("parentPin") {
-            None => None,
+            None => Some(Record::parse(DEFAULT_RECORD)?),
             Some(Value::String(value)) if value == "*" => None,
             Some(Value::String(value)) => Some(Record::parse(value)?),
             _ => return Err(Error::InvalidRecord),

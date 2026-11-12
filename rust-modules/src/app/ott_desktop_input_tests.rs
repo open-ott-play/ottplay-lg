@@ -12,7 +12,7 @@ impl Drop for Reset {
     }
 }
 fn entry(id: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: id.into(),
         title: id.into(),
@@ -246,6 +246,8 @@ fn mac_physical_video_wrong_source_and_pin_fail_without_legacy_fallback() {
         let mut app = fixture();
         let runtime = app.ott.as_mut().unwrap();
         if parental {
+            runtime.catalog.entries[2].protection = Some(true);
+            runtime.entropy = Some([7; 16]);
             runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
         } else {
             runtime.saved.profiles.profiles[0].source = "https://example.invalid/other.m3u".into();

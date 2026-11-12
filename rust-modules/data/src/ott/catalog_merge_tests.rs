@@ -6,7 +6,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 fn row(id: &str, title: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: id.into(), title: title.into(), category: String::new(),
         description: String::new(), poster: String::new(),

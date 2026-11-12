@@ -31,7 +31,7 @@ fn permanent() -> ProviderProfile {
         source: "https://media.invalid/list.m3u".into(), source_alias: "Permanent".into(), enabled: true }
 }
 fn entry() -> CatalogEntry {
-    CatalogEntry { synopsis: None, id: "managed:42".into(), title: "Managed movie".into(), category: String::new(),
+    CatalogEntry { protection: None, synopsis: None, id: "managed:42".into(), title: "Managed movie".into(), category: String::new(),
         description: String::new(), poster: String::new(),
         media: MediaLocator::Plex { server_id: SERVER.into(), rating_key: "42".into() },
         duration_ms: None, provider_id: None, provider_id_field: None, live: None }
@@ -195,7 +195,7 @@ fn only_explicit_resume_repoints_current_server_and_never_changes_the_owner() {
     assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
     // Revoking only the managed intent cannot block an unrelated bound Favorite.
     runtime.managed.active.as_ref().unwrap().cancel.store(true, Ordering::Release);
-    let unrelated = CatalogEntry { synopsis: None, id: "live".into(), title: "Independent".into(),
+    let unrelated = CatalogEntry { protection: None, synopsis: None, id: "live".into(), title: "Independent".into(),
         category: String::new(), description: String::new(), poster: String::new(),
         media: MediaLocator::Http { url: "https://media.invalid/live".into() },
         duration_ms: None, provider_id: Some("live".into()), provider_id_field: Some("id".into()), live: None };
@@ -737,4 +737,62 @@ fn managed_catalogue_retirement_does_not_leave_a_queued_player_mount() {
     assert!(app.route() == AppArg::Home, "the existing no-mounted-origin fallback replaces the pending Player");
     assert!(bridge::player(&app.pages).is_none());
     assert!(!app.pages.has_pending_navigation() && !app.pages.nav.tabs.stack.is_pending());
+}
+
+#[test]
+fn parental_foreign_owned_managed_favorite_revalidates_actual_session_without_selecting_its_catalogue() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset::new();
+    let (mut app, mut runtime, profile, favorite) = fixture();
+    let sid = plex::id_of_machine(SERVER).unwrap();
+    plx_media::route::install_plex_playback_for_test(&mut app.player.session, sid, "42");
+    plx_media::route::install_plex_request_for_test(&mut app.player.session, sid, "42");
+    runtime.playing = Some(Playing { channel_capture:None, kiosk_selection:None, archive:None,
+        transient_owner:None, local_selection:None,
+        identity:plx_media::route::playback_identity(&app.player.session), profile,
+        entry:entry(), selection_id:format!("favorite:{}", favorite.identity()), source:None,
+        advance_on_failure:false, requires_server_lease:false });
+    app.ott = Some(runtime);
+    assert!(crate::app::ott_runtime::foreign_native_start_allowed(&mut app));
+    assert!(app.ott.as_ref().unwrap().effective_profile() == Some(&permanent()));
+    app.ott.as_mut().unwrap().managed.active.as_ref().unwrap().cancel.store(true, Ordering::Release);
+    assert!(!crate::app::ott_runtime::foreign_native_start_allowed(&mut app));
+    assert!(!app.adapters.player.is_live());
+}
+
+#[test]
+fn parental_protected_retained_managed_favorite_uses_its_resource_pin_scope_without_a_saved_duplicate() {
+    let _serial = plx_base::testlock::serial();
+    for mutation in 0..3 {
+        let _reset = Reset::new();
+        let (mut app, mut runtime, profile, _) = fixture();
+        let saved = serde_json::to_value(&runtime.saved).unwrap();
+        assert!(!runtime.saved.profiles.profiles.iter().any(|p| p == &profile));
+        let mut protected = entry();
+        protected.protection = Some(true);
+        assert!(runtime.require_parental_entry(&profile, Some(&protected)).is_err());
+        parental_runtime::request_foreign_pin(&mut runtime, &mut app, &profile);
+        app.ott = Some(runtime);
+        settle(&mut app);
+        let owner = app.pages.top_page().unwrap();
+        let mut runtime = app.ott.take().unwrap();
+        runtime.reply = Some(owner);
+        parental_runtime::tick(&mut runtime, &mut app);
+        assert_eq!(runtime.edit_session.as_ref().unwrap().key, "parental.unlock");
+        app.ott = Some(runtime);
+        // Complete the existing Gate's verified worker fixture; PIN derivation
+        // and the real editor are independently covered by runtime tests.
+        parental_runtime::grant_current_profile_for_test(&mut app);
+        assert!(app.ott.as_mut().unwrap().require_parental_entry(&profile, Some(&protected)).is_ok());
+        match mutation {
+            0 => parental_runtime::expire_current_profile_for_test(&mut app),
+            1 => { app.ott.as_mut().unwrap().managed.active.as_ref().unwrap().cancel.store(true, Ordering::Release); }
+            _ => { app.ott.as_mut().unwrap().managed.active.as_mut().unwrap().cancel = Arc::new(AtomicBool::new(false)); }
+        }
+        let runtime = app.ott.as_mut().unwrap();
+        assert!(runtime.require_parental_entry(&profile, Some(&protected)).is_err());
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+        assert_eq!(runtime.effective_profile(), Some(&permanent()));
+        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    }
 }

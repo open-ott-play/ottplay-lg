@@ -286,8 +286,7 @@ fn automatic_eos_exit_cannot_claim_a_requested_exit() {
         let mut app = ready_app_fixture();
         mount_player(&mut app);
         let pending = arm(app.ott.as_mut().unwrap(), Some(41));
-        assert!(!playback::finish_playback(&mut app.player, &mut app.adapters.player,
-            &mut app.repause_at, &mut app.refresh_hubs, &mut app.pages, &mut app.bridge),
+        assert!(!playback::finish_playback(&mut app),
             "the fixture has no Up Next item");
         assert_retired(&mut app, pending, "changed");
     });

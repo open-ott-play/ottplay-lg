@@ -60,7 +60,7 @@ fn provider_controlled_collision_remains_an_ordinary_catalog_item() {
         panic!("typed item")
     };
     let id = selection.request().id;
-    runtime.catalog.entries.push(CatalogEntry {
+    runtime.catalog.entries.push(CatalogEntry { protection: None,
         synopsis: None,
         live: None,
         id: id.clone(),
@@ -153,7 +153,7 @@ fn pinned_marker_does_not_bypass_exact_archive_request_validation() {
     let prepared = prepare(&runtime).unwrap();
     let Activation::Pinned(selection) = prepared.activation else { panic!("typed item") };
     let profile = runtime.active().unwrap();
-    let entry = CatalogEntry {
+    let entry = CatalogEntry { protection: None,
         synopsis: None,
         id: "fixture-channel".into(), title: "Pinned channel".into(), category: String::new(),
         description: String::new(), poster: String::new(), duration_ms: None,

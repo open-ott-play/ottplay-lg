@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 struct Information {
+    protection: Option<bool>,
     title: String,
     group: String,
     logo: String,
@@ -88,7 +89,7 @@ impl M3uParser {
             pending.group,
             stable_source(&url)
         );
-        Ok(Some(CatalogEntry {
+        Ok(Some(CatalogEntry { protection: pending.protection,
             id: identity(&self.profile.id, &key),
             title,
             category: pending.group,
@@ -152,6 +153,7 @@ fn information(input: &str, defaults: &BTreeMap<String, String>) -> Information 
         title
     };
     Information {
+        protection: super::protection::attributes(&fields),
         title: text(title, 1024),
         group: text(field("group-title"), 1024),
         logo: field("tvg-logo").into(),
@@ -282,6 +284,37 @@ mod tests {
         assert_eq!(a.entries[0].id, b.entries[1].id);
         assert_eq!(a.entries[1].id, b.entries[0].id);
     }
+    #[test]
+    fn timestamped_channel_export_refresh_preserves_saved_id_lookup_and_fresh_media() {
+        let source = "#EXTM3U\n#EXTINF:-1 tvg-id=\"news\" group-title=\"News\",Daily news\nhttps://proxy.invalid/channel/opaque_7/index.m3u8?q=1790000000000&id=source&pid=7\n";
+        let first = parse_m3u(source, &profile()).unwrap();
+        let saved_id = first.entries[0].id.clone();
+        let refreshed = parse_m3u(&source.replace("1790000000000", "1790001100164"), &profile()).unwrap();
+        let restored = refreshed.entries.iter().find(|entry| entry.id == saved_id)
+            .expect("a saved channel ID must resolve after export timestamp refresh");
+        assert_eq!(restored.title, "Daily news");
+        assert_ne!(restored.media, first.entries[0].media, "playback keeps the fresh timestamped URL");
+        for (from, to) in [("proxy.invalid", "other.invalid"), ("opaque_7", "opaque_8"),
+            ("id=source", "id=other"), ("pid=7", "pid=8"), ("Daily news", "Other news"),
+            ("tvg-id=\"news\"", "tvg-id=\"other\""), ("group-title=\"News\"", "group-title=\"Other\"")] {
+            let different = parse_m3u(&source.replace(from, to), &profile()).unwrap();
+            assert_ne!(different.entries[0].id, saved_id, "{from} remains part of channel identity");
+        }
+    }
+
+    #[test]
+    fn ordinary_q_selectors_and_non_timestamp_proxy_q_remain_distinct() {
+        for (path, a, b) in [("/watch", "1790000000000", "1790001100164"),
+            ("/channel/opaque/index.m3u8", "7", "8"),
+            ("/channel/opaque/index.m3u8", "channel-a", "channel-b"),
+            ("/channel/opaque/extra/index.m3u8", "1790000000000", "1790001100164")] {
+            let playlist = format!("#EXTM3U\n#EXTINF:-1,Same name\nhttps://proxy.invalid{path}?q={a}\n#EXTINF:-1,Same name\nhttps://proxy.invalid{path}?q={b}\n");
+            let catalog = parse_m3u(&playlist, &profile()).unwrap();
+            assert_eq!(catalog.entries.len(), 2, "meaningful source selectors cannot deduplicate");
+            assert_ne!(catalog.entries[0].id, catalog.entries[1].id);
+        }
+    }
+
     fn profile() -> ProviderProfile {
         ProviderProfile {
             id: "m3u-home".into(),
@@ -334,13 +367,27 @@ mod tests {
     }
 }
 
+// This proxy route uses one export timestamp shared by its channel URLs. Keep
+// arbitrary q selectors everywhere else, and preserve the host and opaque path.
+fn timestamped_channel_proxy(base: &str) -> bool {
+    base.split_once("://").and_then(|(_, authority_path)| authority_path.split_once('/'))
+        .and_then(|(_, path)| path.strip_prefix("channel/"))
+        .and_then(|path| path.strip_suffix("/index.m3u8"))
+        .is_some_and(|opaque| !opaque.is_empty()
+            && opaque.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+}
+
 fn stable_source(url: &str) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let channel_proxy = timestamped_channel_proxy(base);
     let stable: Vec<&str> = query
         .split('&')
         .filter(|part| {
-            let key = part.split('=').next().unwrap_or("").to_ascii_lowercase();
+            let (raw_key, value) = part.split_once('=').unwrap_or((part, ""));
+            let key = raw_key.to_ascii_lowercase();
             !part.is_empty()
+                && !(channel_proxy && raw_key == "q" && value.len() == 13
+                    && value.bytes().all(|byte| byte.is_ascii_digit()))
                 && !matches!(
                     key.as_str(),
                     "token"

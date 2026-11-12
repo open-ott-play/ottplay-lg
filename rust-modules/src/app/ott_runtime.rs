@@ -21,6 +21,8 @@ mod exit_confirmation;
 mod menu_settings;
 #[path = "ott_player_browse.rs"]
 mod player_browse;
+#[path = "ott_player_startup.rs"]
+mod player_startup;
 #[path = "ott_row_guide.rs"]
 pub(super) mod row_guide;
 #[path = "ott_vportal_quality.rs"]
@@ -121,8 +123,14 @@ mod organization_ui;
 mod osd_ui;
 #[path = "ott_parental.rs"]
 mod parental;
+#[path = "ott_parental_classification.rs"]
+mod parental_classification;
 #[path = "ott_parental_runtime.rs"]
 mod parental_runtime;
+#[path = "ott_parental_foreign.rs"]
+mod parental_foreign;
+#[path = "ott_native_start_admission.rs"]
+mod native_start_admission;
 #[path = "ott_playback_failure.rs"]
 mod playback_failure;
 #[path = "ott_playback_menu.rs"]
@@ -684,6 +692,10 @@ pub(super) struct Runtime {
     resume_pending: Option<PlaybackRequest>,
     checkpoints: BTreeMap<String, SavedResume>,
     last_checkpoint_ms: u64,
+    checkpoint_write_selection: Option<(String, String, String)>,
+    /// Owns only the existing single-flight checkpoint writer, never a settings
+    /// or verifier write. Common admission/completion retires this marker.
+    checkpoint_save_epoch: Option<u64>,
     persistence_uncertain: bool,
     active_lease: Option<HeldLease>,
     quality: Box<vportal_quality::State>,
@@ -1151,6 +1163,8 @@ impl Runtime {
             resume_pending: None,
             checkpoints: BTreeMap::new(),
             last_checkpoint_ms: 0,
+            checkpoint_write_selection: None,
+            checkpoint_save_epoch: None,
             persistence_uncertain: false,
             active_lease: None,
             quality: Default::default(),
@@ -1253,6 +1267,7 @@ impl Runtime {
         if !started {
             return Err("Could not start Plex verifier");
         }
+        self.checkpoint_save_epoch = None;
         self.saving = true;
         self.save_navigation = SaveNavigation::Activate(self.navigation_epoch);
         self.save_playback_epoch = self.playback_epoch;
@@ -1941,6 +1956,7 @@ impl Runtime {
         if !started {
             return Err("Could not start settings writer");
         }
+        self.checkpoint_save_epoch = None;
         self.saving = true;
         self.pending_profile_rename = profile_rename;
         self.save_playback_epoch = self.playback_epoch;
@@ -2331,6 +2347,10 @@ impl Runtime {
             else {
                 break;
             };
+            let restoring_live = reason == continuity::Reason::Restore
+                && self.effective_profile().is_some_and(|profile|
+                    self.catalog.entries.iter().any(|entry|
+                        entry.id == entry_id && guide_ui::is_live(profile, entry)));
             let result = match transient::lifecycle_resume_ready(
                 self,
                 &PlaybackRequest::ordinary(&entry_id, position_ms),
@@ -2363,7 +2383,7 @@ impl Runtime {
                     self.cancel_play_request();
                     self.status = error.into();
                     self.changed();
-                    if reason == continuity::Reason::LiveRetry {
+                    if reason == continuity::Reason::LiveRetry || restoring_live {
                         // A stale/missing/rejected source is not permission to
                         // select another channel, even on synchronous refusal.
                         self.continuity.stop(self.generation);
@@ -2426,6 +2446,9 @@ impl Runtime {
         classic_source::profile(self)
             .or_else(|| self.active())
             .is_some_and(|profile| profile_fingerprint(profile) == value.source_fingerprint)
+    }
+    fn numeric_write_ready(&self) -> bool {
+        !self.saving || self.checkpoint_save_epoch == Some(self.save_playback_epoch)
     }
     fn checkpoint(&mut self, app: &App, force: bool) {
         self.checkpoint_at(app, force, None);
@@ -2536,7 +2559,7 @@ impl Runtime {
         if playing.archive.is_some() {
             return;
         }
-        let key = if playing.selection_id.starts_with("favorite:") {
+        let mut key = if playing.selection_id.starts_with("favorite:") {
             "favorites".into()
         } else {
             playing.profile.id.clone()
@@ -2568,15 +2591,20 @@ impl Runtime {
                 self.resume_floor = None;
             }
         }
+        // A live bookmark identifies a channel, not a seekable broadcast offset.
+        if guide_ui::is_live(&playing.profile, &playing.entry) {
+            position_ms = 0;
+        }
         let durable_local = kiosk_resume::checkpoint(self, &playing, position_ms);
         let temporary = self.transient_checkpoint(&playing, position_ms);
         if let Some(point) = durable_local {
-            self.checkpoints.insert(kiosk_resume::KEY.into(), point);
+            key = kiosk_resume::KEY.into();
+            self.checkpoints.insert(key.clone(), point);
         } else if temporary && !self.durable_global_favorite(&playing) {
             return;
         } else {
             self.checkpoints.insert(
-                key,
+                key.clone(),
                 SavedResume {
                     entry_id: playing.selection_id.clone(),
                     position_ms,
@@ -2589,12 +2617,28 @@ impl Runtime {
             .checkpoints
             .iter()
             .any(|(key, value)| self.saved.resume.get(key) != Some(value));
+        // Channel/source selection must survive a webOS close or an in-place
+        // upgrade even inside the position checkpoint interval. Only advancing
+        // the playhead of the same admitted selection remains throttled.
+        let point = &self.checkpoints[&key];
+        let selection_changed = self.saved.resume.get(&key).is_none_or(|saved|
+            saved.entry_id != point.entry_id || saved.source_fingerprint != point.source_fingerprint);
+        let selection_attempted = self.checkpoint_write_selection.as_ref().is_some_and(|attempt|
+            attempt.0 == key && attempt.1 == point.entry_id && attempt.2 == point.source_fingerprint);
         if changed
-            && (force || now.saturating_sub(self.last_checkpoint_ms) >= 10000)
+            && (force || (selection_changed && !selection_attempted)
+                || now.saturating_sub(self.last_checkpoint_ms) >= 10000)
             && !self.saving
             && !self.persistence_uncertain
         {
-            let _ = self.save(self.saved.clone(), None, false);
+            let selection = (key, point.entry_id.clone(), point.source_fingerprint.clone());
+            if self.save(self.saved.clone(), None, false).is_ok() {
+                self.checkpoint_save_epoch = Some(self.save_playback_epoch);
+            }
+            // A refused admission or failed writer keeps the normal interval
+            // for this selection. A busy writer never spends a newer choice's
+            // bypass because it cannot enter this attempt block.
+            self.checkpoint_write_selection = Some(selection);
             self.last_checkpoint_ms = now;
         }
     }
@@ -2955,6 +2999,8 @@ impl Runtime {
             let mut view = menu_settings::view(self)
                 .unwrap_or_else(|| settings_groups::view(self, self.raw_view()));
             view.pending_play = classic_play_handoff::selected(self);
+            view.pending_step = playback_step::pending_source(self);
+            view.pending_step_sdl = !cfg!(feature = "hostsim");
             if view.pending_play.is_some() {
                 view.status = "Opening video…".into();
             }
@@ -3573,6 +3619,8 @@ impl Runtime {
             shelves,
             status_working: false,
             pending_play: None,
+            pending_step: playback_step::pending_source(self),
+            pending_step_sdl: !cfg!(feature = "hostsim"),
             classic_preferences: self.classic_preferences(),
             volume_available: self.playing.is_some(),
             category_label: self.category_label(),
@@ -4064,6 +4112,7 @@ impl Runtime {
             .map(|(_, profile)| profile)
     }
     fn cancel_play_request(&mut self) {
+        parental_runtime::cancel_ui_origin(self);
         self.classic_play_handoff = Default::default();
         self.live_retry_generation = None;
         self.explicit_step.clear();
@@ -4092,6 +4141,7 @@ impl Runtime {
         profile: &ProviderProfile,
         entry: &CatalogEntry,
     ) -> Result<(), &'static str> {
+        parental_runtime::observe_session(self, app);
         profile_rename::guard(self, profile)?;
         managed::guard_profile(self, app, profile)?;
         classic_source::guard_profile(self, app, profile)?;
@@ -4120,7 +4170,8 @@ impl Runtime {
             return Err("Playback source changed before native admission");
         }
         let policy_profile = self.attachment_policy_profile(&bound_profile, favorite.as_ref())?;
-        self.require_parental_playback(&policy_profile)?;
+        self.require_parental_resolved(&policy_profile, &bound_profile,
+            bound_entry.as_ref(), favorite.as_ref(), entry)?;
         kiosk_source::admit_bound(
             self,
             app,
@@ -4184,6 +4235,7 @@ impl Runtime {
         request: PlaybackRequest,
         interactive: bool,
     ) -> Result<(), &'static str> {
+        parental_runtime::observe_session(self, app);
         if !self.play_work_allowed() {
             return Err("Media work is waiting for foreground or worker retirement");
         }
@@ -4212,7 +4264,7 @@ impl Runtime {
         managed::guard_profile(self, app, &profile)?;
         classic_source::guard_profile(self, app, &profile)?;
         let policy_profile = self.attachment_policy_profile(&profile, favorite.as_ref())?;
-        self.require_parental_playback(&policy_profile)?;
+        self.require_parental_preparation(&policy_profile, &profile, entry.as_ref(), favorite.as_ref())?;
         kiosk_source::admit_bound(
             self,
             app,
@@ -4483,6 +4535,7 @@ impl Runtime {
             plex_choice,
             local_read,
         });
+        playback_step::bind_pending(self);
         self.changed();
         if let Some(attempt) = kiosk_source::admitted_pinned_request(self) {
             self.note_kiosk_attempt(attempt);
@@ -4813,8 +4866,21 @@ pub(super) fn open_player_settings(
     result
 }
 
+/// Presentation only: the admitted OTT resolver runs before the media route owns a flight.
+pub(super) fn player_startup_pending(app: &App) -> bool {
+    player_startup::pending(app)
+}
+
+pub(super) fn pending_channel_display_stamp(app: &App) -> Option<(u64, u64, u64, bool)> {
+    player_startup::display_stamp(app)
+}
+pub(super) fn pending_channel_display(app: &App) -> Option<plx_data::metadata::NowPlaying> {
+    player_startup::display(app)
+}
+
 /// Publish source authority before UI dispatch; AppHost admits each event namespace separately.
 pub(super) fn publish_remote_player_offer(app: &mut App) {
+    if let Some(runtime) = app.ott.as_mut() { runtime.explicit_step.input_publication(); }
     let offer = app
         .ott
         .as_ref()
@@ -4905,8 +4971,9 @@ pub(super) fn draw_notifications(app: &mut App) {
 fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
     use plx_media::player::report::IoFailureDetails;
     use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
-    matches!(details.and_then(|details| details.io_failure), Some(IoFailureDetails::Hls {
-        exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed,
+    matches!(details.filter(|details| details.pipeline_error == 0).and_then(|details| details.io_failure), Some(IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
+            | DemuxExitClass::HlsPlaylistFetchFailed,
         outcome: Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState),
     }))
 }
@@ -4951,6 +5018,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
             Job::Saved(result, ..) => {
                 profile_rename::settle(runtime, result.as_ref().ok());
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 runtime.subtitle_save = None;
                 if let Ok(saved) = result {
                     runtime.saved = saved;
@@ -4959,6 +5027,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
             }
             Job::PublicSaved(result, ..) => {
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 let sent = classic_bookmark::take_write(runtime);
                 let success = result.is_ok();
                 public_preferences::accept_write(runtime, result);
@@ -4970,6 +5039,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
             Job::SaveRejected(..) => {
                 profile_rename::settle(runtime, None);
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 runtime.subtitle_save = None;
             }
             Job::LoadedItemsUncertain(_, _) => {
@@ -4978,6 +5048,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
             Job::Uncertain(..) => {
                 profile_rename::settle(runtime, None);
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 runtime.subtitle_save = None;
                 runtime.persistence_uncertain = true;
             }
@@ -5374,6 +5445,7 @@ fn tick_with_start(
                     && matches!(navigation,
                     SaveNavigation::Activate(epoch) if epoch == runtime.navigation_epoch);
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 let subtitle_save = runtime.subtitle_save.take();
                 let publish_subtitles = subtitle_save
                     .as_ref()
@@ -5653,6 +5725,7 @@ fn tick_with_start(
                 runtime.save_ui_owner = None;
                 runtime.save_source_editor = None;
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 let subtitle_save = runtime.subtitle_save.take();
                 runtime.persistence_uncertain = true;
                 runtime.usb_save_finished(false);
@@ -5741,6 +5814,7 @@ fn tick_with_start(
                 let ui_owner = runtime.save_ui_owner.take();
                 let source_editor = runtime.save_source_editor.take();
                 runtime.saving = false;
+                runtime.checkpoint_save_epoch = None;
                 let prepared = (|| {
                     let verified = result?;
                     if invocation.deadline_ms <= runtime.now_ms()
@@ -5900,6 +5974,9 @@ fn tick_with_start(
                     result.and_then(|(entry, source)| {
                         preplay::phase(&mut runtime, generation, preplay::Phase::Admitting);
                         if let Err(error) = runtime.rebind_native_admission(app, &profile, &entry) {
+                            if parental_runtime::is_pin_required(error) {
+                                parental_runtime::resolved_pin_required(&mut runtime, app);
+                            }
                             runtime.retire_result(Ok((entry, source)));
                             return Err(error);
                         }
@@ -5974,7 +6051,7 @@ fn tick_with_start(
                         )
                     }
                     Err(error) => {
-                        let keep_previous_lease = (catalog_failure
+                        let keep_previous_lease = (parental_runtime::is_pin_required(error) || catalog_failure
                             || transient::plex_remote::target_current(&runtime).is_some())
                             && runtime
                                 .active_lease
@@ -6014,6 +6091,7 @@ fn tick_with_start(
                     runtime.remote.complete(invocation, reply);
                 }
                 let target = runtime.take_completed_play_target();
+                parental_runtime::present_pending(&mut runtime, app);
                 if expired {
                     if let Some(playing) =
                         runtime.playing.as_ref().filter(|p| playing_matches(p, app))
@@ -6776,6 +6854,8 @@ fn apply_ui_action(
     // The addressed affirmative answer alone applies the navigation effects.
     let navigates = navigates && !exit_confirmation::handles(runtime, app, &action);
     let quality_play = matches!(&action, OttAction::Play(_));
+    let parental_submit = matches!(&action, OttAction::SubmitSetting { key, .. }
+        if key == "parental.unlock");
     let profile_submit =
         matches!(&action, OttAction::SubmitSetting { key, .. } if key == "profile.source");
     let duplicate_submit = matches!(&action, OttAction::SubmitSetting { session, key, .. }
@@ -6787,13 +6867,16 @@ fn apply_ui_action(
         Ok(()) if navigates => {
             let started_save = !was_saving && runtime.saving;
             runtime.accepted_navigation(started_save);
+            if parental_submit { parental_runtime::seal_submission(runtime); }
             if quality_play {
                 vportal_quality::seal(runtime);
+                parental_runtime::seal_ui_origin(runtime);
             }
             if profile_submit {
                 local_profile::seal(runtime);
             }
             if explicit_play {
+                playback_step::bind_pending(runtime);
                 kiosk_capture::explicit_admitted(runtime);
                 classic_play_handoff::begin(runtime, app);
             }
@@ -6804,6 +6887,7 @@ fn apply_ui_action(
             // never promote a failed action's save authority.
             if navigates && browse_before != (runtime.page, runtime.provider) {
                 runtime.accepted_navigation(false);
+                if quality_play { parental_runtime::seal_foreign_navigation(runtime); }
             }
             if !search_submission {
                 runtime.status = error.into();
@@ -7171,6 +7255,7 @@ fn handle_action(
             }
             // An admitted row activation is also explicit browse intent. This
             // branch excludes remote/autoplay and the random shortcut.
+            parental_runtime::mark_ui_origin(runtime, app);
             if browse_choice {
                 browse_focus::record(runtime, &id);
                 browse_focus::request_flush(runtime);
@@ -7665,8 +7750,19 @@ pub(super) fn finish_catalog_playback(app: &mut App) -> bool {
         let accepted = runtime.continuity.accepts_end(runtime.generation, &current);
         let decision = runtime.continuity.live_disconnected(runtime.generation, &current, runtime.now_ms());
         if accepted {
+            // A terminal live decoder has the same source-bound catalogue
+            // recovery as an attributed error, without lending transport
+            // authority or advancing to a different channel.
+            runtime.checkpoint(app, false);
+            runtime.failed_playback = failed_playback::capture(&runtime, app);
+            runtime.playing = None;
+            runtime.resume_floor = None;
             runtime.release_active_lease();
             plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+            if let Some(page) = bridge::player_mut(&mut app.pages) {
+                page.transport_reset(false);
+            }
+            plx_media::route::cancel_play(&mut app.player.session);
             runtime.status = if runtime.continuity.pending_retry().is_some() {
                 "Live stream ended; retrying the same channel"
             } else { "Live stream ended" }.into();
@@ -7862,10 +7958,16 @@ fn start_resolved_with<R: playback::PlaybackResources>(
         .play_target
         .clone()
         .unwrap_or_else(|| PlaybackRequest::ordinary(&entry.id, 0));
+    let restore_position_ms = request.position_ms;
     if guide_ui::is_live(&profile, &entry) {
         request.advance_on_failure = false;
+        // Historical bookmarks can contain elapsed live time. Resume the
+        // channel at its live edge even if the probe reports a finite duration;
+        // an explicitly admitted archive keeps its own interval offset.
+        if request.archive.is_none() { request.position_ms = 0; }
         if let Some(target) = runtime.play_target.as_mut() {
             target.advance_on_failure = false;
+            if target.archive.is_none() { target.position_ms = 0; }
         }
     }
     let automatic_resume = runtime.restore_play_generation == Some(runtime.play_generation);
@@ -8089,7 +8191,7 @@ fn start_resolved_with<R: playback::PlaybackResources>(
             runtime.continuity.restore_admitted(
                 runtime.generation,
                 &playing.selection_id,
-                position_ms,
+                restore_position_ms,
             );
         }
         if playing.archive.is_none()
@@ -8654,8 +8756,15 @@ pub(super) fn kiosk_player_request(app: &App, request: &plx_screens::registry::P
 }
 pub(super) fn foreign_content_allowed(app: &mut App) -> bool {
     app.ott
-        .as_mut()
-        .is_none_or(|r| input_policy::foreign_content(r).is_ok())
+        .as_ref()
+        .is_none_or(|runtime| input_policy::replace_source(runtime).is_ok())
+}
+pub(super) fn foreign_play_allowed(app: &mut App, sid: plx_plex::plex::ServerId, rating_key: &str) -> bool {
+    parental_foreign::allowed(app, sid, rating_key)
+}
+
+pub(super) fn foreign_ui_play_allowed(app: &mut App, sid: plx_plex::plex::ServerId, rating_key: &str) -> bool {
+    parental_foreign::ui_allowed(app, sid, rating_key)
 }
 #[cfg(test)]
 #[path = "ott_reminder_wiring_tests.rs"]
@@ -8681,4 +8790,38 @@ pub(super) fn desktop_key(app: &mut App) -> bool {
 /// Action-free physical release retirement precedes standby and kiosk input gates.
 pub(super) fn desktop_key_boundary(app: &mut App) -> bool {
     desktop_input::boundary(app)
+}
+
+pub(super) fn foreign_native_start_allowed(app: &mut App) -> bool {
+    parental_foreign::native_start_allowed(app)
+}
+
+/// A denied old native transaction must not cancel a newer OTT resolver.
+pub(super) fn newer_native_selection_pending(app: &App) -> bool {
+    app.ott.as_ref().is_some_and(|runtime| runtime.play_target.is_some()
+        || runtime.pending_play.is_some() || runtime.transient.candidate.is_some())
+}
+
+/// Non-policy lifecycle tests use a real registered Plex client and an
+/// explicitly verified disabled policy. Bare app() remains unqualified so
+/// missing-Runtime and controlled-start denial regressions retain their fence.
+#[cfg(all(test, feature = "hostsim"))]
+pub(super) fn install_legacy_lifecycle_test_runtime(app: &mut App, sid: plx_plex::plex::ServerId) {
+    assert!(plx_plex::plex::client_for(sid).is_some_and(|client| !client.data_io_disabled()));
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+    runtime.loaded = true;
+    runtime.state_load = StateLoad::Idle;
+    runtime.entropy = Some([1; 16]);
+    runtime.clock_anchor = Some(clock);
+    runtime.clock_sample = Some(clock);
+    runtime.wall_clock_ms = clock.unix_ms();
+    runtime.saved.settings.insert("parentPin".into(), json!("*"));
+    runtime.remote = Remote::disabled_for_test("dev_lifecycle_fixture", "fixture");
+    runtime.write_permit.revoke();
+    runtime.catalog_done.store(false, Ordering::Release);
+    runtime.metadata_done.store(false, Ordering::Release);
+    runtime.resolver_busy = true;
+    app.running = true;
+    app.ott = Some(runtime);
 }

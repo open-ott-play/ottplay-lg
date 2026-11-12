@@ -47,7 +47,7 @@ fn profile() -> ProviderProfile {
 }
 
 fn entry(id: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: id.into(), title: "private-diagnostic-title".into(), category: String::new(),
         description: String::new(), poster: String::new(), duration_ms: Some(10_000),
@@ -636,11 +636,13 @@ fn live_failure() -> Box<App> {
 fn live_transport_recovery_requires_precise_closed_transient_cause() {
     use plx_media::player::report::FailureDetails;
     for exit in [DemuxExitClass::HlsTransportOpenFailed, DemuxExitClass::HlsTransportFailed,
+        DemuxExitClass::HlsPlaylistFetchFailed,
         DemuxExitClass::HlsPlaylistInvalid, DemuxExitClass::Other, DemuxExitClass::NoVideoStream] {
         for outcome in [None, Some(TraceOutcome::Transport), Some(TraceOutcome::Deadline),
             Some(TraceOutcome::ServerState), Some(TraceOutcome::Refused),
             Some(TraceOutcome::Inconclusive), Some(TraceOutcome::Started), Some(TraceOutcome::NoBody)] {
-            let expected = matches!(exit, DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed)
+            let expected = matches!(exit, DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
+                | DemuxExitClass::HlsPlaylistFetchFailed)
                 && matches!(outcome, Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState));
             assert_eq!(recoverable_live_transport(Some(FailureDetails {
                 demux_exit: exit, pipeline_error: 0,
@@ -649,6 +651,46 @@ fn live_transport_recovery_requires_precise_closed_transient_cause() {
         }
     }
     assert!(!recoverable_live_transport(None));
+    assert!(!recoverable_live_transport(Some(FailureDetails {
+        demux_exit: DemuxExitClass::HlsPlaylistFetchFailed, pipeline_error: 200,
+        io_failure: Some(IoFailureDetails::Hls {
+            exit: DemuxExitClass::HlsPlaylistFetchFailed, outcome: Some(TraceOutcome::Deadline),
+        }),
+    })), "a coincident transport failure must not hide a current native decoder failure");
+}
+
+#[test]
+fn owned_live_playlist_refresh_failure_retains_bounded_same_channel_recovery() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    for outcome in [TraceOutcome::Transport, TraceOutcome::Deadline, TraceOutcome::ServerState] {
+        let mut app = fixture();
+        app.ott.as_mut().unwrap().saving = true;
+        admit(&mut app, "first");
+        make_live(&mut app);
+        let epoch = install_owned_engine(&mut app);
+        assert!(plx_media::player::SHARED.note_io_failure_for(epoch, IoFailureDetails::Hls {
+            exit: DemuxExitClass::HlsPlaylistFetchFailed, outcome: Some(outcome),
+        }));
+        signal_error(&app, FailureKind::PlaybackInterrupted);
+        reconcile(&mut app);
+        let runtime = app.ott.as_mut().unwrap();
+        let generation = runtime.generation;
+        let pending = runtime.continuity.pending_retry().expect("current typed playlist failure");
+        assert_eq!(pending.after, "first");
+        let due = pending.not_before_ms;
+        let decision = runtime.retry_continuity(due, &["first", "second"], true);
+        assert!(matches!(&decision, continuity::Decision::Start {
+            entry_id, reason: continuity::Reason::LiveRetry, ..
+        } if entry_id == "first"));
+        runtime.apply_continuity(decision);
+        let request = runtime.play_target.as_ref().unwrap();
+        assert_eq!(request.id, "first");
+        assert!(!request.advance_on_failure);
+        // Retrying the selected source is not viewer intent that renews its budget.
+        assert_eq!(runtime.continuity.live_disconnected(generation, "first", due), continuity::Decision::Wait);
+        assert_eq!(runtime.continuity.pending_retry().unwrap().failures, 2);
+    }
 }
 
 #[test]
@@ -804,3 +846,6 @@ fn newer_explicit_selection_is_not_cancelled_by_old_live_retry_pause_receipt() {
     assert_eq!(runtime.play_target.as_ref().unwrap().id, "second");
     assert!(runtime.live_retry_generation.is_none());
 }
+
+#[path = "player_startup_feedback.rs"]
+mod startup_feedback;

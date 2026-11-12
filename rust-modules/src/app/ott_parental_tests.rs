@@ -75,14 +75,18 @@ fn accepts_only_exact_four_ascii_digits_and_the_versioned_record() {
 }
 
 #[test]
-fn missing_pin_is_disabled_but_malformed_or_plaintext_never_resets_policy() {
+fn missing_pin_uses_classic_default_but_only_explicit_disable_removes_protection() {
     let empty = Settings::new();
     let policy = Policy::read(&empty).unwrap();
-    assert!(policy.record.is_none());
+    assert!(policy.record == Some(Record::parse(DEFAULT_RECORD).unwrap()));
     assert!(policy.channels && !policy.settings && !policy.providers);
     let mut map = empty.clone();
     map.insert("parentPin".into(), json!("*"));
-    assert!(Policy::read(&map).unwrap() == policy);
+    let disabled = Policy::read(&map).unwrap();
+    assert!(disabled.record.is_none());
+    assert!(!disabled.protects(Target::Channel { marked: true }));
+    assert!(policy.protects(Target::Channel { marked: true }));
+    assert!(!policy.protects(Target::Channel { marked: false }));
     for value in [Value::Null, json!(2468), json!("2468"), json!("invalid")] {
         map.insert("parentPin".into(), value);
         assert!(matches!(Policy::read(&map), Err(Error::InvalidRecord)));
@@ -104,6 +108,21 @@ fn missing_pin_is_disabled_but_malformed_or_plaintext_never_resets_policy() {
     let mut map = settings();
     map.insert(REVISION.into(), json!("0"));
     assert!(matches!(Policy::read(&map), Err(Error::InvalidRevision)));
+}
+
+#[test]
+fn classic_bootstrap_record_verifies_the_public_default_without_a_settings_write() {
+    let map = Settings::new();
+    let ctx = context(&map);
+    let mut gate = gate();
+    let work = gate.verify(&ctx, Pin::parse("1234").unwrap(), 0).unwrap();
+    let completion = work.run(&plx_base::task::OffFrame::for_test());
+    assert!(matches!(gate.complete(&ctx, completion, 1), Outcome::Granted));
+    assert!(map.is_empty(), "unlocking must not persist the public PIN in plaintext");
+    assert_eq!(gate.access(&ctx, Target::Channel { marked: true }, 2), Access::Allowed);
+    let custom = context(&settings());
+    assert_eq!(gate.access(&custom, Target::Channel { marked: true }, 3), Access::PinRequired,
+        "a bootstrap grant cannot unlock a replacement custom record");
 }
 
 #[test]
@@ -257,7 +276,7 @@ fn refused_verification_in_a_disabled_source_still_retires_the_old_grant() {
     let ctx = context(&settings());
     let mut gate = gate();
     authorize(&mut gate, &ctx, 0);
-    let disabled = Context::new(2, Policy::read(&Settings::new()).unwrap());
+    let disabled = Context::new(2, Policy::read(&BTreeMap::from([("parentPin".into(), json!("*"))])).unwrap());
     assert!(matches!(
         gate.verify(&disabled, input(), 1),
         Err(Error::Restricted)
@@ -282,7 +301,7 @@ fn failed_worker_never_grants_and_releases_only_its_ticket() {
 
 #[test]
 fn enablement_produces_only_a_candidate_and_unknown_write_blocks_even_old_disabled_policy() {
-    let map = Settings::new();
+    let map = BTreeMap::from([("parentPin".into(), json!("*"))]);
     let ctx = context(&map);
     let mut gate = gate();
     let work = gate.create(&ctx, input(), [0; 16], 0).unwrap();
@@ -292,7 +311,7 @@ fn enablement_produces_only_a_candidate_and_unknown_write_blocks_even_old_disabl
     let candidate = gate.candidate(&ctx, change, &map, 2).unwrap();
     assert_eq!(candidate.get("parentPin"), Some(&json!(RECORD)));
     assert_eq!(candidate.get(REVISION), Some(&json!(1)));
-    assert!(map.is_empty());
+    assert_eq!(map.get("parentPin"), Some(&json!("*")));
     assert!(gate.expires.is_none());
     gate.write_uncertain();
     assert_eq!(gate.access(&ctx, Target::Control, 3), Access::Unavailable);

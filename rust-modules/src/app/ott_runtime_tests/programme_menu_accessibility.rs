@@ -56,6 +56,24 @@ fn install_leaf(app: &mut App, kind: &str, show: &str, chapters: bool) {
     assert!(app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::InstallPlaying(Some(leaf))));
     publish(app);
 }
+fn bind_current_catalogue(app: &mut App) {
+    let sid = route::cur_sid(&app.player.session);
+    let key = route::cur_rk(&app.player.session);
+    let mut runtime = app.ott.take().unwrap();
+    assert!(classic_source::ensure_server_catalog(&mut runtime, app, sid).unwrap());
+    let profile = runtime.effective_profile().unwrap();
+    runtime.catalog.entries = vec![CatalogEntry {
+        protection: None, id: "installed-leaf".into(), title: "Ordinary fixture".into(),
+        category: "Documentary".into(), description: String::new(), synopsis: None,
+        poster: String::new(), media: MediaLocator::Plex {
+            server_id: profile.source.clone(), rating_key: key,
+        }, duration_ms: Some(60_000), provider_id: None, provider_id_field: None, live: None,
+    }];
+    runtime.catalog_complete = true;
+    runtime.catalog_loading = false;
+    runtime.catalog_next = None;
+    app.ott = Some(runtime);
+}
 fn retained(app: &App) {
     assert_eq!(bridge::player_overlay_kind(&app.pages), Some(OverlayKind::More { page: None }));
     assert!(!app.pages.has_pending_surface_navigation());
@@ -111,6 +129,7 @@ fn detail_target_comes_from_exact_installed_movie_or_episode_not_current_browse(
     let _registry = NativeCatalogRegistry;
     for (kind, show, expected) in [("movie", "", "42"), ("episode", "show-42", "show-42")] {
         let mut app = app();
+        bind_current_catalogue(&mut app);
         install_leaf(&mut app, kind, show, false);
         let sid = route::cur_sid(&app.player.session);
         land_plex_detail(&mut app, sid, "unrelated", "movie", "Unrelated browsing");
@@ -119,6 +138,29 @@ fn detail_target_comes_from_exact_installed_movie_or_episode_not_current_browse(
             plx_appkit::info_panel::InfoAction::GoToDetail(rk)))) if rk == expected));
         assert_eq!(route::cur_sid(&app.player.session), sid);
         assert!(app.ott.as_ref().unwrap().catalog_next.is_none());
+    }
+}
+
+#[test]
+fn detail_target_refuses_protected_unknown_and_ambiguous_source_membership() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let _registry = NativeCatalogRegistry;
+    for case in ["protected", "unknown", "ambiguous"] {
+        let mut app = app();
+        bind_current_catalogue(&mut app);
+        let runtime = app.ott.as_mut().unwrap();
+        match case {
+            "protected" => runtime.catalog.entries[0].protection = Some(true),
+            "unknown" => runtime.catalog.entries.clear(),
+            "ambiguous" => runtime.catalog.entries.push(runtime.catalog.entries[0].clone()),
+            _ => unreachable!(),
+        }
+        let identity = route::playback_identity(&app.player.session);
+        let req = request(&mut app, Action::GoToDetail);
+        assert!(perform(&mut app, req).is_err(), "{case} cannot borrow current browsing metadata");
+        assert_eq!(route::playback_identity(&app.player.session), identity);
+        retained(&app);
     }
 }
 

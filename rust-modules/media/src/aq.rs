@@ -590,9 +590,42 @@ pub fn aq_bytes(q: *mut AuQueue) -> c_long {
     }
 }
 
+/// A producer completed this lane successfully enough for the consumer to
+/// inspect its terminal state: EOF is published and every queued node was
+/// consumed. A zero-byte node is still a node; teardown is never this proof.
+pub fn aq_drained_at_eof(q: *mut AuQueue) -> bool {
+    if q.is_null() { return false; }
+    unsafe {
+        libc::pthread_mutex_lock(ptr::addr_of_mut!((*q).m));
+        let done = (*q).eof != 0 && (*q).head.is_null() && (*q).abort == 0;
+        libc::pthread_mutex_unlock(ptr::addr_of_mut!((*q).m));
+        done
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drained_eof_requires_terminal_empty_nonaborted_nodes_not_a_byte_count() {
+        assert!(!aq_drained_at_eof(ptr::null_mut()));
+        let mut queue = aq_new(1024);
+        let q = &mut *queue;
+        assert!(!aq_drained_at_eof(q));
+        let byte = [0u8];
+        assert_eq!(aq_push(q, byte.as_ptr(), 0, 0, 1, 1), 0);
+        aq_set_eof(q);
+        assert_eq!(aq_bytes(q), 0);
+        assert!(!aq_drained_at_eof(q), "a queued empty AU is not consumed");
+        let node = aq_pop(q, ptr::null_mut());
+        assert!(!node.is_null());
+        unsafe { libc::free(node.cast()); }
+        assert!(aq_drained_at_eof(q));
+        aq_abort(q);
+        assert!(!aq_drained_at_eof(q));
+        aq_destroy(q);
+    }
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
 

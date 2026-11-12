@@ -185,6 +185,7 @@ pub fn categories(value: &Value) -> Result<BTreeMap<String, String>, CatalogErro
 
 #[derive(Clone, Debug)]
 pub struct Series {
+    pub protection: Option<bool>,
     pub id: String,
     pub name: String,
     pub category: String,
@@ -259,7 +260,7 @@ pub fn streams(
         if !seen.insert(id.clone()) {
             continue;
         }
-        catalog.entries.push(CatalogEntry {
+        catalog.entries.push(CatalogEntry { protection: super::protection::advertised(row),
             synopsis: None,
             id: identity(&profile.id, &format!("xtream:{kind}:{id}")),
             title: title(row, "name", format!("Channel {id}")),
@@ -307,6 +308,7 @@ pub fn series(
             continue;
         }
         output.push(Series {
+            protection: super::protection::advertised(row),
             id: id.clone(),
             name: title(row, "name", format!("Series {id}")),
             category: group(row, groups, "Series"),
@@ -400,7 +402,9 @@ pub fn episodes(
         ordered.push((
             season,
             ep,
-            CatalogEntry {
+            CatalogEntry { protection: super::protection::inherit(parent.protection,
+                super::protection::inherit(super::protection::advertised(&value["info"]),
+                    super::protection::inherit(super::protection::advertised(row), super::protection::advertised(&row["info"])))),
                 synopsis: None,
                 id: identity(&profile.id, &format!("xtream:series:{id}")),
                 title: title(
@@ -603,7 +607,7 @@ mod tests {
     #[test]
     fn array_episodes_preserve_season_and_never_save_direct_credentials() {
         let c = config();
-        let parent = Series {
+        let parent = Series { protection: None,
             id: "5".into(),
             name: "Show".into(),
             category: "Series".into(),
@@ -661,7 +665,7 @@ mod tests {
     #[test]
     fn series_flattened_in_season_episode_order() {
         let c = config();
-        let parent = Series {
+        let parent = Series { protection: None,
             id: "1".into(),
             name: "Show".into(),
             category: "Series".into(),

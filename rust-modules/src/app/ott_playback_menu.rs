@@ -75,7 +75,9 @@ fn finite_seek(runtime: &Runtime, app: &App) -> bool {
 
 fn permit_detail(runtime: &mut Runtime, app: &App) -> Result<(), &'static str> {
     input_policy::replace_source(runtime)?;
-    let sid = installed_leaf(app).ok_or(CHANGED)?.sid;
+    let leaf = installed_leaf(app).ok_or(CHANGED)?;
+    let sid = leaf.sid;
+    let rating_key = leaf.rk.clone();
     let profile = if runtime.playing.is_some() {
         Some(bound_playing(runtime, app)?.profile.clone())
     } else {
@@ -91,7 +93,21 @@ fn permit_detail(runtime: &mut Runtime, app: &App) -> Result<(), &'static str> {
         } else { None }
     };
     match profile {
-        Some(profile) => runtime.require_parental_playback(&profile),
+        Some(profile) => {
+            let entry = runtime.playing.as_ref().map(|playing| playing.entry.clone())
+                .or_else(|| {
+                    // A legacy native player has no OTT Playing record. Only
+                    // its exact, unique row in the current source-owned
+                    // catalogue can establish ordinary membership; the detail
+                    // page being browsed is unrelated presentation metadata.
+                    let mut rows = runtime.catalog.entries.iter().filter(|row|
+                        matches!(&row.media, MediaLocator::Plex { server_id, rating_key: key }
+                            if server_id == &profile.source && key == &rating_key));
+                    let row = rows.next()?.clone();
+                    rows.next().is_none().then_some(row)
+                });
+            runtime.require_parental_entry(&profile, entry.as_ref())
+        }
         None => runtime.require_parental(parental::Target::Channel { marked: true }),
     }
 }

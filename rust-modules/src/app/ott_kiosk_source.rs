@@ -237,6 +237,8 @@ fn item(runtime: &Runtime, id: &str) -> Result<Item, SourceError> {
     })
 }
 fn same_item(a: &Item, b: &Item) -> bool {
+    if parental_classification::marked(a.entry.as_ref())
+        != parental_classification::marked(b.entry.as_ref()) { return false; }
     a.id == b.id && a.favorite == b.favorite && a.profile == b.profile && a.local == b.local
         && a.local_read == b.local_read && a.attachment == b.attachment
 }
@@ -505,7 +507,11 @@ pub(super) fn authorize_designation(
     };
     let favorite = match prepared.stored.target() { TargetRef::Item(entry) => Some(entry), _ => None };
     let policy_profile = runtime.attachment_policy_profile(&profile, favorite)?;
-    runtime.require_parental_playback(&policy_profile)
+    let entry = match &prepared.proof {
+        Proof::Item(_, item) | Proof::Observed(_, item, _) => item.entry.as_ref(),
+        _ => None,
+    };
+    runtime.require_parental_candidate(&policy_profile, &profile, entry, favorite)
 }
 
 /// Include the pin and any real root-file attestation in the SAME Saved image.

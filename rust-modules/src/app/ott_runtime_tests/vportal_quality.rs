@@ -10,7 +10,7 @@ fn profile() -> ProviderProfile {
         source:"portal::[key:fixture]https://fixture.invalid/nas/api".into(), source_alias:String::new(), enabled:true }
 }
 fn entry() -> CatalogEntry {
-    CatalogEntry { synopsis: None, id:"quality-film".into(), title:"Quality film".into(), category:String::new(), description:String::new(),
+    CatalogEntry { protection: None, synopsis: None, id:"quality-film".into(), title:"Quality film".into(), category:String::new(), description:String::new(),
         poster:String::new(), duration_ms:Some(12_000), media:MediaLocator::VPortal { request:json!({"id":"film"}) },
         provider_id:Some("film".into()), provider_id_field:Some("id".into()), live:None }
 }

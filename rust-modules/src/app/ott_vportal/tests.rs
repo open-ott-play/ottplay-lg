@@ -13,7 +13,7 @@ fn profile() -> ProviderProfile {
     }
 }
 fn entry() -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: "x".into(),
         title: "X".into(),

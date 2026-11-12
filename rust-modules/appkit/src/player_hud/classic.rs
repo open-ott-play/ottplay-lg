@@ -977,6 +977,30 @@ pub fn draw_hud_in_mode(
     meta: plx_data::metadata::MetadataView<'_>,
     mode: plx_machine::machine::UiMode,
 ) {
+    draw_hud_for_display(ps, model, row, up, slot, busy, focus, btn, tab, now,
+        transport, measure, meta, mode, None);
+}
+
+/// Paint-only channel selection preview. The original metadata still supplies
+/// controls; this optional caption never grants playback or seek authority.
+pub fn draw_hud_for_display(
+    ps: &plx_media::route::PlaybackSession,
+    model: &HudModel,
+    row: &mut HudMotion,
+    up: &crate::up_next::Countdown,
+    slot: ControlSlot,
+    busy: Busy,
+    focus: GroupId,
+    btn: i32,
+    tab: i32,
+    now: u32,
+    transport: bool,
+    measure: &dyn plx_machine::machine::Measure,
+    meta: plx_data::metadata::MetadataView<'_>,
+    mode: plx_machine::machine::UiMode,
+    display: Option<&plx_data::metadata::NowPlaying>,
+) {
+    let playing = display.or_else(|| meta.now_playing());
     // A FAILURE owns the frame, and it outranks every branch below — including the Up Next card,
     // which cannot coexist with one but must not be the arm that decides so. `Player Screen.dc.html`
     // sets `hudDisplay:none` AND `tabsDisplay:none` on the failed variant, and its read-out block
@@ -998,14 +1022,14 @@ pub fn draw_hud_in_mode(
         return;
     }
     if mode == plx_machine::machine::UiMode::Modern {
-        draw_modern(ps, model, row, up, slot, busy, focus, btn, tab, now, transport, measure, meta);
+        draw_modern(ps, model, row, up, slot, busy, focus, btn, tab, now, transport, measure, meta, playing);
         return;
     }
     // An expanded Classic description sits above this same footer, not in its
     // place. Contextual offers stay on the actual transport surface only.
     let visible_slot = if transport && !failure_row_drawn(busy) { slot } else { ControlSlot::Discs(Controls::NONE) };
     row.ott_clock_labels.refresh_raster(model.video_raster);
-    let layout = ott_classic_layout(visible_slot, row, 0, meta.now_playing(), measure);
+    let layout = ott_classic_layout(visible_slot, row, 0, playing, measure);
     let p = Painter::root();
     let color = theme::with_a(plx_ui::palette::color(plx_ui::palette::Role::Background, theme::CLASSIC_BACKGROUND), model.osd_opacity.background_alpha(0.78));
     p.rect(layout.panel, 0.0, color, color, 0.0);
@@ -1015,9 +1039,9 @@ pub fn draw_hud_in_mode(
     let mut bar = Playbar::live(model, busy, if transport { focus } else { GROUP_ROW }, row.since_play_ms(now), now);
     let decoder = Some((bar.pos_ns, bar.dur_ns));
     if chrome {
-        if let Some(playing) = meta.now_playing() {
+        if let Some(playing) = playing {
             super::ott_footer::draw_classic(pc, playing, playing.ott.as_ref(), &mut row.ott_clock_labels,
-                &layout, measure, model.wall_now_s, decoder, busy);
+                &layout, measure, model.wall_now_s, decoder, busy, bar.mark);
         } else {
             draw_route_title(pc, plx_media::route::title_cptr(ps),
                 plx_media::route::ctxline_cptr(ps), &layout);
@@ -1033,7 +1057,7 @@ pub fn draw_hud_in_mode(
     }
     bar.clock_grow = row.preview.motion.clock_grow(now);
     bar.pos_ns = row.spring.apply(bar.pos_ns, now);
-    rail_domain(mode, model, meta.now_playing()).apply(&mut bar);
+    rail_domain(mode, model, playing).apply(&mut bar);
     draw_playbar_track(p, bar, layout.geometry.playbar);
     if transport { draw_scrub_preview_at(p, ps, model, row, bar, layout.geometry.playbar); }
 
@@ -1062,6 +1086,7 @@ fn draw_modern(
     up: &crate::up_next::Countdown, slot: ControlSlot, busy: Busy, focus: GroupId,
     btn: i32, tab: i32, now: u32, transport: bool, measure: &dyn Measure,
     meta: plx_data::metadata::MetadataView<'_>,
+    playing: Option<&plx_data::metadata::NowPlaying>,
 ) {
     let p = Painter::root();
     row.ott_clock_labels.refresh_raster(model.video_raster);
@@ -1069,16 +1094,17 @@ fn draw_modern(
     let label = super::modern::focused_label(slot, focused);
     let tabs = if crate::chapters_panel::has_chapters(meta) { 2 } else { 1 };
     let layout = super::modern::compose(geometry(slot, row, tabs, measure), slot, row,
-        focused, label, meta.now_playing(), model.wall_now_s, measure);
+        focused, label, playing, model.wall_now_s, measure);
     if transport { super::modern::draw_panel(p, &layout, model.osd_opacity); }
     else { draw_scrim_with_opacity(p, model.osd_opacity); }
     let chrome = row.chrome_visible(now);
     let pc = p.alpha(row.preview.motion.chrome_alpha(now));
     row.reset_title();
     if transport {
+        let mut bar = Playbar::live(model, busy, focus, row.since_play_ms(now), now);
         if chrome {
-            super::modern::draw_information(pc, &layout, meta.now_playing(), model.wall_now_s,
-                &mut row.ott_clock_labels, measure, busy);
+            super::modern::draw_information(pc, &layout, playing, model.wall_now_s,
+                &mut row.ott_clock_labels, measure, busy, bar.mark);
             match slot {
                 _ if failure_row_drawn(busy) => {},
                 ControlSlot::Discs(controls) => super::modern::draw_controls(pc, &layout,
@@ -1089,11 +1115,10 @@ fn draw_modern(
                     focus == GROUP_ROW, btn, now, measure),
             }
         }
-        if !failure_row_drawn(busy) && super::modern::shows_timeline(model, meta.now_playing()) {
-            let mut bar = Playbar::live(model, busy, focus, row.since_play_ms(now), now);
+        if !failure_row_drawn(busy) && super::modern::shows_timeline(model, playing) {
             bar.clock_grow = row.preview.motion.clock_grow(now);
             bar.pos_ns = row.spring.apply(bar.pos_ns, now);
-            let domain = rail_domain(plx_machine::machine::UiMode::Modern, model, meta.now_playing());
+            let domain = rail_domain(plx_machine::machine::UiMode::Modern, model, playing);
             domain.apply(&mut bar);
             if matches!(domain, RailDomain::GuideReadOnly { .. }) {
                 draw_playbar_track(p, bar, layout.geometry.playbar);

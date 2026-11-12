@@ -34,9 +34,22 @@ fn sequence(runtime: &Runtime, playing: &Playing) -> bool {
 }
 
 pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
+    if app.running && playback_allowed(app) && app.player.pending_exit.is_none()
+        && matches!(app.route(), AppArg::Player | AppArg::Ott)
+        && !app.pages.surface_up() && !app.pages.has_pending_navigation()
+        && !app.pages.nav.suspended && !app.decoder_parked
+        && !app.pages.nav.tabs.stack.is_pending() && !app.pages.nav.tabs.stack.transition.in_flight()
+        && !matches!(&app.rec, super::super::recorder::Recplay::Replaying(_))
+        && !app.bridge.is_controlled_replay() && input_policy::navigation(runtime).is_ok()
+        && runtime.setup.is_none() && runtime.edit_session.is_none()
+        && playback_step::pending_id(runtime, app).is_some()
+    {
+        return Some(OttPlayerOffer { source: playback_step::pending_source(runtime)?,
+            recovery_only: true, seek_arrows: false, accept: Action::OpenCatalog, guide: false });
+    }
     if failed_playback::ready(runtime, app) {
         let source = failed_playback::current(runtime, app)?.identity.clone()?;
-        return Some(OttPlayerOffer { source, recovery_only: true, seek_arrows: false,
+        return Some(OttPlayerOffer { source: source.into(), recovery_only: true, seek_arrows: false,
             accept: Action::OpenCatalog, guide: false });
     }
     if runtime.playing.is_none() {
@@ -45,7 +58,7 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
         let accept = if runtime.view_selection().1 || !lifecycle::viewer_paused() {
             Action::OpenCatalog
         } else { Action::TogglePause };
-        return Some(OttPlayerOffer { source, recovery_only: false, seek_arrows: true, accept, guide: false });
+        return Some(OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows: true, accept, guide: false });
     }
     let playing = playing(runtime, app)?;
     let source = playing.identity.clone()?;
@@ -60,10 +73,11 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
     } else if playing.archive.is_some() {
         Action::OpenGuide
     } else { Action::OpenCatalog };
-    Some(OttPlayerOffer { source, recovery_only: false, seek_arrows, accept, guide })
+    Some(OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows, accept, guide })
 }
 
 fn action_allowed(offer: &OttPlayerOffer, action: Action) -> bool {
+    if offer.source.pending() { return matches!(action, Action::Previous | Action::Next); }
     if offer.recovery_only { return matches!(action, Action::Previous | Action::Next | Action::OpenCatalog); }
     match action {
         Action::SeekBackward | Action::SeekForward => offer.seek_arrows,
@@ -78,13 +92,17 @@ fn action_allowed(offer: &OttPlayerOffer, action: Action) -> bool {
 pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerRequest)
     -> Result<Option<PlayerReq>, &'static str> {
     let current = offer(runtime, app).ok_or(CHANGED)?;
-    if current.source != request.source || app.bridge.ott_player_offer() != Some(&current)
-        || !action_allowed(&current, request.action)
-    { return Err(CHANGED); }
+    let published = app.bridge.ott_player_offer().ok_or(CHANGED)?;
+    let step = matches!(request.action, Action::Previous | Action::Next);
+    let exact = current.source == request.source && published == &current;
+    let chained = step && published.source == request.source
+        && playback_step::chained(runtime, app, request);
+    if (!exact && !chained) || !action_allowed(&current, request.action) { return Err(CHANGED); }
     let entry = app.pages.nav.entry_of_instance(request.owner).ok_or(CHANGED)?;
     if app.pages.nav.input_owner() != Some(InputOwner::Entry(entry))
         || app.pages.nav.top_page().is_none_or(|page| page.id != entry
-            || !matches!(page.arg, AppArg::Player)
+            || !(matches!(page.arg, AppArg::Player)
+                || (current.source.pending() && matches!(page.arg, AppArg::Ott)))
             || page.inst.as_ref().is_none_or(|body| body.staged || body.id != request.owner))
     { return Err(CHANGED); }
     // From here, reuse the same semantic doors as the native controls. Never
@@ -94,6 +112,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
         Action::Previous | Action::Next => {
             let offset = if request.action == Action::Next { 1 } else { -1 };
             playback_step::perform(runtime, app, offset)?;
+            playback_step::note_chain(runtime, app, request);
             None
         }
         Action::SeekBackward | Action::SeekForward => {
@@ -107,9 +126,8 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
         Action::OpenMenu => Some(PlayerReq::OpenOverlay(
             plx_screens::player::overlay::OverlayKind::More { page: None })),
         Action::ShowInfo => Some(PlayerReq::ExtendDefaultHud),
-        Action::ShowDescription => Some(if app.bridge.ui_mode() == plx_machine::machine::UiMode::Classic
-            && plx_appkit::info_panel::live_channel(app.bridge.metadata_view())
-            && !plx_appkit::info_panel::description(app.bridge.metadata_view()).trim().is_empty() {
+        Action::ShowDescription => Some(if plx_appkit::info_panel::live_information_available(
+            app.bridge.metadata_view(), (runtime.wall_clock_ms / 1000) as i64) {
             PlayerReq::OpenOverlay(plx_screens::player::overlay::OverlayKind::Info)
         } else { PlayerReq::ExtendDefaultHud }),
         Action::TogglePause => Some(PlayerReq::Transport(None)),
@@ -123,7 +141,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
                 failed_playback::admissible(runtime, app).ok_or(CHANGED)?;
                 player_browse::present(runtime, app, None, page);
             } else if runtime.playing.is_none() {
-                player_browse::open_native(runtime, app, &request.source, None, page)?;
+                player_browse::open_native(runtime, app, request.source.playback().ok_or(CHANGED)?, None, page)?;
             } else {
                 player_browse::present(runtime, app, None, page);
             }

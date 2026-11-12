@@ -26,7 +26,7 @@ fn item(id: String) -> OttRow {
 impl Harness {
     fn new(n: usize) -> Self {
         let mut h = Self { screen: OttScreen::new(ENTRY, InstanceId(9)), focus: None, press: 1.0, ms: 0 };
-        h.step(ScreenEvent::App(AppMsg::OttSnapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None,
+        h.step(ScreenEvent::App(AppMsg::OttSnapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
             preview_context: Some("source-fixture".into()), random_context: None, order_context: None,
             page_id: "channels:fixture".into(), revision: 1, title: msg::ott_channel_list().into(),
             description: String::new(), status: String::new(), selected_row: None,

@@ -82,9 +82,14 @@ fn native_channel_rocker_steps_from_playing_item_not_browse_focus() {
         assert_eq!(app.pages.top_page(), owner);
         assert!(app.adapters.player.is_live());
         assert!(app.player.pending_exit.is_none());
+        let generation = app.ott.as_ref().unwrap().play_generation;
         native_edge(&mut app, 0, raw, Edge::Repeat);
+        let repeated = if wanted == "a" { "b" } else { "a" };
+        assert_eq!(queued(&app), Some(repeated), "one accepted repeat advances from the pending target");
+        assert_eq!(app.ott.as_ref().unwrap().play_generation, generation.wrapping_add(1));
         native_edge(&mut app, 0, raw, Edge::Up);
-        assert_eq!(queued(&app), Some(wanted), "pending admission/release cannot queue another item");
+        assert_eq!(queued(&app), Some(repeated), "release never advances the list");
+        assert_eq!(app.ott.as_ref().unwrap().play_generation, generation.wrapping_add(1));
     }
 }
 
@@ -148,10 +153,13 @@ fn live_m3u_rocker_case(visible_hud: bool) {
             assert!(app.adapters.player.is_live() && app.player.pending_exit.is_none());
             let generation = runtime.play_generation;
             native_edge(&mut app, 0, raw, Edge::Repeat);
+            let repeated = if wanted == "a" { "b" } else { "a" };
+            assert_eq!(queued(&app), Some(repeated), "accepted repeat coalesces to the next pending channel");
+            assert_eq!(app.ott.as_ref().unwrap().play_generation, generation.wrapping_add(1));
             native_edge(&mut app, 0, raw, Edge::Up);
-            assert_eq!(queued(&app), Some(wanted));
-            assert_eq!(app.ott.as_ref().unwrap().play_generation, generation,
-                "repeat/release cannot replace an opening channel");
+            assert_eq!(queued(&app), Some(repeated));
+            assert_eq!(app.ott.as_ref().unwrap().play_generation, generation.wrapping_add(1),
+                "release must not open a third channel");
         }
     }
 }
@@ -622,7 +630,7 @@ fn native_hud_step_commands_use_the_owned_ott_list_instead_of_plex_queue() {
             deferred: false, rn: "player" };
         content::content_requests(&mut app, &fr);
         assert_eq!(queued(&app), Some(wanted));
-        assert!(route::playback_identity_matches(&app.player.session, &source));
+        assert!(route::playback_identity_matches(&app.player.session, source.playback().unwrap()));
         assert!(!app.ott.as_ref().unwrap().play_target.as_ref().unwrap().advance_on_failure);
     }
 }
@@ -743,5 +751,183 @@ fn failed_live_center_opens_bound_catalogue_without_restart_or_implicit_navigati
         assert!(app.ott.as_ref().unwrap().play_target.is_none());
         assert!(app.ott.as_ref().unwrap().resolver_next.is_none());
         assert!(!app.adapters.player.is_live(), "browsing is not playback retry or resume");
+    }
+}
+
+#[test]
+fn live_eof_exhaustion_preserves_header_and_explicit_catalogue_recovery() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        for revoke_source in [false, true] {
+            let mut app = live_m3u_remote_app(mode, true);
+            // Exhaust the four same-channel retries without starting a worker.
+            // The real EOF below is the terminal fifth disconnect.
+            let runtime = app.ott.as_mut().unwrap();
+            let generation = runtime.generation;
+            let mut now = runtime.now_ms();
+            for _ in 0..4 {
+                assert_eq!(runtime.continuity.live_disconnected(generation, "c", now), continuity::Decision::Wait);
+                let due = runtime.continuity.pending_retry().unwrap().not_before_ms;
+                assert!(matches!(runtime.continuity.tick(generation, due, &["c", "a", "b"], true),
+                    continuity::Decision::Start { entry_id, .. } if entry_id == "c"));
+                now = due + 1;
+            }
+            let title = runtime.playing.as_ref().unwrap().entry.title.clone();
+            let art = projection(&app).art;
+            assert!(art.is_some(), "fixture exercises actual retained artwork");
+            assert!(crate::app::ott_runtime::finish_catalog_playback(&mut app));
+            let mut runtime = app.ott.take().unwrap();
+            assert!(runtime.playing.is_none() && !app.adapters.player.is_live());
+            assert!(runtime.continuity.pending_retry().is_none());
+            assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+            assert!(failed_playback::current(&runtime, &app).is_some());
+            assert!(crate::app::ott_runtime::live_hud::publish(&mut runtime, &mut app, true));
+            app.ott = Some(runtime);
+            assert_eq!(projection(&app).live.unwrap().channel_title, title);
+            assert_eq!(projection(&app).art, art);
+            crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+            let offer = app.bridge.ott_player_offer().unwrap();
+            assert!(offer.recovery_only);
+            if revoke_source {
+                let request = plx_screens::registry::OttPlayerRequest {
+                    owner: app.pages.top_page().unwrap(), source: offer.source.clone(),
+                    action: plx_screens::registry::OttPlayerAction::OpenCatalog };
+                app.ott.as_mut().unwrap().saved.profiles.profiles[0].source = "https://other.invalid/list.m3u".into();
+                assert!(crate::app::ott_runtime::remote_player_action(&mut app, request).is_err());
+                assert!(!app.pages.has_pending_navigation());
+            } else {
+                native_edge(&mut app, consts::SDLK_RETURN, 40, Edge::Down);
+                idle(&mut app);
+                assert!(ott_surface(&app).is_some(), "terminal EOF must keep the explicit OK catalogue door");
+                assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+            }
+            assert!(app.ott.as_ref().unwrap().play_target.is_none());
+            assert!(!app.adapters.player.is_live(), "a recovery panel cannot restart a decoder");
+        }
+    }
+}
+
+#[test]
+fn pending_channel_footer_paints_new_target_before_admission_and_retires_stale_snapshot() {
+    use plx_data::ott::{epg::Programme, guide::{Context, Coverage, Request, ResultSet}};
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        for absent_actual_metadata in [false, true] {
+            let mut app = live_m3u_remote_app(mode, true);
+            let identity = route::playback_identity(&app.player.session);
+            let actual_title = app.bridge.metadata_view().now_playing().unwrap().title.clone();
+            let runtime = app.ott.as_mut().unwrap();
+            runtime.catalog.entries[1].poster = "https://media.invalid/target-logo.png".into();
+            let target = runtime.catalog.entries[1].clone();
+            let profile = runtime.saved.profiles.profiles[0].clone();
+            runtime.play_request(PlaybackRequest::ordinary(&target.id, 0)).unwrap();
+            runtime.request_metadata(profile.clone(), target.clone());
+            let now = runtime.wall_now_s().unwrap();
+            let context = Context { generation: runtime.metadata_generation,
+                profile_id: profile.id.clone(), entry_id: target.id.clone() };
+            let query = runtime.metadata_query.unwrap();
+            let guide = crate::app::ott_metadata::Guide {
+                row_guide: None, source_profile: profile, generation: runtime.metadata_generation,
+                profile_id: context.profile_id.clone(), entry_id: target.id.clone(), entry: target.clone(),
+                request: Request { context: context.clone(), query },
+                result: Ok(ResultSet { context, query, coverage: Coverage::RequestedWindow,
+                    programmes: vec![Programme { channel: "fixture".into(), start: now - 60, end: now + 60,
+                        title: "Target broadcast".into(), description: "Target synopsis".into() }] }),
+            };
+            let candidate = selected_guide::Candidate::from_reply(&guide, now);
+            assert!(runtime.retain_selected_guide(Some(candidate), None));
+            if absent_actual_metadata {
+                app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::SetNowPlaying(None));
+            }
+            run::publish_pending_channel_display(&mut app);
+            let page = bridge::player(&app.pages).unwrap();
+            let display = page.pending_channel_display.as_ref().unwrap();
+            assert_eq!(display.title, target.title);
+            let ott = display.ott.as_ref().unwrap();
+            assert!(ott.confirmed_start_unix_ms.is_none());
+            assert_eq!(ott.live.as_ref().unwrap().guide.as_ref().unwrap().current.as_ref().unwrap().title, "Target broadcast");
+            assert!(matches!(&ott.art, Some(plx_data::metadata::MediaArt::Http { url })
+                if Some(url) == plx_data::ott::http_url("https://media.invalid/target-logo.png").as_ref()),
+                "the selected target's canonical logo must be preserved");
+            let mut motion = plx_appkit::player_hud::motion::HudMotion::new();
+            let model = plx_appkit::player_hud::model::HudModel { wall_now_s: Some(now), ..Default::default() };
+            let painted = plx_ui::draw_census::capture_text(|| plx_ui::record_walk(||
+                plx_appkit::player_hud::classic::draw_hud_for_display(&app.player.session, &model, &mut motion,
+                    &Default::default(), plx_appkit::player_hud::ControlSlot::Discs(plx_appkit::player_hud::Controls::NONE),
+                    plx_appkit::player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Opening video…"),
+                    plx_appkit::player_hud::geometry::GROUP_ROW, 0, 0, app.loop_t, true, &plx_ui::fixture::FixtureMeasure,
+                    app.bridge.metadata_view(), mode, Some(display))))
+                .into_iter().map(|(text, _)| text).collect::<Vec<_>>().join(" ");
+            assert!(painted.contains(&target.title) && painted.contains("Target broadcast"), "{mode:?}: {painted}");
+            assert!(!painted.contains(&actual_title));
+            assert_eq!(route::playback_identity(&app.player.session), identity);
+            assert_eq!(app.ott.as_ref().unwrap().playing.as_ref().unwrap().entry.id, "c");
+            assert_eq!(app.bridge.metadata_view().now_playing().map(|now| now.title.as_str()),
+                (!absent_actual_metadata).then_some(actual_title.as_str()));
+            // The title and logo do not depend on a calendar sample; only EPG does.
+            let clock = app.ott.as_mut().unwrap().clock_sample.take();
+            run::publish_pending_channel_display(&mut app);
+            let without_clock = bridge::player(&app.pages).unwrap().pending_channel_display.as_ref().unwrap();
+            assert_eq!(without_clock.title, target.title);
+            assert!(without_clock.ott.as_ref().unwrap().art.is_some());
+            assert!(without_clock.ott.as_ref().unwrap().live.as_ref().unwrap().guide.is_none());
+            app.ott.as_mut().unwrap().clock_sample = clock;
+            run::publish_pending_channel_display(&mut app);
+            assert!(bridge::player(&app.pages).unwrap().pending_channel_display.as_ref().unwrap()
+                .ott.as_ref().unwrap().live.as_ref().unwrap().guide.is_some());
+            // Both cancellation and a source replacement withdraw the paint-only preview.
+            app.ott.as_mut().unwrap().play_cancel.store(true, Ordering::Release);
+            run::publish_pending_channel_display(&mut app);
+            assert!(bridge::player(&app.pages).unwrap().pending_channel_display.is_none());
+            app.ott.as_mut().unwrap().play_cancel.store(false, Ordering::Release);
+            run::publish_pending_channel_display(&mut app);
+            assert!(bridge::player(&app.pages).unwrap().pending_channel_display.is_some());
+            app.ott.as_mut().unwrap().saved.profiles.profiles[0].source = "https://other.invalid/list.m3u".into();
+            run::publish_pending_channel_display(&mut app);
+            assert!(bridge::player(&app.pages).unwrap().pending_channel_display.is_none());
+        }
+    }
+}
+
+
+#[path = "programme_pending_steps.rs"]
+mod pending_steps;
+
+
+#[test]
+fn numeric_channels_accept_only_the_owned_checkpoint_writer_and_not_a_stale_settings_writer_marker() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for checkpoint in [true, false] {
+        let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Classic, false);
+        let mut runtime = app.ott.take().unwrap();
+        runtime.saving = false;
+        runtime.write_permit.revoke(); // an admitted writer cannot touch protected host state
+        if checkpoint {
+            runtime.checkpoint(&app, true);
+            assert!(runtime.saving && runtime.numeric_write_ready());
+            assert_eq!(runtime.checkpoint_save_epoch, Some(runtime.save_playback_epoch));
+        } else {
+            // A previous checkpoint receipt cannot lend its capability to a
+            // newly admitted ordinary settings/Favorites writer.
+            runtime.checkpoint_save_epoch = Some(runtime.save_playback_epoch);
+            runtime.save(runtime.saved.clone(), None, false).unwrap();
+            assert!(runtime.saving && !runtime.numeric_write_ready());
+            assert!(runtime.checkpoint_save_epoch.is_none());
+        }
+        app.ott = Some(runtime);
+        native_edge(&mut app, u32::from(b'1'), 0, Edge::Down);
+        native_edge(&mut app, u32::from(b'1'), 0, Edge::Up);
+        let mut runtime = app.ott.take().unwrap();
+        let deadline = runtime.now_ms() + 2_001;
+        crate::app::ott_runtime::numeric_input::tick(&mut runtime, &mut app, deadline);
+        app.ott = Some(runtime);
+        if checkpoint {
+            assert_eq!(queued(&app), Some("c"), "ordinary checkpoint persistence cannot drop a channel number");
+        } else {
+            assert!(queued(&app).is_none(), "ordinary settings writer retains the numeric mutation fence");
+        }
     }
 }

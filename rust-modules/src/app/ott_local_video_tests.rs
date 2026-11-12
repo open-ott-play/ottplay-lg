@@ -28,7 +28,7 @@ impl Drop for Fixture {
     fn drop(&mut self) { plx_base::testscratch::remove_tree(&self.0); }
 }
 fn entry(relative: &str) -> CatalogEntry {
-    CatalogEntry { synopsis: None, live: None, id: "local-video".into(), title: "Video".into(), category: String::new(),
+    CatalogEntry { protection: None, synopsis: None, live: None, id: "local-video".into(), title: "Video".into(), category: String::new(),
         description: String::new(), poster: String::new(), duration_ms: None,
         media: MediaLocator::Local { relative_path: relative.into() }, provider_id: None, provider_id_field: None }
 }

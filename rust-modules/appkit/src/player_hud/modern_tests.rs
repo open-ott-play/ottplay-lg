@@ -256,7 +256,7 @@ fn modern_footer_draws_typed_ordinal_and_live_clocks_then_retires_stale_guide() 
         let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
         let layout = compose(base, slot, &motion, None, "", Some(&value), Some(now), &FixtureMeasure);
         let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-            &layout, Some(&value), Some(now), &mut clocks, &FixtureMeasure, Busy::None));
+            &layout, Some(&value), Some(now), &mut clocks, &FixtureMeasure, Busy::None, TransportMark::None));
         for expected in ["3450", "Channel A", title] {
             assert!(runs.iter().any(|run| run.text == expected), "missing {expected}: {runs:?}");
         }
@@ -277,7 +277,7 @@ fn modern_footer_draws_typed_ordinal_and_live_clocks_then_retires_stale_guide() 
     let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
     let layout = compose(base, slot, &motion, None, "", Some(&value), None, &FixtureMeasure);
     let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-        &layout, Some(&value), None, &mut clocks, &FixtureMeasure, Busy::None));
+        &layout, Some(&value), None, &mut clocks, &FixtureMeasure, Busy::None, TransportMark::None));
     assert!(clocks.current().is_empty() && clocks.next().is_empty());
     assert!(runs.iter().any(|run| run.text == "123 Channel A"));
     assert!(!runs.iter().any(|run| run.text == "3450" || run.text == "123"));
@@ -299,7 +299,7 @@ fn modern_footer_keeps_episode_identity_and_only_confirmed_finite_clocks() {
         }
         let layout = compose(base, slot, &motion, None, "", Some(&value), None, &FixtureMeasure);
         let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-            &layout, Some(&value), None, &mut clocks, &FixtureMeasure, Busy::None));
+            &layout, Some(&value), None, &mut clocks, &FixtureMeasure, Busy::None, TransportMark::None));
         for expected in ["Series / Season 2", "Current episode", "Next episode"] {
             assert!(runs.iter().any(|run| run.text == expected), "missing {expected}: {runs:?}");
         }
@@ -362,7 +362,7 @@ fn modern_live_footer_has_real_clock_raster_and_read_only_broadcast_rail() {
     let mut clocks = super::super::ott_footer::ClockLabels::default();
     clocks.refresh_raster(model.video_raster);
     let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(), &plan,
-        Some(&playing), Some(150), &mut clocks, &FixtureMeasure, Busy::None));
+        Some(&playing), Some(150), &mut clocks, &FixtureMeasure, Busy::None, TransportMark::None));
     for label in ["7", "Channel A", "Current programme", "+1"] {
         assert!(runs.iter().any(|run| run.text == label), "missing {label}: {runs:?}");
     }
@@ -372,7 +372,7 @@ fn modern_live_footer_has_real_clock_raster_and_read_only_broadcast_rail() {
 }
 
 #[test]
-fn modern_startup_spinner_keeps_channel_title_without_its_catalogue_number() {
+fn modern_spinner_hides_ordinal_but_directional_seek_keeps_it() {
     use plx_data::metadata::OttLivePlaying;
     let mut playing = footer_playing();
     playing.ott.as_mut().unwrap().live = Some(OttLivePlaying {
@@ -383,16 +383,20 @@ fn modern_startup_spinner_keeps_channel_title_without_its_catalogue_number() {
     let base = super::super::classic::geometry(slot, &motion, 1, &FixtureMeasure);
     let layout = compose(base, slot, &motion, None, "", Some(&playing), Some(150), &FixtureMeasure);
     let mut clocks = super::super::ott_footer::ClockLabels::default();
-    for (busy, numbered) in [
-        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), false),
-        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), false),
-        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), false),
-        (Busy::None, true),
-        (Busy::Transport, true),
-        (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), true),
+    for (busy, displayed_ns, expected_mark, numbered) in [
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), 10, TransportMark::None, false),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), 10, TransportMark::None, false),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), 10, TransportMark::None, false),
+        (Busy::None, 10, TransportMark::None, true),
+        (Busy::Transport, 10, TransportMark::Working, false),
+        (Busy::Transport, 5, TransportMark::Rewind, true),
+        (Busy::Transport, 15, TransportMark::FastForward, true),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), 10, TransportMark::None, true),
     ] {
+        let mark = crate::player_hud::transport_mark(false, busy, false, displayed_ns, 10, None);
+        assert_eq!(mark, expected_mark);
         let runs = plx_ui::draw_census::capture_runs(|| draw_information(Painter::recording(),
-            &layout, Some(&playing), Some(150), &mut clocks, &FixtureMeasure, busy));
+            &layout, Some(&playing), Some(150), &mut clocks, &FixtureMeasure, busy, mark));
         assert!(runs.iter().any(|run| run.text == "123 Channel A"), "missing title for {busy:?}");
         assert_eq!(runs.iter().any(|run| run.text == "3450"), numbered, "{busy:?}: {runs:?}");
     }

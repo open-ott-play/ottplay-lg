@@ -41,6 +41,19 @@ pub fn description(meta: metadata::MetadataView<'_>) -> &str {
         .unwrap_or("")
 }
 
+/// Availability follows source-owned current programme facts, not just synopsis
+/// length. Some broadcasters supply an honest title/time without a description.
+pub fn live_information_available(meta: metadata::MetadataView<'_>, wall_now_s: i64) -> bool {
+    let Some(now) = meta.now_playing() else { return false; };
+    let Some(ott) = now.ott.as_ref().filter(|ott| ott.archive.is_none()) else { return false; };
+    let Some(live) = ott.live.as_ref() else { return false; };
+    match live.guide.as_ref() {
+        Some(guide) => guide.at(wall_now_s).0.is_some_and(|programme|
+            !programme.title.trim().is_empty() || !programme.description.trim().is_empty()),
+        None => !now.summary.trim().is_empty(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum InfoAction {
     None,
@@ -180,7 +193,9 @@ impl InfoPanelState {
         measure: &dyn plx_machine::machine::Measure, meta: metadata::MetadataView<'_>, mode: UiMode,
         presentation: InfoPresentation,
     ) {
-        if mode != UiMode::Classic { return self.draw(ps, appear, measure, meta); }
+        if mode != UiMode::Classic {
+            return self.draw_with_wall_time(ps, appear, measure, meta, presentation.wall_now_s);
+        }
         let copy = classic_copy(meta.now_playing(), fallback_detail(meta), presentation.wall_now_s);
         if copy.title.is_empty() && copy.summary.is_empty() { return; }
         let footer_top = crate::player_hud::classic::classic_footer_top(meta.now_playing(), measure);
@@ -252,6 +267,14 @@ impl InfoPanelState {
         measure: &dyn plx_machine::machine::Measure,
         meta: metadata::MetadataView<'_>,
     ) {
+        self.draw_with_wall_time(ps, appear, measure, meta, None);
+    }
+
+    fn draw_with_wall_time(
+        &mut self, ps: &plx_media::route::PlaybackSession, appear: f32,
+        measure: &dyn plx_machine::machine::Measure, meta: metadata::MetadataView<'_>,
+        wall_now_s: Option<i64>,
+    ) {
         let np = meta.now_playing();
         let d = fallback_detail(meta);
         if np.is_none() && d.is_none() {
@@ -266,18 +289,20 @@ impl InfoPanelState {
         // Resolve the playing leaf's fields: `now_playing` describes the episode (show title + SxEy
         // + its still) or the movie; the loaded `Detail` backs the capability badges + genres.
         let is_ep = np.map(|n| n.is_episode).unwrap_or(false);
-        let big_title = np
-            .map(|n| n.title.clone())
+        let live_copy = live_channel(meta).then(|| classic_copy(np, d, wall_now_s));
+        let big_title = live_copy.as_ref().map(|copy| copy.title.to_owned()).or_else(|| np
+            .map(|n| n.title.clone()))
             .or_else(|| d.map(|x| x.title.clone()))
             .unwrap_or_default();
         let ep_name = np.map(|n| n.ep_title.clone()).unwrap_or_default();
-        let summary = description(meta).to_owned();
+        let summary = live_copy.as_ref().map(|copy| copy.summary.to_owned())
+            .unwrap_or_else(|| description(meta).to_owned());
         let year = np
             .map(|n| n.year)
             .or_else(|| d.map(|x| x.year))
             .unwrap_or(0);
-        let dur_ms = np
-            .map(|n| n.dur_ms)
+        let dur_ms = live_copy.as_ref().map(|copy| copy.duration_ms).or_else(|| np
+            .map(|n| n.dur_ms))
             .or_else(|| d.map(|x| x.dur_ms))
             .unwrap_or(0);
         let rating = np
@@ -595,9 +620,10 @@ fn classic_copy<'a>(now: Option<&'a metadata::NowPlaying>, detail: Option<&'a me
                 return ClassicCopy { title: &programme.title, summary: &programme.description,
                     duration_ms: programme.end_s.saturating_sub(programme.start_s).saturating_mul(1000) };
             }
-            // The retained guide no longer owns a current programme. now.summary can
-            // still describe its expired row, so it is not a channel-level fallback.
-            return ClassicCopy { title: &live.channel_title, summary: "", duration_ms: 0 };
+            // An expired guide must not borrow its old row's summary. With no
+            // guide, the accepted playing source may still supply its own synopsis.
+            return ClassicCopy { title: &live.channel_title,
+                summary: if live.guide.is_none() { &now.summary } else { "" }, duration_ms: 0 };
         }
         // A playing leaf is authoritative, including its intentionally empty description.
         return ClassicCopy {

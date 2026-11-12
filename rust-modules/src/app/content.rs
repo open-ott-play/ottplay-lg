@@ -17,8 +17,9 @@ use plx_ui::screen::{ReturnState, ScreenEvent};
 // (`node` stood here — `ContentArg` → `ui::trail::Node`, one of the two conversions the trail
 // needed. A `ContentArg` IS the page's identity; there is nothing to convert it to.)
 
-/// Drain the real bridge queue after menu activation. Resource injection is below the shared
-/// performer, so production and tests consume precisely the same emitted requests.
+/// Test driver for the real bridge queue. The production App entry point
+/// validates playback policy before using the same injected performer.
+#[cfg(test)]
 pub(super) fn drain_item_menu_requests<R: super::playback::PlaybackResources>(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,
@@ -28,8 +29,47 @@ pub(super) fn drain_item_menu_requests<R: super::playback::PlaybackResources>(
     menu_play_await: &mut Option<super::input::MenuPlayAwait>,
     now: u32,
 ) {
-    for req in bridge.take_item_menu_reqs() {
+    let requests = bridge.take_item_menu_reqs();
+    perform_item_menu_requests(ps, pa, pages, bridge, resources, menu_play_await, now, requests);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn perform_item_menu_requests<R: super::playback::PlaybackResources>(
+    ps: &mut plx_media::route::PlaybackSession,
+    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
+    bridge: &mut super::bridge::Bridge,
+    resources: &mut R,
+    menu_play_await: &mut Option<super::input::MenuPlayAwait>,
+    now: u32,
+    requests: Vec<plx_screens::registry::ItemMenuReq>,
+) {
+    for req in requests {
         unsafe { super::input::apply_item_action(ps, pa, req, pages, bridge, resources, menu_play_await, now); }
+    }
+}
+
+pub(super) fn play_intent_allowed(app: &mut App, play: &plx_screens::registry::PlayIntent) -> bool {
+    match play {
+        plx_screens::registry::PlayIntent::Item { sid, rk, .. } =>
+            super::ott_runtime::foreign_ui_play_allowed(app, *sid, rk),
+        plx_screens::registry::PlayIntent::Movie { item, .. } =>
+            super::ott_runtime::foreign_ui_play_allowed(app, item.sid, &item.rk),
+    }
+}
+
+fn item_menu_play_allowed(app: &mut App, request: &plx_screens::registry::ItemMenuReq) -> bool {
+    use plx_screens::item_menu::Action;
+    match &request.act {
+        Action::Play(key) if request.item.as_ref().is_some_and(|item|
+            item.rk == *key && !matches!(item.kind, 0 | 3)) => true, // metadata-only continuation
+        Action::Play(key) | Action::PlayFromStart(key) | Action::PlayVersion { rk: key, .. } => {
+            let sid = if request.loaded_episode { request.sid }
+                else { request.item.as_ref().filter(|item| item.rk == *key).map_or(request.sid, |item| item.sid) };
+            super::ott_runtime::foreign_ui_play_allowed(app, sid, key)
+        }
+        Action::PlayTrailer { rk, .. } => super::ott_runtime::foreign_ui_play_allowed(app, request.sid, rk),
+        _ => true,
     }
 }
 
@@ -217,6 +257,10 @@ fn drain_held_feature(app: &mut App) {
     if HELD_FEATURE.with(|slot| slot.borrow().is_none()) {
         return;
     }
+    let play = HELD_FEATURE.with(|slot| slot.borrow_mut().take());
+    let Some(held) = play else { return; };
+    if !play_intent_allowed(app, &held.play) { return; }
+    HELD_FEATURE.with(|slot| { *slot.borrow_mut() = Some(held); });
     let mounted = super::bridge::player(&app.pages).is_some();
     if !clear_engine_for_play(&mut app.player.session, &mut app.adapters.player, mounted) {
         return;
@@ -528,26 +572,18 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
         let Some(request) = super::player_geometry::request(app, request) else { continue; };
         if !super::ott_runtime::kiosk_player_request(app, &request) { continue; }
         let Some(request) = super::ott_runtime::track_request(app, request) else { continue };
-        let viewer_transport = super::playback::player_requests(&mut app.player,
-            &mut app.adapters.player,
-            &mut app.repause_at,
-            vec![request],
-            fr.now,
-            &mut app.refresh_hubs,
-            &mut app.pages,
-            &mut app.bridge,
-            &mut app.ok_armed,
-            &mut app.input.press,
-        );
+        let viewer_transport = super::playback::player_requests_checked(app, vec![request], fr.now);
         super::ott_runtime::viewer_action(app, viewer_transport);
     }
     // …and the item context menu's committed row, for the same reason and at the same moment: it
     // is a surface on the shared stack, so what it decides reaches the loop as a request. The
     // dispatch asks the container for a navigation and takes the playback session's `&mut`,
     // neither of which a screen may name (§2.1).
-    drain_item_menu_requests(&mut app.player.session, &mut app.adapters.player,
+    let item_requests = app.bridge.take_item_menu_reqs().into_iter()
+        .filter(|request| item_menu_play_allowed(app, request)).collect();
+    perform_item_menu_requests(&mut app.player.session, &mut app.adapters.player,
         &mut app.pages, &mut app.bridge, &mut super::playback::LivePlaybackResources,
-        &mut app.menu_play_await, fr.now);
+        &mut app.menu_play_await, fr.now, item_requests);
     for (source, request, ret) in app.bridge.take_content_reqs() {
         let MachineId::Instance(instance) = source else { continue };
         let Some(entry) = app.pages.nav.entry_of_instance(instance) else { continue };
@@ -572,6 +608,7 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
                 content_back(&mut app.pages, source, entry, ret);
             }
             ContentReq::Play { play, resume_ns } => {
+                if !play_intent_allowed(app, &play) { continue; }
                 let mounted = bridge::player(&app.pages).is_some();
                 if !clear_engine_for_play(&mut app.player.session, &mut app.adapters.player, mounted) {
                     hold_feature(play, resume_ns, Some(ret));
@@ -594,6 +631,7 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
                     Some(ret), &mut app.pages, &mut app.bridge);
             }
             ContentReq::PreviewStart { sid, rk, part, vcodec, acodec, title } => {
+                if !super::ott_runtime::foreign_play_allowed(app, sid, &rk) { continue; }
                 if part.is_empty() {
                     plx_media::player::preview::note_no_extra(sid, &rk);
                     continue;
@@ -936,6 +974,11 @@ fn library_requests(app: &mut App, now: u32) {
         let library_page = app.route().is_library_family();
         if app.pages.nav.input_owner() != Some(InputOwner::Entry(entry)) || !library_page { continue; }
         let Some(ret) = library_navigation(&mut app.pages, &mut app.bridge, &request, ret) else { continue };
+        if let LibraryReq::Play { sid, rk, .. } = &request {
+            let item = app.bridge.library_selection(&app.pages, entry, ret.focus);
+            let immediate = item.as_ref().is_none_or(|(item, _)| matches!(item.kind, 0 | 3));
+            if immediate && !super::ott_runtime::foreign_ui_play_allowed(app, *sid, rk) { continue; }
+        }
         unsafe {
             library_page_request(&mut app.player.session, &mut app.adapters.player, &mut app.menu_play_await,
                 &mut app.ok_armed, now, &mut app.pages, &mut app.bridge, instance, entry, request, ret);
@@ -2611,6 +2654,8 @@ fn activate_home_item(app: &mut App, source: MachineId, entry: EntryId,
     sid: plx_plex::plex::ServerId, rk: &str, resume_ns: Option<i64>, ret: ReturnState<u32, PageMemory>, now: u32) {
     let snapshot = app.bridge.hubs_snapshot();
     let Some(mut item) = home_item(snapshot.view(), sid, rk).cloned() else { return };
+    if resume_ns.is_some() && matches!(item.kind, 0 | 3)
+        && !super::ott_runtime::foreign_ui_play_allowed(app, item.sid, &item.rk) { return; }
     if let Some(resume_ns) = resume_ns { item.resume_ms = resume_ns.max(0) / 1_000_000; }
     // Home is the container's ROOT and a card press is the user acting on it, so there is nothing
     // above it to spend — `Trail::reset()` stood here and was a no-op in the only case that could

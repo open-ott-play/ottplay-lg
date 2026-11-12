@@ -134,7 +134,7 @@ mod runtime {
         let mut result = categories(vec![node(&category, "Season", Some(provenance(2, "7")))]);
         for key in ["42", "43"] {
             let id = format!("{}:{key}", profile.id);
-            result.entries.push(plx_data::ott::CatalogEntry {
+            result.entries.push(plx_data::ott::CatalogEntry { protection: None,
                 synopsis: None,
                 id: id.clone(), title: format!("Episode {key}"), category: "Season".into(),
                 description: String::new(), poster: String::new(),
