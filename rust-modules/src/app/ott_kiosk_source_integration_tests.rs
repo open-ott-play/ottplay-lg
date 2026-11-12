@@ -175,16 +175,25 @@ fn explicit_first_playing_capture_definite_failure_keeps_armed() {
     select_remote(&mut app);
     install_playing(&mut app);
     let (job, _) = capture_write(&mut app);
-    // This case isolates capture settlement. Keep the ordinary bookmark writer
-    // inside its existing interval so it cannot occupy the same saving flag
-    // immediately after the capture's failed write releases that flag.
+    // This case isolates capture settlement. The admitted-selection checkpoint
+    // bypasses the position interval, so mark that independent attempt too.
+    // It must not occupy the saving flag after the failed capture releases it.
     let runtime = app.ott.as_mut().unwrap();
+    assert!(runtime.saving, "the capture still owns the outstanding writer");
+    assert!(runtime.checkpoint_save_epoch.is_none(),
+        "the outstanding write must not be a bookmark checkpoint");
+    let playing = runtime.playing.as_ref().unwrap();
+    runtime.checkpoint_write_selection = Some((
+        playing.profile.id.clone(), playing.selection_id.clone(),
+        profile_fingerprint(&playing.profile),
+    ));
     runtime.last_checkpoint_ms = runtime.now_ms();
     app.ott.as_ref().unwrap().tx.send(job).unwrap();
     runtime_tick(&mut app);
     let runtime = app.ott.as_ref().unwrap();
     assert!(!runtime.kiosk_capture.pending());
     assert!(!runtime.saving);
+    assert!(runtime.checkpoint_save_epoch.is_none());
     assert_eq!(
         runtime.saved.settings["nativeKiosk"]["target"]["kind"],
         "armed"
