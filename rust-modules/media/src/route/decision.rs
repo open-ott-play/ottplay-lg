@@ -47,6 +47,8 @@ pub use identity::PlaybackIdentity;
 
 #[path = "external.rs"]
 mod external;
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) use external::external_hls_session_for_test;
 pub use external::{reconcile_observed_hls_tracks, install_observed_hls_tracks, observed_hls_tracks, observed_hls_subtitle_selection, HlsSubtitleMode, HlsSubtitlePolicy, HlsSubtitleIntent, hls_subtitle_policy, hls_subtitle_intent, restore_hls_subtitle_policy, begin_automatic_hls_subtitle_request, hls_track_catalog, begin_hls_track_request, hls_track_request_is_current, complete_hls_track_request, HlsTrackRow, HlsSubtitleRow, HlsTrackTarget, HlsTrackCatalog, HlsTrackChoice, HlsTrackRequest, PreparedHlsTrack, request_external, request_external_source, continue_external_source, external_source, external_hls, external_duration_ns, external_tracks, apply_external_track, apply_external_track_request, cancel_external_track_request, external_track_request_status, ExternalTrackRequest, ExternalTrackRequestStatus, install_external_local_subtitles, rearm_selected_local_subtitle, forget_external_source, ExternalError, ExternalTrackApplyError};
 
 #[path = "plex_tracks.rs"]
@@ -5854,6 +5856,21 @@ pub fn install_plex_playback_for_test(ps: &mut PlaybackSession, sid: ServerId, r
     install_plex_identity_for_test(ps, sid, rk);
     ps.playback_identity = Some(PlaybackIdentity::fresh());
 }
+
+/// Queue/source fixture for application final-admission tests. No resolve,
+/// metadata lookup, native Load, authorization or network operation is performed.
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_plex_queue_for_test(ps: &mut PlaybackSession, sid: ServerId, rk: &str,
+    rows: Vec<plx_plex::plex::QueueRow>)
+{
+    install_plex_playback_for_test(ps, sid, rk);
+    let index = rows.iter().position(|row| row.sid == sid && row.rk == rk);
+    ps.pq_id = "queue-fixture".into();
+    ps.pq_item_id = index.map(|i| rows[i].item_id.to_string()).unwrap_or_default();
+    ps.up_next = index.and_then(|i| rows.get(i + 1))
+        .and_then(super::plan::up_next_of).map(std::sync::Arc::new);
+    ps.queue = rows;
+}
 /// Install an already-admitted Plex route for application track-adapter tests.
 /// This is fixture data only: no resolver, network, decoder, or selection effect.
 /// The real adapter must still validate identity, inventory and eligibility.
@@ -6608,10 +6625,12 @@ fn cur_delivery(ps: &PlaybackSession) -> plx_plex::plex::TranscodeDelivery {
 /// Load boundary: HLS must prime both elementary-stream lanes before starting the audio-master
 /// clock, even on an ordinary play-from-zero where no seek rebase is pending.
 pub fn is_segmented_hls(ps: &PlaybackSession) -> bool {
-    matches!(
-        cur_delivery(ps),
-        plx_plex::plex::TranscodeDelivery::FixedHls { .. }
-    )
+    match ps.external_source.as_ref() {
+        Some(crate::ff::ExternalSource::Hls(_)) => true,
+        Some(_) => false,
+        None => matches!(cur_delivery(ps),
+            plx_plex::plex::TranscodeDelivery::FixedHls { .. }),
+    }
 }
 pub fn source_vcodec(ps: &PlaybackSession) -> String {
     ps.src_vcodec.clone()
@@ -8566,6 +8585,11 @@ static PLAY_BUSY: AtomicBool = AtomicBool::new(false);
 /// so callers must not use it as the identity of a long-lived playing item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayRequestTicket(u32);
+impl PlayRequestTicket {
+    /// Canonical input-publication word; reading it does not create a ticket or
+    /// grant ownership of installed playback.
+    pub fn generation(self) -> u32 { self.0 }
+}
 
 /// Capture before starting asynchronous work, and check before replacing native playback.
 pub fn play_request_ticket() -> PlayRequestTicket {

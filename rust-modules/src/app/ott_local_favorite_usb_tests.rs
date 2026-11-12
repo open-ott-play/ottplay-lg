@@ -104,7 +104,7 @@ fn profiles(path: &str) -> ProviderProfiles {
 }
 
 fn row(path: &str) -> CatalogEntry {
-    CatalogEntry { synopsis: None, live: None,
+    CatalogEntry { protection: None, synopsis: None, live: None,
         id: format!("captured:{path}"),
         title: path.into(),
         category: String::new(),

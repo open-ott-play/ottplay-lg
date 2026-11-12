@@ -35,7 +35,7 @@ use plx_ui::table_screen::{DocumentFocus, DocumentPart};
 use plx_ui::{theme, Rect};
 use plx_ui::widgets::{CtlPop, TabStrip};
 
-pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,pending_play:Option<str>,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
+pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,pending_play:Option<str>,pending_step:Option<(u64,u64,u32)>,pending_step_sdl:bool,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
 
 /// Presentation order for the already loaded single-channel guide window.
 /// This does not request or claim a complete archive/recordings history.
@@ -320,6 +320,9 @@ pub struct OttView {
     pub status_working: bool,
     /// Runtime-owned pending Play identity; presentation must not claim playback admission.
     pub pending_play: Option<String>,
+    /// Rocker-only input publication; never authorizes hidden catalogue rows.
+    pub pending_step: Option<crate::registry::OttPlayerSource>,
+    pub pending_step_sdl: bool,
     pub rows: Vec<OttRow>,
     /// Empty preserves the flat catalogue presentation. Runtime supplies these
     /// only for its unfiltered All list; Classic continues to use `rows`.
@@ -334,7 +337,7 @@ pub struct OttView {
 impl Default for OttView {
     fn default() -> Self {
         Self { classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None, catalog_progress: None, page_id: "loading".into(), revision: 0, title: msg::ott_brand().into(),
-            description: msg::ott_intro().into(), status: String::new(), status_working: false, pending_play: None,
+            description: msg::ott_intro().into(), status: String::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false,
             rows: Vec::new(), shelves: Vec::new(), shelf_context: None, selected_row: None, search: None }
     }
 }
@@ -1368,6 +1371,32 @@ impl OttScreen {
     fn step_inner<H: AppLike<Memory = PageMemory>>(&mut self, ev: &ScreenEvent<H>, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         if let Some(handled) = self.exit_event(ev, cx, fx) { return handled; }
         self.refresh_presentation(H::ui_mode(&cx.views), cx.measure);
+        if let ScreenEvent::Input(input) = ev {
+            if let InputKind::Key { sym, wcode, edge, at_edge, .. } = input.kind {
+                let native = input.source == plx_machine::machine::Source::RemoteFifo
+                    || (self.snapshot.pending_step_sdl && input.source == plx_machine::machine::Source::Sdl);
+                if native {
+                    if let (Some(source), Some(button)) = (&self.snapshot.pending_step,
+                        plx_ui::consts::remote_button(sym, wcode)) {
+                        let action = match button {
+                            plx_ui::consts::RemoteButton::ChannelUp => Some(crate::registry::OttPlayerAction::Next),
+                            plx_ui::consts::RemoteButton::ChannelDown => Some(crate::registry::OttPlayerAction::Previous),
+                            _ => None,
+                        };
+                        if let Some(action) = action {
+                            if edge != Edge::Up && !at_edge {
+                                if let MachineId::Instance(owner) = fx.from() {
+                                    fx.push(Fx::App(AppFx::Player(
+                                        crate::registry::PlayerReq::OttAction(crate::registry::OttPlayerRequest {
+                                            owner, source: source.clone(), action }))));
+                                }
+                            }
+                            return Handled::Yes;
+                        }
+                    }
+                }
+            }
+        }
         // A selected item leaves the list immediately, while the runtime still
         // resolves/admit its source. Hidden rows cannot receive navigation or
         // preview input; Back cancels the addressed request in the runtime.
@@ -1726,6 +1755,12 @@ impl LogicalState for OttScreen {
         out.bool(preferences.show_number()).bool(preferences.show_name()).bool(preferences.show_program()).bool(preferences.show_progress()).bool(preferences.show_description());
         out.bool(self.snapshot.volume_available);
         out.option(self.snapshot.pending_play.as_ref(), |out, id| { out.str(id); });
+        out.option(self.snapshot.pending_step.as_ref(), |out, source| {
+            if let crate::registry::OttPlayerSource::Pending { generation, play_generation, ticket } = source {
+                out.u64(*generation).u64(*play_generation).u32(ticket.generation());
+            }
+        });
+        out.bool(self.snapshot.pending_step_sdl);
         out.str(&self.snapshot.page_id).u64(self.snapshot.revision).seq(self.snapshot.rows.len());
         for row in &self.snapshot.rows { out.str(&row.id).bool(row.enabled).bool(row.favorite).bool(row.guide_available).bool(row.records_available); }
         out.seq(self.snapshot.shelves.len());
@@ -1822,7 +1857,11 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
                 msg::browse_library_loading()
             } else { &self.snapshot.status }).unwrap_or_default();
             let title = std::ffi::CString::new(self.snapshot.rows.iter()
-                .find(|row| &row.id == id).map_or("", |row| row.title.as_str())).unwrap_or_default();
+                // Catalogue row labels carry their ordinal. This wait begins
+                // before the Player HUD exists, so use the separate source
+                // title here too; never strip digits from a real channel name.
+                .find(|row| &row.id == id).map_or("", |row|
+                    row.content_title.as_deref().unwrap_or(&row.title))).unwrap_or_default();
             plx_ui::widgets::StatusOverlay::new(Rect::FULL, &caption, plx_ui::widgets::StatusKind::Working)
                 .reason(&title).phase(frame.cx.tick.ms).draw(&plx_ui::Env::inert(), frame.painter);
             return;
@@ -2073,7 +2112,7 @@ mod tests {
             kind: InputKind::Key { key, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true } })
     }
     fn snapshot(revision: u64, ids: &[&str]) -> Arc<OttView> {
-        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
+        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
             description: String::new(), status: String::new(), selected_row: None, search: None,
             rows: ids.iter().map(|id| OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: id.to_string(), title: id.to_string(), detail: String::new(),
                 description: "Complete description. A second sentence remains available.".into(), poster: None,

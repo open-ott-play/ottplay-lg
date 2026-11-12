@@ -5397,6 +5397,32 @@ mod native_seek_pump_tests {
     const NEXT_NS: i64 = 1_200_000_000_000;
     const V_STEP_NS: i64 = 41_708_333;
 
+    #[test]
+    fn external_hls_primes_and_holds_for_rebuffer_without_pausing_viewer_transport() {
+        let _serial = plx_base::testlock::serial();
+        let ps = crate::route::external_hls_session_for_test(0);
+        let mut rig = Rig::new(None);
+        rig.ps = ps;
+        assert!(prime_before_play(false, crate::route::is_segmented_hls(&rig.ps)),
+            "ordinary external HLS starts with both elementary-stream lanes primed");
+        let recovery = SHARED.hls_recovery();
+        let generation = SHARED.hls_candidate_generation.load(Acquire);
+        let (token, _) = SHARED.reserve_hls_prime_play(HlsPrimeKind::Fresh, generation, recovery)
+            .expect("the fixture's initial clock hold can be completed");
+        assert!(matches!(SHARED.complete_hls_prime_play(token, true),
+            super::super::shared::HlsPlayCompletion::Accepted { .. }));
+        rig.eng().prime_play = false;
+        SHARED.hls_rebuffer_requested.store(true, Release);
+        ffi_host::force_pause_result_for_test(Some(1));
+        let mt = unsafe { MainThread::assume() };
+        maybe_begin_hls_rebuffer(&rig.ps, &mt, rig.pa.engine().unwrap());
+        ffi_host::force_pause_result_for_test(None);
+        assert!(rig.eng().prime_play, "a depleted external HLS route holds its native clock");
+        assert!(!TX.paused.load(Relaxed), "buffering is not a viewer pause");
+        assert!(SHARED.hls_rebuffering.load(Acquire));
+        assert!(!SHARED.hls_rebuffer_requested.load(Acquire));
+    }
+
     struct Rig {
         ps: crate::route::PlaybackSession,
         pa: super::super::adapter::PlayerAdapter,

@@ -20,7 +20,7 @@ impl Drop for ResetMedia {
 }
 
 fn local_entry(id: &str) -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: id.into(),
         title: format!("{id}.mp4"),
@@ -262,3 +262,7 @@ fn partial_catalogue_failure_does_not_grant_eos_wrap_or_hide_the_error() {
         "EOS must not replace the scan failure with an opening message"
     );
 }
+
+
+#[path = "resume_selection.rs"]
+mod selection_checkpoint;

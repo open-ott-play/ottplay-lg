@@ -555,7 +555,7 @@ pub(super) use plex_remote::{
 
 #[path = "ott_transient_parental.rs"]
 mod parental_source;
-pub(super) use parental_source::{parental_source_authority, SourceAuthority};
+pub(super) use parental_source::{parental_source_authority, parental_profile_authority, SourceAuthority};
 
 #[path = "ott_local_video.rs"]
 mod local_video;

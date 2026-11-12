@@ -1269,6 +1269,42 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 guide.insert("reply_current".into(), json!(runtime.reply.is_some()
                     && runtime.reply == bridge::ott_ui_target(&app.pages)));
                 guide.insert("ui".into(), bridge::ott_guide_presentation(&app.pages).unwrap_or(Value::Null));
+                let metadata = app.bridge.metadata_view();
+                let now = metadata.now_playing();
+                let ott = now.and_then(|now| now.ott.as_ref());
+                let live = ott.and_then(|ott| ott.live.as_ref());
+                let programme = live.and_then(|live| live.guide.as_ref())
+                    .and_then(|guide| guide.at((runtime.wall_clock_ms / 1000) as i64).0);
+                let offer = app.bridge.ott_player_offer();
+                let resume_key = runtime.resume_key();
+                let saved_resume = resume_key.as_ref().and_then(|key| runtime.saved.resume.get(key));
+                let checkpoint = resume_key.as_ref().and_then(|key| runtime.checkpoints.get(key));
+                let selection = runtime.playing.as_ref().map(|playing| &playing.selection_id);
+                // Presence and sizes only: diagnose a real information-panel
+                // gate without exporting programme text, sources or credentials.
+                guide.insert("player".into(), json!({
+                    "live_channel": live.is_some(),
+                    "summary_chars": now.map_or(0, |now| now.summary.chars().count()),
+                    "current_programme": programme.is_some(),
+                    "programme_description_chars": programme.map_or(0, |p| p.description.chars().count()),
+                    "confirmed_start": ott.is_some_and(|ott| ott.confirmed_start_unix_ms.is_some()),
+                    "remote_offer": offer.is_some(),
+                    "recovery_only": offer.is_some_and(|offer| offer.recovery_only),
+                    "footer_visible": bridge::player(&app.pages)
+                        .is_some_and(|page| page.hud_up(&app.player.session, app.loop_t)),
+                    "surface_up": app.pages.surface_up(),
+                    "resume": {
+                        "saved": saved_resume.is_some(),
+                        "checkpoint": checkpoint.is_some(),
+                        "saved_source_current": saved_resume.is_some_and(|value| runtime.resume_is_current(value)),
+                        "saved_matches_playing": saved_resume.is_some_and(|value| selection == Some(&value.entry_id)),
+                        "checkpoint_matches_playing": checkpoint.is_some_and(|value| selection == Some(&value.entry_id)),
+                        "pending_restore": runtime.continuity.pending_restore().is_some(),
+                        "restoring_current": runtime.restore_play_generation == Some(runtime.play_generation),
+                        "saving": runtime.saving,
+                        "persistence_uncertain": runtime.persistence_uncertain
+                    }
+                }));
             }
             value["provider_context"] = provider_context(runtime);
             value["uuid"] = json!(runtime.remote.device_id());

@@ -41,7 +41,7 @@ fn fixture(outer_selection: &str, resolved_id: &str) -> Guide {
         generation: GENERATION,
         profile_id: "profile-a".into(),
         entry_id: outer_selection.into(),
-        entry: CatalogEntry {
+        entry: CatalogEntry { protection: None,
             synopsis: None,
             id: resolved_id.into(),
             title: "Channel A".into(),

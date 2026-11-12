@@ -32,6 +32,8 @@ mod overlay_tests;
 mod ott_remote_tests;
 #[cfg(test)]
 mod osd_tests;
+#[cfg(test)]
+mod channel_transition_tests;
 
 use std::borrow::Cow;
 
@@ -148,6 +150,8 @@ pub struct PlayerScreen {
     /// Who owns the "pipeline is working" signal this frame — resolved once, after `player::pump`,
     /// and handed to both the transport and the read-out so they can never both light.
     pub busy: plx_appkit::player_hud::Busy,
+    /// A viewer-requested channel change keeps its information visible through acquisition.
+    channel_change_hud: bool,
     /// Is the transport's MIDDLE drawn at all this frame? False while an Info card or Chapters
     /// strip has taken it — which panel is up is the container's answer, so the loop pushes it.
     pub transport: bool,
@@ -183,6 +187,9 @@ pub struct PlayerScreen {
     /// The app assigns it ONCE a frame, before `prepare` and `draw`; only those two read it.
     /// Key handling, the scrub arithmetic and the Tick keep sampling what they always did.
     pub model: HudModel,
+    /// Paint-only pending channel facts; never consulted by input or transport.
+    pub pending_channel_display: Option<plx_data::metadata::NowPlaying>,
+    pub pending_channel_display_stamp: Option<(u64, u64, u64, bool)>,
 }
 
 impl PlayerScreen {
@@ -197,6 +204,7 @@ impl PlayerScreen {
             up_next: Countdown::default(),
             slot: ControlSlot::Discs(player_hud::Controls::NONE),
             busy: plx_appkit::player_hud::Busy::None,
+            channel_change_hud: false,
             transport: true,
             hud_policy: HudPolicy::Normal,
             osd_uncovered: false,
@@ -222,6 +230,8 @@ impl PlayerScreen {
             failure_attempt: None,
             clock_warm: Default::default(),
             model: HudModel::default(),
+            pending_channel_display: None,
+            pending_channel_display_stamp: None,
         }
     }
 
@@ -323,6 +333,29 @@ impl PlayerScreen {
         plx_machine::idle::invalidate();
     }
 
+    /// Called only after the application accepts an explicit next/previous request.
+    /// Keep the installed channel's facts until the admitted replacement publishes its own.
+    pub fn begin_channel_change(&mut self, now: u32) {
+        self.channel_change_hud = true;
+        self.hud.dismissed = false;
+        self.hud.extend_default(now);
+        if self.number_notice { self.clear_volume_notice(); }
+        self.publish();
+    }
+
+    /// Presentation consumes the application's source-fenced loading fact, never clears media errors.
+    pub fn set_playback_feedback(&mut self, busy: player_hud::Busy, now: u32) {
+        self.busy = busy;
+        if self.channel_change_hud {
+            // A deliberate Back/dismiss remains authoritative even during a slow resolve.
+            if !self.hud.dismissed { self.hud.extend_default(now); }
+            if matches!(busy, player_hud::Busy::None
+                | player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Failed, _)) {
+                self.channel_change_hud = false;
+            }
+        }
+    }
+
     fn clear_volume_notice(&mut self) {
         if self.volume_notice.visible() || self.volume_notice_until.is_some() {
             self.volume_notice.close();
@@ -417,7 +450,7 @@ impl PlayerScreen {
         meta: plx_data::metadata::MetadataView<'_>,
         mode: plx_machine::machine::UiMode,
     ) {
-        plx_appkit::player_hud::classic::draw_hud_in_mode(
+        plx_appkit::player_hud::classic::draw_hud_for_display(
             ps,
             &self.model,
             &mut self.row,
@@ -432,6 +465,7 @@ impl PlayerScreen {
             measure,
             meta,
             mode,
+            self.pending_channel_display.as_ref(),
         );
     }
 
@@ -586,6 +620,7 @@ impl PlayerScreen {
     pub fn clock_fingerprint_in_mode(&self, ps: &plx_media::route::PlaybackSession, now: u32,
         mode: plx_machine::machine::UiMode, playing: Option<&plx_data::metadata::NowPlaying>) -> u64 {
         use std::sync::atomic::Ordering::Relaxed;
+        let playing = self.pending_channel_display.as_ref().or(playing);
         let pos = plx_media::player::playpos_ns();
         let hud_up = self.hud_up(ps, now);
         let mut h: u64 = 0;
@@ -594,6 +629,10 @@ impl PlayerScreen {
             // digest, and the cost is paid on every frame of the route.
             h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
         };
+        mix(u64::from(self.pending_channel_display_stamp.is_some()));
+        if let Some((generation, play_generation, revision, clock_ready)) = self.pending_channel_display_stamp {
+            mix(generation); mix(play_generation); mix(revision); mix(u64::from(clock_ready));
+        }
         // The playhead's three readings move the SCRUB BAR and the two clocks, which exist only
         // while the transport is up. Folding them in unconditionally would report motion for a
         // picture nobody is drawing — playback spends ~99% of its time with the HUD auto-hidden,
@@ -1168,7 +1207,7 @@ impl PlayerScreen {
             if plx_media::route::playback_identity_matches(ps, &source) {
                 self.end_jump_gesture();
                 Self::ask(fx, PlayerReq::OttAction(crate::registry::OttPlayerRequest {
-                    owner, source, action: crate::registry::OttPlayerAction::OpenMenu,
+                    owner, source: source.into(), action: crate::registry::OttPlayerAction::OpenMenu,
                 }));
             }
         }
@@ -1331,10 +1370,16 @@ impl PlayerScreen {
             | Key::Right { alt: false } | Key::Ok);
         let remote = (key == Key::Other).then(|| consts::remote_button(sym, wcode)).flatten();
         let channel_step = matches!(remote, Some(RemoteButton::ChannelUp | RemoteButton::ChannelDown));
+        if offer.source.pending() && !channel_step {
+            // Pending authority is a step-only capability. Preserve the
+            // ordinary cancel/back and volume paths, never lend it to a menu,
+            // list, seek or pause command.
+            return if direction_or_ok || remote.is_some() { Some(Handled::Yes) } else { None };
+        }
         let recovery_channel = offer.recovery_only && channel_step;
         let recovery_browse = offer.recovery_only && key == Key::Ok && offer.accept == Action::OpenCatalog;
         if offer.recovery_only && !recovery_channel && !recovery_browse { return None; }
-        if !offer.recovery_only && !plx_media::route::playback_identity_matches(ps, &offer.source) {
+        if !offer.recovery_only && !offer.source.playback().is_some_and(|source| plx_media::route::playback_identity_matches(ps, source)) {
             // A captured OTT command is not permission to control a replacement
             // source through the generic fallback. No offer is different: that
             // remains an ordinary player or desktop event.
@@ -1353,8 +1398,12 @@ impl PlayerScreen {
         { return None; }
         // This is the PRE-press sample. note_global_press has already cleared
         // dismissal by this point and must not turn a bare press into HUD input.
-        let info_cycle = mode == plx_machine::machine::UiMode::Classic
-            && live_channel && !offer.seek_arrows && key == (Key::Right { alt: false });
+        // UP expands live programme information in either presentation. CH+/CH−
+        // retain channel stepping; finite Local/Plex/portal arrows keep their
+        // source-owned sequence behavior. Classic RIGHT retains its info cycle.
+        let info_cycle = live_channel && !offer.seek_arrows
+            && (key == Key::Up || (mode == plx_machine::machine::UiMode::Classic
+                && key == (Key::Right { alt: false })));
         // On a live channel, the center/OK button is the channel-list command. Keep
         // that action available while the transport HUD is visible too: otherwise
         // the first press only reveals the footer and every later press is consumed
@@ -1371,6 +1420,8 @@ impl PlayerScreen {
             return None;
         }
         let action = match key {
+            Key::Up if info_cycle => if self.hud.visible_at_press { Action::ShowDescription }
+                else { Action::ShowInfo },
             Key::Up => Action::Next,
             Key::Down => Action::Previous,
             Key::Left { alt: false } => if offer.seek_arrows { Action::SeekBackward } else { Action::OpenMenu },
@@ -2164,7 +2215,7 @@ impl LogicalState for PlayerScreen {
         c.option(self.reminder_notice_until.as_ref(), |c, until| { c.u32(*until); });
         c.bool(self.reminder_notice.is_open());
         c.option(self.volume_notice_until.as_ref(), |c, until| { c.u32(*until); });
-        c.bool(self.volume_notice.is_open()).bool(self.number_notice);
+        c.bool(self.volume_notice.is_open()).bool(self.number_notice).bool(self.channel_change_hud);
     }
     fn probe(&self, out: &mut String) {
         out.push_str(WORD);

@@ -399,7 +399,7 @@ mod tests {
             source_alias: String::new(),
             enabled: true,
         };
-        let entry = CatalogEntry {
+        let entry = CatalogEntry { protection: None,
             id: "local".into(),
             title: "Station +1".into(),
             category: String::new(),

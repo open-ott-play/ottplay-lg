@@ -3900,6 +3900,32 @@ pub fn arm_live_clock_prime(eng: &mut Engine) {
     eng.prime_play = true;
 }
 
+/// A finite producer can legitimately finish before a normal prime window.
+/// Producer EOF is inspected after both queues drain. Audio must also have
+/// reached the sink (not merely arrived in an application queue), with no
+/// rejected AU pending. This cannot spend an empty live reserve, a failed
+/// producer, a queued seek, or a previous native Load's terminal state.
+fn finite_tail_fully_fed(eng: &mut Engine, audio_expected: bool) -> bool {
+    matches!(eng.source, Source::Stream)
+        && eng.stage >= Stage::Playing && eng.accepted_any_au
+        && SHARED.duration_ns.load(Ordering::Acquire) > 0
+        && SHARED.native_load_returned(eng.native_epoch)
+        && SHARED.hls_video_tail_ns.load(Ordering::Acquire) >= 0
+        && eng.max_fed_video_pts >= eng.seek_base_pts
+        && (!audio_expected || (SHARED.hls_audio_tail_ns.load(Ordering::Acquire) >= 0
+            && eng.max_fed_audio_pts >= eng.seek_base_pts))
+        && eng.pending_video.is_none() && eng.pending_audio.is_none()
+        && eng.aq_video.as_mut().is_some_and(|q| crate::aq::aq_drained_at_eof(&mut **q))
+        && eng.aq_audio.as_mut().is_some_and(|q| crate::aq::aq_drained_at_eof(&mut **q))
+        && !SHARED.demux_failed.load(Ordering::Acquire)
+        && !SHARED.demux_empty_failed.load(Ordering::Acquire)
+        && !SHARED.demux_io_failed.load(Ordering::Acquire)
+        && !SHARED.load_failed.load(Ordering::Acquire)
+        && SHARED.dg_cb_err.load(Ordering::Acquire) == 0
+        && TX.seek_to_ns.load(Ordering::Acquire) < 0
+        && SHARED.seek_to_ns.load(Ordering::Acquire) < 0
+}
+
 /// **Start the clock once both lanes are buffered past the seek base** — video to [`PRIME_NS`]
 /// AND audio to [`PRIME_AUDIO_NS`], with a video-only escape at [`PRIME_VIDEO_MAX_NS`] so an
 /// audioless or briefly-starved stream still starts.
@@ -4021,7 +4047,8 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::
         plx_platform::tv::sink::SeekPreroll::Waiting | plx_platform::tv::sink::SeekPreroll::Exhausted => eng.eos_pushed,
         _ => false,
     };
-    if ((decoder_ready && boundary_ready) || exact_seek_ready) && TX.feed_allowed() {
+    let finite_tail_ready = finite_tail_fully_fed(eng, audio_expected);
+    if ((decoder_ready && boundary_ready) || exact_seek_ready || finite_tail_ready) && TX.feed_allowed() {
         let Some((play_token, recovery)) =
             SHARED.reserve_hls_prime_play(prime_kind, candidate_generation, recovery)
         else {
@@ -9880,3 +9907,7 @@ mod temporary_track_restart_tests {
 #[cfg(test)]
 #[path = "video_only_tests.rs"]
 mod video_only_tests;
+
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "finite_tail_prime_tests.rs"]
+mod finite_tail_prime_tests;

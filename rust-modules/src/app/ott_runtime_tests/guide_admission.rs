@@ -229,6 +229,7 @@ fn archive_validation_uses_wall_time_and_refuses_implicit_continuation() {
 fn parental_rejection_keeps_archive_out_of_the_resolver() {
     let _serial = plx_base::testlock::serial();
     let (mut app, mut runtime) = fixture();
+    runtime.catalog.entries[0].protection = Some(true);
     let request = archive(&runtime);
     runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
     let generation = runtime.play_generation;

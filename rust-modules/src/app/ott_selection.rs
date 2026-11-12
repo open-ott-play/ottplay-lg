@@ -820,7 +820,7 @@ mod tests {
         }
     }
     fn entry(media: MediaLocator) -> CatalogEntry {
-        CatalogEntry {
+        CatalogEntry { protection: None,
             synopsis: None,
             id: "receiver-row".into(),
             title: "Film".into(),

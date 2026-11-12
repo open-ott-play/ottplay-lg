@@ -15,7 +15,7 @@ fn listed(entries: Vec<CatalogEntry>) -> Runtime {
     runtime
 }
 fn leaf(id: &str, locator: MediaLocator, duration_ms: Option<u64>) -> CatalogEntry {
-    CatalogEntry { synopsis: None, id: id.into(), title: "Movie S01E01 Live TV".into(), category: "Folder".into(),
+    CatalogEntry { protection: None, synopsis: None, id: id.into(), title: "Movie S01E01 Live TV".into(), category: "Folder".into(),
         description: "Description retained in full.".into(), poster: String::new(), media: locator,
         duration_ms, provider_id: None, provider_id_field: None, live: None }
 }

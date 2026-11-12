@@ -52,6 +52,238 @@ fn profile(id: &str) -> ProviderProfile {
         enabled: true,
     }
 }
+fn classified_entry(id: &str, category: &str) -> CatalogEntry {
+    CatalogEntry { protection: None, id: id.into(), title: format!("Fixture {id}"), category: category.into(),
+        description: String::new(), synopsis: None, poster: String::new(),
+        media: MediaLocator::Http { url: format!("https://example.invalid/{id}.m3u8") },
+        duration_ms: None, provider_id: None, provider_id_field: None, live: None }
+}
+fn classified_source(app: &mut App) -> ProviderProfile {
+    app.running = true;
+    let profile = profile("source");
+    let r = app.ott.as_mut().unwrap();
+    r.saved.settings.remove("parentPin");
+    r.saved.profiles.profiles = vec![profile.clone()];
+    r.saved.profiles.active_profile = Some(profile.id.clone());
+    r.provider = profile.kind;
+    r.catalog.entries = vec![classified_entry("ordinary", "Documentary"),
+        classified_entry("protected", "Catalog / 18+")];
+    r.catalog_complete = true;
+    r.catalog_loading = false;
+    r.resume_source_work();
+    r.resolver_busy = true;
+    profile
+}
+#[test]
+fn bootstrap_and_custom_policy_gate_only_the_source_classified_entry() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    let profile = classified_source(&mut app);
+    let r = app.ott.as_mut().unwrap();
+    for custom in [false, true] {
+        if custom { r.saved.settings.insert("parentPin".into(), json!(RECORD)); }
+        assert!(r.require_parental_entry(&profile, Some(&classified_entry("ordinary", "Documentary"))).is_ok());
+        assert_eq!(r.require_parental_entry(&profile, Some(&classified_entry("protected", "Catalog / 18+"))), Err(LOCKED));
+        assert_eq!(r.require_parental_entry(&profile, None), Err(LOCKED));
+    }
+    r.saved.settings.insert("parentPin".into(), json!("*"));
+    assert!(r.require_parental_entry(&profile, Some(&classified_entry("protected", "Catalog / 18+"))).is_ok());
+    assert!(r.require_parental_entry(&profile, None).is_ok());
+}
+#[test]
+fn ordinary_ui_play_does_not_prompt_but_protected_play_opens_the_secret_editor_before_resolve() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    classified_source(&mut app);
+    act(&mut app, OttAction::Play("ordinary".into())).unwrap();
+    let r = app.ott.as_ref().unwrap();
+    assert!(r.edit_session.is_none());
+    assert_eq!(r.play_target.as_ref().map(|request| request.id.as_str()), Some("ordinary"));
+    let generation = r.play_generation;
+    assert_eq!(act(&mut app, OttAction::Play("protected".into())), Err(LOCKED));
+    let r = app.ott.as_ref().unwrap();
+    assert_eq!(r.edit_session.as_ref().unwrap().key, UNLOCK);
+    assert_eq!(r.play_generation, generation, "a rejected protected choice must not stop or replace the current request");
+    assert_eq!(r.play_target.as_ref().map(|request| request.id.as_str()), Some("ordinary"));
+}
+#[test]
+fn final_native_binding_rechecks_membership_even_after_ordinary_admission() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    let profile = classified_source(&mut app);
+    act(&mut app, OttAction::Play("ordinary".into())).unwrap();
+    let entry = {
+        let r = app.ott.as_mut().unwrap();
+        let old = r.catalog.entries[0].clone();
+        r.catalog.entries[0].category = "Catalog / 18+".into();
+        old
+    };
+    let mut r = app.ott.take().unwrap();
+    assert_eq!(r.rebind_native_admission(&app, &profile, &entry), Err(LOCKED));
+    r.catalog.entries[0].category = "Documentary".into();
+    r.catalog.entries[0].protection = Some(true);
+    assert_eq!(r.rebind_native_admission(&app, &profile, &entry), Err(LOCKED));
+    app.ott = Some(r);
+}
+#[test]
+fn remote_number_and_channel_step_cannot_queue_a_protected_entry() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    app.running = true;
+    classified_source(&mut app);
+    let mut r = app.ott.take().unwrap();
+    r.selected = Some("ordinary".into());
+    for (action, params) in [
+        ("play", json!({"query": 2})),
+        ("playback", json!({"operation":"next_channel"})),
+    ] {
+        let invocation = command_invocation(&mut r, action, params);
+        let response = commands::command(&mut r, &mut app, &invocation).unwrap();
+        assert_eq!(response["status"], "rejected");
+        assert!(r.play_target.is_none() && r.resolver_next.is_none());
+    }
+    let invocation = command_invocation(&mut r, "play", json!({"query": 1}));
+    assert!(commands::command(&mut r, &mut app, &invocation).is_none());
+    assert_eq!(r.play_target.as_ref().map(|request| request.id.as_str()), Some("ordinary"));
+    app.ott = Some(r);
+}
+#[test]
+fn portable_favorite_labels_cannot_override_the_current_source_membership() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    let profile = classified_source(&mut app);
+    let r = app.ott.as_mut().unwrap();
+    let ordinary = r.catalog.entries[0].clone();
+    let favorite = Favorite {
+        title: "An ordinary portable label".into(),
+        origin: plx_data::ott::favorites::Origin { provider: "m3u".into(),
+            profile: profile.name.clone(), source_alias: profile.alias().into(), subprofile: None },
+        locator: plx_data::ott::favorites::Locator::ChannelName {
+            name: ordinary.title.clone(), group: Some(ordinary.category.clone()) },
+    };
+    assert!(r.require_parental_candidate(&profile, &profile, None, Some(&favorite)).is_ok());
+    r.catalog.entries[0].protection = Some(true);
+    assert_eq!(r.require_parental_candidate(&profile, &profile, None, Some(&favorite)), Err(LOCKED));
+    r.catalog.entries.clear();
+    assert_eq!(r.require_parental_candidate(&profile, &profile, None, Some(&favorite)), Err(LOCKED));
+}
+#[test]
+fn local_pin_submission_seals_its_navigation_and_retries_one_fresh_selection() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    classified_source(&mut app);
+    assert_eq!(act(&mut app, OttAction::Play("protected".into())), Err(LOCKED));
+    draft_settle(&mut app);
+    let mut r = app.ott.take().unwrap();
+    let session = r.edit_session.clone().unwrap();
+    apply_ui_action(&mut r, &mut app, OttAction::SubmitSetting {
+        session: session.id, key: UNLOCK.into(), value: "1234".into(),
+    }, true, false, false);
+    let ticket = r.parental.worker.as_ref().unwrap().ticket;
+    assert_eq!(r.parental.intent.as_ref().unwrap().navigation, r.navigation_epoch);
+    let job = r.rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    let Job::Parental(answer) = job else { panic!("PIN worker result"); };
+    completed(&mut r, &mut app, answer);
+    assert!(r.edit_session.is_none());
+    assert_eq!(r.play_target.as_ref().map(|request| request.id.as_str()), Some("protected"));
+    assert!(r.parental.intent.is_none());
+    let generation = r.play_generation;
+    completed(&mut r, &mut app, parental::Completion::verified_fixture(ticket));
+    assert_eq!(r.play_generation, generation, "a duplicate worker answer cannot replay selection");
+    app.ott = Some(r);
+}
+fn modeled_current_pin(app: &mut App) -> parental::Ticket {
+    let mut r = app.ott.take().unwrap();
+    let request = r.edit_session.clone().unwrap();
+    let context = r.parental_context().unwrap();
+    let now = r.now_ms();
+    let work = r.parental.gate.as_mut().unwrap().verify(&context, Pin::parse("1234").unwrap(), now).unwrap();
+    let ticket = work.ticket();
+    start_with(&mut r, request, work, |work, _| { drop(work); true }).unwrap();
+    app.ott = Some(r);
+    ticket
+}
+#[test]
+fn local_pin_intent_never_replays_after_cancel_owner_navigation_source_roots_or_expiry_change() {
+    let _serial = plx_base::testlock::serial();
+    for reason in 0..7 {
+        let mut app = fixture();
+        classified_source(&mut app);
+        assert_eq!(act(&mut app, OttAction::Play("protected".into())), Err(LOCKED));
+        let ticket = modeled_current_pin(&mut app);
+        let mut r = app.ott.take().unwrap();
+        let now = r.now_ms();
+        match reason {
+            0 => r.cancel_editor(),
+            1 => r.reply = None,
+            2 => r.navigation_epoch = r.navigation_epoch.wrapping_add(1),
+            3 => r.saved.profiles.profiles[0].source = "https://example.invalid/replaced.m3u".into(),
+            4 => { r.saved.settings.insert("nativeLocalSources".into(), json!([])); }
+            5 => { r.parental.intent.as_mut().unwrap().deadline_ms = now; }
+            _ => r.generation = r.generation.wrapping_add(1),
+        }
+        completed(&mut r, &mut app, parental::Completion::verified_fixture(ticket));
+        assert!(r.play_target.is_none() && r.resolver_next.is_none(), "stale local intent {reason}");
+        app.ott = Some(r);
+    }
+}
+#[test]
+fn protected_metadata_from_a_remote_request_cannot_open_or_retain_a_pin_continuation() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    let profile = classified_source(&mut app);
+    let mut r = app.ott.take().unwrap();
+    let invocation = command_invocation(&mut r, "play", json!({"query":2}));
+    r.pending_play = Some(invocation);
+    r.parental.origin = ui_intent(&r, &app, PlaybackRequest::ordinary("protected", 0));
+    assert_eq!(r.require_parental_entry(&profile, Some(&r.catalog.entries[1].clone())), Err(LOCKED));
+    resolved_pin_required(&mut r, &app);
+    present_pending(&mut r, &mut app);
+    assert!(r.parental.intent.is_none() && r.edit_session.is_none());
+    app.ott = Some(r);
+}
+#[test]
+fn mixed_favorite_prepares_metadata_then_only_its_local_pin_intent_can_resume() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = fixture();
+    classified_source(&mut app);
+    let mut target = profile("target");
+    target.source = "https://example.invalid/target.m3u".into();
+    let favorite = Favorite {
+        title: "Portable fixture".into(),
+        origin: plx_data::ott::favorites::Origin { provider: "m3u".into(), profile: target.name.clone(),
+            source_alias: target.alias().into(), subprofile: None },
+        locator: plx_data::ott::favorites::Locator::ChannelName { name: "Fixture leaf".into(), group: None },
+    };
+    let id = format!("favorite:{}", favorite.identity());
+    {
+        let r = app.ott.as_mut().unwrap();
+        r.saved.profiles.profiles.push(target.clone());
+        r.saved.favorites = serde_json::from_value(json!({"version":1,"entries":[favorite]})).unwrap();
+    }
+    act(&mut app, OttAction::Play(id.clone())).unwrap();
+    let mut r = app.ott.take().unwrap();
+    assert!(r.edit_session.is_none());
+    let mut resolved = classified_entry("resolved", "Documentary");
+    resolved.title = "Fixture leaf".into();
+    assert!(r.rebind_native_admission(&app, &target, &resolved).is_ok());
+    resolved.protection = Some(true);
+    assert_eq!(r.rebind_native_admission(&app, &target, &resolved), Err(LOCKED));
+    resolved_pin_required(&mut r, &app);
+    r.take_completed_play_target();
+    present_pending(&mut r, &mut app);
+    assert_eq!(r.edit_session.as_ref().unwrap().key, UNLOCK);
+    assert_eq!(r.parental.target.as_ref(), Some(&target));
+    assert_eq!(r.saved.profiles.active_profile.as_deref(), Some("source"));
+    app.ott = Some(r);
+    let ticket = modeled_current_pin(&mut app);
+    let mut r = app.ott.take().unwrap();
+    completed(&mut r, &mut app, parental::Completion::verified_fixture(ticket));
+    assert_eq!(r.play_target.as_ref().map(|request| request.id.as_str()), Some(id.as_str()));
+    assert_eq!(r.saved.profiles.active_profile.as_deref(), Some("source"));
+    assert!(r.rebind_native_admission(&app, &target, &resolved).is_ok());
+    app.ott = Some(r);
+}
 fn begin_without_running(app: &mut App) -> parental::Work {
     let mut runtime = app.ott.take().unwrap();
     open(&mut runtime, app, UNLOCK, "Parental access PIN").unwrap();
@@ -167,7 +399,7 @@ fn current_secret_editor_verifies_real_pin_and_grant_never_crosses_profiles() {
         runtime.require_parental_control().is_err(),
         "verified reload clears uncertainty without granting"
     );
-    runtime.saved.settings.remove("parentPin");
+    runtime.saved.settings.insert("parentPin".into(), json!("*"));
     runtime.parental_authoritative_load();
     assert!(
         runtime.require_parental_control().is_ok(),
@@ -223,10 +455,10 @@ fn canceled_old_result_never_grants_or_reopens_editor() {
     app.ott = Some(runtime);
 }
 #[test]
-fn missing_channels_default_toggles_off_via_real_saved_candidate_only() {
+fn implicit_channel_flag_toggles_off_with_explicitly_disabled_pin() {
     let _serial = plx_base::testlock::serial();
     let mut app = fixture();
-    app.ott.as_mut().unwrap().saved.settings.remove("parentPin");
+    app.ott.as_mut().unwrap().saved.settings.insert("parentPin".into(), json!("*"));
     act(&mut app, OttAction::EditSetting("parental.channels".into())).unwrap();
     let runtime = app.ott.as_ref().unwrap();
     assert!(runtime.saving);
@@ -250,7 +482,7 @@ fn disabled_pin_and_unknown_classification_are_distinct() {
     runtime.saved.profiles.active_profile = Some("a".into());
     assert!(runtime.require_parental_playback(&target).is_err());
     assert!(!runtime.saving);
-    runtime.saved.settings.remove("parentPin");
+    runtime.saved.settings.insert("parentPin".into(), json!("*"));
     assert!(runtime.require_parental_playback(&target).is_ok());
 }
 
@@ -374,56 +606,37 @@ fn expired_pin_grant_does_not_block_authenticated_strict_only_kiosk_change() {
 fn protected_cross_profile_favorite_is_denied_by_composed_dispatch_before_play_or_pin_save() {
     let _serial = plx_base::testlock::serial();
     let mut app = fixture();
-    let a=profile("a");let b=profile("b");
-    let favorite=profile_favorite(&b,"Favorite B");
-    let selection=format!("favorite:{}",favorite.identity());
+    let a = profile("a"); let b = profile("b");
+    let favorite = profile_favorite(&b, "Favorite B");
+    let selection = format!("favorite:{}", favorite.identity());
     {
-        let runtime=app.ott.as_mut().unwrap();
-        runtime.saved.profiles.profiles=vec![a.clone(),b.clone()];
-        runtime.saved.profiles.active_profile=Some(a.id.clone());
-        runtime.provider=a.kind;
-        runtime.saved.favorites.toggle(favorite).unwrap();
-        runtime.saved.favorites_selected=true;
-        // If admission accidentally regresses, queued resolution stays inert.
-        runtime.resolver_busy=true;
+        let r = app.ott.as_mut().unwrap();
+        r.saved.profiles.profiles = vec![a.clone(), b.clone()];
+        r.saved.profiles.active_profile = Some(a.id.clone());
+        r.provider = a.kind;
+        r.saved.favorites.toggle(favorite).unwrap();
+        r.saved.favorites_selected = true;
+        r.resolver_busy = true;
     }
     grant_current_profile_for_dispatch(&mut app);
-    let mut runtime=app.ott.take().unwrap();
-    let (_,bound,_,_)=runtime.prepare_play_request(PlaybackRequest::ordinary(&selection,0)).unwrap();
-    assert_eq!(bound.id,b.id,"the actual Favorite must bind to profile B");
-    assert!(runtime.require_parental_playback(&a).is_ok());
-    let saved=serde_json::to_value(&runtime.saved).unwrap();
-    let generation=runtime.play_generation;
-    let playback=runtime.playback_epoch;
-    let ticket=plx_media::route::play_request_ticket();
-    for (action,params) in [
-        ("play",json!({"query":"Favorite B"})),
-        ("kiosk",json!({"mode":"on","query":"Favorite B"})),
-    ] {
-        let invocation=command_invocation(&mut runtime,action,params);
-        let response=commands::command(&mut runtime,&mut app,&invocation).unwrap();
-        assert_eq!(response["status"],"rejected");
-        assert!(response.to_string().contains("Select and unlock the target profile"),"{response}");
-        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(),saved);
-        assert!(!runtime.saving);
-        assert!(!commands::kiosk_pending(&runtime));
-        assert!(runtime.play_target.is_none());
-        assert!(runtime.resolver_next.is_none());
-        assert_eq!(runtime.play_generation,generation);
-        assert_eq!(runtime.playback_epoch,playback);
-        assert!(plx_media::route::play_request_is_current(ticket));
-        assert!(runtime.rx.try_recv().is_err());
-    }
-    let error=handle_action(&mut runtime,&mut app,OttAction::Play(selection)).unwrap_err();
-    assert!(error.contains("Select and unlock the target profile"));
-    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(),saved);
-    assert!(!runtime.saving);
-    assert!(runtime.play_target.is_none());
-    assert!(runtime.resolver_next.is_none());
-    assert_eq!(runtime.play_generation,generation);
-    assert_eq!(runtime.playback_epoch,playback);
-    assert!(plx_media::route::play_request_is_current(ticket));
-    app.ott=Some(runtime);
+    let mut r = app.ott.take().unwrap();
+    let saved = serde_json::to_value(&r.saved).unwrap();
+    assert!(r.require_parental_playback(&a).is_ok());
+    // A remote request may look up bound metadata; that neither grants a PIN
+    // nor admits a decoder Load. A different profile's grant cannot authorize it.
+    r.play(&mut app, &selection).unwrap();
+    assert!(r.edit_session.is_none() && r.parental.intent.is_none());
+    let mut resolved = classified_entry("resolved", "News");
+    resolved.protection = Some(true);
+    assert_eq!(r.rebind_native_admission(&app, &b, &resolved), Err(LOCKED));
+    resolved_pin_required(&mut r, &app);
+    r.take_completed_play_target();
+    present_pending(&mut r, &mut app);
+    assert!(r.edit_session.is_none(), "remote rejection cannot open or retain a PIN continuation");
+    assert_eq!(serde_json::to_value(&r.saved).unwrap(), saved);
+    assert!(!r.saving && r.play_target.is_none());
+    assert!(r.require_parental_playback(&a).is_ok());
+    app.ott = Some(r);
 }
 
 #[path = "ott_m3u_kiosk_admission_tests.rs"]
@@ -602,6 +815,86 @@ fn classic_parental_app(durable: bool) -> (App, plx_plex::plex::ServerId) {
     (app, sid)
 }
 
+fn explicit_other_source_grant(app: &mut App) -> ProviderProfile {
+    app.running = true;
+    let mut r = app.ott.take().unwrap();
+    let target = r.effective_profile().unwrap().clone();
+    classic_source::release(&mut r);
+    let active = profile("active-source");
+    r.saved.profiles.profiles.push(active.clone());
+    r.saved.profiles.active_profile = Some(active.id.clone());
+    r.provider = active.kind;
+    request_foreign_pin(&mut r, app, &target);
+    present_foreign(&mut r, app);
+    assert_eq!(r.edit_session.as_ref().unwrap().key, UNLOCK);
+    app.ott = Some(r);
+    let ticket = modeled_current_pin(app);
+    let mut r = app.ott.take().unwrap();
+    completed(&mut r, app, parental::Completion::verified_fixture(ticket));
+    assert!(r.require_parental_playback(&target).is_ok());
+    app.ott = Some(r);
+    target
+}
+
+#[test]
+fn explicit_target_grant_survives_only_that_install_and_never_refreshes_its_expiry() {
+    let _serial = plx_base::testlock::serial();
+    let _registry = ClassicRegistryGuard::new();
+    let (mut app, sid) = classic_parental_app(true);
+    let target = explicit_other_source_grant(&mut app);
+    let mut r = app.ott.take().unwrap();
+    let clock = r.clock_sample.unwrap();
+    r.clock_sample = Some(clock.advance_for_test(Duration::from_secs(3599)));
+    assert!(classic_source::ensure_server_catalog(&mut r, &mut app, sid).unwrap());
+    assert!(r.require_parental_playback(&target).is_ok());
+    r.clock_sample = Some(clock.advance_for_test(Duration::from_secs(3601)));
+    assert_eq!(r.require_parental_playback(&target), Err(LOCKED));
+    app.ott = Some(r);
+}
+
+#[test]
+fn target_grant_cannot_return_through_other_source_or_mutated_authority_policy_roots_profiles() {
+    let _serial = plx_base::testlock::serial();
+    for reason in 0..5 {
+        let _registry = ClassicRegistryGuard::new();
+        let (mut app, sid) = classic_parental_app(true);
+        let target = explicit_other_source_grant(&mut app);
+        let mut r = app.ott.take().unwrap();
+        match reason {
+            0 => {
+                assert!(classic_source::ensure_server_catalog(&mut r, &mut app, sid).unwrap());
+                classic_source::release(&mut r);
+                r.parental_source_installed();
+            }
+            1 => { r.saved.settings.insert("parentPin".into(), json!(
+                "pbkdf2-sha256$600000$d31e359a309cba65c78598d5ef539f9f$478c66d8e80d7a82bd31b12e84856820ebb83159da63d7cf6c0f388abae81603")); }
+            2 => { r.saved.settings.insert("nativeLocalSources".into(), json!([])); }
+            3 => { r.saved.profiles.profiles[0].name.push_str(" changed"); }
+            _ => plx_plex::plex::grant::network_changed(),
+        }
+        let _ = classic_source::ensure_server_catalog(&mut r, &mut app, sid);
+        assert!(r.require_parental_playback(&target).is_err(), "a changed source boundary {reason} cannot inherit target access");
+        app.ott = Some(r);
+    }
+}
+
+#[test]
+fn pending_pin_worker_is_not_carried_into_the_target_install_or_allowed_to_regrant_it() {
+    let _serial = plx_base::testlock::serial();
+    let _registry = ClassicRegistryGuard::new();
+    let (mut app, sid) = classic_parental_app(true);
+    let target = explicit_other_source_grant(&mut app);
+    let mut r = app.ott.take().unwrap();
+    open(&mut r, &mut app, UNLOCK, "Parental access PIN").unwrap();
+    app.ott = Some(r);
+    let ticket = modeled_current_pin(&mut app);
+    let mut r = app.ott.take().unwrap();
+    assert!(classic_source::ensure_server_catalog(&mut r, &mut app, sid).unwrap());
+    completed(&mut r, &mut app, parental::Completion::verified_fixture(ticket));
+    assert!(r.require_parental_playback(&target).is_err());
+    app.ott = Some(r);
+}
+
 #[test]
 fn classic_unsaved_source_uses_the_existing_pin_editor_and_grant() {
     let _serial = plx_base::testlock::serial();
@@ -672,4 +965,33 @@ fn classic_stale_pin_completion_cannot_unlock_a_new_source_receipt() {
     assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
     assert!(!runtime.saving);
     app.ott = Some(runtime);
+}
+
+#[test]
+fn target_grant_and_pending_pin_are_retired_by_bridge_epoch_before_source_install() {
+    let _serial = plx_base::testlock::serial();
+    for pending in [false, true] {
+        let _registry = ClassicRegistryGuard::new();
+        let (mut app, _) = classic_parental_app(true);
+        let target = explicit_other_source_grant(&mut app);
+        let ticket = if pending {
+            let mut r = app.ott.take().unwrap();
+            open(&mut r, &mut app, UNLOCK, "Parental access PIN").unwrap();
+            app.ott = Some(r);
+            Some(modeled_current_pin(&mut app))
+        } else { None };
+        let mut init = app.bridge.snapshot_session_init();
+        init.epoch += 1;
+        app.bridge = crate::app::bridge::Bridge::for_session_test(init);
+        let mut r = app.ott.take().unwrap();
+        // Exercise the admission observation directly, without a preceding tick.
+        observe_session(&mut r, &app);
+        if let Some(ticket) = ticket {
+            completed(&mut r, &mut app, parental::Completion::verified_fixture(ticket));
+        }
+        assert_eq!(r.require_parental_playback(&target), Err(LOCKED));
+        assert!(r.parental.target.is_none());
+        assert!(r.parental.intent.is_none() && r.parental.foreign.is_none());
+        app.ott = Some(r);
+    }
 }

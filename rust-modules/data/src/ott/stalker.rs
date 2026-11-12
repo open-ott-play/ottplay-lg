@@ -369,6 +369,7 @@ impl Pages {
 
 #[derive(Clone, Debug, Default)]
 pub struct Folder {
+    pub protection: Option<bool>,
     pub category: String,
     pub name: String,
     pub movie: String,
@@ -410,6 +411,7 @@ pub fn rows(
                 return Err("Stalker folder depth exceeds limit");
             }
             let mut folder = parent.clone();
+            folder.protection = super::protection::inherit(parent.protection, super::protection::advertised(row));
             folder.depth += 1;
             folder.name = if parent.name.is_empty() {
                 title
@@ -463,7 +465,7 @@ pub fn rows(
             "stalker:{kind}:{}:{}:{}:{id}",
             parent.movie, parent.season, parent.episode
         );
-        result.entries.push(CatalogEntry {
+        result.entries.push(CatalogEntry { protection: super::protection::inherit(parent.protection, super::protection::advertised(row)),
             id: identity(&profile.id, &stable),
             title,
             category,

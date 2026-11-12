@@ -254,7 +254,7 @@ fn metadata(
 
 /// Favorites retain portable identity, not a stale metadata snapshot. Plex's
 /// direct identity lookup therefore needs its read-only metadata request here.
-fn hydrate_plex(
+pub(super) fn hydrate_plex(
     profile: &ProviderProfile,
     entry: CatalogEntry,
     cancel: &AtomicBool,
@@ -320,6 +320,18 @@ fn hydrate_plex_with_read(
     {
         return Err("Plex item metadata exceeds its limit");
     }
+    // A portable caption cannot attest the source's category membership.
+    // Only the exact bounded metadata answer may classify a direct Favorite.
+    entry.category = item.library_section_title.clone();
+    if !item.grandparent_title.is_empty() {
+        if !entry.category.is_empty() { entry.category.push_str(" / "); }
+        entry.category.push_str(&item.grandparent_title);
+    }
+    if !item.parent_title.is_empty() {
+        if !entry.category.is_empty() { entry.category.push_str(" / "); }
+        entry.category.push_str(&item.parent_title);
+    }
+    if item.library_section_title.is_empty() { entry.protection = Some(true); }
     entry.description = item.summary;
     entry.poster = if item.thumb.is_empty() {
         item.art
@@ -472,7 +484,7 @@ mod tests {
         }
     }
     fn entry() -> CatalogEntry {
-        CatalogEntry {
+        CatalogEntry { protection: None,
             synopsis: None,
             id: "entry-a".into(),
             title: "Video".into(),

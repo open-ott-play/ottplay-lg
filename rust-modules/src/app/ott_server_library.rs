@@ -222,7 +222,7 @@ fn entry(
         return Err("Server library returned an invalid file name");
     }
     let (relative_path, root_alias) = roots.portable(item, source);
-    Ok(Some(CatalogEntry {
+    Ok(Some(CatalogEntry { protection: None,
         synopsis: None,
         id: format!("{}:server:{key}", profile.id),
         title: item.name.clone(),

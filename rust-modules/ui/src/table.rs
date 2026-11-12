@@ -2297,8 +2297,7 @@ impl TableView {
                             RowArt::Http(url) => crate::widgets::Art::Http { url, res: (96, 64) },
                             RowArt::Plex { server, key } => crate::widgets::Art::Thumb { sid: *server, key, res: (96, 64) },
                         };
-                        let image = crate::widgets::resolve_card_art(p, frame, &art);
-                        crate::widgets::card_named_led(p, frame, art, None, 3.0, false, 1.0, 0.0, Some(image));
+                        crate::widgets::card_contained(p, frame, art, 3.0);
                     } else if let Some(icon) = row.catalogue_icon {
                         crate::icons::draw(p, icon, Rect::new(icon_x+(frame.w-art_h)*0.5,cyc-art_h*0.5,art_h,art_h), base);
                     }

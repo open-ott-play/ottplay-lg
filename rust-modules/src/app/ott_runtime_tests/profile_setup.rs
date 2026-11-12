@@ -225,7 +225,7 @@ fn saved_source_catalog_play_back_and_restart_keep_the_profile() {
     settle_pages(&mut app);
     assert_eq!(app.ott.as_ref().unwrap().page, "channels");
     assert_eq!(app.ott.as_ref().unwrap().active(), Some(&profile));
-    let item = CatalogEntry {
+    let item = CatalogEntry { protection: None,
         synopsis: None,
         id: "fixture-channel".into(),
         title: "Fixture channel".into(),

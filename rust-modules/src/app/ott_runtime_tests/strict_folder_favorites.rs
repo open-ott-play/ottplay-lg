@@ -360,6 +360,10 @@ fn strict_partial_folder_waits_for_real_batches_and_only_wraps_after_completion(
 // The real command retains its Prepared proof. Only its durable outcome is
 // modeled after a pre-revoked writer has completed without touching storage.
 fn designate(app: &mut App) {
+    // A folder does not assert that every future scanned item is ordinary.
+    // This continuity test models the existing verified PIN grant for the
+    // exact current Local source before its remote designation transaction.
+    parental_runtime::grant_current_profile_for_test(app);
     let mut runtime = app.ott.take().unwrap();
     runtime.saving = false; // release the known synthetic writer hold
     assert!(runtime.play_target.is_none() && runtime.pending_play.is_none());
@@ -376,7 +380,8 @@ fn designate(app: &mut App) {
     assert_eq!(parsed.len(), 1);
     let invocation = parsed.pop().unwrap();
     assert!(runtime.remote.invocation_is_current(&invocation));
-    assert!(commands::command(&mut runtime, app, &invocation).is_none());
+    let response = commands::command(&mut runtime, app, &invocation);
+    assert!(response.is_none(), "designation must start its captured durable write: {response:?}");
     let completion = runtime
         .rx
         .recv_timeout(std::time::Duration::from_secs(5))

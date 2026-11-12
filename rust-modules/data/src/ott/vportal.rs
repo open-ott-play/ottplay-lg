@@ -73,6 +73,7 @@ impl PortalLink {
 /// Metadata that crosses a page request. Never sent back to the provider.
 #[derive(Clone, Default, PartialEq)]
 struct PortalContext {
+    protection: Option<bool>,
     title: String,
     year: String,
     duration: String,
@@ -123,6 +124,7 @@ impl PortalContext {
             .and_then(|v| nonempty_url(base, v));
         let has_own_art = own_landscape.is_some() || own_poster.is_some();
         Ok(Self {
+            protection: super::protection::inherit(parent.protection, super::protection::advertised(item)),
             title,
             year: prose("year", &parent.year)?,
             duration: prose("duration", &parent.duration)?,
@@ -420,7 +422,7 @@ fn walk(
                 .or_else(|| explicit_duration_ms(&metadata.duration));
             // The same provider leaf may be intentionally present in two folder categories.
             // Its provider ID remains identical for portable Favorites; the view row is scoped.
-            let entry = CatalogEntry {
+            let entry = CatalogEntry { protection: metadata.protection,
                 id: identity(&profile.id, &format!("{category}\0{key}")),
                 title,
                 category: text(category, 4096),
