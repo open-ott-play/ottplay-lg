@@ -1014,7 +1014,11 @@ $(FFABI_STAMP): ci/ffabi-assert.c $(FFMPEG_INC)/libavformat/avformat.h Makefile
 # all, and this target is an ordinary timestamp comparison.
 RUST_INPUTS := $(shell find rust-modules/src rust-modules/base rust-modules/machine rust-modules/net rust-modules/platform rust-modules/gfx rust-modules/ui rust-modules/plex rust-modules/telemetry rust-modules/data rust-modules/session rust-modules/media rust-modules/appkit rust-modules/screens rust-modules/shared-core rust-modules/build_support locales assets -type f 2>/dev/null)
 RUST_INPUTS += vendor/ottplay-core.js vendor/ottplay-core.manifest.json vendor/ottplay-core.LICENSE.txt
-$(RUST_LIB): LICENSE $(RUST_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock rust-modules/build.rs ci/install-identities.json rust-modules/.cargo/config.toml Makefile ci/check-staticlib-artifact.py $(FFABI_STAMP)
+# Cargo only checks build.rs Git watches when make actually invokes it. A commit
+# without source edits must still refresh the embedded build identity. Missing
+# metadata is intentionally ignored for published source archives without .git.
+RUST_GIT_INPUTS := $(wildcard $(shell git rev-parse --path-format=absolute --git-path HEAD 2>/dev/null) $(shell git rev-parse --path-format=absolute --git-path logs/HEAD 2>/dev/null))
+$(RUST_LIB): LICENSE $(RUST_INPUTS) $(RUST_GIT_INPUTS) rust-modules/Cargo.toml rust-modules/Cargo.lock rust-modules/build.rs ci/install-identities.json rust-modules/.cargo/config.toml Makefile ci/check-staticlib-artifact.py $(FFABI_STAMP)
 	@# BEFORE the mkdir: the seed is only ever cloned into a target dir that does not exist yet.
 	$(CARGO_SEED) restore $(RUST_TDIR) rust-modules/$(RUST_TDIR)
 	mkdir -p rust-modules/$(RUST_TDIR)
