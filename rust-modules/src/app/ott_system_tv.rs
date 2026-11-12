@@ -202,6 +202,11 @@ fn select_status(value: &Value, id: &str) -> &'static str {
         _ => "System TV channel was not confirmed; inspect the TV before retrying",
     }
 }
+fn decoder_released(player: &plx_media::player::adapter::PlayerAdapter) -> bool {
+    // A timed-out Load can outlive both the visible engine and the Unload machine.
+    // System TV must wait for its native object to be reaped too.
+    !player.release_busy() && !player.is_live() && !player.has_abandoned_load()
+}
 pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
     if runtime.page != "system-tv" && busy(&runtime.system_tv) {
         leave(runtime);
@@ -232,7 +237,7 @@ pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
             runtime.system_tv.release = None;
             runtime.status = "System TV handoff cancelled or decoder release timed out".into();
             runtime.changed();
-        } else if !app.adapters.player.release_busy() && !app.adapters.player.is_live() {
+        } else if decoder_released(&app.adapters.player) {
             let id = runtime
                 .system_tv
                 .release
@@ -324,6 +329,53 @@ mod tests {
         r.loaded = true;
         r.page = "system-tv";
         r
+    }
+    #[test]
+    fn abandoned_load_keeps_decoder_owned_until_the_worker_returns() {
+        use plx_media::player::{engine, SHARED};
+        use std::sync::{mpsc, atomic::Ordering};
+        let _serial = plx_base::testlock::serial();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        SHARED.reset_session();
+        SHARED.test_force_native_idle();
+        let epoch = SHARED.begin_native_session().expect("native object ownership");
+        let mut eng = engine::engine_after_reload_for_test();
+        eng.native_epoch = epoch;
+        let (release, held) = mpsc::channel::<()>();
+        // The real teardown path parks this unfinished Load instead of joining it.
+        // recv_timeout bounds a broken test without leaving a worker behind.
+        eng.load_th = Some(std::thread::spawn(move || {
+            let _ = held.recv_timeout(std::time::Duration::from_secs(5));
+        }));
+        app.adapters.player.install(eng);
+        SHARED.load_timed_out.store(true, Ordering::Release);
+        plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+        assert!(!app.adapters.player.release_busy());
+        assert!(!app.adapters.player.is_live());
+        assert!(app.adapters.player.has_abandoned_load(), "precondition: teardown parked the worker");
+        let blocked = !decoder_released(&app.adapters.player);
+        let not_reaped = !engine::reap_abandoned_load(&mut app.adapters.player);
+        let mut runtime = fixture();
+        runtime.system_tv.release = Some(Release {
+            id: "A".into(),
+            deadline: 0,
+            connection: runtime.remote.television_generation(),
+        });
+        tick(&mut runtime, &mut app);
+        assert!(runtime.system_tv.release.is_none());
+        assert!(runtime.system_tv.flight.is_none(), "expired ownership wait cannot dispatch a tune");
+        release.send(()).expect("release held worker");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !engine::reap_abandoned_load(&mut app.adapters.player) {
+            assert!(std::time::Instant::now() < deadline, "worker did not settle");
+            std::thread::yield_now();
+        }
+        let settled = decoder_released(&app.adapters.player);
+        SHARED.test_force_native_idle();
+        SHARED.reset_session();
+        assert!(blocked, "handoff must not dispatch while the abandoned Load owns the decoder");
+        assert!(not_reaped, "an unfinished Load must retain ownership");
+        assert!(settled, "handoff may proceed after the native release completes");
     }
     #[test]
     fn leaving_or_expired_handoff_never_late_tunes() {

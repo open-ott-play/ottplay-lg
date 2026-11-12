@@ -2438,7 +2438,7 @@ fn install_synthetic_playurl(
 /// time. Call BEFORE start_bufferfeed (resume) or via reload_at (mid-play seek).
 pub fn arm_seek(target_ns: i64) {
     let t = target_ns.max(0);
-    SHARED.seek_to_ns.store(t, Ordering::Release);
+    SHARED.publish_seek_target(t);
     SHARED.disp_base.store(0, Ordering::Relaxed);
     SHARED.playpos_ns.store(t, Ordering::Relaxed); // instant HUD feedback until frames land
 }

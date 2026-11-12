@@ -639,6 +639,7 @@ pub(super) fn demux_video(
     let mut mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
     let mut timeline = crate::hls::SegmentTimeline::default();
     let mut last_progress = Instant::now();
+    let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
     'refresh: loop {
         if unsafe { crate::aq::aq_is_aborted(aq) } {
             return Err(HlsExit::Aborted);
@@ -719,7 +720,7 @@ pub(super) fn demux_video(
                 )
             }?;
             output.remap_transport(&mut transport_clock)?;
-            if !hls_feed_segment_interruptible(&output, aq, aqa, true)? {
+            if !hls_feed_external_segment(&output, segment.inner.duration, recovery_generation, aq, aqa)? {
                 video_continuation = None;
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
                 continue 'refresh;

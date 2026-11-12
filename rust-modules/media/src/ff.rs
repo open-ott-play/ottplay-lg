@@ -5834,6 +5834,47 @@ unsafe fn hls_demux_segment_path(
     })
 }
 
+/// Complete external intervals are retained before a bounded queue can park
+/// their producer. Rebuffer release still requires actual queued/fed media; this
+/// publishes acquisition evidence, never future timestamps or decoder readiness.
+fn hls_feed_external_segment(
+    output: &HlsSegmentOutput, media: std::time::Duration, generation: u64,
+    aq: *mut AuQueue, aqa: *mut AuQueue,
+) -> Result<bool, HlsExit> {
+    if media.is_zero() || !output.aus.iter().any(|au| au.es == 1) {
+        return Err(HlsExit::Failed("HLS segment produced no video access units"));
+    }
+    if output.transfer.audio_expected
+        && (output.audio_tail_ns.is_none() || !output.aus.iter().any(|au| au.es == 2))
+    {
+        // A muxed segment may legitimately omit its declared audio lane. Keep
+        // the existing feed behavior, but it cannot prove joined recovery.
+        let active = crate::aq::aq_if_not_aborted(aq, || {
+            generation & 1 == 0
+                && SHARED.hls_candidate_generation.load(Ordering::Acquire) == generation
+        }).ok_or(HlsExit::Aborted)?;
+        if !active { return Err(HlsExit::Aborted); }
+        return hls_feed_segment_interruptible(output, aq, aqa, true);
+    }
+    // Only a tiny publication while the abort mutex is held. No queue operations
+    // or blocking work may enter this closure (in particular no aq_is_aborted).
+    let admitted = crate::aq::aq_if_not_aborted(aq, || {
+        if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 { return Some(None); }
+        match SHARED.retain_external_hls_interval(generation, output.transfer.total_us, media) {
+            Ok(token) => Some(Some(token)),
+            Err(crate::player::ExternalHlsRetentionError::SeekPending) => Some(None),
+            Err(crate::player::ExternalHlsRetentionError::Retired) => None,
+        }
+    }).flatten().ok_or(HlsExit::Aborted)?;
+    let Some(token) = admitted else { return Ok(false); };
+    struct Retained(u64);
+    impl Drop for Retained {
+        fn drop(&mut self) { SHARED.release_external_hls_interval(self.0); }
+    }
+    let _retained = Retained(token);
+    hls_feed_segment_interruptible(output, aq, aqa, true)
+}
+
 fn hls_feed_segment(
     output: &HlsSegmentOutput,
     aq: *mut AuQueue,
@@ -10996,3 +11037,7 @@ mod h264_continuation_metadata_tests {
 #[cfg(test)]
 #[path = "ff/hls_transport_tests.rs"]
 mod hls_transport_tests;
+
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "ff/hls_external_recovery_tests.rs"]
+mod hls_external_recovery_tests;

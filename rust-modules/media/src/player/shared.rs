@@ -151,11 +151,26 @@ enum HlsClockPhase {
     Stopping,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalHlsRetentionError {
+    SeekPending,
+    Retired,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RetainedHlsInterval {
+    token: u64,
+    generation: u64,
+    acquisition_us: u64,
+    media: Duration,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct HlsClockState {
     phase: HlsClockPhase,
     next_token: u64,
     recovery: HlsRecoveryEpoch,
+    retained: Option<RetainedHlsInterval>,
     /// Accepted user Pause ownership. This is intentionally inside the actuator mutex: the
     /// transport atomic is a hot-path mirror, not a second authority over whether Play may issue.
     user_held: bool,
@@ -179,6 +194,7 @@ impl HlsClockState {
             phase: HlsClockPhase::Running,
             next_token: 0,
             recovery: HlsRecoveryEpoch::idle(),
+            retained: None,
             user_held: false,
             user_sequence: 0,
             resume_acb_pending: false,
@@ -1986,6 +2002,50 @@ impl Shared {
             .observe(acquisition_us, media);
     }
 
+    /// Publish the new demux timeline atomically with revoking retained old output.
+    pub(crate) fn publish_seek_target(&self, target_ns: i64) {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        clock.retained = None;
+        self.seek_to_ns.store(target_ns, Ordering::Release);
+    }
+
+    /// Own one complete, validated external interval until its feeder returns.
+    /// Its immutable output remains behind the bounded queues while a push parks.
+    /// A later Pause can therefore seed its proof from that still-active owner;
+    /// completed historical intervals disappear when the matching lease drops.
+    pub(crate) fn retain_external_hls_interval(
+        &self, generation: u64, acquisition_us: u64, media: Duration,
+    ) -> Result<u64, ExternalHlsRetentionError> {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.seek_to_ns.load(Ordering::Acquire) >= 0 {
+            return Err(ExternalHlsRetentionError::SeekPending);
+        }
+        if generation & 1 != 0 || self.hls_candidate_generation.load(Ordering::Acquire) != generation
+            || clock.phase == HlsClockPhase::Stopping
+        { return Err(ExternalHlsRetentionError::Retired); }
+        if clock.retained.is_some_and(|p| p.generation != generation) {
+            clock.retained = None;
+        }
+        if clock.retained.is_some() { return Err(ExternalHlsRetentionError::Retired); }
+        let token = clock.token();
+        clock.retained = Some(RetainedHlsInterval { token, generation, acquisition_us, media });
+        if matches!(clock.phase,
+            HlsClockPhase::PauseIssuing { hold: ClockHold::Rebuffer, .. }
+            | HlsClockPhase::Held { hold: ClockHold::Rebuffer })
+        { clock.recovery.observe(acquisition_us, media); }
+        Ok(token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_retained_external_hls_interval_for_test(&self) -> bool {
+        self.hls_clock.lock().unwrap_or_else(|e| e.into_inner()).retained.is_some()
+    }
+
+    pub(crate) fn release_external_hls_interval(&self, token: u64) {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if clock.retained.is_some_and(|p| p.token == token) { clock.retained = None; }
+    }
+
     pub fn hls_recovery(&self) -> HlsRecoveryEpoch {
         self.hls_clock
             .lock()
@@ -2074,6 +2134,10 @@ impl Shared {
         }
         let token = clock.token();
         clock.recovery.begin();
+        let generation = self.hls_candidate_generation.load(Ordering::Acquire);
+        if let Some(retained) = clock.retained.filter(|p| generation & 1 == 0
+            && p.generation == generation)
+        { clock.recovery.observe(retained.acquisition_us, retained.media); }
         clock.phase = HlsClockPhase::PauseIssuing {
             token,
             hold: ClockHold::Rebuffer,
@@ -2176,6 +2240,7 @@ impl Shared {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         match clock.phase {
             HlsClockPhase::Running => {
+                clock.retained = None;
                 let token = clock.token();
                 clock.phase = HlsClockPhase::PauseIssuing {
                     token,
@@ -2187,6 +2252,7 @@ impl Shared {
                 hold:
                     ClockHold::User | ClockHold::Initial | ClockHold::Seek | ClockHold::ResumePrime,
             } => {
+                clock.retained = None;
                 if clock.user_held {
                     clock.user_held = false;
                     clock.resume_acb_pending = true;
@@ -2637,6 +2703,7 @@ impl Shared {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         clock.phase = HlsClockPhase::Stopping;
         clock.recovery = HlsRecoveryEpoch::idle();
+        clock.retained = None;
         clock.user_held = false;
         clock.resume_acb_pending = false;
         clock.automatic = None;
@@ -3877,5 +3944,72 @@ mod tests {
         assert_eq!(s.dg_abr_action.load(Ordering::Relaxed), 0);
         assert_eq!(s.dg_abr_target_kbps.load(Ordering::Relaxed), 0);
         assert_eq!(s.dg_abr_unsafe_deficit_ms.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod external_retained_interval_tests {
+    use super::*;
+    #[test]
+    fn retained_interval_survives_viewer_pause_but_never_plays_through_it() {
+        let s = Shared::new();
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let retained = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        let Some(HlsUserPause::Issue(pause)) = s.prepare_hls_user_pause() else { panic!("viewer pause"); };
+        assert_eq!(s.complete_hls_user_pause(pause, true), HlsPauseCompletion::Accepted);
+        assert!(s.reserve_hls_prime_play(HlsPrimeKind::Resume, generation, s.hls_recovery()).is_none());
+        assert_eq!(s.prepare_hls_user_resume(true), Some(HlsUserResume::Prime));
+        let (play, _) = s.reserve_hls_prime_play(HlsPrimeKind::Resume, generation, s.hls_recovery()).unwrap();
+        assert!(matches!(s.complete_hls_prime_play(play, true), HlsPlayCompletion::Accepted { .. }));
+        let pause = s.prepare_hls_rebuffer_pause().unwrap();
+        assert_eq!(s.complete_hls_rebuffer_pause(pause, true), HlsPauseCompletion::Accepted);
+        assert_eq!(s.hls_recovery().completed, 1, "the same parked producer still owns validated bytes");
+        s.release_external_hls_interval(retained);
+        assert!(!s.has_retained_external_hls_interval_for_test());
+    }
+    #[test]
+    fn seek_publication_revokes_the_prepare_window_without_stranding_the_producer() {
+        let s = Shared::new();
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let Some(HlsSeekPause::Issue(seek)) = s.prepare_seek_pause() else { panic!("seek pause"); };
+        assert_eq!(s.complete_seek_pause(seek, true), HlsPauseCompletion::Accepted);
+        // The old producer can reach admission after prepare/drain, before publication.
+        let old = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.publish_seek_target(8_000_000_000);
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        assert_eq!(s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)),
+            Err(ExternalHlsRetentionError::SeekPending));
+        // The same worker consumes the target, validates fresh bytes and remains usable.
+        assert_eq!(s.seek_to_ns.swap(-1, Ordering::AcqRel), 8_000_000_000);
+        let new = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.release_external_hls_interval(old);
+        assert!(s.has_retained_external_hls_interval_for_test());
+        s.release_external_hls_interval(new);
+    }
+
+    #[test]
+    fn reset_seek_and_old_lease_drop_cannot_lend_stale_media() {
+        let s = Shared::new();
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let old = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.reset_hls_clock();
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        assert!(s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).is_err());
+        let current = s.hls_candidate_generation.load(Ordering::Acquire);
+        let new = s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).unwrap();
+        s.release_external_hls_interval(old);
+        assert!(s.has_retained_external_hls_interval_for_test(), "old Drop cannot clear a new interval");
+        let Some(HlsSeekPause::Issue(seek)) = s.prepare_seek_pause() else { panic!("seek pause"); };
+        assert!(!s.has_retained_external_hls_interval_for_test(), "accepted seek revokes the old interval");
+        assert_eq!(s.complete_seek_pause(seek, true), HlsPauseCompletion::Accepted);
+        s.release_external_hls_interval(new);
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        s.reset_hls_clock();
+        let current = s.hls_candidate_generation.load(Ordering::Acquire);
+        let cancelled = s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).unwrap();
+        s.stop_hls_clock();
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        assert!(s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).is_err());
+        s.release_external_hls_interval(cancelled);
     }
 }

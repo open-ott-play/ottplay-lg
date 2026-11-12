@@ -482,7 +482,7 @@ larger object may be abandoned so recovery can fetch a smaller one. An already h
 arms no second abort loop. In every case network, demux and feeding remain active.
 
 Runtime resume does not use the historical `R_s` at all. A hold starts a fresh ordered recovery
-epoch. For complete active-rung acquisitions after that pause,
+epoch. For complete active-rung acquisitions available to that hold,
 
 ```text
 P_0 = 0
@@ -496,10 +496,25 @@ new completed segment beside an old debt. Candidate media is not credited as rec
 after a rung commit the epoch restarts and the next ordinary acquisition describes the encoder
 that will sustain playback.
 
+External HLS has one additional bounded handoff: a completely downloaded and validated
+immutable interval may still be owned by its producer while a full AU FIFO prevents the
+remaining samples from being enqueued. Its unique source-generation lease registers the
+complete acquisition before that push can block. If the native clock enters rebuffering
+later, the new epoch seeds from that still-owned interval; a producer already parked before
+Pause cannot otherwise publish another completion. Separate audio/video workers retain one
+jointly validated interval, using its actual video span and combined acquisition cost.
+
+This data lease publishes no future sample timestamp. Decoder prime and runway still use
+only media actually accepted by the sink or enqueued on each expected lane. Completion,
+abort, seek and source replacement retire the lease; historical completed intervals cannot
+seed a later hold. Viewer Pause does not invalidate immutable data but still prevents Play
+through the existing user-hold gate. Thus neither a larger queue nor a timeout substitutes
+for real recovery media.
+
 Resume requires all of:
 
 - Starfish accepted its ordinary decoder prime;
-- at least one complete segment landed in the current recovery epoch;
+- at least one complete validated active interval is retained in the current recovery epoch;
 - `P <= 0` — the epoch has repaid all acquisition time with at least as much media;
 - the whole already-playable pipeline (Starfish plus demuxed AU queues) covers `H` on every
   expected A/V lane;

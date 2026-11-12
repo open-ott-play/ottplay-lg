@@ -2036,7 +2036,7 @@ fn pump_with_before_feed(
         // into a session whose mode no longer anchors in place), go straight to `reload_at`.
         if eng.seek_retries < 2 && !seek_reloads(seek_mode()) {
             eng.seek_retries += 1;
-            SHARED.seek_to_ns.store(tgt, Release); // re-publish; the demux thread seeks on it
+            SHARED.publish_seek_target(tgt); // re-publish; the demux thread seeks on it
             SHARED.seek_target_ns.store(tgt, Relaxed); // rebase guard keys on the retried target
             eng.seek_armed_at = now;
             super::log(&format!(
@@ -2182,7 +2182,7 @@ fn pump_with_before_feed(
         // keyframe. disp_base=0 (rebase to the landed keyframe).
         eng.flushed = true;
         eng.presentation_rearm_pending = false;
-        SHARED.seek_to_ns.store(t, Release); // the demux thread's av_seek target
+        SHARED.publish_seek_target(t); // the demux thread's av_seek target
         SHARED.seek_target_ns.store(t, Relaxed); // rebase guard: reject stale drifted keyframes
         SHARED.disp_base.store(0, Relaxed);
         super::log(&format!(

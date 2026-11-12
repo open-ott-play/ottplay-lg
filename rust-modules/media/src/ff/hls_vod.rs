@@ -64,6 +64,7 @@ pub(super) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut AuQueue,
     let video = playback.video();
     let origin = video.start_ns;
     let mut net = HlsNet { hs, curl: None };
+    let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
     let mut next_video = 0usize;
     let mut next_audio = 0usize;
     let mut join = JoinCursor::new(0).map_err(HlsExit::Failed)?;
@@ -110,8 +111,11 @@ pub(super) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut AuQueue,
             join.push_audio(audio).map_err(HlsExit::Failed)?;
             next_audio += 1;
         }
+        let media_ns = frames.end_ns.checked_sub(frames.start_ns)
+            .and_then(|ns| u64::try_from(ns).ok()).filter(|ns| *ns > 0)
+            .ok_or(HlsExit::Failed("HLS timeline overflow"))?;
         let output = join.join(frames).map_err(HlsExit::Failed)?;
-        if !hls_feed_segment_interruptible(&output, aq, aqa, true)? { continue; }
+        if !hls_feed_external_segment(&output, std::time::Duration::from_nanos(media_ns), recovery_generation, aq, aqa)? { continue; }
         next_video += 1;
     }
 }

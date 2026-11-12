@@ -70,6 +70,7 @@ use plx_base::task::MainThread;
 #[cfg(test)]
 pub(crate) use shared::pinned_pause_clock;
 pub use shared::HlsAutomaticTransition;
+pub(crate) use shared::ExternalHlsRetentionError;
 pub use shared::HlsClockFenceError;
 /// one rect of an image-subtitle display set — the demuxer builds them, the HUD draws them
 pub use shared::SubRect;
