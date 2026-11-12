@@ -262,3 +262,7 @@ fn partial_catalogue_failure_does_not_grant_eos_wrap_or_hide_the_error() {
         "EOS must not replace the scan failure with an opening message"
     );
 }
+
+
+#[path = "resume_selection.rs"]
+mod selection_checkpoint;

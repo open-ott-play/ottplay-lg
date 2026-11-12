@@ -88,3 +88,44 @@ pub(super) fn pending(app: &App) -> bool {
         && guide_ui::is_live(&failed.profile, &failed.entry)
         && profile_current(runtime, &failed.profile, None)
 }
+
+/// A keyed, display-only target snapshot. This never changes installed playback,
+/// native identity or the metadata store used by transport and remote commands.
+pub(super) fn display_stamp(app: &App) -> Option<(u64, u64, u64, bool)> {
+    if !pending(app) { return None; }
+    let runtime = app.ott.as_ref()?;
+    runtime.play_target.as_ref()?;
+    Some((runtime.generation, runtime.play_generation, runtime.revision, runtime.wall_now_s().is_some()))
+}
+
+pub(super) fn display(app: &App) -> Option<plx_data::metadata::NowPlaying> {
+    display_stamp(app)?;
+    let runtime = app.ott.as_ref()?;
+    let request = runtime.play_target.as_ref()?;
+    if request.archive.is_some() { return None; }
+    let (_, profile, entry, _) = runtime.prepare_play_request(request.clone()).ok()?;
+    if runtime.pending_play_profile() != Some(&profile) { return None; }
+    let entry = entry?;
+    if !guide_ui::is_live(&profile, &entry) { return None; }
+    let guide = runtime.wall_now_s().and_then(|now_s|
+        runtime.selected_row_guide(&request.id, Some(&entry)).or_else(|| {
+            if runtime.effective_profile() != Some(&profile) { return None; }
+            let programme = runtime.current_row_programme(&entry)?;
+            Some(plx_data::metadata::OttNowNext { now_s,
+                current: Some(plx_data::metadata::OttGuideProgramme { title: programme.title,
+                    description: String::new(), start_s: programme.start_s, end_s: programme.end_s }),
+                next: None })
+        }));
+    let summary = guide.as_ref().and_then(|guide| guide.at(guide.now_s).0)
+        .map_or_else(String::new, |programme| programme.description.clone());
+    let title = entry.title.clone();
+    Some(plx_data::metadata::NowPlaying {
+        ott: Some(plx_data::metadata::OttNowPlaying {
+            live: Some(plx_data::metadata::OttLivePlaying { channel_title: title.clone(), ordinal: None, guide }),
+            archive: None, collection_label: title.clone(), confirmed_start_unix_ms: None,
+            next: None, art: entry_poster(&entry),
+        }), title, summary, is_episode: false, is_real_episode: false,
+        ep_title: String::new(), season: 0, index: 0, year: 0, dur_ms: 0,
+        rating: String::new(), thumb: String::new(), detail_rk: String::new(),
+    })
+}

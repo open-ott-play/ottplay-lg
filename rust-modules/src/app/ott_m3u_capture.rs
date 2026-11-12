@@ -139,6 +139,31 @@ mod tests {
         "#EXTM3U\n#EXTINF:-1 tvg-id=\"same\" group-title=\"News\",Alpha\nhttps://media.invalid/a?token=a\n#EXTINF:-1 tvg-id=\"same\" group-title=\"News\",Beta\nhttps://media.invalid/b?token=b\n"
     }
     #[test]
+    fn existing_portable_favorite_resolves_after_timestamped_export_refresh_without_rewriting() {
+        for attributes in ["tvg-id=\"only\"", ""] {
+            let body = format!("#EXTM3U\n#EXTINF:-1 {attributes} group-title=\"News\",Alpha\nhttps://proxy.invalid/channel/opaque/index.m3u8?q=1790000000000\n");
+            let (profiles, mut old) = setup(&body);
+            // An earlier build's opaque native hash is not the portable locator.
+            old.entries[0].id = "receiver:legacy-export-hash".into();
+            let bindings = SelectionBindings::profiles_only(&profiles);
+            let owner = SelectionOwner::Profile(&profiles.profiles[0]);
+            let capture = capture_channel(&bindings, owner, &old.entries, &old.entries[0]).unwrap().unwrap();
+            let mut document = Document::default();
+            document.toggle(capture.favorite.clone()).unwrap();
+            let preserved = document.encode().unwrap();
+            let refreshed = plx_data::ott::parse_m3u(
+                &body.replace("1790000000000", "1790001100164"), &profiles.profiles[0]).unwrap();
+            assert!(matches_entry(&capture.favorite, &refreshed.entries[0]));
+            assert!(bindings::same_owner(bind_bound(&bindings, &capture.favorite).unwrap(), owner));
+            let index = FavoriteIndex::new_bound(&bindings, &document, owner).unwrap()
+                .with_channel_catalog(owner, &refreshed.entries, true);
+            assert_eq!(index.identity(&refreshed.entries[0]).unwrap(), Some(capture.favorite.identity().as_str()));
+            assert_eq!(document.encode().unwrap(), preserved, "refresh must not rewrite or delete saved Favorites");
+            assert!(!String::from_utf8(preserved).unwrap().contains("1790000000000"));
+        }
+    }
+
+    #[test]
     fn unique_id_stays_canonical_without_private_source_data() {
         let (profiles, catalog) = setup("#EXTM3U\n#EXTINF:-1 tvg-id=\"only\",Alpha\nhttps://media.invalid/a?token=private\n");
         let bindings = SelectionBindings::profiles_only(&profiles);

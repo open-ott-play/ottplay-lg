@@ -174,7 +174,8 @@ fn live_hud_current_error_clears_guide_but_stale_error_cannot_clear_new_facts() 
     let before = live(&app).unwrap();
     deliver(&mut app, sample, stale_error);
     assert_eq!(live(&app).as_ref(), Some(&before));
-    refresh_playing(&mut app);
+    // The producer can deliver success then error for the same request. Its
+    // retained successful cache must not undo the explicit live clear next frame.
     let mut current_error = reply(&app, "unused");
     current_error.result = Err("current failure");
     deliver(&mut app, sample, current_error);
@@ -182,6 +183,17 @@ fn live_hud_current_error_clears_guide_but_stale_error_cannot_clear_new_facts() 
     assert!(value.guide.is_none());
     assert_eq!(value.channel_title, "Current file");
     assert_eq!(value.ordinal, Some(1));
+    let metadata_revision = app.bridge.metadata_mut().gen();
+    for _ in 0..3 {
+        publish_without_runtime_change(&mut app);
+        assert!(live(&app).unwrap().guide.is_none(), "an accepted clear survives later publications");
+        assert!(app.bridge.metadata_view().now_playing().unwrap().summary.is_empty());
+    }
+    assert_eq!(app.bridge.metadata_mut().gen(), metadata_revision,
+        "a stable clear must not republish metadata every frame");
+    let recovered = reply(&app, "Recovered programme");
+    deliver(&mut app, sample, recovered);
+    assert_eq!(live(&app).unwrap().guide.unwrap().current.unwrap().title, "Recovered programme");
 }
 
 #[test]

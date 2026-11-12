@@ -145,7 +145,7 @@ fn frame(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32, inputs: Vec<I
 }
 
 fn boot(favorite: bool) -> (Dispatcher<TestHost>, TestRig) {
-    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: if favorite { "favorites" } else { "channels" }.into(),
         revision: 1, title: "Fixture videos".into(), description: String::new(),
         status: String::new(), selected_row: Some("video-one".into()),
@@ -191,7 +191,7 @@ fn navigation_row(id: &str, action: OttAction) -> OttRow {
 }
 
 fn navigation_view(page_id: &str, revision: u64, rows: Vec<OttRow>, selected: Option<&str>) -> Arc<OttView> {
-    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None, page_id: page_id.into(), revision, title: page_id.into(),
+    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None, page_id: page_id.into(), revision, title: page_id.into(),
         description: String::new(), status: String::new(), rows,
         selected_row: selected.map(str::to_owned) })
 }
@@ -489,7 +489,7 @@ fn dispatcher_description_follows_selected_row_and_async_metadata() {
             id: id.into(), title: id.into(), detail: String::new(), description: description.into(),
             poster: None, action: OttAction::Play(id.into()), enabled: true, favorite: false,
         }).collect();
-    let (mut d, mut rig) = boot_snapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let (mut d, mut rig) = boot_snapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: "channels".into(), revision: 1, title: "Fixture videos".into(),
         description: String::new(), status: String::new(), rows,
         selected_row: Some("empty-first".into()),
@@ -548,7 +548,7 @@ fn dispatcher_editor_save_keeps_draft_until_the_host_confirms_it() {
 #[test]
 fn dispatcher_editor_cancel_returns_to_add_profile_and_can_reopen_it() {
     let _guard = plx_base::testlock::serial();
-    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: "profiles:m3u".into(), revision: 1, title: "Profiles".into(),
         description: String::new(), status: String::new(), selected_row: Some("profile.add".into()),
         rows: vec![OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: "profile.add".into(), title: "Add profile".into(),
@@ -1228,7 +1228,7 @@ fn restored_or_reconciled_focus_is_not_new_persistent_user_intent() {
 }
 
 fn quality_view(context: &str, revision: u64, variants: &[&str], selected: &str) -> Arc<OttView> {
-    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None,
+    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false,
         classic_preferences: Default::default(), volume_available: false,
         page_id: format!("vportal-quality:{context}"), revision,
         title: msg::settings_playback_quality().into(),

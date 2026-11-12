@@ -42,7 +42,7 @@ fn digit(sym: u32) -> bool { (b'0' as u32..=b'9' as u32).contains(&sym) }
 
 fn ready(runtime: &Runtime, app: &App) -> bool {
     app.running && playback_allowed(app) && runtime.loaded && !runtime.persistence_uncertain
-        && !runtime.saving && runtime.edit_session.is_none() && runtime.setup.is_none()
+        && runtime.numeric_write_ready() && runtime.edit_session.is_none() && runtime.setup.is_none()
         && runtime.clock_sample.is_some() && runtime.play_work_allowed()
         && input_policy::navigation(runtime).is_ok() && !app.pages.has_pending_navigation()
         && app.pages.input.arm.is_none() && !app.pages.input.press.is_active()

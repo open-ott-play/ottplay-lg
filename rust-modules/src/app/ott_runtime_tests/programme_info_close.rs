@@ -41,9 +41,9 @@ fn modern_live_right_keeps_hud_navigation_and_strict_policy_refuses_description(
     let prepared = kiosk_source::prepare(&runtime, &app, Some("1"), true).unwrap();
     runtime.saved = kiosk_source::save_candidate(&runtime, &prepared).unwrap();
     runtime.sync_saved_context(); runtime.saving = true;
-    let request = OttPlayerRequest { owner, source, action: OttPlayerAction::ShowDescription };
+    let request = OttPlayerRequest { owner, source: source.into(), action: OttPlayerAction::ShowDescription };
     assert!(player_remote::perform(&mut runtime, &mut app, &request).is_err());
-    assert!(!crate::app::ott_runtime::input_policy::player(&runtime, &PlayerReq::HideInfo(request.source.clone())));
+    assert!(!crate::app::ott_runtime::input_policy::player(&runtime, &PlayerReq::HideInfo(request.source.playback().unwrap().clone())));
     app.ott = Some(runtime);
     assert!(!info(&app));
 }

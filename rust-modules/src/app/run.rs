@@ -506,6 +506,7 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
         model.permanent_clock = clock;
         let uncovered = app.running && super::ott_runtime::playback_allowed(app)
             && !app.pages.surface_up();
+        publish_pending_channel_display(app);
         if let Some(player) = super::bridge::player_mut(&mut app.pages) {
             player.model = model;
             player.set_osd_uncovered(uncovered);
@@ -636,6 +637,19 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
     // Hoisted: the frame-drop detector reads these after the gate. Seeded to the pump
     // stamp so a skipped frame reports zero draw/cap/swap rather than a stale delta.
     app.instr.seed_present_phases();
+}
+
+/// Refresh only the paint snapshot when the source-fenced target changes. This
+/// runs before the present fingerprint, independent of decoder/metadata ownership.
+pub(super) fn publish_pending_channel_display(app: &mut App) {
+    let stamp = super::ott_runtime::pending_channel_display_stamp(app);
+    if !super::bridge::player(&app.pages)
+        .is_some_and(|player| player.pending_channel_display_stamp != stamp) { return; }
+    let display = super::ott_runtime::pending_channel_display(app);
+    if let Some(player) = super::bridge::player_mut(&mut app.pages) {
+        player.pending_channel_display = display;
+        player.pending_channel_display_stamp = stamp;
+    }
 }
 
 /// **The player HUD's [`HudModel`] for this frame**: every process global its presentation reads,

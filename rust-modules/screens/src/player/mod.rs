@@ -187,6 +187,9 @@ pub struct PlayerScreen {
     /// The app assigns it ONCE a frame, before `prepare` and `draw`; only those two read it.
     /// Key handling, the scrub arithmetic and the Tick keep sampling what they always did.
     pub model: HudModel,
+    /// Paint-only pending channel facts; never consulted by input or transport.
+    pub pending_channel_display: Option<plx_data::metadata::NowPlaying>,
+    pub pending_channel_display_stamp: Option<(u64, u64, u64, bool)>,
 }
 
 impl PlayerScreen {
@@ -227,6 +230,8 @@ impl PlayerScreen {
             failure_attempt: None,
             clock_warm: Default::default(),
             model: HudModel::default(),
+            pending_channel_display: None,
+            pending_channel_display_stamp: None,
         }
     }
 
@@ -445,7 +450,7 @@ impl PlayerScreen {
         meta: plx_data::metadata::MetadataView<'_>,
         mode: plx_machine::machine::UiMode,
     ) {
-        plx_appkit::player_hud::classic::draw_hud_in_mode(
+        plx_appkit::player_hud::classic::draw_hud_for_display(
             ps,
             &self.model,
             &mut self.row,
@@ -460,6 +465,7 @@ impl PlayerScreen {
             measure,
             meta,
             mode,
+            self.pending_channel_display.as_ref(),
         );
     }
 
@@ -614,6 +620,7 @@ impl PlayerScreen {
     pub fn clock_fingerprint_in_mode(&self, ps: &plx_media::route::PlaybackSession, now: u32,
         mode: plx_machine::machine::UiMode, playing: Option<&plx_data::metadata::NowPlaying>) -> u64 {
         use std::sync::atomic::Ordering::Relaxed;
+        let playing = self.pending_channel_display.as_ref().or(playing);
         let pos = plx_media::player::playpos_ns();
         let hud_up = self.hud_up(ps, now);
         let mut h: u64 = 0;
@@ -622,6 +629,10 @@ impl PlayerScreen {
             // digest, and the cost is paid on every frame of the route.
             h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
         };
+        mix(u64::from(self.pending_channel_display_stamp.is_some()));
+        if let Some((generation, play_generation, revision, clock_ready)) = self.pending_channel_display_stamp {
+            mix(generation); mix(play_generation); mix(revision); mix(u64::from(clock_ready));
+        }
         // The playhead's three readings move the SCRUB BAR and the two clocks, which exist only
         // while the transport is up. Folding them in unconditionally would report motion for a
         // picture nobody is drawing — playback spends ~99% of its time with the HUD auto-hidden,
@@ -1196,7 +1207,7 @@ impl PlayerScreen {
             if plx_media::route::playback_identity_matches(ps, &source) {
                 self.end_jump_gesture();
                 Self::ask(fx, PlayerReq::OttAction(crate::registry::OttPlayerRequest {
-                    owner, source, action: crate::registry::OttPlayerAction::OpenMenu,
+                    owner, source: source.into(), action: crate::registry::OttPlayerAction::OpenMenu,
                 }));
             }
         }
@@ -1359,10 +1370,16 @@ impl PlayerScreen {
             | Key::Right { alt: false } | Key::Ok);
         let remote = (key == Key::Other).then(|| consts::remote_button(sym, wcode)).flatten();
         let channel_step = matches!(remote, Some(RemoteButton::ChannelUp | RemoteButton::ChannelDown));
+        if offer.source.pending() && !channel_step {
+            // Pending authority is a step-only capability. Preserve the
+            // ordinary cancel/back and volume paths, never lend it to a menu,
+            // list, seek or pause command.
+            return if direction_or_ok || remote.is_some() { Some(Handled::Yes) } else { None };
+        }
         let recovery_channel = offer.recovery_only && channel_step;
         let recovery_browse = offer.recovery_only && key == Key::Ok && offer.accept == Action::OpenCatalog;
         if offer.recovery_only && !recovery_channel && !recovery_browse { return None; }
-        if !offer.recovery_only && !plx_media::route::playback_identity_matches(ps, &offer.source) {
+        if !offer.recovery_only && !offer.source.playback().is_some_and(|source| plx_media::route::playback_identity_matches(ps, source)) {
             // A captured OTT command is not permission to control a replacement
             // source through the generic fallback. No offer is different: that
             // remains an ordinary player or desktop event.

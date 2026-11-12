@@ -125,6 +125,7 @@ impl Runtime {
         if !self.loaded || self.persistence_uncertain
             || self.metadata_cancel.load(Ordering::Acquire)
             || !self.metadata_attachment_current()
+            || self.metadata_playback_identity != playing.identity
         {
             return None;
         }

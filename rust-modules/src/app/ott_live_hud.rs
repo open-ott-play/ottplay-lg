@@ -117,14 +117,22 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App, changed: bool) -> bo
     let pending = runtime.live_hud.pending.filter(|(generation, _)|
         *generation == runtime.metadata_generation && runtime.live_hud.request.as_ref()
             .is_some_and(|request| request.matches_playing(playing)));
-    if !changed && same && pending.is_none() && current.is_some_and(|n|
-        n.ott.as_ref().is_some_and(|o| o.live.is_some() && o.confirmed_start_unix_ms == start)) { return true; }
+    // Completion notices are transient. The admitted metadata owner can already
+    // hold the exact playing source's guide when its notice was consumed before
+    // this projection existed (or was rebuilt). Reconcile those source-fenced
+    // facts independently of the notice; never borrow the highlighted row.
+    let cleared = matches!(pending, Some((_, true)));
+    let admitted_guide = if cleared { Some(None) }
+        else { start.and_then(|_| runtime.playing_row_guide(playing)) };
+    if !changed && same && (pending.is_none() || cleared) && current.is_some_and(|n|
+        n.ott.as_ref().is_some_and(|o| o.confirmed_start_unix_ms == start
+            && o.live.as_ref().is_some_and(|live|
+                admitted_guide.as_ref().is_none_or(|guide| &live.guide == guide)))) { return true; }
     let previous_guide = current.filter(|_| same).and_then(|n| n.ott.as_ref())
         .and_then(|o| o.live.as_ref()).and_then(|live| live.guide.clone());
     let guide = if start.is_none() { None } else { match pending {
         Some((_, true)) => None,
-        Some((_, false)) => runtime.playing_row_guide(playing).unwrap_or(previous_guide),
-        None => previous_guide,
+        _ => admitted_guide.unwrap_or(previous_guide),
     }};
     let catalog = runtime.effective_profile().map(|profile| live_label::CatalogSource {
         profile, entries: &runtime.catalog.entries,
@@ -145,7 +153,10 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App, changed: bool) -> bo
     let unchanged = current.is_some_and(|old| old.title == title && old.summary == summary
         && old.dur_ms == 0 && old.ott.as_ref().is_some_and(|old| same_programme(old, &projection)));
     runtime.live_hud.published = capture(playing, runtime.metadata_generation, now_s);
-    if start.is_some() { runtime.live_hud.pending = None; }
+    // A same-request failure is an exact source/generation clear fence, not a
+    // one-frame notification: retained metadata may still hold an older success.
+    // arm/complete replaces it only for a new request or accepted completion.
+    if start.is_some() && !cleared { runtime.live_hud.pending = None; }
     if !unchanged {
         let now = NowPlaying { ott: Some(projection), is_episode: false, is_real_episode: false,
             title, ep_title: String::new(), season: 0, index: 0, summary, year: 0, dur_ms: 0,

@@ -1422,7 +1422,7 @@ pub(crate) fn perform_hud_command(
             // and provider media. Never let its HUD button enter the PMS queue.
             // Keep a stale OTT offer fail-closed instead of falling through.
             if !pages.surface_up()
-                && (offer.recovery_only || plx_media::route::playback_identity_matches(&player.session, &offer.source)) {
+                && (offer.recovery_only || offer.source.playback().is_some_and(|source| plx_media::route::playback_identity_matches(&player.session, source))) {
                 if let Some(page) = pages.nav.top_page().filter(|page| matches!(page.arg, AppArg::Player)) {
                     if let Some(body) = page.inst.as_ref().filter(|body| !body.staged) {
                         if pages.nav.input_owner() == Some(plx_machine::machine::InputOwner::Entry(page.id)) {
