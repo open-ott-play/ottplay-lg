@@ -17,8 +17,9 @@ use plx_ui::screen::{ReturnState, ScreenEvent};
 // (`node` stood here — `ContentArg` → `ui::trail::Node`, one of the two conversions the trail
 // needed. A `ContentArg` IS the page's identity; there is nothing to convert it to.)
 
-/// Drain the real bridge queue after menu activation. Resource injection is below the shared
-/// performer, so production and tests consume precisely the same emitted requests.
+/// Test driver for the real bridge queue. The production App entry point
+/// validates playback policy before using the same injected performer.
+#[cfg(test)]
 pub(super) fn drain_item_menu_requests<R: super::playback::PlaybackResources>(
     ps: &mut plx_media::route::PlaybackSession,
     pa: &mut plx_media::player::adapter::PlayerAdapter,

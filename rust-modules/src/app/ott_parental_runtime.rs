@@ -190,6 +190,7 @@ impl Runtime {
     pub(super) fn require_parental_control(&mut self) -> Result<(), &'static str> {
         self.require_parental(Target::Control)
     }
+    #[cfg(all(test, feature = "hostsim"))]
     pub(super) fn require_parental_playback(
         &mut self,
         profile: &ProviderProfile,
