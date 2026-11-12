@@ -6,9 +6,13 @@ URL from the tuner and does not decode that picture itself.
 
 ## Setup
 
-The controller must have an existing physical-TV binding for the exact paired
-OTTPlay device identity. Developer Mode access and OTT remote pairing do not by
-themselves grant TV-channel access.
+The controller must resolve the paired OTTPlay device identity to its physical
+TV binding. If the television already has a canonical binding for another
+player, add the native player identity to that binding’s `channel_player_ids`
+list. Do not duplicate the TV endpoint or replace the older player’s identity.
+Channel aliases share the same TV command queue and pairing key, and grant no
+power or application-launch access. Developer Mode access and OTT remote pairing
+do not by themselves grant TV-channel access.
 
 In the controller's private `televisions` configuration, explicitly enable
 `"player_channel_control": true` for that binding. It defaults to false. Keep the
