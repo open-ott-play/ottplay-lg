@@ -93,6 +93,18 @@ struct Draft {
     api_key: String,
 }
 
+/// A process-local proof issued only by the verified companion admission path.
+/// It cannot be reconstructed from an arbitrary external URL.
+struct NativeAdmission {
+    identity: plx_media::route::PlaybackIdentity,
+    source: plx_media::ff::ExternalSource,
+    generation: u64,
+    media_generation: u64,
+    worker: plx_media::route::WorkerTicket,
+    request: plx_media::route::PlayRequestTicket,
+    configuration: (Configuration, u64),
+    session: Option<(String, Option<usize>)>,
+}
 pub(super) struct Adapter {
     pending: Vec<Pending>,
     sources: Vec<IndexerSource>,
@@ -116,6 +128,7 @@ pub(super) struct Adapter {
     next_poll: u64,
     inspecting: bool,
     playing: bool,
+    native_admission: Option<NativeAdmission>,
     worker_done: Arc<AtomicBool>,
     inspected_tx: mpsc::Sender<Completed>,
     inspected_rx: mpsc::Receiver<Completed>,
@@ -155,6 +168,7 @@ impl Default for Adapter {
             next_poll: 0,
             inspecting: false,
             playing: false,
+            native_admission: None,
             worker_done: Arc::new(AtomicBool::new(true)),
             inspected_tx: tx,
             inspected_rx: rx,
@@ -687,6 +701,7 @@ impl Adapter {
     }
 
     fn cancel_media(&mut self, runtime: &mut Runtime) {
+        self.native_admission = None;
         self.draft = Draft::default();
         self.generation = self.generation.wrapping_add(1);
         self.cancelled.store(true, Ordering::Relaxed);
@@ -1306,6 +1321,11 @@ impl Adapter {
         source: plx_media::ff::ExternalSource,
         info: plx_media::ff::inspect::MediaInfo,
     ) -> Result<(), &'static str> {
+        self.native_admission = None;
+        parental_runtime::observe_session(runtime, app);
+        input_policy::replace_source(runtime)?;
+        runtime.require_parental(parental::Target::Settings)?;
+        let configuration = configuration(&runtime.saved.settings)?;
         // Owned URLs remain scoped to the current helper session. Add-on HTTP
         // proposals never acquire ownership merely by looking like a loopback URL.
         if let Some(expected) = self.direct_source.as_ref() {
@@ -1374,6 +1394,17 @@ impl Adapter {
         )
         .map_err(|_| "The native decoder cannot open this torrent file")?;
         subtitles.apply(app, true);
+        self.route_ticket = Some(plx_media::route::worker_ticket());
+        self.native_admission = Some(NativeAdmission {
+            identity: plx_media::route::playback_identity(&app.player.session)
+                .ok_or("Native companion playback identity is unavailable")?,
+            source: plx_media::route::external_source(&app.player.session)
+                .ok_or("Native companion source is unavailable")?,
+            generation: self.generation, media_generation: self.media_generation,
+            worker: plx_media::route::worker_ticket(),
+            request: plx_media::route::play_request_ticket(), configuration,
+            session: self.session.as_ref().map(|session| (session.id.clone(), session.selected)),
+        });
         Ok(())
     }
 
@@ -1610,6 +1641,68 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         rows,
         selected_row: runtime.selected.clone(),
     })
+}
+
+/// Generic Play belongs to this adapter only when its actual current view
+/// publishes that exact enabled action under the current session/catalogue.
+pub(super) fn owns_generic_play(runtime: &Runtime, action: &OttAction) -> bool {
+    matches!(action, OttAction::Play(_)) && view(runtime).is_some_and(|view|
+        view.rows.iter().any(|row| row.enabled && &row.action == action))
+}
+
+/// Recognize the real companion owner at the last decoder boundary. Neither
+/// an external URL nor a matching display label is sufficient authority.
+pub(super) fn native_start_admission(runtime: &mut Runtime, app: &App)
+    -> Option<Result<(), &'static str>>
+{
+    let receipt = runtime.companion_adapter.as_ref()?.native_admission.as_ref()?;
+    if !plx_media::route::playback_identity_matches(&app.player.session, &receipt.identity) { return None; }
+    let check = (|| {
+        let adapter = runtime.companion_adapter.as_ref().ok_or("Companion media owner is unavailable")?;
+        if !app.running || !runtime.loaded || runtime.persistence_uncertain || !playback_allowed(app)
+            || adapter.cancelled.load(Ordering::Relaxed)
+            || adapter.generation != receipt.generation
+            || adapter.media_generation != receipt.media_generation
+            || runtime.play_generation != receipt.media_generation
+            || plx_media::route::external_source(&app.player.session).as_ref() != Some(&receipt.source)
+            || receipt.worker != plx_media::route::worker_ticket()
+            || adapter.route_ticket.as_ref() != Some(&receipt.worker)
+            || !plx_media::route::play_request_is_current(receipt.request)
+            || configuration(&runtime.saved.settings)? != receipt.configuration
+        { return Err("Companion playback changed before native Load"); }
+        if let Some(expected) = adapter.direct_source.as_ref() {
+            if receipt.session.is_some() || adapter.session.is_some()
+                || expected != &receipt.source || !stremio::admitted_source(expected) {
+                return Err("Companion direct source changed before native Load");
+            }
+        } else {
+            let session = adapter.session.as_ref().ok_or("Companion session retired before native Load")?;
+            if receipt.session.as_ref() != Some(&(session.id.clone(), session.selected))
+                || !matches!(&receipt.source, plx_media::ff::ExternalSource::OwnedHttp(url)
+                    if runtime.companion.stream_url(session).ok().as_ref() == Some(url))
+            { return Err("Companion session changed before native Load"); }
+        }
+        Ok(())
+    })();
+    Some(check.and_then(|()| {
+        parental_runtime::observe_session(runtime, app);
+        input_policy::replace_source(runtime)?;
+        runtime.require_parental(parental::Target::Settings)
+    }))
+}
+
+pub(super) fn retire_native_start(runtime: &mut Runtime, app: &App,
+    identity: &plx_media::route::PlaybackIdentity, ticket: plx_media::route::PlayRequestTicket)
+{
+    if !plx_media::route::play_request_is_current(ticket)
+        || !plx_media::route::playback_identity_matches(&app.player.session, identity)
+        || !runtime.companion_adapter.as_ref().and_then(|a| a.native_admission.as_ref())
+            .is_some_and(|receipt| &receipt.identity == identity && receipt.request == ticket)
+    { return; }
+    if let Some(mut adapter) = runtime.companion_adapter.take() {
+        adapter.cancel_media(runtime);
+        runtime.companion_adapter = Some(adapter);
+    }
 }
 
 pub(super) fn action(

@@ -315,15 +315,18 @@ fn native_plex_list_step_never_skips_an_unavailable_or_pin_protected_target() {
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     let _registry = NativeCatalogRegistry;
     for protected in [false, true] {
-        let mut app = list_app(&[42,43], 42);
+        let mut app = list_app(&[42,43,44], 42);
         let r = app.ott.as_mut().unwrap();
         let profile = r.effective_profile().unwrap().clone();
         let current = selection::capture(&profile, &r.catalog.entries[0]).unwrap();
-        let following = selection::capture(&profile, &r.catalog.entries[1]).unwrap();
-        let target_profile = synthetic_profile();
-        let target = selection::capture(&target_profile, &synthetic_entry()).unwrap();
+        let following = selection::capture(&profile, &r.catalog.entries[2]).unwrap();
+        let target = if protected {
+            r.catalog.entries[1].protection = Some(true);
+            selection::capture(&profile, &r.catalog.entries[1]).unwrap()
+        } else {
+            selection::capture(&synthetic_profile(), &synthetic_entry()).unwrap()
+        };
         if protected {
-            r.saved.profiles.profiles.push(target_profile);
             r.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
         }
         r.saved.favorites.toggle(current).unwrap();

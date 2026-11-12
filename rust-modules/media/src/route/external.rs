@@ -599,6 +599,24 @@ fn install_external_source(
 }
 
 #[cfg(test)]
+pub(crate) fn external_hls_session_for_test(duration_ns: i64) -> PlaybackSession {
+    let mut ps = PlaybackSession::IDLE;
+    reset_player_control_for_test(&ps);
+    let info = MediaInfo {
+        resolved_source: None, hls_playback: None, tracks: Default::default(),
+        video_codec: "h264".into(), audio_codec: "aac".into(),
+        width: 1280, height: 720, fps: 24.0, duration_ns,
+        audio_channels: 2, audio_sample_rate: 48000, audio_bit_depth: 16,
+        dovi: plx_data::metadata::Dovi::NONE,
+    };
+    request_external_source(&mut ps, &info,
+        crate::ff::ExternalSource::Hls("https://example.invalid/stream.m3u8".into()),
+        "Fixture", "", plx_platform::devcaps::assumed_shared()).unwrap();
+    reset_player_control_for_test(&ps);
+    ps
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn media() -> MediaInfo {
@@ -616,6 +634,25 @@ mod tests {
             audio_sample_rate: 48000,
             audio_bit_depth: 16,
             dovi: plx_data::metadata::Dovi::NONE,
+        }
+    }
+    #[test]
+    fn admitted_external_hls_uses_segmented_buffering_without_a_plex_contract() {
+        let _serial = plx_base::testlock::serial();
+        for (source, segmented) in [
+            (crate::ff::ExternalSource::Hls("https://example.invalid/live.m3u8".into()), true),
+            (crate::ff::ExternalSource::Http("https://example.invalid/video.mp4".into()), false),
+            (crate::ff::ExternalSource::Local("/media/video.mp4".into()), false),
+        ] {
+            let mut ps = PlaybackSession::IDLE;
+            reset_player_control_for_test(&ps);
+            request_external_source(&mut ps, &media(), source, "Video", "",
+                plx_platform::devcaps::assumed_shared()).unwrap();
+            assert_eq!(is_segmented_hls(&ps), segmented);
+            assert!(!matches!(ps.cur_contract.delivery,
+                plx_plex::plex::TranscodeDelivery::FixedHls { .. }),
+                "external playback must not manufacture a server transcode contract");
+            reset_player_control_for_test(&ps);
         }
     }
     #[test]

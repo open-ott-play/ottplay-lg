@@ -336,6 +336,62 @@ impl MenuPlayAwait {
     pub(crate) fn for_link(sid: plx_plex::plex::ServerId, rk: String, open: bool, now: u32) -> Self {
         Self { open, stay_on_miss: true, ..Self::new(sid, rk, None, HudStart::Ordinary, now) }
     }
+
+    pub(crate) fn parental_interactive(&self) -> bool { !self.stay_on_miss }
+
+    /// The leaf this settled continuation would actually send to the native
+    /// route. Before settlement it may only fetch metadata, never start media.
+    pub(crate) fn parental_target(&self, view: plx_data::metadata::MetadataView<'_>)
+        -> Option<(plx_plex::plex::ServerId, String)>
+    {
+        if self.open { return None; }
+        let detail = view.current().filter(|detail|
+            plx_plex::plex::same_item((detail.sid, &detail.rk), (self.sid, &self.expect)))?;
+        match self.phase {
+            MenuPlayPhase::Season { gen, idx } if view.season_gen() != gen
+                || view.season_loading() || detail.cur_season != idx => return None,
+            _ => {}
+        }
+        if self.season_index.is_some_and(|index| detail.seasons.iter()
+            .position(|season| season.index == index).is_some_and(|index| index != detail.cur_season))
+        { return None; }
+        let key = if detail.kind == "show" || !detail.seasons.is_empty() {
+            let started = detail.on_deck.as_ref().is_some_and(|episode| episode.resume_ms > 0)
+                || detail.seasons.iter().any(|season| season.viewed_leaf_count > 0);
+            (if started { detail.on_deck.as_ref() } else { None })
+                .or_else(|| detail.episodes.first())?.rk.clone()
+        } else { detail.rk.clone() };
+        Some((self.sid, key))
+    }
+}
+
+#[cfg(test)]
+mod parental_target_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_parental_target_names_the_actual_current_leaf_and_not_a_stale_parent() {
+        let _serial = plx_base::testlock::serial();
+        let sid = plx_plex::plex::ServerId::default();
+        let mut metadata = plx_data::stores::metadata::MetadataStore::default();
+        let mut detail = plx_data::metadata::Detail {
+            sid, rk: "show".into(), kind: "show".into(),
+            episodes: vec![plx_data::metadata::Episode { rk: "first".into(), ..Default::default() }].into(),
+            on_deck: Some(plx_data::metadata::Episode { rk: "resume".into(), resume_ms: 10, ..Default::default() }),
+            ..Default::default()
+        };
+        let wait = MenuPlayAwait::for_link(sid, "show".into(), false, 0);
+        plx_data::metadata::set_current_for_test(metadata.state_mut(), Some(detail.clone()));
+        assert_eq!(wait.parental_target(metadata.view()), Some((sid, "resume".into())));
+        detail.on_deck.as_mut().unwrap().resume_ms = 0;
+        plx_data::metadata::set_current_for_test(metadata.state_mut(), Some(detail.clone()));
+        assert_eq!(wait.parental_target(metadata.view()), Some((sid, "first".into())));
+        detail.rk = "replacement".into();
+        plx_data::metadata::set_current_for_test(metadata.state_mut(), Some(detail));
+        assert_eq!(wait.parental_target(metadata.view()), None);
+        assert_eq!(MenuPlayAwait::for_link(sid, "replacement".into(), true, 0)
+            .parental_target(metadata.view()), None, "Open only navigates; it never starts media");
+    }
 }
 
 /// **What a card ACTIVATION does, once its screen has decided whether the press means PLAY.**

@@ -10,7 +10,7 @@ fn fixture() -> (ProviderProfile, CatalogEntry, ArchiveInterval) {
         source_alias: String::new(),
         enabled: true,
     };
-    let entry = CatalogEntry {
+    let entry = CatalogEntry { protection: None,
         synopsis: None,
         id: "channel".into(),
         title: "Channel".into(),

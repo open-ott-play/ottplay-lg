@@ -123,8 +123,14 @@ mod organization_ui;
 mod osd_ui;
 #[path = "ott_parental.rs"]
 mod parental;
+#[path = "ott_parental_classification.rs"]
+mod parental_classification;
 #[path = "ott_parental_runtime.rs"]
 mod parental_runtime;
+#[path = "ott_parental_foreign.rs"]
+mod parental_foreign;
+#[path = "ott_native_start_admission.rs"]
+mod native_start_admission;
 #[path = "ott_playback_failure.rs"]
 mod playback_failure;
 #[path = "ott_playback_menu.rs"]
@@ -4106,6 +4112,7 @@ impl Runtime {
             .map(|(_, profile)| profile)
     }
     fn cancel_play_request(&mut self) {
+        parental_runtime::cancel_ui_origin(self);
         self.classic_play_handoff = Default::default();
         self.live_retry_generation = None;
         self.explicit_step.clear();
@@ -4134,6 +4141,7 @@ impl Runtime {
         profile: &ProviderProfile,
         entry: &CatalogEntry,
     ) -> Result<(), &'static str> {
+        parental_runtime::observe_session(self, app);
         profile_rename::guard(self, profile)?;
         managed::guard_profile(self, app, profile)?;
         classic_source::guard_profile(self, app, profile)?;
@@ -4162,7 +4170,8 @@ impl Runtime {
             return Err("Playback source changed before native admission");
         }
         let policy_profile = self.attachment_policy_profile(&bound_profile, favorite.as_ref())?;
-        self.require_parental_playback(&policy_profile)?;
+        self.require_parental_resolved(&policy_profile, &bound_profile,
+            bound_entry.as_ref(), favorite.as_ref(), entry)?;
         kiosk_source::admit_bound(
             self,
             app,
@@ -4226,6 +4235,7 @@ impl Runtime {
         request: PlaybackRequest,
         interactive: bool,
     ) -> Result<(), &'static str> {
+        parental_runtime::observe_session(self, app);
         if !self.play_work_allowed() {
             return Err("Media work is waiting for foreground or worker retirement");
         }
@@ -4254,7 +4264,7 @@ impl Runtime {
         managed::guard_profile(self, app, &profile)?;
         classic_source::guard_profile(self, app, &profile)?;
         let policy_profile = self.attachment_policy_profile(&profile, favorite.as_ref())?;
-        self.require_parental_playback(&policy_profile)?;
+        self.require_parental_preparation(&policy_profile, &profile, entry.as_ref(), favorite.as_ref())?;
         kiosk_source::admit_bound(
             self,
             app,
@@ -4961,8 +4971,9 @@ pub(super) fn draw_notifications(app: &mut App) {
 fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
     use plx_media::player::report::IoFailureDetails;
     use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
-    matches!(details.and_then(|details| details.io_failure), Some(IoFailureDetails::Hls {
-        exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed,
+    matches!(details.filter(|details| details.pipeline_error == 0).and_then(|details| details.io_failure), Some(IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
+            | DemuxExitClass::HlsPlaylistFetchFailed,
         outcome: Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState),
     }))
 }
@@ -5963,6 +5974,9 @@ fn tick_with_start(
                     result.and_then(|(entry, source)| {
                         preplay::phase(&mut runtime, generation, preplay::Phase::Admitting);
                         if let Err(error) = runtime.rebind_native_admission(app, &profile, &entry) {
+                            if parental_runtime::is_pin_required(error) {
+                                parental_runtime::resolved_pin_required(&mut runtime, app);
+                            }
                             runtime.retire_result(Ok((entry, source)));
                             return Err(error);
                         }
@@ -6037,7 +6051,7 @@ fn tick_with_start(
                         )
                     }
                     Err(error) => {
-                        let keep_previous_lease = (catalog_failure
+                        let keep_previous_lease = (parental_runtime::is_pin_required(error) || catalog_failure
                             || transient::plex_remote::target_current(&runtime).is_some())
                             && runtime
                                 .active_lease
@@ -6077,6 +6091,7 @@ fn tick_with_start(
                     runtime.remote.complete(invocation, reply);
                 }
                 let target = runtime.take_completed_play_target();
+                parental_runtime::present_pending(&mut runtime, app);
                 if expired {
                     if let Some(playing) =
                         runtime.playing.as_ref().filter(|p| playing_matches(p, app))
@@ -6839,6 +6854,8 @@ fn apply_ui_action(
     // The addressed affirmative answer alone applies the navigation effects.
     let navigates = navigates && !exit_confirmation::handles(runtime, app, &action);
     let quality_play = matches!(&action, OttAction::Play(_));
+    let parental_submit = matches!(&action, OttAction::SubmitSetting { key, .. }
+        if key == "parental.unlock");
     let profile_submit =
         matches!(&action, OttAction::SubmitSetting { key, .. } if key == "profile.source");
     let duplicate_submit = matches!(&action, OttAction::SubmitSetting { session, key, .. }
@@ -6850,8 +6867,10 @@ fn apply_ui_action(
         Ok(()) if navigates => {
             let started_save = !was_saving && runtime.saving;
             runtime.accepted_navigation(started_save);
+            if parental_submit { parental_runtime::seal_submission(runtime); }
             if quality_play {
                 vportal_quality::seal(runtime);
+                parental_runtime::seal_ui_origin(runtime);
             }
             if profile_submit {
                 local_profile::seal(runtime);
@@ -6868,6 +6887,7 @@ fn apply_ui_action(
             // never promote a failed action's save authority.
             if navigates && browse_before != (runtime.page, runtime.provider) {
                 runtime.accepted_navigation(false);
+                if quality_play { parental_runtime::seal_foreign_navigation(runtime); }
             }
             if !search_submission {
                 runtime.status = error.into();
@@ -7235,6 +7255,7 @@ fn handle_action(
             }
             // An admitted row activation is also explicit browse intent. This
             // branch excludes remote/autoplay and the random shortcut.
+            parental_runtime::mark_ui_origin(runtime, app);
             if browse_choice {
                 browse_focus::record(runtime, &id);
                 browse_focus::request_flush(runtime);
@@ -8735,8 +8756,15 @@ pub(super) fn kiosk_player_request(app: &App, request: &plx_screens::registry::P
 }
 pub(super) fn foreign_content_allowed(app: &mut App) -> bool {
     app.ott
-        .as_mut()
-        .is_none_or(|r| input_policy::foreign_content(r).is_ok())
+        .as_ref()
+        .is_none_or(|runtime| input_policy::replace_source(runtime).is_ok())
+}
+pub(super) fn foreign_play_allowed(app: &mut App, sid: plx_plex::plex::ServerId, rating_key: &str) -> bool {
+    parental_foreign::allowed(app, sid, rating_key)
+}
+
+pub(super) fn foreign_ui_play_allowed(app: &mut App, sid: plx_plex::plex::ServerId, rating_key: &str) -> bool {
+    parental_foreign::ui_allowed(app, sid, rating_key)
 }
 #[cfg(test)]
 #[path = "ott_reminder_wiring_tests.rs"]
@@ -8762,4 +8790,38 @@ pub(super) fn desktop_key(app: &mut App) -> bool {
 /// Action-free physical release retirement precedes standby and kiosk input gates.
 pub(super) fn desktop_key_boundary(app: &mut App) -> bool {
     desktop_input::boundary(app)
+}
+
+pub(super) fn foreign_native_start_allowed(app: &mut App) -> bool {
+    parental_foreign::native_start_allowed(app)
+}
+
+/// A denied old native transaction must not cancel a newer OTT resolver.
+pub(super) fn newer_native_selection_pending(app: &App) -> bool {
+    app.ott.as_ref().is_some_and(|runtime| runtime.play_target.is_some()
+        || runtime.pending_play.is_some() || runtime.transient.candidate.is_some())
+}
+
+/// Non-policy lifecycle tests use a real registered Plex client and an
+/// explicitly verified disabled policy. Bare app() remains unqualified so
+/// missing-Runtime and controlled-start denial regressions retain their fence.
+#[cfg(all(test, feature = "hostsim"))]
+pub(super) fn install_legacy_lifecycle_test_runtime(app: &mut App, sid: plx_plex::plex::ServerId) {
+    assert!(plx_plex::plex::client_for(sid).is_some_and(|client| !client.data_io_disabled()));
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+    runtime.loaded = true;
+    runtime.state_load = StateLoad::Idle;
+    runtime.entropy = Some([1; 16]);
+    runtime.clock_anchor = Some(clock);
+    runtime.clock_sample = Some(clock);
+    runtime.wall_clock_ms = clock.unix_ms();
+    runtime.saved.settings.insert("parentPin".into(), json!("*"));
+    runtime.remote = Remote::disabled_for_test("dev_lifecycle_fixture", "fixture");
+    runtime.write_permit.revoke();
+    runtime.catalog_done.store(false, Ordering::Release);
+    runtime.metadata_done.store(false, Ordering::Release);
+    runtime.resolver_busy = true;
+    app.running = true;
+    app.ott = Some(runtime);
 }

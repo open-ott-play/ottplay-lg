@@ -658,6 +658,7 @@ fn protected_new_designation_is_denied_before_saved_mutation() {
     let mut app = installed_a();
     let runtime = app.ott.as_mut().unwrap();
     runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
+    runtime.catalog.entries[1].protection = Some(true);
     let before = runtime.saved.settings.clone();
     let (_, response) = request(&mut app, json!({"mode":"set","query":"2"}));
     assert_eq!(response.unwrap()["status"], "rejected");

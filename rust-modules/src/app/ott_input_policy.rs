@@ -149,14 +149,12 @@ fn plex_remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'static s
             ..
         }) => {
             replace_source(runtime)?;
-            runtime.require_parental(parental::Target::Providers)?;
-            runtime.require_parental(parental::Target::Channel { marked: true })
+            runtime.require_parental(parental::Target::Providers)
         }
         PlexRequest::Queue(QueueRequest::Next | QueueRequest::Previous) => {
             // A normal pinned queue can move within its actual admitted members.
             // The final source binder still checks the exact member and owner.
-            navigation(runtime)?;
-            runtime.require_parental(parental::Target::Channel { marked: true })
+            navigation(runtime)
         }
         PlexRequest::Queue(QueueRequest::Stop) => navigation(runtime),
         PlexRequest::Queue(QueueRequest::Repeat(_)) => {
@@ -167,7 +165,10 @@ fn plex_remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'static s
             if !matches!(mode(runtime)?, Kiosk::Off) {
                 return Err(PINNED);
             }
-            runtime.require_parental(parental::Target::Channel { marked: true })
+            match runtime.playing.as_ref().map(|playing| (playing.profile.clone(), playing.entry.clone())) {
+                Some((profile, entry)) => runtime.require_parental_entry(&profile, Some(&entry)),
+                None => runtime.require_parental(parental::Target::Channel { marked: true }),
+            }
         }
     }
 }
@@ -204,7 +205,8 @@ pub(super) fn remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'st
             return Err(BUSY);
         }
         if inv.params.get("query").is_some() {
-            return runtime.require_parental(parental::Target::Channel { marked: true });
+            // The designation binder checks its resolved, source-owned item.
+            return Ok(());
         }
         // Off, strict-only adjustment and bare ordinary arm do not designate
         // protected media. The source owner checks queue/target/capture admission.
@@ -232,16 +234,16 @@ pub(super) fn remote(runtime: &mut Runtime, inv: &Invocation) -> Result<(), &'st
         "player_settings" | "player_settings_patch" => {
             runtime.require_parental(parental::Target::Settings)
         }
-        "play" | "play_catalog" | "favorites_global_items" => {
-            runtime.require_parental(parental::Target::Channel { marked: true })
-        }
+        // The selected entry, including a number/step resolved from a receipt,
+        // is checked by the common preparation and final native binder.
+        "play" | "play_catalog" | "favorites_global_items" => Ok(()),
         "playback"
             if matches!(
                 operation(inv),
                 "next_channel" | "previous_channel" | "step_channel"
             ) =>
         {
-            runtime.require_parental(parental::Target::Channel { marked: true })
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -255,10 +257,4 @@ pub(super) fn player(runtime: &Runtime, request: &plx_screens::registry::PlayerR
         request,
         PlayerReq::ExtendHud(_) | PlayerReq::ExtendDefaultHud | PlayerReq::ArmInfoPress
     )
-}
-/// Source-changing effects from other native screens have no OTT item proof.
-/// A locked source must never be replaced through that alternate route.
-pub(super) fn foreign_content(runtime: &mut Runtime) -> Result<(), &'static str> {
-    replace_source(runtime)?;
-    runtime.require_parental(parental::Target::Channel { marked: true })
 }

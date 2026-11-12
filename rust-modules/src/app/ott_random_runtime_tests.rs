@@ -178,12 +178,13 @@ fn editing_saving_uncertain_empty_and_nonmedia_pages_have_no_random_entry() {
 }
 
 #[test]
-fn ordinary_channel_pin_and_strict_kiosk_gate_the_resolved_play_action() {
+fn protected_channel_pin_and_strict_kiosk_gate_the_resolved_play_action() {
     let _serial = plx_base::testlock::serial();
     for pin in [true, false] {
         let mut app = mounted();
         let runtime = app.ott.as_mut().unwrap();
         if pin {
+            for entry in &mut runtime.catalog.entries { entry.protection = Some(true); }
             runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
             runtime.saved.settings.insert("psChannels".into(), json!(1));
         } else {

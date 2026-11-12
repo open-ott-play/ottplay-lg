@@ -137,7 +137,9 @@ pub(super) fn native_list_step(runtime: &mut Runtime, app: &mut App,
     let target = commands::step_in_list(&ids, Some(current), offset).ok_or(OPEN)?;
     if target == current { return Ok(false); }
     input_policy::ui(runtime, &OttAction::Play(target.clone()))?;
+    parental_runtime::ui_gate(runtime, app, &OttAction::Play(target.clone()))?;
     runtime.play_with_policy(app, &target, false)?;
+    parental_runtime::mark_ui_origin(runtime, app);
     runtime.cancel_setup();
     Ok(true)
 }
@@ -240,7 +242,7 @@ pub(super) fn play_current(runtime: &mut Runtime, app: &mut App, id: &str)
     managed::guard_profile(runtime, app, &profile)?;
     classic_source::guard_profile(runtime, app, &profile)?;
     let policy_profile = runtime.attachment_policy_profile(&profile, favorite.as_ref())?;
-    runtime.require_parental_playback(&policy_profile)?;
+    runtime.require_parental_entry(&policy_profile, playing_entry.as_ref())?;
     kiosk_source::admit_bound(runtime, app, kiosk_source::BoundCandidate {
         request: &request, profile: &profile, entry: playing_entry.as_ref(), favorite: favorite.as_ref(),
     }).map_err(kiosk_source::SourceError::message)?;

@@ -195,6 +195,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     }
     let id = target(runtime, app, offset)?;
     input_policy::ui(runtime, &OttAction::Play(id.clone()))?;
+    parental_runtime::ui_gate(runtime, app, &OttAction::Play(id.clone()))?;
     let selected = runtime.play_target.as_ref().map(|request| request.id.as_str())
         .or_else(|| runtime.playing.as_ref().map(|playing| playing.selection_id.as_str()));
     if selected == Some(id.as_str()) { return Ok(()); }
@@ -220,6 +221,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     }
     // A refused destination must not fall forward to unrelated media.
     runtime.play_with_policy(app, &id, false)?;
+    parental_runtime::mark_ui_origin(runtime, app);
     if let Some(page) = bridge::player_mut(&mut app.pages) {
         page.begin_channel_change(clock::now());
     }

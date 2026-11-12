@@ -128,7 +128,7 @@ fn proof(saved: &mut Saved, root: &BoundSource, configured_profile: bool, item_i
     let Locator::Local { relative_path, .. } = &favorite.locator else {
         panic!("Local fixture")
     };
-    let entry = CatalogEntry { synopsis: None, live: None,
+    let entry = CatalogEntry { protection: None, synopsis: None, live: None,
         id: item_id.into(),
         title: favorite.title.clone(),
         category: String::new(),

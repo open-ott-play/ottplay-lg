@@ -78,6 +78,9 @@ receipt and matching source distribution. Developer Mode and Homebrew delivery
 must use the same verified package. See
 [installation and acceptance](docs/ott-native-delivery.md).
 
+For supported application preferences, PIN policy and schema-based remote
+configuration, see [native LG settings](docs/native-settings.md).
+
 ## License
 
 GPL-3.0-or-later. Original PlxNative copyright and earlier MIT grants remain

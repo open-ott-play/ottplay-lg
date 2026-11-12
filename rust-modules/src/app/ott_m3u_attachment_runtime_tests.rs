@@ -20,7 +20,7 @@ fn profile(id: &str) -> ProviderProfile {
 }
 
 fn tv_entry() -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         live: None,
         id: "tv-row".into(),

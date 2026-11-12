@@ -236,7 +236,7 @@ pub(super) fn toggle(runtime: &mut Runtime, app: &mut App) -> Result<(), &'stati
             selection::SelectionOwner::M3uAttachment(receipt) => receipt.parent().clone(),
             _ => playing.profile.clone(),
         };
-        runtime.require_parental_playback(&policy)?;
+        runtime.require_parental_entry(&policy, Some(&playing.entry))?;
         classic_source::guard_profile(runtime, app, &playing.profile)?;
         let managed_read = managed::capture_read(runtime, app, &playing.profile)?;
         let (saved, favorite, added) = candidate(runtime, &playing)?;

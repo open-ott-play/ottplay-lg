@@ -522,7 +522,7 @@ mod tests {
             resolve(&p, &live, &mut f).unwrap(),
             "https://media.invalid:443/live.m3u8"
         );
-        let parent = xtream::Series {
+        let parent = xtream::Series { protection: None,
             id: "10".into(),
             name: "Show".into(),
             category: "Series".into(),
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn missing_episode_is_not_replaced_by_a_different_file() {
         let (p, mut f, c) = setup();
-        let parent = xtream::Series {
+        let parent = xtream::Series { protection: None,
             id: "10".into(),
             name: "Show".into(),
             category: "Series".into(),

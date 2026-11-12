@@ -28,7 +28,7 @@ fn permanent() -> ProviderProfile {
 }
 
 fn live_entry() -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         id: "live".into(),
         title: "Live fixture".into(),
@@ -2321,3 +2321,40 @@ fn failed_native_replacement_play_returns_safe_rejection_for_both_versions() {
 
 #[path = "plex_repeat.rs"]
 mod ordinary_repeat;
+
+#[test]
+fn parental_protected_transient_plex_pin_scope_requires_its_configured_source_and_current_grant() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset;
+    for change in ["expiry", "profile-removal", "profile-duplicate", "origin", "source-duplicate", "token"] {
+        let mut app = setup();
+        app.running = true;
+        let sid = register_source(&mut app, "protected-transient-fixture");
+        seed_queue(&mut app, sid, &["41", "42"]);
+        let (profile, mut entry) = {
+            let runtime = app.ott.as_mut().unwrap();
+            runtime.entropy = Some([7; 16]);
+            runtime.saved.settings.remove("parentPin");
+            (runtime.effective_profile().unwrap().clone(), runtime.catalog.entries[0].clone())
+        };
+        entry.protection = Some(true);
+        // Queue preparation captures a configured source; its retained
+        // playback owner cannot replace that durable source's authority.
+        assert!(app.ott.as_mut().unwrap().require_parental_entry(&profile, Some(&entry)).is_err());
+        parental_runtime::grant_current_profile_for_test(&mut app);
+        assert!(app.ott.as_mut().unwrap().require_parental_entry(&profile, Some(&entry)).is_ok());
+        match change {
+            "expiry" => parental_runtime::expire_current_profile_for_test(&mut app),
+            "profile-removal" => app.ott.as_mut().unwrap().saved.profiles.profiles.retain(|saved| saved != &profile),
+            "profile-duplicate" => app.ott.as_mut().unwrap().saved.profiles.profiles.push(profile.clone()),
+            "origin" => app.ott.as_mut().unwrap().saved.settings.get_mut("nativePlexSources").unwrap()[0]["origin"] = json!("https://changed.invalid"),
+            "source-duplicate" => {
+                let sources = app.ott.as_mut().unwrap().saved.settings.get_mut("nativePlexSources").unwrap().as_array_mut().unwrap();
+                sources.push(sources[0].clone());
+            }
+            "token" => plx_plex::plex::client_for(sid).unwrap().set_token("replacement-synthetic-token"),
+            _ => unreachable!(),
+        }
+        assert!(app.ott.as_mut().unwrap().require_parental_entry(&profile, Some(&entry)).is_err(), "{change}");
+    }
+}

@@ -1704,3 +1704,62 @@ fn generic_torrent_file_digit_dispatches_the_rendered_choice_once_and_rejects_ch
         assert!(!runtime.saving);
     }
 }
+
+#[test]
+fn companion_native_load_requires_its_verified_receipt_and_current_source_scope() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetSubtitleAdmission;
+    for mutation in 0..8 {
+        let (mut runtime, mut app, mut adapter) = fixture();
+        app.running = true;
+        runtime.entropy = Some([7; 16]);
+        adapter.media_generation = runtime.play_generation;
+        plx_media::route::cancel_play(&mut app.player.session);
+        plx_media::route::reset_player_control_for_test(&app.player.session);
+        let source = arm_direct_subtitle_admission(&mut adapter, "https://media.invalid:443/receipt.mp4");
+        adapter.admit_playback(&mut runtime, &mut app, source.clone(), subtitle_admission_media()).unwrap();
+        let identity = plx_media::route::playback_identity(&app.player.session).unwrap();
+        let ticket = plx_media::route::play_request_ticket();
+        runtime.companion_adapter = Some(adapter);
+        assert_eq!(native_start_admission(&mut runtime, &app), Some(Ok(())));
+        match mutation {
+            0 => { runtime.saved.settings.insert(REVISION_KEY.into(), json!(1)); }
+            1 => { runtime.companion_adapter.as_mut().unwrap().generation += 1; }
+            2 => { runtime.play_generation += 1; }
+            3 => { runtime.companion_adapter.as_mut().unwrap().cancelled.store(true, Ordering::Relaxed); }
+            4 => { runtime.companion_adapter.as_mut().unwrap().direct_source = Some(
+                plx_media::ff::ExternalSource::Http("https://media.invalid:443/replaced.mp4".into())); }
+            5 => { runtime.saved.settings.insert("psOptions".into(), json!(1)); }
+            6 => { runtime.companion_adapter.as_mut().unwrap().session = Some(select_session()); }
+            _ => { runtime.companion_adapter.as_mut().unwrap().route_ticket = None;
+                runtime.companion_adapter.as_mut().unwrap().native_admission = None; }
+        }
+        assert!(!matches!(native_start_admission(&mut runtime, &app), Some(Ok(()))), "mutation {mutation}");
+        retire_native_start(&mut runtime, &app, &identity, ticket);
+        assert!(runtime.companion_adapter.as_ref().unwrap().native_admission.is_none());
+    }
+}
+
+#[test]
+fn arbitrary_external_video_cannot_acquire_companion_native_load_authority() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetSubtitleAdmission;
+    let (mut runtime, mut app, adapter) = fixture();
+    plx_media::route::cancel_play(&mut app.player.session);
+    plx_media::route::request_external_source(&mut app.player.session, &subtitle_admission_media(),
+        plx_media::ff::ExternalSource::Http("https://media.invalid:443/unowned.mp4".into()),
+        "Fixture", "Video", playback::start_caps()).unwrap();
+    runtime.companion_adapter = Some(adapter);
+    assert!(native_start_admission(&mut runtime, &app).is_none());
+}
+
+#[test]
+fn generic_play_ui_ownership_requires_an_actual_current_adapter_row() {
+    let _serial = plx_base::testlock::serial();
+    let (mut runtime, _app, key) = generic_file_fixture("torrent");
+    assert!(owns_generic_play(&runtime, &OttAction::Play(key.clone())));
+    let stale = format!("torrent.file:999:lease-1:23");
+    assert!(!owns_generic_play(&runtime, &OttAction::Play(stale)));
+    runtime.companion_adapter.as_mut().unwrap().session = None;
+    assert!(!owns_generic_play(&runtime, &OttAction::Play(key)));
+}

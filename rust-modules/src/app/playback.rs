@@ -16,7 +16,7 @@
 //! `PlayerScreen::step` had been answering the same keys through the dispatcher since the page
 //! began reporting `FocusSource::Engine`, and these four went on writing that page's `hud`/`scrub`
 //! from the loop beside it. What is left of the player here is the half a screen may not do —
-//! [`commit_seek`], [`exit_player`], [`activate_player_row`], the transport toggle — each reached
+//! [`commit_seek`], [`exit_player`], [`activate_player_row_checked`], the transport toggle — each reached
 //! through a `PlayerReq`.
 
 use plx_screens::player::input::HudStart;
@@ -678,6 +678,101 @@ impl ViewerTransport {
 /// name. Drained once per frame, after the dispatcher's, exactly as the Library's requests are.
 /// Returns the accepted explicit intent, with seek taking priority in a batch. The caller notifies
 /// its catalogue owner synchronously, before a late restore can replace the viewer's choice.
+pub(crate) fn player_requests_checked(app: &mut super::App,
+    reqs: Vec<plx_screens::registry::PlayerReq>, now: u32) -> ViewerTransport
+{
+    use plx_screens::registry::PlayerReq;
+    let mut accepted = ViewerTransport::None;
+    for request in reqs {
+        let result = match request {
+            PlayerReq::RetryPlayback | PlayerReq::PlayAutomatically
+                if !super::ott_runtime::foreign_native_start_allowed(app) => ViewerTransport::None,
+            PlayerReq::Command(command) => perform_hud_command_checked(app, command, now),
+            PlayerReq::StandIn => {
+                if let Some(slot) = super::bridge::player(&app.pages).map(|page| page.slot) {
+                    ViewerTransport::from_seek(activate_stand_in_checked(app, slot, now))
+                } else { ViewerTransport::None }
+            }
+            request => player_requests(&mut app.player, &mut app.adapters.player,
+                &mut app.repause_at, vec![request], now, &mut app.refresh_hubs,
+                &mut app.pages, &mut app.bridge, &mut app.ok_armed, &mut app.input.press),
+        };
+        accepted = accepted.merge(result);
+    }
+    accepted
+}
+
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) fn queue_target_for_test(app: &mut super::App,
+    direction: Option<plx_media::route::QueueStep>) -> Option<(plx_plex::plex::ServerId, String)>
+{
+    let mut admitted = None;
+    let candidate = direction.map(queue_transport::Candidate::Neighbor)
+        .unwrap_or(queue_transport::Candidate::UpNext);
+    queue_transport::play_with(app, candidate, HudStart::Ordinary, false, false,
+        |_, row, _, _, _| {
+            admitted = Some((row.sid, row.rk));
+            queue_transport::PlayOutcome::Started
+        });
+    admitted
+}
+
+pub(crate) fn perform_hud_command_checked(app: &mut super::App,
+    command: plx_appkit::player_hud::command::HudCommand, now: u32) -> ViewerTransport
+{
+    use plx_appkit::player_hud::command::HudCommand;
+    if app.bridge.ott_player_offer().is_none() {
+        match command {
+            HudCommand::Previous => return queue_transport::step(app, plx_media::route::QueueStep::Previous),
+            HudCommand::Next => return queue_transport::step(app, plx_media::route::QueueStep::Next),
+            _ => {}
+        }
+    }
+    perform_hud_command(command, &mut app.player, &mut app.adapters.player,
+        &mut app.repause_at, now, &mut app.refresh_hubs, &mut app.pages, &mut app.bridge)
+}
+
+pub(crate) fn activate_player_row_checked(app: &mut super::App,
+    slot: plx_appkit::player_hud::ControlSlot, now: u32) -> ViewerTransport
+{
+    let button = super::bridge::player(&app.pages).map_or(0, |page| page.hud.nav.btn);
+    if let plx_appkit::player_hud::ControlSlot::Discs(controls) = slot {
+        controls.command(button).map_or(ViewerTransport::None,
+            |command| perform_hud_command_checked(app, command, now))
+    } else { ViewerTransport::from_seek(activate_stand_in_checked(app, slot, now)) }
+}
+
+fn activate_stand_in_checked(app: &mut super::App,
+    slot: plx_appkit::player_hud::ControlSlot, now: u32) -> bool
+{
+    let button = super::bridge::player(&app.pages).map_or(0, |page| page.hud.nav.btn);
+    let accepted = activate_ctrl_row_checked(app, slot, button);
+    if let Some(page) = super::bridge::player_mut(&mut app.pages) {
+        page.hud.extend_default(now);
+        page.publish();
+    }
+    accepted
+}
+
+pub(crate) fn activate_ctrl_row_checked(app: &mut super::App,
+    slot: plx_appkit::player_hud::ControlSlot, button: c_int) -> bool
+{
+    use plx_appkit::player_hud::ControlSlot;
+    match slot {
+        ControlSlot::UpNext(_) if button == plx_appkit::up_next::BTN_NEXT => {
+            play_up_next(app, HudStart::Ordinary, true);
+            false
+        }
+        ControlSlot::Skip(prompt) if matches!(prompt.action, plx_appkit::skip_pill::SkipAction::Finish) => {
+            finish_playback_checked(app, true);
+            false
+        }
+        slot => activate_ctrl_row(&mut app.player, &mut app.adapters.player,
+            &mut app.repause_at, slot, &mut app.refresh_hubs, button,
+            &mut app.pages, &mut app.bridge),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn player_requests(
     player: &mut plx_media::player::machine::Player,
@@ -1090,20 +1185,22 @@ pub(crate) const CW_RETURN_HOLD_MS: u32 = 300;
 /// commit), so `app.route()` still reads `Player` for the rest of this frame; a caller that needs
 /// to tell a real exit from an Up Next handoff — `dev::scenarios::maybe_replay_after_eos` is the
 /// one that does — must use this return value rather than the route.
-pub(crate) fn finish_playback(
-    player: &mut plx_media::player::machine::Player,
-    pa: &mut plx_media::player::adapter::PlayerAdapter,
-    repause_at: &mut i64,
-    refresh_hubs: &mut bool,
-    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
-    bridge: &mut super::bridge::Bridge,
-) -> bool {
-    if plx_media::route::next_episode_mode() != plx_media::route::NextEpisodeMode::Off
-        && play_up_next(&mut player.session, pa, HudStart::Ordinary, pages, bridge)
-    {
-        return true;
+pub(crate) fn finish_playback(app: &mut super::App) -> bool {
+    finish_playback_checked(app, false)
+}
+
+fn finish_playback_checked(app: &mut super::App, interactive: bool) -> bool {
+    let has_successor = plx_media::route::up_next(&app.player.session).is_some();
+    if plx_media::route::next_episode_mode() != plx_media::route::NextEpisodeMode::Off {
+        match try_up_next(app, HudStart::Ordinary, interactive) {
+            queue_transport::PlayOutcome::Started => return true,
+            queue_transport::PlayOutcome::Refused if interactive && has_successor => return false,
+            _ => {}
+        }
     }
-    exit_player(player, pa, repause_at, refresh_hubs, pages);
+    if interactive { app.player.session.finished = true; }
+    exit_player(&mut app.player, &mut app.adapters.player, &mut app.repause_at,
+        &mut app.refresh_hubs, &mut app.pages);
     // The ring goes back to the scrubber for the NEXT session, and the next session is a fresh
     // instance — so there is nothing to park here any more (`start_playback`'s note).
     false
@@ -1134,9 +1231,9 @@ pub(crate) fn activate_ctrl_row(
         // than an absence, which on a countdown is the difference between choosing and
         // being caught out.
         ControlSlot::UpNext(_) => {
-            if btn == plx_appkit::up_next::BTN_NEXT {
-                play_up_next(&mut player.session, pa, HudStart::Ordinary, pages, bridge);
-            } else {
+            // A split-field caller cannot authorize another leaf. The
+            // App-aware performer consumes Next before reaching here.
+            if btn != plx_appkit::up_next::BTN_NEXT {
                 if let Some(player) = super::bridge::player_mut(pages) {
                     player.up_next.cancel();
                 }
@@ -1165,7 +1262,9 @@ pub(crate) fn activate_ctrl_row(
                 // a `final` credits segment: skipping it IS finishing the item
                 SkipAction::Finish => {
                     player.session.finished = true;
-                    let _ = finish_playback(player, pa, repause_at, refresh_hubs, pages, bridge);
+                    // Fail closed for callers without the App-owned target gate.
+                    // The checked performer handles an authorized successor.
+                    exit_player(player, pa, repause_at, refresh_hubs, pages);
                     false
                 }
             }
@@ -1187,35 +1286,25 @@ pub(crate) fn activate_ctrl_row(
 /// through `queue_transport`: teardown reads the outgoing item's session ids and clears the URL,
 /// both of which the new plan is about to overwrite.
 pub(crate) fn play_up_next(
-    ps: &mut plx_media::route::PlaybackSession,
-    pa: &mut plx_media::player::adapter::PlayerAdapter,
+    app: &mut super::App,
     hud_start: HudStart,
-    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
-    bridge: &mut super::bridge::Bridge,
+    interactive: bool,
 ) -> bool {
-    // clone off the `&'static` store BEFORE anything can replace it (see `Countdown::take`)
-    let Some(u) = super::bridge::player_mut(pages).and_then(|player| player.up_next.take(ps)) else {
-        return false;
-    };
-    // The ratingKey, not the episode title: `rk` is the handle every other line and every harness
-    // assertion already uses, and the title is LG's "Content Viewing Information" — the one
-    // category this app's Data Safety declaration answers "Not collected" to. `eventlog::scrub` is a
-    // backstop for shapes like this; not writing it is the mechanism.
-    log(&format!("up next: S{}E{} rk={}", u.season, u.index, u.rk));
-    // Leaving for the next episode is finishing this one: a stop below the server's watched
-    // threshold scrobbles it, one past the threshold is the server's to count. `queue_transport::play`'s
-    // stop takes the flag (`route::scrobble_stop`).
-    ps.finished = true;
-    if let Some(row) = plx_media::route::queue_neighbor(ps, plx_media::route::QueueStep::Next)
-        .filter(|row| row.rk == u.rk) {
-        return queue_transport::play(ps, pa, row, hud_start, pages, bridge);
+    matches!(try_up_next(app, hud_start, interactive), queue_transport::PlayOutcome::Started)
+}
+
+fn try_up_next(app: &mut super::App, hud_start: HudStart, interactive: bool)
+    -> queue_transport::PlayOutcome
+{
+    if super::bridge::player(&app.pages).is_none() { return queue_transport::PlayOutcome::Refused; }
+    let started = queue_transport::play(app, queue_transport::Candidate::UpNext,
+        hud_start, true, interactive);
+    // Neither a denied automatic countdown nor a successful handoff may keep
+    // firing on later frames. Unlocking never replays this retired action.
+    if let Some(page) = super::bridge::player_mut(&mut app.pages) {
+        page.up_next.cancel();
     }
-    let sid = plx_media::route::item_sid(plx_media::route::cur_sid(ps));
-    queue_transport::play(ps, pa, plx_plex::plex::QueueRow {
-        sid, rk: u.rk, kind: "episode".into(), title: u.ep_title, show_title: u.show_title,
-        season: u.season, index: u.index, part: u.part, vcodec: u.vcodec, acodec: u.acodec,
-        resume_ms: u.resume_ms, dur_ms: u.dur_ms, ..Default::default()
-    }, hud_start, pages, bridge)
+    started
 }
 
 /// Direct-play a LEAF catalog item (movie or episode) — the hero-pill / Continue-Watching
@@ -1388,7 +1477,7 @@ fn go_to_detail(
 
 /// **THE performer of a [`HudCommand`](plx_appkit::player_hud::command::HudCommand)**: one `match` over the closed vocabulary, which every route to
 /// a command ends in. A disc pressed with OK (`PlayerReq::Command`), one clicked
-/// ([`activate_player_row`]) and, in a later change, a More-menu row folded from a package all call
+/// ([`activate_player_row_checked`]) and a More-menu row folded from a package all call
 /// this function, so a command can never mean one thing from a control and another from a menu.
 ///
 /// It performs and does not decide: whether the command is enabled is the caller's, from
@@ -1401,6 +1490,8 @@ fn go_to_detail(
 /// Except Previous and Next, which hand the queue to the transport and leave the HUD as it is, a
 /// performed command keeps the transport up and extends its linger.
 /// The result reports an accepted viewer transport/seek, not an opened panel or a route change.
+/// New legacy queue leaves are intentionally unavailable to this split-field
+/// entry; `perform_hud_command_checked` admits their exact target with the App.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn perform_hud_command(
     command: plx_appkit::player_hud::command::HudCommand,
@@ -1413,7 +1504,6 @@ pub(crate) fn perform_hud_command(
     bridge: &mut super::bridge::Bridge,
 ) -> ViewerTransport {
     use plx_appkit::player_hud::command::{HudCommand, Section};
-    use plx_media::route::QueueStep;
     use plx_screens::player::overlay::OverlayKind;
     use plx_screens::registry::PlayerReq;
     if matches!(command, HudCommand::Previous | HudCommand::Next) {
@@ -1458,10 +1548,17 @@ pub(crate) fn perform_hud_command(
             }
         }
         HudCommand::Previous => {
-            return queue_transport::step(&mut player.session, pa, QueueStep::Previous, pages, bridge);
+            // Restarting the already-admitted item is an ordinary seek. Another
+            // queue leaf requires the App-aware final-target performer.
+            if plx_media::route::previous_restarts(plx_media::player::intended_pos_ns(&player.session)) {
+                request_seek(0);
+                resume_if_paused(pa);
+                return ViewerTransport::Seek;
+            }
+            return ViewerTransport::None;
         }
         HudCommand::Next => {
-            return queue_transport::step(&mut player.session, pa, QueueStep::Next, pages, bridge);
+            return ViewerTransport::None;
         }
         HudCommand::OpenTracks(tab) => {
             super::bridge::open_player_overlay(
@@ -1528,42 +1625,6 @@ fn apply_seek_to(pa: &mut plx_media::player::adapter::PlayerAdapter, ns: i64) ->
     request_seek(ns);
     resume_if_paused(pa);
     true
-}
-
-/// Activate the player transport's focused CONTROL ROW item — the deferred half of a pointer
-/// click, run from the per-frame loop once the press spring-back has played (OK reaches
-/// [`perform_hud_command`] and [`activate_stand_in`] through the engine's own press instead).
-///
-/// Two arms: a STAND-IN owns the row (Skip, Up Next) and performs its own action, or the row holds
-/// the discs, whose focused item is a [`HudCommand`](plx_appkit::player_hud::command::HudCommand) for the one performer. `ctrl` is re-resolved by
-/// the caller on the committing frame rather than captured at the press, so the activation acts on
-/// the row that is DRAWN — the slot is resolved once per loop iteration for input, update and draw
-/// alike (see the `let ctrl` at the top of the loop), and an offer that arrived mid-press has
-/// already changed what the user is looking at.
-#[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn activate_player_row(
-    player: &mut plx_media::player::machine::Player,
-    pa: &mut plx_media::player::adapter::PlayerAdapter,
-    repause_at: &mut i64,
-    ctrl: plx_appkit::player_hud::ControlSlot,
-    now: u32,
-    refresh_hubs: &mut bool,
-    pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>,
-    bridge: &mut super::bridge::Bridge,
-) -> ViewerTransport {
-    // The cursor is the instance's; read the one field this dispatch turns on, so the container
-    // is borrowed once and the arms below are free to present a panel on it.
-    let btn = super::bridge::player(pages).map_or(0, |player| player.hud.nav.btn);
-    if let plx_appkit::player_hud::ControlSlot::Discs(controls) = ctrl {
-        if let Some(command) = controls.command(btn) {
-            perform_hud_command(command, player, pa, repause_at, now, refresh_hubs, pages, bridge)
-        } else {
-            ViewerTransport::None
-        }
-    } else {
-        ViewerTransport::from_seek(activate_stand_in(
-            player, pa, repause_at, ctrl, now, refresh_hubs, pages, bridge))
-    }
 }
 
 /// Activate the Skip pill or the Up Next item the cursor is on, then keep the transport up. Same

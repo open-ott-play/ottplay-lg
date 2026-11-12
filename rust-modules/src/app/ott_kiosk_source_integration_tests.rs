@@ -309,6 +309,8 @@ fn protected_first_capture_is_denied_before_writer_admission() {
     install_playing(&mut app);
     let mut runtime = app.ott.take().unwrap();
     runtime.saved.settings.insert("parentPin".into(), json!("pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
+    runtime.playing.as_mut().unwrap().entry.protection = Some(true);
+    runtime.catalog.entries[0].protection = Some(true);
     let before = runtime.saved.clone();
     assert!(kiosk_capture::tick(&mut runtime, &app).is_err());
     assert_eq!(runtime.saved.settings, before.settings);

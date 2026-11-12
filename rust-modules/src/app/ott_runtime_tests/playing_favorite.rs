@@ -395,6 +395,7 @@ fn protected_playing_source_without_a_pin_grant_is_not_favorited() {
     // Existing valid record fixture: parsing only, no key derivation or grant.
     app.ott.as_mut().unwrap().saved.settings.insert("parentPin".into(), json!(
         "pbkdf2-sha256$600000$000102030405060708090a0b0c0d0e0f$ac310cc8527c6c3a4e20d2a2246ebd77d59766dae1c5fe843d65ecf6a7e20c65"));
+    app.ott.as_mut().unwrap().playing.as_mut().unwrap().entry.protection = Some(true);
     assert!(invoke(&mut app).is_err());
     let r = app.ott.as_ref().unwrap();
     assert!(!r.saving && r.pending_playing_favorite.is_none());

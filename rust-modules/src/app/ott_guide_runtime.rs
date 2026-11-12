@@ -31,6 +31,13 @@ pub(super) struct State {
     return_page: &'static str,
 }
 
+pub(super) fn parental_target(runtime: &Runtime) -> Option<(ProviderProfile, CatalogEntry)> {
+    let state = runtime.guide.as_ref()?;
+    (state.source_generation == runtime.generation
+        && runtime.effective_profile() == Some(&state.profile))
+        .then(|| (state.profile.clone(), state.entry.clone()))
+}
+
 pub(super) fn is_live(profile: &ProviderProfile, entry: &CatalogEntry) -> bool {
     match (&profile.kind, &entry.media) {
         (ProviderKind::M3u, MediaLocator::Http { .. }) => entry.duration_ms.is_none(),

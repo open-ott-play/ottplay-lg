@@ -8,7 +8,7 @@ use plx_data::ott::favorites::{Locator, Origin};
 const LINK: &str = "portal::[key:fixture-secret]https://portal.fixture.invalid/api/";
 
 fn tv_entry() -> CatalogEntry {
-    CatalogEntry {
+    CatalogEntry { protection: None,
         synopsis: None,
         live: None,
         id: "home-channel".into(),
@@ -49,7 +49,7 @@ fn attached_app(protected: bool) -> App {
     {
         let runtime = app.ott.as_mut().unwrap();
         if !protected {
-            runtime.saved.settings.remove("parentPin");
+            runtime.saved.settings.insert("parentPin".into(), json!("*"));
         }
         runtime.saved.profiles.profiles = vec![parent.clone()];
         runtime.saved.profiles.active_profile = Some(parent.id.clone());
@@ -510,7 +510,7 @@ fn install_attached_playing(runtime: &mut Runtime, app: &mut App, favorite: &Fav
     let request = runtime.play_target.as_ref().unwrap().clone();
     let receipt = runtime.play_attachment.clone().unwrap();
     let effective = receipt.effective_profile().unwrap();
-    let entry = CatalogEntry {
+    let entry = CatalogEntry { protection: None,
         synopsis: None,
         live: None, id: format!("{}:film:42", effective.id), title: "Resolved film title".into(),
         category: "Films/Family".into(), description: String::new(), poster: String::new(),
