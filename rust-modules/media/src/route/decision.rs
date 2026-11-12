@@ -8566,6 +8566,11 @@ static PLAY_BUSY: AtomicBool = AtomicBool::new(false);
 /// so callers must not use it as the identity of a long-lived playing item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayRequestTicket(u32);
+impl PlayRequestTicket {
+    /// Canonical input-publication word; reading it does not create a ticket or
+    /// grant ownership of installed playback.
+    pub fn generation(self) -> u32 { self.0 }
+}
 
 /// Capture before starting asynchronous work, and check before replacing native playback.
 pub fn play_request_ticket() -> PlayRequestTicket {

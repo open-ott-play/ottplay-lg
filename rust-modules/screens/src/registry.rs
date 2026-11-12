@@ -243,8 +243,24 @@ pub enum OttPlayerAction {
 /// generic player/desktop path. Eligibility is supplied by the input adapter,
 /// never inferred by a screen from firmware, provider names or a UI theme.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OttPlayerSource {
+    Playback(plx_media::route::PlaybackIdentity),
+    /// A queued source selection, not an installed decoder or playback identity.
+    Pending { generation: u64, play_generation: u64, ticket: plx_media::route::PlayRequestTicket },
+}
+impl OttPlayerSource {
+    pub fn playback(&self) -> Option<&plx_media::route::PlaybackIdentity> {
+        match self { Self::Playback(identity) => Some(identity), Self::Pending { .. } => None }
+    }
+    pub fn pending(&self) -> bool { matches!(self, Self::Pending { .. }) }
+}
+impl From<plx_media::route::PlaybackIdentity> for OttPlayerSource {
+    fn from(identity: plx_media::route::PlaybackIdentity) -> Self { Self::Playback(identity) }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttPlayerOffer {
-    pub source: plx_media::route::PlaybackIdentity,
+    pub source: OttPlayerSource,
     /// An exact retained failed selection permits only physical channel steps.
     /// The runner revalidates its source/list context; this grants no transport.
     pub recovery_only: bool,
@@ -256,7 +272,7 @@ pub struct OttPlayerOffer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttPlayerRequest {
     pub owner: plx_machine::machine::InstanceId,
-    pub source: plx_media::route::PlaybackIdentity,
+    pub source: OttPlayerSource,
     pub action: OttPlayerAction,
 }
 
@@ -2871,7 +2887,15 @@ pub const SCREEN_SHAPES: &[&str] = &[
 /// as `LogicalState::write`. It distinguishes the blocked catalogue cover from
 /// the interactive list during asynchronous source admission. Existing OTT
 /// recordings require fresh recording rather than silently changing this state.
-const SCREEN_SHAPES_PIN: u64 = 0xf572_4bfa_de86_f69f;
+/// **OTT pending step input capability** (0xf572_4bfa_de86_f69f → 0x2908_609b_2b56_bf74):
+/// `Ott` writes `pending_step: Option<(catalog_generation:u64, play_generation:u64,
+/// native_request_generation:u32)>`, then `pending_step_sdl:bool`, immediately
+/// after `pending_play` and before `page`, matching its canonical declaration.
+/// This is a pending selection capability, never a fabricated playback identity.
+/// The all-screen census order is unchanged; this value is the actual census
+/// emitted by `the_screen_shape_inventory_is_pinned`. Existing recording headers
+/// remain incompatible and must be rejected; no fixture headers are migrated.
+const SCREEN_SHAPES_PIN: u64 = 0x2908_609b_2b56_bf74;
 
 #[cfg(test)]
 mod arg_tests {

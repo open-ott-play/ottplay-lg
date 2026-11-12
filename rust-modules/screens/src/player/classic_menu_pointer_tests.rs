@@ -55,7 +55,7 @@ fn classic_top_band_is_bounded_and_rechecks_source_owner_and_gestures() {
         let mut page = PlayerScreen::new(ENTRY);
         let req = click(&mut page, &cx, x, y, None);
         assert!(matches!(req.as_slice(), [PlayerReq::OttAction(r)]
-            if r.owner == OWNER && r.source == source && r.action == OttPlayerAction::OpenMenu));
+            if r.owner == OWNER && r.source.playback() == Some(&source) && r.action == OttPlayerAction::OpenMenu));
     }
     for (x, y) in [(-1.0, 0.0), (1920.0, 0.0), (0.0, -1.0), (0.0, 1080.0),
         (f32::NAN, 10.0), (10.0, f32::INFINITY)] {
@@ -86,7 +86,7 @@ fn classic_top_band_is_bounded_and_rechecks_source_owner_and_gestures() {
             // after its target is cancelled, without resetting any other guard.
             page.scrub.cancel();
             assert!(matches!(click(&mut page, &cx, 100.0, 100.0, None).as_slice(),
-                [PlayerReq::OttAction(r)] if r.owner == OWNER && r.source == source
+                [PlayerReq::OttAction(r)] if r.owner == OWNER && r.source.playback() == Some(&source)
                     && r.action == OttPlayerAction::OpenMenu));
         }
     }

@@ -131,6 +131,35 @@ reviewed exception for a census-only change in an unused type is documented belo
 every recorded payload and still requires full replay validation. The D1 results below describe
 that earlier build, not current all-domain acceptance.
 
+**Unused OTT pending-step census migration (2026-11-11, source-only).**
+`Ott::SHAPE` and its canonical writer now include the source-bound pending-step
+publication and its native SDL eligibility flag. The ordered screen census moves
+from `0xf5724bfade86f69f` to `0x2908609b2b56bf74`; the product census moves from
+`0xf03ce876bc6e4e69` (`17310966664370474601`) to
+`0xaef28df3a25ec65e` (`12606294384504129118`). No other canonical screen,
+App or wire declaration changes in this migration.
+
+Reviewed anchors: `1-boot-home-chip-grid` starts Home; `6-settings-family` starts
+Home with the root Settings panel; `12-filmography-detail-return` uses the typed
+synthetic Detail/Person domain. None can instantiate OTT: controlled bootstrap
+has no OTT runtime and the controlled navigation codec rejects OTT. Only these
+three manifest `state_fp` values are updated. Every initial payload/hash,
+segment byte, input edge, measurement, frame hash, grade and anchor flag remains
+unchanged. `pre_ott_pending_step_recording_headers_remain_refused` retains the
+production refusal of arbitrary predecessor recordings before segment parsing.
+
+This source-only census update is not a runtime replay PASS. The existing full
+Targets and Resolve gate must still complete all three recordings with their
+original complete frame/grade counts and zero differences. Any divergence needs
+fresh capture; no grades or hashes may be edited to hide it. Recordings that
+instantiate OTT require fresh recording.
+
+Renderer verification on 2026-11-11 completed all six runs with the unchanged
+recorded ledgers: Home `522/522`, Settings `829/829`, Filmography `1277/1277`
+frames/grades in each mode; every difference counter was zero (`SAME`). Command:
+`python3 tests/replay_fixtures.py --sim rust-modules/target/debug/plxnative-sim --window 960x540 --jobs 1`.
+The driver retained outbound-network denial and required clean process exits.
+
 **Unused OTT pending-Play census migration (2026-11-09, source-only).**
 `Ott::SHAPE` and its canonical writer gain the opaque `pending_play: Option<str>`
 identity, distinguishing an admission cover from the interactive catalogue.

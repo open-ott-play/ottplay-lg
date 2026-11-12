@@ -796,7 +796,7 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
         }
     }
     rows.push(button("stremio.back", "Cancel / Back"));
-    Some(OttView { pending_play: None, shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
+    Some(OttView { pending_play: None, pending_step: None, pending_step_sdl: false, shelf_context: None, shelves: Vec::new(), status_working: false, classic_preferences: Default::default(), volume_available: false, category_label: None,
         preview_context: None,
         order_context: None, random_context: None,
         catalog_progress: None,

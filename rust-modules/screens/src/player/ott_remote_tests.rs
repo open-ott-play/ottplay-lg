@@ -47,7 +47,7 @@ fn playback() -> (plx_media::route::PlaybackSession, OttPlayerOffer) {
     plx_media::route::install_plex_playback_for_test(&mut session,
         plx_plex::plex::ServerId::from_raw(0), "remote-fixture");
     let source = plx_media::route::playback_identity(&session).unwrap();
-    (session, OttPlayerOffer { source, recovery_only: false, seek_arrows: false, accept: Action::OpenCatalog, guide: true })
+    (session, OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows: false, accept: Action::OpenCatalog, guide: true })
 }
 fn bare(session: &plx_media::route::PlaybackSession) -> PlayerScreen {
     let mut page = PlayerScreen::new(ENTRY);
@@ -135,7 +135,7 @@ fn failed_source_offer_dispatches_channel_steps_and_explicit_catalogue_only() {
     offer.recovery_only = true;
     let session = plx_media::route::PlaybackSession::default();
     plx_media::route::reset_player_control_for_test(&session);
-    assert!(!plx_media::route::playback_identity_matches(&session, &offer.source));
+    assert!(!plx_media::route::playback_identity_matches(&session, offer.source.playback().unwrap()));
     struct Restore(u8);
     impl Drop for Restore {
         fn drop(&mut self) { plx_media::player::restore_state_for_test(self.0); }

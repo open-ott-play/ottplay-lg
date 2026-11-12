@@ -22,7 +22,7 @@ Historical diagnostics show that inspection and whole-segment processing can be 
 
 ## Channel-change information
 
-An accepted fullscreen next/previous request that queues a replacement reveals the information footer without publishing a new playing identity. The outgoing channel facts remain until the replacement is admitted, at which point the normal source-bound metadata publication updates them. Acquisition keeps the footer alive, normal auto-hide resumes after settling, and deliberate dismissal is respected.
+An accepted fullscreen next/previous request immediately reveals the selected target in the information footer. A separate source-fenced paint snapshot supplies the target title, artwork and available guide facts while the decoder is still acquiring it. This snapshot does not replace the actual playing identity or grant transport authority. Acquisition keeps the footer alive, normal auto-hide resumes after settling, and deliberate dismissal is respected. Repeated channel steps advance from the latest pending target and supersede older work; only the last valid request may commit.
 
 The application resolver can run before the media route marks itself busy. During that exact current request, or a current bounded same-channel recovery cooldown, the player displays loading rather than an outgoing decoder error. Cancellation, expiry, source/profile replacement and terminal failure retire that presentation. It does not clear native error flags or change playback authority.
 
@@ -33,3 +33,11 @@ The catalogue wait cover uses the source content title, not the numbered display
 A retained failed-channel receipt may supply presentation facts even while the UI cannot accept actions. This does not grant playback authority. Catalogue recovery still rechecks source, profile, category and input ownership, and a replaced source invalidates the old channel facts. Live EOF retains the same bounded recovery model rather than falling into a generic player footer.
 
 For extensionless HTTP sources, inspection completes the already-open response after recognizing an HLS header. It preserves the consumed prefix, validated final URL, body cap, cancellation and original deadline. This avoids a redundant initial manifest request; selected-manifest timeouts remain separately observable and are not automatically classified as fixed.
+
+## Durable selection and current programme information
+
+An admitted selection/source change is checkpointed without waiting for the playhead update interval. Same-selection playhead saves and failed write retries retain the ten-second interval; a newer choice while a writer is busy keeps its immediate-save opportunity. Live bookmarks identify the channel and resume at the live edge; finite videos retain their saved position. A synchronous refusal to restore a known live channel cannot automatically choose another channel.
+
+Current programme information can use an already-admitted exact-source guide after a completion notification has gone. An explicit metadata failure remains cleared until a later accepted completion. A current title/time can open information even without a synopsis; expired and unrelated details are excluded. Authenticated status exposes only presence/counts and resume-match booleans under row_guide.player for diagnosis, without source addresses or programme contents.
+
+For the recognised channel-proxy export route, a thirteen-digit timestamp q is omitted only from the channel identity. Playback still uses the complete fresh URL. General q selectors, source host/path, provider ID, title and group remain meaningful. Existing portable Favorites bind through their provider/name locators; old opaque resume hashes cannot recover their lost URL context. Capture a source-checked channel handoff during an upgrade from the older identity scheme; later restarts resolve the stable ID after playlist refresh.

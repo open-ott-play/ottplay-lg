@@ -140,6 +140,8 @@ fn authenticated_state_and_status_expose_only_closed_row_coverage() {
         let diagnostic = &reply["data"]["row_guide"];
         assert_eq!(diagnostic["coverage"]["requested"], 3);
         assert_eq!(diagnostic["fresh"], true);
+        assert!(diagnostic["player"]["summary_chars"].is_u64());
+        assert!(diagnostic["player"]["remote_offer"].is_boolean());
         let encoded = diagnostic.to_string();
         for private in ["https://", "Programme for", "guide-profile", "Fixture"] {
             assert!(!encoded.contains(private));
