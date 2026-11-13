@@ -283,11 +283,11 @@ macro_rules! forward_caption_date_data {
     };
 }
 forward_caption_date_data!(
-    icu_datetime::provider::DatetimePatternsDateGregorianV1,
+    icu_datetime::provider::semantic_skeletons::DatetimePatternsDateGregorianV1,
     icu_datetime::provider::Baked
 );
 forward_caption_date_data!(
-    icu_datetime::provider::neo::DatetimeNamesYearGregorianV1,
+    icu_datetime::provider::names::DatetimeNamesYearGregorianV1,
     icu_datetime::provider::Baked
 );
 forward_caption_date_data!(
@@ -299,17 +299,17 @@ forward_caption_date_data!(
     icu_decimal::provider::Baked
 );
 
-impl icu_provider::DataProvider<icu_datetime::provider::neo::DatetimeNamesMonthGregorianV1>
+impl icu_provider::DataProvider<icu_datetime::provider::names::DatetimeNamesMonthGregorianV1>
     for CaptionDateProvider
 {
     fn load(
         &self,
         req: icu_provider::DataRequest,
     ) -> Result<
-        icu_provider::DataResponse<icu_datetime::provider::neo::DatetimeNamesMonthGregorianV1>,
+        icu_provider::DataResponse<icu_datetime::provider::names::DatetimeNamesMonthGregorianV1>,
         icu_provider::DataError,
     > {
-        use icu_datetime::provider::neo::{marker_attrs, MonthNames};
+        use icu_datetime::provider::{names::MonthNames, semantic_skeletons::marker_attrs};
         if req.id.marker_attributes != marker_attrs::ABBR {
             return Err(icu_provider::DataErrorKind::IdentifierNotFound.into_error());
         }
