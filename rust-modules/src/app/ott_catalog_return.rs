@@ -69,6 +69,18 @@ impl Runtime {
         Some(Pending { generation: self.generation, fingerprint, outcome })
     }
 
+    /// Read authority for a completed view retained by Back. Inspecting it must
+    /// not consume the return, navigate, or restart its cancelled producer.
+    pub(super) fn returned_catalog_complete(&self) -> bool {
+        if self.view_selection().1 || self.transient.accepted.is_some()
+            || self.transient.candidate.is_some() { return false; }
+        let Some(profile) = self.effective_profile().filter(|profile| profile.enabled && matches!(profile.kind,
+            ProviderKind::M3u | ProviderKind::VPortal | ProviderKind::Plex)) else { return false; };
+        self.catalog_return.as_ref().is_some_and(|pending|
+            pending.current(self, &profile_fingerprint(profile))
+                && matches!(pending.outcome, Outcome::Retained { complete: true, .. }))
+    }
+
     pub(super) fn resume_returned_catalog(&mut self) {
         let Some(pending) = self.catalog_return.take() else { return; };
         let Some(profile) = self.effective_profile() else { return; };

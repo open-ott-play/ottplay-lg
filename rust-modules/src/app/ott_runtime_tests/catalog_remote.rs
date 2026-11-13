@@ -2138,3 +2138,101 @@ fn private_archive_source_never_enters_catalog_guide_or_portable_favorites() {
     let wire = json!({"query":result.query,"coverage":result.coverage,"programmes":result.programmes});
     assert!(!wire.to_string().contains(secret));
 }
+
+
+fn back_from_completed_catalog(f: &mut Fixture) {
+    let mut runtime = f.app.ott.take().unwrap();
+    runtime.page = "channels";
+    apply_ui_action(&mut runtime, &mut f.app, OttAction::Back, true, false, false);
+    assert_eq!(runtime.page, "profiles");
+    assert!(!runtime.catalog_complete && !runtime.catalog_loading);
+    assert!(runtime.catalog_return.is_some());
+    f.app.ott = Some(runtime);
+}
+
+#[test]
+fn catalog_remote_completed_return_is_readable_and_plays_without_ui_reentry() {
+    let _lock = plx_base::testlock::serial();
+    let mut f = Fixture::new(4);
+    back_from_completed_catalog(&mut f);
+    let runtime = f.app.ott.as_ref().unwrap();
+    assert!(runtime.returned_catalog_complete());
+    let saved = serde_json::to_value(&runtime.saved).unwrap();
+    let generation = runtime.generation;
+    let cancelled = runtime.cancel.clone();
+    let done = runtime.catalog_done.clone();
+    let done_before = done.load(Ordering::Acquire);
+    let catalog = runtime.catalog.clone();
+    let caps = f.request("capabilities", json!({})).unwrap();
+    assert!(caps["data"].get("categories").is_some());
+    let cats = f.categories();
+    let page = f.channels(cats["catalog"].as_str().unwrap(), "all", 0);
+    let runtime = f.app.ott.as_ref().unwrap();
+    assert_eq!(runtime.page, "profiles");
+    assert_eq!(runtime.generation, generation);
+    assert_eq!(runtime.catalog, catalog);
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+    assert!(!runtime.catalog_complete && !runtime.catalog_loading);
+    assert!(runtime.catalog_return.is_some() && runtime.catalog_next.is_none());
+    assert!(Arc::ptr_eq(&runtime.cancel, &cancelled));
+    assert_eq!(done.load(Ordering::Acquire), done_before);
+    assert!(runtime.resolver_next.is_none() && runtime.play_target.is_none());
+    let original = runtime.catalog.entries[2].clone();
+    assert!(f.request("play_catalog", json!({"catalog":page["catalog"],"id":"video-2"})).is_none());
+    let runtime = f.app.ott.as_ref().unwrap();
+    let request = runtime.resolver_next.as_ref().unwrap();
+    assert!(!request.cancel.load(Ordering::Acquire), "play owns a fresh live resolver cancellation token");
+    assert!(cancelled.load(Ordering::Acquire), "the cancelled catalogue producer must remain retired");
+    assert!(!Arc::ptr_eq(&request.cancel, &cancelled));
+    assert_eq!(request.entry.as_ref().unwrap().id, original.id);
+    assert_eq!(request.entry.as_ref().unwrap().media, original.media);
+    assert_eq!(request.profile, synthetic_profile());
+    assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
+}
+
+#[test]
+fn catalog_remote_completed_return_rejects_stale_partial_failed_and_background_play() {
+    let _lock = plx_base::testlock::serial();
+    for change in ["partial", "failed", "generation", "profile", "source", "favorites"] {
+        let mut f = Fixture::new(2);
+        if change == "partial" { f.app.ott.as_mut().unwrap().catalog_complete = false; f.app.ott.as_mut().unwrap().catalog_loading = true; }
+        if change == "failed" { f.app.ott.as_mut().unwrap().catalog_complete = false; }
+        back_from_completed_catalog(&mut f);
+        let runtime = f.app.ott.as_mut().unwrap();
+        match change {
+            "generation" => runtime.generation += 1,
+            "profile" => runtime.saved.profiles.active_profile = None,
+            "source" => runtime.saved.profiles.profiles[0].source.push_str("?changed"),
+            "favorites" => runtime.saved.favorites_selected = true,
+            _ => {}
+        }
+        assert!(!runtime.returned_catalog_complete(), "{change}");
+        if change != "favorites" {
+            let caps = f.request("capabilities", json!({})).unwrap();
+            assert!(caps["data"].get("categories").is_none(), "{change}");
+        }
+        assert!(f.app.ott.as_ref().unwrap().resolver_next.is_none());
+    }
+    let mut f = Fixture::new(2);
+    back_from_completed_catalog(&mut f);
+    let cats = f.categories();
+    let page = f.channels(cats["catalog"].as_str().unwrap(), "all", 0);
+    f.app.ott_standby = true;
+    let response = f.request("play_catalog", json!({"catalog":page["catalog"],"id":"video-0"})).unwrap();
+    assert_eq!(response["status"], "rejected");
+    assert!(f.app.ott.as_ref().unwrap().resolver_next.is_none());
+}
+
+#[test]
+fn catalog_remote_completed_return_random_uses_the_same_completion_authority() {
+    let _lock = plx_base::testlock::serial();
+    let mut f = Fixture::new(2);
+    f.app.ott.as_mut().unwrap().entropy = Some([1;16]);
+    back_from_completed_catalog(&mut f);
+    let cats = f.categories();
+    let page = f.channels(cats["catalog"].as_str().unwrap(), "all", 0);
+    assert!(f.request("play_catalog", json!({"catalog":page["catalog"],"receipt_random":{"version":2,"scope":"receipt"}})).is_none());
+    let runtime = f.app.ott.as_ref().unwrap();
+    assert!(runtime.resolver_next.is_some());
+    assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
+}
