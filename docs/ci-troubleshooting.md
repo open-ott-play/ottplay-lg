@@ -38,6 +38,9 @@ successful preflight; the exhaustive date oracles are unchanged.
 The test runner limits each test executable to 900 seconds by default. An
 overrun terminates that executable's process group, retains its partial output,
 reports `TIMED OUT`, and fails the gate. Other package results remain visible.
+The group leader remains unreaped during the TERM grace period, followed by
+a final group kill before output is drained. A parent exiting or a child
+redirecting its output does not exempt the child from timeout cleanup.
 `--timeout-seconds` accepts only positive finite values for explicit diagnosis.
 This limit covers binary execution, not compilation or the entire suite; the
 outer 45-minute job limit remains unchanged. Fake-process regression tests run
