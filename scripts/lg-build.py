@@ -811,6 +811,7 @@ def check_commands(args, environment):
     contracts = [
         [python, "scripts/test_lg_build.py"],
         [python, "ci/test_cargo_test_parallel.py"],
+        [python, "ci/gen-third-party-notices.py", "--check", "--verify-graph"],
         [python, "ci/test_package_product_config.py"],
         [python, "ci/test_rust_c_toolchain.py"],
         [python, "ci/check-package.py", "--tracked", "--product-config", PRODUCT_CONFIG],

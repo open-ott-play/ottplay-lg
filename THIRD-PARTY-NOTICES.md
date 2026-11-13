@@ -332,7 +332,7 @@ stated; election does not alter your rights under the other arms.
 | crc-catalog | 2.5.0 | MIT OR Apache-2.0 | Akhil Velagapudi |
 | crc32fast | 1.5.0 | MIT OR Apache-2.0 | 2018 Sam Rijs, Alex Crichton and contributors |
 | either | 1.18.0 | MIT OR Apache-2.0 | Copyright (c) 2015 (the upstream notice names no holder) |
-| encoding_rs | 0.8.42 | (Apache-2.0 OR MIT) AND BSD-3-Clause | Mozilla Foundation. Its encoding tables derive from the WHATWG Encoding Standard, whose data files are BSD-3-Clause (`licenses/WHATWG-BSD-3-Clause.txt`) |
+| encoding_rs | 0.8.44 | (Apache-2.0 OR MIT) AND BSD-3-Clause | Mozilla Foundation. Its encoding tables derive from the WHATWG Encoding Standard, whose data files are BSD-3-Clause (`licenses/WHATWG-BSD-3-Clause.txt`) |
 | equivalent | 1.0.3 | Apache-2.0 OR MIT | Copyright (c) 2016--2023 (the upstream notice names no holder; licenses/equivalent.txt) |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | The image-rs Developers |
 | flate2 | 1.1.9 | MIT OR Apache-2.0 | 2014-2026 Alex Crichton |
@@ -355,6 +355,8 @@ stated; election does not alter your rights under the other arms.
 | smallvec | 1.16.2 | MIT OR Apache-2.0 | Copyright (c) 2018 The Servo Project Developers |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | Copyright (c) 2017 Robert Grosse |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | 2019 Daniel "Lokathor" Gee |
+| utf8_iter | 1.1.0 | Apache-2.0 OR MIT | Mozilla Foundation |
+| utf_types | 1.0.0 | Apache-2.0 OR MIT | Mozilla Foundation |
 | zune-core | 0.5.1 | MIT OR Apache-2.0 OR Zlib | The zune-image developers |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | The zune-image developers |
 
@@ -421,24 +423,26 @@ verbatim in `licenses/ICU4X.txt`, including both notices:
 
 | Package | Version |
 |---|---|
-| fixed_decimal | 0.7.2 |
-| icu_calendar | 2.1.1 |
-| icu_calendar_data | 2.1.1 |
-| icu_collections | 2.1.1 |
-| icu_datetime | 2.1.1 |
-| icu_datetime_data | 2.1.2 |
-| icu_decimal | 2.1.1 |
-| icu_decimal_data | 2.1.1 |
-| icu_locale | 2.1.1 |
+| fixed_decimal | 0.7.3 |
+| icu_calendar | 2.4.0 |
+| icu_calendar_data | 2.4.0 |
+| icu_collections | 2.4.0 |
+| icu_datetime | 2.4.0 |
+| icu_datetime_data | 2.4.0 |
+| icu_decimal | 2.4.0 |
+| icu_decimal_data | 2.4.0 |
+| icu_locale | 2.4.0 |
 | icu_locale_core | 2.4.0 |
-| icu_locale_data | 2.1.2 |
-| icu_pattern | 0.4.2 |
-| icu_plurals | 2.1.1 |
-| icu_plurals_data | 2.1.1 |
+| icu_locale_data | 2.4.0 |
+| icu_locale_fallback | 2.4.0 |
+| icu_locale_fallback_data | 2.4.0 |
+| icu_pattern | 0.5.1 |
+| icu_plurals | 2.4.0 |
+| icu_plurals_data | 2.4.0 |
 | icu_provider | 2.4.0 |
-| icu_time | 2.1.1 |
-| icu_time_data | 2.1.1 |
-| ixdtf | 0.6.6 |
+| icu_time | 2.4.0 |
+| icu_time_data | 2.4.0 |
+| ixdtf | 0.6.7 |
 | litemap | 0.8.3 |
 | potential_utf | 0.1.6 |
 | tinystr | 0.8.5 |

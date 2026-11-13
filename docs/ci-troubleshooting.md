@@ -69,3 +69,12 @@ old job keeps its old pin; adoption requires updating the caller revision. Use
 a fresh invocation of the updated workflow to verify the repair. Preserve failed
 and cancelled history as evidence, and use reruns only for an identified
 transient problem rather than to hide a deterministic failure.
+
+## Dependency notices
+
+Source contracts check committed crate classifications and notice versions and run
+the notice generator unit suite before native compilation. Native host checks also compare those classifications with the
+locked ARM application and packaged storage-helper runtime graph using `ci/gen-third-party-notices.py --check --verify-graph`;
+this resolves Cargo metadata without building or running dependency code. Update
+`ci/third-party-crates.json` from that graph and regenerate notices after a dependency
+change. Both checks fail the existing aggregate CI gate; neither writes in check mode.
