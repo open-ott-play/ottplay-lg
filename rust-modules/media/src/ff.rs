@@ -2700,12 +2700,25 @@ fn classify_hls_avio_operation(
         total_us: request_started.elapsed().as_micros().max(1) as u64,
         audio_expected,
     });
-    classify_hls_avio_facts(
+    let terminal = classify_hls_avio_facts(
         stall,
         state.reserve_deadline.expired,
         state.io_failed,
         operation_failed,
-    )
+    );
+    if matches!(terminal, Some(HlsExit::Failed("segment body transport failed"))) {
+        if let Src::Curl(source) = &state.src {
+            if let Some(failure) = source.body_failure() {
+                let outcome = hls_curl_open_outcome(crate::curlio::OpenErr::Transport(failure.rc));
+                if matches!(outcome, TraceOutcome::Transport | TraceOutcome::Deadline) {
+                    return Some(HlsExit::OpenFailed {
+                        reason: "segment body transport failed", outcome,
+                    });
+                }
+            }
+        }
+    }
+    terminal
 }
 
 /// Pure terminal reduction for one completed native operation. The callback records facts while
@@ -3173,18 +3186,8 @@ fn frame_read_failed(state: &mut AvioState, result: c_int, native_epoch: u32) ->
         crate::player::log(&format!(
             "ff: media transport failed during av_read_frame r={result}{cause}"
         ));
-        if let Some(f) = failure {
-            SHARED.dg_transport_rc.store(f.rc, Ordering::Release);
-            SHARED
-                .dg_transport_age_ms
-                .store(f.age_ms.min(i64::MAX as u64) as i64, Ordering::Release);
-            SHARED
-                .dg_transport_reopen_failed
-                .store(f.reopen_failed, Ordering::Release);
-        }
-        let (rc, reopen_failed) = failure.map_or((0, false), |f| (f.rc, f.reopen_failed));
-        SHARED.note_io_failure_for(native_epoch, IoFailureDetails::source_io(rc, reopen_failed));
-        SHARED.demux_io_failed.store(true, Ordering::Release);
+        SHARED.fail_source_io_for(native_epoch, failure.map(|f|
+            (f.rc, f.age_ms.min(i64::MAX as u64) as i64, f.reopen_failed)));
     }
     true
 }
@@ -5425,7 +5428,10 @@ unsafe fn hls_demux_segment_path(
                 }
             }
             Err(HlsExit::NotReady) => {
-                return Err(HlsExit::Failed("HLS segment was not produced in time"));
+                return Err(HlsExit::OpenFailed {
+                    reason: "HLS segment was not produced in time",
+                    outcome: TraceOutcome::ServerState,
+                });
             }
             Err(error) => return Err(error),
         }
@@ -9652,45 +9658,28 @@ fn settle_hls_demux(native_epoch: u32, outcome: std::thread::Result<Result<(), H
         }
         Ok(Err(HlsExit::Failed(why))) => {
             crate::player::log(&format!("hls: demux failed: {why}"));
-            if PUSHED_ANY.load(Ordering::Relaxed) {
-                SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                    exit: hls_failure::classify(why), outcome: None,
-                });
-                SHARED.demux_io_failed.store(true, Ordering::Release);
-            } else {
-                SHARED.fail_demux(hls_failure::classify(why));
-            }
+            SHARED.fail_hls_terminal_for(native_epoch, hls_failure::classify(why), None,
+                PUSHED_ANY.load(Ordering::Relaxed));
         }
         Ok(Err(HlsExit::NotReady)) => {
             crate::player::log("hls: demux failed: playlist resource was not ready");
-            if PUSHED_ANY.load(Ordering::Relaxed) {
-                SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                    exit: DemuxExitClass::HlsNotReady, outcome: None,
-                });
-                SHARED.demux_io_failed.store(true, Ordering::Release);
-            } else {
-                SHARED.fail_demux(DemuxExitClass::HlsNotReady);
-            }
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::HlsNotReady, None,
+                PUSHED_ANY.load(Ordering::Relaxed));
         }
         Ok(Err(HlsExit::PrimeExpired)) => {
             crate::player::log("hls: demux failed: unexpected active-stream prime deadline");
-            SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                exit: DemuxExitClass::Other, outcome: Some(TraceOutcome::Deadline),
-            });
-            SHARED.demux_io_failed.store(true, Ordering::Release);
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::Other,
+                Some(TraceOutcome::Deadline), true);
         }
         Ok(Err(HlsExit::StallAbort(_))) => {
             // The abort rule is handled where it fires, inside the segment loop; reaching here
             // means it escaped one of the candidate paths, which do not arm it.
             crate::player::log("hls: demux failed: stall abort escaped the segment loop");
-            SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                exit: DemuxExitClass::Other, outcome: None,
-            });
-            SHARED.demux_io_failed.store(true, Ordering::Release);
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::Other, None, true);
         }
         Err(_) => {
             crate::player::log("hls: demux panicked");
-            SHARED.fail_demux(DemuxExitClass::DemuxPanicked);
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::DemuxPanicked, None, false);
         }
     }
 }

@@ -2,11 +2,11 @@ use super::*;
 use plx_machine::machine::UiMode;
 
 #[test]
-fn interface_schema_accepts_both_modes_without_changing_native_default() {
+fn interface_schema_accepts_both_modes_and_defaults_to_classic() {
     let field = Setting::Interface;
     let descriptor = field.descriptor();
     assert_eq!(descriptor["id"], "interfaceMode");
-    assert_eq!(descriptor["default_value"], 1);
+    assert_eq!(descriptor["default_value"], 0);
     assert_eq!(descriptor["access"]["write"], true);
     assert_eq!(descriptor["constraints"]["values"], json!([0, 1]));
     assert_eq!(
@@ -32,21 +32,27 @@ fn interface_schema_accepts_both_modes_without_changing_native_default() {
 }
 
 #[test]
-fn interface_storage_preserves_explicit_classic_and_reports_invalid_values() {
+fn interface_storage_preserves_explicit_modes_and_reports_invalid_values() {
     let mut saved = Saved::default();
-    assert_eq!(stored(&saved, Setting::Interface)["value"], 1);
-    assert_eq!(stored(&saved, Setting::Interface)["storage"], "default");
+    let fresh = stored(&saved, Setting::Interface);
+    assert_eq!(fresh["value"], 0);
+    assert_eq!(fresh["storage"], "default");
     saved.settings.insert("interfaceMode".into(), json!(0));
     let classic = stored(&saved, Setting::Interface);
     assert_eq!(classic["value"], 0);
     assert_eq!(classic["persisted_value"], 0);
     assert_eq!(classic["storage"], "stored");
+    saved.settings.insert("interfaceMode".into(), json!(1));
+    let modern = stored(&saved, Setting::Interface);
+    assert_eq!(modern["value"], 1);
+    assert_eq!(modern["persisted_value"], 1);
+    assert_eq!(modern["storage"], "stored");
     saved
         .settings
         .insert("interfaceMode".into(), json!("invalid private value"));
     let invalid = stored(&saved, Setting::Interface);
     assert_eq!(invalid["storage"], "invalid");
-    assert_eq!(invalid["value"], 1);
+    assert_eq!(invalid["value"], 0);
     assert!(invalid.get("persisted_value").is_none());
 }
 
@@ -55,6 +61,9 @@ fn local_mode_candidates_preserve_other_saved_data_and_invalidate_remote_aba() {
     let _serial = plx_base::testlock::serial();
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
     runtime.remote = Remote::disabled_for_test("dev_fixture", "fixture");
+    // This exercises a real Modern -> Classic -> Modern transition rather than
+    // relying on the fresh-install default.
+    runtime.saved.settings.insert("interfaceMode".into(), json!(1));
     runtime.saved.category = "Favorites".into();
     runtime
         .saved
@@ -77,7 +86,6 @@ fn local_mode_candidates_preserve_other_saved_data_and_invalidate_remote_aba() {
         signature(&modern, Setting::Interface)
     );
     let mut rest = modern;
-    rest.settings.remove("interfaceMode");
     rest.settings.remove("settingRevision:interfaceMode");
     assert_eq!(
         serde_json::to_value(rest).unwrap(),

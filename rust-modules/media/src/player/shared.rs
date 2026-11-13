@@ -1097,6 +1097,25 @@ impl Shared {
         }).unwrap_or(false)
     }
 
+    /// Settle one unrecovered source read while it still owns the native
+    /// epoch. Reset/retirement uses this same lock, including through publish.
+    pub(crate) fn fail_source_io_for(&self, epoch: u32,
+        transport: Option<(i32, i64, bool)>) -> bool
+    {
+        self.with_native_session(epoch, NativeEventClass::Other, 0, || {
+            let (rc, reopen_failed) = if let Some((rc, age_ms, reopen_failed)) = transport {
+                self.dg_transport_rc.store(rc, Ordering::Release);
+                self.dg_transport_age_ms.store(age_ms, Ordering::Release);
+                self.dg_transport_reopen_failed.store(reopen_failed, Ordering::Release);
+                (rc, reopen_failed)
+            } else { (0, false) };
+            let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
+            first.get_or_insert(super::report::IoFailureDetails::source_io(rc, reopen_failed));
+            self.demux_io_failed.store(true, Ordering::Release);
+            true
+        }).unwrap_or(false)
+    }
+
     /// Attribute a typed HLS open failure and its terminal flags under one
     /// native-owner fence. A previous detail still wins, but cannot suppress
     /// this owner's failure flag. Never nest `note_io_failure_for` here.
@@ -1104,10 +1123,23 @@ impl Shared {
         exit: plx_telemetry::telemetry::classes::DemuxExitClass,
         outcome: plx_telemetry::telemetry::classes::TraceOutcome, pushed: bool) -> bool
     {
+        self.fail_hls_terminal_for(epoch, exit, Some(outcome), pushed)
+    }
+
+    /// Publish the producer's details AND terminal flag in one native-epoch
+    /// transaction. `io_failed` preserves the existing pre/post-feed signal.
+    /// No callback may validate A, release the epoch lock, then fail B.
+    pub(crate) fn fail_hls_terminal_for(&self, epoch: u32,
+        exit: plx_telemetry::telemetry::classes::DemuxExitClass,
+        outcome: Option<plx_telemetry::telemetry::classes::TraceOutcome>,
+        io_failed: bool) -> bool
+    {
         self.with_native_session(epoch, NativeEventClass::Other, 0, || {
-            let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
-            first.get_or_insert(super::report::IoFailureDetails::Hls { exit, outcome: Some(outcome) });
-            if pushed { self.demux_io_failed.store(true, Ordering::Release); }
+            if io_failed || outcome.is_some() {
+                let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
+                first.get_or_insert(super::report::IoFailureDetails::Hls { exit, outcome });
+            }
+            if io_failed { self.demux_io_failed.store(true, Ordering::Release); }
             else { self.fail_demux(exit); }
             true
         }).unwrap_or(false)
@@ -3923,10 +3955,20 @@ mod tests {
     #[test]
     fn every_diagnostics_mirror_field_has_a_writer() {
         const SHARED_SRC: &str = include_str!("shared.rs");
+        // The native-epoch fenced source helper stamps transport facts in Shared. Include only
+        // this production method, not reset_session_inner or the test fixtures below: a reset
+        // must never satisfy the writer contract.
+        let transport_writer = SHARED_SRC
+            .split_once("pub(crate) fn fail_source_io_for(")
+            .expect("transport publisher exists").1
+            .split_once("pub(crate) fn fail_hls_open_for(")
+            .expect("transport publisher has a bounded production scope").0;
+        assert!(!transport_writer.contains("fn reset_session"));
         // ff.rs stamps HTTP status and received bytes; viewport.rs stamps exported placement.
         // A writer file missing from this list reads exactly like a field with no writer, so
         // adding one here is part of adding one there.
-        const WRITERS: [&str; 5] = [
+        let writers_src: [&str; 6] = [
+            transport_writer,
             include_str!("pump.rs"),
             include_str!("engine.rs"),
             include_str!("mod.rs"),
@@ -3946,7 +3988,7 @@ mod tests {
         );
         // rustfmt may wrap `SHARED.dg_field.store(...)` between either dot.  Whitespace carries no
         // source-level meaning here, so remove it before looking for the writer expression.
-        let writers: Vec<String> = WRITERS
+        let writers: Vec<String> = writers_src
             .iter()
             .map(|src| src.chars().filter(|c| !c.is_whitespace()).collect())
             .collect();
@@ -4285,5 +4327,54 @@ mod external_retained_interval_tests {
         assert!(!s.has_retained_external_hls_interval_for_test());
         assert!(s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).is_err());
         s.release_external_hls_interval(cancelled);
+    }
+}
+
+
+#[cfg(test)]
+mod terminal_producer_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_publication_holds_epoch_lock_through_details_and_flag() {
+        use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
+        for source_io in [false, true] {
+            let shared = std::sync::Arc::new(Shared::new());
+            let epoch = shared.begin_native_session().unwrap();
+            let observation = shared.io_failure.lock().unwrap();
+            let worker_shared = shared.clone();
+            let worker = std::thread::spawn(move || {
+                if source_io {
+                    worker_shared.fail_source_io_for(epoch, Some((56, 20, false)))
+                } else {
+                    worker_shared.fail_hls_terminal_for(epoch, DemuxExitClass::HlsTransportFailed,
+                        Some(TraceOutcome::Transport), true)
+                }
+            });
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match shared.native_session.try_lock() {
+                    Err(std::sync::TryLockError::WouldBlock) => break,
+                    Ok(guard) => drop(guard),
+                    Err(_) => panic!("native owner mutex poisoned"),
+                }
+                assert!(std::time::Instant::now() < until, "terminal worker must acquire owner before IO detail");
+                std::thread::yield_now();
+            }
+            // The worker is stopped at the real detail mutex while retaining
+            // native ownership; a reset cannot slip between check and publish.
+            assert!(!shared.demux_io_failed.load(Ordering::Acquire));
+            drop(observation);
+            assert!(worker.join().unwrap());
+            assert!(shared.demux_io_failed.load(Ordering::Acquire));
+            shared.reset_session();
+            let replacement = shared.begin_native_session().unwrap();
+            assert_ne!(replacement, epoch);
+            assert!(!shared.fail_source_io_for(epoch, Some((18, 99, true))));
+            assert!(!shared.fail_hls_terminal_for(epoch, DemuxExitClass::HlsNotReady, None, true));
+            assert!(!shared.demux_io_failed.load(Ordering::Acquire));
+            assert_eq!(shared.io_failure(), None);
+            assert_eq!(shared.dg_transport_rc.load(Ordering::Acquire), 0);
+        }
     }
 }

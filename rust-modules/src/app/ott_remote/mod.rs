@@ -3,6 +3,7 @@
 //! loading each retain one bounded IO task, including canceled workers.
 pub(crate) use protocol::favorites_rejection;
 mod protocol;
+mod activity;
 mod discovery;
 use discovery::{CatalogProfile, ControllerBase, DiscoveryTarget};
 mod transport;
@@ -94,6 +95,7 @@ struct Flight {
 
 pub(crate) struct Remote {
     notifications: Box<notifications::State>,
+    activity: activity::Activity,
     config: Config,
     write_permit: plx_platform::storage::private::WritePermit,
     runtime: String,
@@ -140,6 +142,7 @@ impl Remote {
 
     /// Revoke disk authority before dropping any asynchronous control work.
     pub(crate) fn retire_for_erasure(&mut self) {
+        self.activity = activity::Activity::default();
         self.notifications.suspend();
         self.write_permit.revoke();
         self.clear_discovery();
@@ -157,6 +160,7 @@ impl Remote {
         let config = Config::disabled(device_id.to_owned());
         Self {
             notifications: Box::default(),
+            activity: activity::Activity::default(),
             config,
             write_permit: plx_platform::storage::private::WritePermit::new(),
             runtime: runtime.into(),
@@ -519,6 +523,7 @@ impl Remote {
         self.clear_discovery();
         self.network_diagnostic.clear();
         self.generation = self.generation.wrapping_add(1);
+        self.activity = activity::Activity::default();
         if let Some(flight) = &self.flight {
             flight.task.cancel();
         }
@@ -540,6 +545,7 @@ impl Remote {
         self.delivery = Delivery::default();
         self.pairing = None;
         self.generation = self.generation.wrapping_add(1);
+        self.activity = activity::Activity::default();
         self.epoch.clear();
         self.presence_pending = None;
         self.presence_sequence = 0;
@@ -707,6 +713,14 @@ impl Remote {
     }
     #[cfg(all(test, feature = "hostsim"))]
     pub(crate) fn show_notification_for_test(&mut self, now: u64) { self.notifications.show_for_test(now); }
+    /// Bounded in-memory command evidence; never exposes arguments or raw IDs.
+    pub(crate) fn note_command(&mut self, invocation: &Invocation, now_ms: u64) {
+        if self.write_permit.is_valid() && self.invocation_is_current(invocation) {
+            self.activity.received(invocation, now_ms);
+        }
+    }
+    pub(crate) fn command_activity(&self, now_ms: u64) -> Value { self.activity.snapshot(now_ms) }
+
     pub fn invocation_is_current(&self, invocation: &Invocation) -> bool {
         invocation.generation == self.generation
     }
@@ -714,6 +728,7 @@ impl Remote {
         if invocation.generation != self.generation {
             return;
         }
+        self.activity.completed(&invocation, &result);
         self.delivery.complete(invocation, result);
         self.next_ms = 0;
     }
@@ -726,6 +741,7 @@ impl Remote {
         if invocation.generation != self.generation {
             return;
         }
+        self.activity.completed(&invocation, &result);
         let id = invocation.id.clone();
         let deadline = invocation.deadline_ms;
         if self.delivery.complete(invocation, result) && self.after_reply.len() < 50 {

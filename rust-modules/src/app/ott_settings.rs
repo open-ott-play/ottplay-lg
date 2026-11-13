@@ -89,7 +89,7 @@ impl Setting {
         match self {
             Self::NativeInputProbe | Self::HostedEpg | Self::UiColors => json!(""),
             Self::InfoTimeout => json!(plx_screens::player::input::InfoTimeout::DEFAULT.seconds()),
-            Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(1),
+            Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(0),
             Self::Appearance(field) => field.default_value(),
             Self::Geometry(field) => field.default_value(),
             Self::SubtitleSelection(field) => field.default_value(),
@@ -799,7 +799,7 @@ impl Runtime {
     }
 
     pub(in crate::app::ott_runtime) fn interface_mode(&self) -> plx_machine::machine::UiMode {
-        let index = stored(&self.saved, Setting::Interface)["value"].as_u64().unwrap_or(1);
+        let index = stored(&self.saved, Setting::Interface)["value"].as_u64().unwrap_or(0);
         plx_machine::machine::UiMode::from_index(index).unwrap_or_default()
     }
 

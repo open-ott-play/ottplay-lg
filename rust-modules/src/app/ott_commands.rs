@@ -1166,6 +1166,7 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
 }
 
 pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
+    runtime.remote.note_command(inv, runtime.now_ms());
     if inv.action == "native_playback_diagnostics" {
         if runtime.now_ms() >= inv.deadline_ms {
             return Some(super::native_playback_diagnostics::failure(
@@ -1323,6 +1324,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 runtime.catalog.entries.len()
             ));
             value["preplay"] = json!(runtime.preplay.snapshot(runtime.now_ms()));
+            value["command_activity"] = runtime.remote.command_activity(runtime.now_ms());
             value["playback_failure"] = json!(match version {
                 playback_failure::Version::V2 => runtime.playback_failure.snapshot(),
                 playback_failure::Version::V3 => runtime.playback_failure.snapshot_version(version),

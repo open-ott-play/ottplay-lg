@@ -281,7 +281,9 @@ pub(super) fn classic_controls(snapshot: &OttView, actions: &[Action], keys: &st
     let catalogue = matches!(page, "channels" | "favorites" | "torrent-results" | "torrent-files");
     let primary = if actions.iter().any(|item| item.id == "nav:guide") { "nav:guide" } else { "nav:description" };
     let context = if page == "favorites" { "nav:favorite" } else { "nav:actions" };
-    let compact = [primary, "nav:categories", context, if primary == "nav:guide" { "nav:description" } else { "" }];
+    let compact = [primary, "nav:categories", context,
+        if primary == "nav:guide" { "nav:description" } else { "" },
+        "nav:search", if page == "favorites" { "" } else { "nav:favorite" }];
     // Additional operations keep their ordinary Browse routes. This is only
     // the channel footer's presentation, not a new action/capability policy.
     let categories = ["nav:catalog", "nav:actions", "nav:search", "nav:favorites"];

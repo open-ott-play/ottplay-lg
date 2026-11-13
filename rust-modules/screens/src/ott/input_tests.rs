@@ -2300,3 +2300,25 @@ fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
         assert_eq!(d.focus(), selected, "cancel/failure must reopen the exact original row");
     }
 }
+
+
+#[test]
+fn dispatcher_classic_footer_search_and_favorite_use_existing_context_actions() {
+    let _guard = plx_base::testlock::serial();
+    let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+    for favorite in [false, true] {
+        for action in ["nav:search", "nav:favorite"] {
+            let (mut d, mut rig) = mount_snapshot_in_mode(discoverable_live_catalog(favorite), UiMode::Classic);
+            let rects = draw_pointer_map(&mut d, &rig, &[action]);
+            let screen = d.nav.top_page().unwrap().inst.as_ref().unwrap().screen.as_any().unwrap()
+                .downcast_ref::<OttScreen>().unwrap();
+            assert!(!screen.browse, "common actions must be reachable without Browse");
+            assert!(screen.header(&rig.measure).unwrap().stops.iter().any(|(key, _)| *key == screen.keys[action]));
+            click_header(&mut d, &mut rig, rects[0], 256);
+            let expected = if action == "nav:search" { OttAction::BeginSearch }
+                else { OttAction::ToggleFavorite("selected".into()) };
+            assert_eq!(semantic_actions(&rig), vec![&expected]);
+            assert!(!rig.actions.iter().any(|action| matches!(action, OttAction::Play(_) | OttAction::Random(_))));
+        }
+    }
+}
