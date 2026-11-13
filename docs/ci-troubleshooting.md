@@ -13,7 +13,10 @@ ICU datetime provider APIs can move between minor versions. The ICU 2.4 update
 requires Gregorian pattern markers from `provider::semantic_skeletons` and year
 and month-name markers from `provider::names`. Numeric M/MM and L/LL patterns
 also request the `NUMERIC` month marker: return `MonthNames::Numeric` without
-requiring a localized text table. Preserve locale fallback and run
+requiring a localized text table. The ICU 2.4 CLDR data also changes Australian
+English, Latin-American Spanish and Austrian/Italian German abbreviations;
+keep custom tables aligned with that version and its locale-parent fallback.
+Preserve locale fallback and run
 the existing exhaustive regional-date oracle rather than weakening its expected
 results. sha2 0.11 changed the digest container; the build receipt verifier
 formats each digest byte as two lowercase hexadecimal digits and still compares
