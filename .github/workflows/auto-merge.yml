@@ -1,4 +1,5 @@
 # Trusted default-branch metadata only; never execute pull-request source.
+# Policy waits and failure diagnosis: docs/ci-troubleshooting.md.
 name: Auto Merge PRs
 
 on:
@@ -30,7 +31,7 @@ jobs:
        contains(fromJSON('["4alvit","californiantiramisu","renovate[bot]"]'), github.event.pull_request.user.login)) ||
       (contains(fromJSON('["workflow_run","status","check_run","schedule","workflow_dispatch"]'), github.event_name) &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
-    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/auto-merge.yml@0047a13b5eb79dfa770e31070a83e9696ddd36d1 # main
+    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/auto-merge.yml@82461bf9c723748d2956e6b80ed7e031fb661796 # main
     with:
       runner-labels: '["ubuntu-24.04"]'
       merge-method: squash
