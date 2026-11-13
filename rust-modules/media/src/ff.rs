@@ -4309,6 +4309,8 @@ fn adts_duration_ns(data: &[u8]) -> Option<i64> {
 
 #[derive(Clone, Copy, Debug)]
 enum HlsExit {
+    /// Complete, validated external segment contained no safe decoder entry.
+    NoRandomAccessEntry { bytes: u64 },
     Aborted,
     NotReady,
     PrimeExpired,
@@ -5682,10 +5684,8 @@ unsafe fn hls_demux_segment_path(
         return Err(HlsExit::Failed("segment body ended before Content-Length"));
     }
 
-    if external && (needs_entry || hevc_state.as_deref().is_some_and(hevc_ts::State::needs_entry)) {
-        return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
-    }
-    if (video_packets == 0 || (external && !seen_vcl))
+    let awaiting_entry = external && (needs_entry || hevc_state.as_deref().is_some_and(hevc_ts::State::needs_entry));
+    if !awaiting_entry && (video_packets == 0 || (external && !seen_vcl))
         && lane != Some(hls_rendition::Lane::Audio)
     {
         return Err(HlsExit::Failed(
@@ -5713,6 +5713,9 @@ unsafe fn hls_demux_segment_path(
         }
     }
     let synthesized_audio = resolve_audio_stamps(&mut audio_stamps).map_err(HlsExit::Failed)?;
+    if awaiting_entry {
+        return Err(HlsExit::NoRandomAccessEntry { bytes: input.state.body_bytes });
+    }
     let first_audio_raw_pts = audio_stamps.first().and_then(|stamp| stamp.raw_ns);
     // When every audio PTS was synthesized from AAC frame durations, its zero is
     // segment-local rather than on the transport clock. Keep that lane anchored
@@ -5835,8 +5838,9 @@ unsafe fn hls_demux_segment_path(
 }
 
 /// Complete external intervals are retained before a bounded queue can park
-/// their producer. Rebuffer release still requires actual queued/fed media; this
-/// publishes acquisition evidence, never future timestamps or decoder readiness.
+/// their producer. Real overlapping resident AU spans can cover acquisition
+/// runway while a full FIFO parks, but decoder prime still requires accepted
+/// data. Declared/output-tail estimates never become resident-media evidence.
 fn hls_feed_external_segment(
     output: &HlsSegmentOutput, media: std::time::Duration, generation: u64,
     aq: *mut AuQueue, aqa: *mut AuQueue,
@@ -5856,11 +5860,17 @@ fn hls_feed_external_segment(
         if !active { return Err(HlsExit::Aborted); }
         return hls_feed_segment_interruptible(output, aq, aqa, true);
     }
+    // Actual immutable AU bytes only: EXTINF/output-tail estimates are not data.
+    let lane = |es| output.aus.iter().filter(|au| au.es == es && !au.data.is_empty())
+        .map(|au| au.pts_ns).fold(None::<(i64, i64)>, |range, pts| match range {
+            None => Some((pts, pts)), Some((first, last)) => Some((first.min(pts), last.max(pts))),
+        });
+    let resident = lane(1).map(|video| crate::player::ExternalHlsResident { video, audio: lane(2) });
     // Only a tiny publication while the abort mutex is held. No queue operations
     // or blocking work may enter this closure (in particular no aq_is_aborted).
     let admitted = crate::aq::aq_if_not_aborted(aq, || {
         if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 { return Some(None); }
-        match SHARED.retain_external_hls_interval(generation, output.transfer.total_us, media) {
+        match SHARED.retain_external_hls_interval_with_resident(generation, output.transfer.total_us, media, resident) {
             Ok(token) => Some(Some(token)),
             Err(crate::player::ExternalHlsRetentionError::SeekPending) => Some(None),
             Err(crate::player::ExternalHlsRetentionError::Retired) => None,
@@ -5872,7 +5882,9 @@ fn hls_feed_external_segment(
         fn drop(&mut self) { SHARED.release_external_hls_interval(self.0); }
     }
     let _retained = Retained(token);
-    hls_feed_segment_interruptible(output, aq, aqa, true)
+    let result = hls_feed_segment_interruptible(output, aq, aqa, true);
+    if matches!(result, Ok(true)) { SHARED.complete_external_hls_interval(token); }
+    result
 }
 
 fn hls_feed_segment(
@@ -7159,7 +7171,7 @@ fn publish_hls_candidate(
 fn abr_reject_for_hls_exit(exit: HlsExit) -> crate::abr::RejectCause {
     match exit {
         HlsExit::PrimeExpired | HlsExit::StallAbort(_) => crate::abr::RejectCause::Censored,
-        HlsExit::Aborted | HlsExit::NotReady | HlsExit::Failed(_) | HlsExit::OpenFailed { .. } => {
+        HlsExit::Aborted | HlsExit::NotReady | HlsExit::NoRandomAccessEntry { .. } | HlsExit::Failed(_) | HlsExit::OpenFailed { .. } => {
             crate::abr::RejectCause::Circumstance
         }
     }
@@ -9569,6 +9581,8 @@ mod pre_audio_headroom_tests {
 /// attach details to the next Load, even when its existing failure flag is raised.
 fn settle_hls_demux(native_epoch: u32, outcome: std::thread::Result<Result<(), HlsExit>>) {
     match outcome {
+        Ok(Err(HlsExit::NoRandomAccessEntry { .. })) => settle_hls_demux(native_epoch,
+            Ok(Err(HlsExit::Failed("HLS segment does not begin with an IDR")))),
         Ok(Ok(())) | Ok(Err(HlsExit::Aborted)) => {}
         Ok(Err(HlsExit::OpenFailed { reason, outcome })) => {
             crate::player::log(&format!("hls: demux open failed: {reason} outcome={}", outcome.code()));

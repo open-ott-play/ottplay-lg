@@ -993,6 +993,9 @@ fn entry_fixture(dir: &Path, gop: &str) -> String {
 }
 
 fn entry_fixture_with_audio(dir: &Path, gop: &str, audio: bool) -> String {
+    entry_fixture_with_length(dir, gop, audio, "3", 3)
+}
+fn entry_fixture_with_length(dir: &Path, gop: &str, audio: bool, seconds: &str, count: usize) -> String {
     let source = dir.join("source.mp4");
     let mut encode = vec!["-v", "error", "-nostdin", "-y",
         "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10"];
@@ -1002,7 +1005,7 @@ fn entry_fixture_with_audio(dir: &Path, gop: &str, audio: bool) -> String {
     } else {
         encode.push("-an");
     }
-    encode.extend(["-t", "3", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+    encode.extend(["-t", seconds, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
         "-g", gop, "-keyint_min", gop, "-sc_threshold", "0", "-bf", "0", source.to_str().unwrap()]);
     entry_fixture_command("ffmpeg", &encode, true);
     let index = dir.join("index.m3u8");
@@ -1020,8 +1023,8 @@ fn entry_fixture_with_audio(dir: &Path, gop: &str, audio: bool) -> String {
     entry_fixture_command("ffmpeg", &split, true);
     let text = std::fs::read_to_string(&index).unwrap();
     assert!(!text.contains("#EXT-X-INDEPENDENT-SEGMENTS"));
-    assert_eq!(text.lines().filter(|line| line.ends_with(".ts")).count(), 3);
-    let bytes: u64 = (0..3).map(|i| std::fs::metadata(dir.join(format!("part-{i}.ts"))).unwrap().len()).sum();
+    assert_eq!(text.lines().filter(|line| line.ends_with(".ts")).count(), count);
+    let bytes: u64 = (0..count).map(|i| std::fs::metadata(dir.join(format!("part-{i}.ts"))).unwrap().len()).sum();
     assert!(bytes < 256 * 1024, "tiny synchronous fixture must fit comfortably in its AU queue");
     // A control independent of our segment decoder: the complete stream is decodable.
     entry_fixture_command("ffmpeg", &["-v", "error", "-nostdin", "-i", index.to_str().unwrap(),
@@ -1068,13 +1071,24 @@ fn entry_demux(http: &HttpFixture, name: &str, seek: i64) -> (Result<(), HlsExit
 fn entry_demux_tracks(http: &HttpFixture, name: &str, seek: i64, audio_enabled: bool)
     -> (Result<(), HlsExit>, Vec<(i32, i64, i32)>, bool)
 {
+    entry_demux_tracks_with_abort(http, name, seek, audio_enabled, false, None)
+}
+fn entry_demux_tracks_with_abort(http: &HttpFixture, name: &str, seek: i64, audio_enabled: bool, aborted: bool, source_offset: Option<(i64, bool)>)
+    -> (Result<(), HlsExit>, Vec<(i32, i64, i32)>, bool)
+{
     SHARED.reset_session();
+    assert!(SHARED.arm_initial_clock_hold(false, false));
+    if source_offset.is_some_and(|(_, paused)| paused) {
+        assert!(SHARED.prepare_hls_user_pause().is_some());
+        assert!(SHARED.hand_hold_to_seek_prime(), "real paused-before-first-frame preroll path");
+    }
     SHARED.seek_to_ns.store(seek, Ordering::Release);
     PUSHED_ANY.store(false, Ordering::Relaxed);
     let feed = FEED_AUDIO.swap(audio_enabled, Ordering::Relaxed);
     let mut video = crate::aq::aq_new(16 * 1024 * 1024);
     let mut audio = crate::aq::aq_new(128 * 1024);
     let mut hs = plx_net::stream::http_stream_boxed();
+    if aborted { crate::aq::aq_abort(&mut *video); }
     let result = external_hls::demux(&format!("{}/{name}", http.url), if audio_enabled { "aac" } else { "" }, None,
         &mut *video, &mut *audio, &mut *hs, None);
     let mut aus = Vec::new();
@@ -1090,6 +1104,17 @@ fn entry_demux_tracks(http: &HttpFixture, name: &str, seek: i64, audio_enabled: 
         }
     }
     let failed = SHARED.demux_io_failed.load(Ordering::Acquire) || SHARED.demux_failed.load(Ordering::Acquire);
+    if let Some((source_offset, _)) = source_offset {
+        assert_eq!(SHARED.disp_base.load(Ordering::Acquire), source_offset);
+        let epoch = SHARED.begin_native_session().expect("position callback owner");
+        assert!(SHARED.arm_native_presentations(epoch));
+        for pts in [aus.first().expect("safe first AU").1, aus.last().expect("safe last AU").1] {
+            crate::player::sf_on_event(epoch, 0, pts, std::ptr::null());
+            assert_eq!(crate::player::playpos_ns(), pts + source_offset,
+                "public playback position must remain on the original finite source timeline");
+        }
+        assert!(SHARED.retire_native_session(epoch));
+    }
     plx_net::stream::http_close(&mut *hs);
     crate::aq::aq_destroy(&mut *video);
     crate::aq::aq_destroy(&mut *audio);
@@ -1346,4 +1371,148 @@ fn external_live_hls_subtitles_use_committed_mux_video_clock_and_route_selection
     let prepared = off_request.prepare(&off, Arc::new(AtomicBool::new(false))).unwrap();
     assert!(route::complete_hls_track_request(&mut ps, &off_request, prepared).unwrap());
     assert_eq!(route::hls_track_catalog(&ps).unwrap().selected_subtitle(), None);
+}
+
+/// A non-independent entry may precede the next decoder random-access point.
+/// A cold start must bound its search, not declare the presentation invalid.
+#[test]
+#[ignore = "requires bundled host FFmpeg, ffmpeg/libx264 and ffprobe CLI; synthetic localhost only"]
+fn external_hls_cold_entry_continues_past_a_wholly_dependent_segment() {
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    entry_fixture_with_length(&dir.0, "20", false, "4", 4);
+    let dependent = entry_packet_nals(&dir.0.join("part-1.ts"));
+    let entry = entry_packet_nals(&dir.0.join("part-2.ts"));
+    assert_eq!(dependent.len(), 10);
+    assert!(dependent.iter().all(|(_, nals)| !nals.contains(&5)),
+        "precondition: the first available segment has no random-access picture");
+    assert!(entry[0].1.contains(&5), "precondition: the next segment starts with a genuine IDR");
+    std::fs::write(dir.0.join("cold-next.m3u8"),
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\npart-1.ts\n#EXTINF:1,\npart-2.ts\n#EXTINF:1,\npart-3.ts\n#EXT-X-ENDLIST\n").unwrap();
+    // Independent decoder control: unavailable preroll references must not
+    // prevent the later random-access point from producing displayable frames.
+    let frames = entry_fixture_command("ffmpeg", &["-v", "error", "-nostdin", "-i",
+        dir.0.join("cold-next.m3u8").to_str().unwrap(), "-an", "-f", "framemd5", "-"], false);
+    let frames = std::str::from_utf8(&frames).unwrap().lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty()).count();
+    assert!(frames >= 10, "independent decoder must reach the next segment's IDR");
+    let http = HttpFixture::start(dir.0.clone());
+    let (result, tracks, failed) = entry_demux_tracks_with_abort(&http, "cold-next.m3u8", -1,
+        false, false, Some((1_000_000_000, false)));
+    let aus: Vec<_> = tracks.into_iter().map(|(_, pts, key)| (pts, key)).collect();
+    assert!(result.is_ok(), "valid non-independent HLS must search past dependent entry: {result:?}");
+    assert!(!failed);
+    assert_eq!(aus.len(), 20, "safe entry and its dependent successor must both be emitted");
+    assert_eq!(aus[0], (0, 1), "discarded source gap must not appear as accepted sink runway");
+    assert_eq!(aus.iter().map(|(pts, _)| *pts).collect::<Vec<_>>(),
+        (0..20).map(|i| i * 100_000_000).collect::<Vec<i64>>(),
+        "the continuation transport clock remains monotonic after cold rebasing");
+    assert!(http.requests.lock().unwrap().iter().any(|path| path == "/part-2.ts"),
+        "producer must actually fetch the later entry, not synthesize success");
+    let (paused, tracks, _) = entry_demux_tracks_with_abort(&http, "cold-next.m3u8", -1,
+        false, false, Some((1_000_000_000, true)));
+    assert!(paused.is_ok(), "viewer pause/preroll must not discard the cold producer: {paused:?}");
+    assert_eq!(tracks.first().map(|(_, pts, _)| *pts), Some(0));
+}
+
+#[test]
+#[ignore = "requires bundled host FFmpeg, ffmpeg/libx264 and ffprobe CLI; synthetic localhost only"]
+fn external_hls_cold_search_cannot_skip_fatal_input_or_escape_its_bounds() {
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    entry_fixture(&dir.0, "20");
+    let header = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n";
+    let pair = format!("{header}#EXTINF:1,\npart-1.ts\n#EXTINF:1,\npart-2.ts\n#EXT-X-ENDLIST\n");
+    std::fs::write(dir.0.join("pair.m3u8"), &pair).unwrap();
+    std::fs::write(dir.0.join("independent-cold.m3u8"),
+        pair.replacen("#EXTM3U", "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS", 1)).unwrap();
+    std::fs::write(dir.0.join("end-cold.m3u8"),
+        format!("{header}#EXTINF:1,\npart-1.ts\n#EXT-X-ENDLIST\n")).unwrap();
+    std::fs::write(dir.0.join("bound-cold.m3u8"),
+        format!("{header}{}#EXTINF:1,\npart-2.ts\n#EXT-X-ENDLIST\n",
+            "#EXTINF:1,\npart-1.ts\n".repeat(3))).unwrap();
+    for (name, seek) in [("independent-cold.m3u8", -1), ("end-cold.m3u8", -1),
+        ("bound-cold.m3u8", -1), ("pair.m3u8", 0)] {
+        let http = HttpFixture::start(dir.0.clone());
+        let (result, aus, _) = entry_demux(&http, name, seek);
+        assert!(matches!(result, Err(HlsExit::Failed("HLS segment does not begin with an IDR"))),
+            "{name} must preserve strict entry/exhaustion behavior: {result:?}");
+        assert!(aus.is_empty(), "dependent pictures cannot enter playback queues");
+        assert!(!http.requests.lock().unwrap().iter().any(|path| path == "/part-2.ts"));
+    }
+    for malformed in [false, true] {
+        let body = if malformed { b"not-a-transport-stream".to_vec() }
+            else { std::fs::read(dir.0.join("part-1.ts")).unwrap() };
+        let size = body.len() + if malformed { 0 } else { 188 };
+        let response = [format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n").into_bytes(), body].concat();
+        let http = HttpFixture::start_with(dir.0.clone(), move |head|
+            head.starts_with("GET /part-1.ts ").then(|| response.clone()));
+        let (result, aus, _) = entry_demux(&http, "pair.m3u8", -1);
+        assert!(result.is_err(), "malformed/truncated input is fatal");
+        assert!(aus.is_empty());
+        assert!(!http.requests.lock().unwrap().iter().any(|path| path == "/part-2.ts"),
+            "fatal transport/container errors must not become random-access search");
+    }
+    let http = HttpFixture::start(dir.0.clone());
+    let (result, aus, _) = entry_demux_tracks_with_abort(&http, "pair.m3u8", -1, false, true, None);
+    assert!(matches!(result, Err(HlsExit::Aborted)));
+    assert!(aus.is_empty());
+    assert!(http.requests.lock().unwrap().is_empty(), "cancelled startup cannot issue HTTP");
+}
+
+#[test]
+#[ignore = "requires bundled host FFmpeg, ffmpeg/libx264 and ffprobe CLI; synthetic localhost only"]
+fn external_hls_cold_entry_deadline_bounds_http_without_shortening_normal_acquisition() {
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    entry_fixture(&dir.0, "20");
+    let http = HttpFixture::start_with(dir.0.clone(), |head| {
+        if head.starts_with("GET /part-2.ts ") {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        None
+    });
+    SHARED.reset_session();
+    let feed = FEED_AUDIO.swap(false, Ordering::Relaxed);
+    for bounded in [true, false] {
+        let mut video = crate::aq::aq_new(1024 * 1024);
+        let mut hs = plx_net::stream::http_stream_boxed();
+        let mut net = HlsNet { hs: &mut *hs, curl: None };
+        let mut clock = crate::hls::SegmentTimeline::default().begin(Duration::from_secs(1)).unwrap();
+        let segment = crate::hls::Segment {
+            sequence: 2,
+            duration: Duration::from_secs(1),
+            resource: crate::hls::Resource::new(plx_plex::plex::StreamUrl::parse(&http.url).origin,
+                "/part-2.ts").unwrap(),
+        };
+        let mut state = H264SegmentState::default();
+        let result = unsafe { hls_demux_segment_path(&segment,
+            HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External,
+                body_limit: Some(64 * 1024 * 1024), audio: None, rendition: None,
+                video: HlsVideoEntry::External(&mut state), mp2: None },
+            &mut clock, &mut *video, &mut net, "",
+            if bounded { SegmentAcquisition::cold_entry(Instant::now() + Duration::from_millis(30)) }
+                else { SegmentAcquisition::for_cursor(None) }) };
+        if bounded {
+            assert!(matches!(result, Err(HlsExit::PrimeExpired)), "the absolute bound must reach HTTP open");
+        } else {
+            assert!(result.is_ok(), "normal initial acquisition keeps its existing budget: {:?}", result.as_ref().err());
+        }
+        drop(net);
+        plx_net::stream::http_close(&mut *hs);
+        crate::aq::aq_destroy(&mut *video);
+    }
+    assert!(http.requests.lock().unwrap().iter().filter(|path| path.as_str() == "/part-2.ts").count() >= 2,
+        "both bounded and normal acquisitions must really reach the HTTP server");
+    FEED_AUDIO.store(feed, Ordering::Relaxed);
+    SHARED.reset_session();
 }

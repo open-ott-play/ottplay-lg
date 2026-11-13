@@ -46,9 +46,14 @@ are active. The existing OTT profile is not replaced by a system-TV selection.
 
 Channels returned by the television are selectable by their opaque channel ID.
 LG Channels availability in that catalogue depends on model, region and TV
-configuration. The administrator CLI also supports an explicit terrestrial
-channel-number selection for regional LG Channels catalogues; no universal
-regional list is invented or bundled.
+configuration. A controller binding can opt in to the official US metadata with
+`"lg_channels_country": "US"`. These additional rows use opaque IDs such as
+`lgfast:US:120` and are explicitly labelled a regional catalogue, not channels
+verified on every television. The controller fetches the official metadata;
+the native package does not bundle a universal regional list. The administrator
+CLI also supports an explicit terrestrial channel-number selection. Retire the
+native decoder before a direct administrator CLI tune; selecting through the
+native System television source performs its own decoder handoff.
 
 Current-channel and current-programme metadata can be queried through the
 controller. A full guide, archive support, thumbnails and direct FAST/tuner stream

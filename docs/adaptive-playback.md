@@ -504,19 +504,30 @@ later, the new epoch seeds from that still-owned interval; a producer already pa
 Pause cannot otherwise publish another completion. Separate audio/video workers retain one
 jointly validated interval, using its actual video span and combined acquisition cost.
 
-This data lease publishes no future sample timestamp. Decoder prime and runway still use
-only media actually accepted by the sink or enqueued on each expected lane. Completion,
-abort, seek and source replacement retire the lease; historical completed intervals cannot
-seed a later hold. Viewer Pause does not invalidate immutable data but still prevents Play
-through the existing user-hold gate. Thus neither a larger queue nor a timeout substitutes
-for real recovery media.
+Decoder prime remains an accepted-data requirement. The separate acquisition
+runway can also use already-enqueued media and actual access units still resident
+in that immutable loader output. Each expected lane's resident span must overlap
+the already-pushed prefix; a disjoint future interval, declared EXTINF or synthetic
+output tail cannot fill a hole. The enqueued-tail counters are not advanced for
+unpushed data. The final Play reservation revalidates the exact loader lease, so
+release, source replacement or a seek cannot substitute another one. This rule
+applies to Fresh startup, internal rebuffer and user Resume without relaxing
+their separate clock/debt/completion conditions.
 
-Resume requires all of:
+A successful whole feed can transfer Fresh evidence to a clock-owned certificate
+when a short finite producer finishes before the decoder starts. All its bytes
+are then already queued or accepted. The certificate is scoped to the held Fresh
+clock, revoked on seek, reset and stop, and consumed at the first successful Play.
+It never seeds a subsequent rebuffer epoch. Completion otherwise retires the
+producer lease; historical intervals cannot seed a later hold. Viewer Pause
+preserves immutable data but still prevents Play through the user-hold gate.
+
+Internal rebuffer resume requires all of:
 
 - Starfish accepted its ordinary decoder prime;
 - at least one complete validated active interval is retained in the current recovery epoch;
 - `P <= 0` — the epoch has repaid all acquisition time with at least as much media;
-- the whole already-playable pipeline (Starfish plus demuxed AU queues) covers `H` on every
+- the whole already-playable pipeline (Starfish, demuxed AU queues and overlapping validated resident AUs) covers `H` on every
   expected A/V lane;
 - the user transport is not paused;
 - Starfish accepted `Play`.
