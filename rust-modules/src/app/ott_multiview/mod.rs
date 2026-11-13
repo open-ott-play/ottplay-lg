@@ -360,7 +360,7 @@ impl Coordinator {
     }
 
     /// The active slot is the destination for commands from the active window/remote focus.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "hostsim"))]
     pub fn active_playback(&self) -> Option<(SlotId, ResolveTicket)> {
         if self.lifecycle != Lifecycle::Active {
             return None;
@@ -615,7 +615,7 @@ impl Coordinator {
 
     /// Only backend acknowledgements count as admitted pipelines. No maximum is inferred from
     /// `Layout`; an unsupported/over-capacity attempt remains a per-slot result.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "hostsim"))]
     pub fn admitted_pipeline_slots(&self) -> usize {
         self.scene
             .as_ref()
@@ -1210,6 +1210,6 @@ fn slot_failure_token(failure: SlotFailure) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hostsim"))]
 #[path = "tests.rs"]
 mod tests;
