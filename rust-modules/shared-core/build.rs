@@ -20,7 +20,10 @@ fn main() {
             Some(bytes.len() as u64),
             "Shared-core artifact size differs from its distribution receipt: {name}"
         );
-        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let digest: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         assert_eq!(
             manifest["artifacts"][name]["sha256"].as_str(),
             Some(digest.as_str()),
