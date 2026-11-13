@@ -33,11 +33,11 @@ plx_machine = { path = "../machine" }
 libc = "0.2"
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
-icu_locale = "=2.1.1"
-icu_plurals = "=2.1.1"
-icu_decimal = "=2.1.1"
-icu_datetime = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
-icu_calendar = "=2.1.1"
+icu_locale = "=2.4.0"
+icu_plurals = "=2.4.0"
+icu_decimal = "=2.4.0"
+icu_datetime = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_calendar = "=2.4.0"
 icu_provider = { version = "2.1", features = ["sync"] }
 
 [build-dependencies]

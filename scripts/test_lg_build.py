@@ -191,13 +191,36 @@ class BuildAdmission(unittest.TestCase):
             commands = [command for _, command in build.check_commands(self.args(), environment)]
         self.assertEqual(reader.call_args.kwargs["env"], environment)
         self.assertTrue(any("scripts/check-shared-core.cjs" in command for command in commands))
-        units = [command for command in commands if "--lib" in command and "test" in command]
+        self.assertTrue(any("ci/test_cargo_test_parallel.py" in command for command in commands))
+        notice_checks = [command for command in commands if "ci/gen-third-party-notices.py" in command]
+        self.assertEqual(len(notice_checks), 1)
+        self.assertEqual(notice_checks[0][-2:], ["--check", "--verify-graph"])
+        preflight = [command for command in commands if "i18n::tests" in command]
+        self.assertEqual(len(preflight), 1)
+        self.assertIn("plx_platform", preflight[0])
+        self.assertIn("--locked", preflight[0])
+        self.assertIn("--require-match", preflight[0])
+        units = [command for command in commands if "--lib" in command and "test" in command
+                 and "i18n::tests" not in command]
+        self.assertLess(commands.index(notice_checks[0]), commands.index(preflight[0]))
+        self.assertLess(commands.index(preflight[0]), commands.index(units[0]))
         self.assertEqual(len(units), 2)
         self.assertTrue(all("plx_shared_core" in command and "plxnative-modules" in command for command in units))
         self.assertTrue(any("hostsim" in command for command in units))
         self.assertTrue(any("--no-default-features" in command for command in commands))
         self.assertTrue(all("make" not in command for command in commands))
         self.assertFalse(any("test_ci_workflows.py" in str(command) for command in commands))
+
+    def test_failed_notice_verification_stops_before_native_commands(self):
+        notice = ["python3", "ci/gen-third-party-notices.py", "--check", "--verify-graph"]
+        planned = [(ROOT, notice), (ROOT / "rust-modules", ["must-not-run-native-tests"])]
+        with mock.patch.object(build, "check_commands", return_value=planned), \
+                mock.patch.object(build, "run", side_effect=subprocess.CalledProcessError(2, notice)) as runner, \
+                mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(subprocess.CalledProcessError) as error:
+                build.check(self.args(), {})
+        self.assertEqual(error.exception.returncode, 2)
+        self.assertEqual(runner.call_count, 1)
 
 
 def tar_bytes(files):

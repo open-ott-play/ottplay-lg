@@ -810,6 +810,8 @@ def check_commands(args, environment):
     python = sys.executable
     contracts = [
         [python, "scripts/test_lg_build.py"],
+        [python, "ci/test_cargo_test_parallel.py"],
+        [python, "ci/gen-third-party-notices.py", "--check", "--verify-graph"],
         [python, "ci/test_package_product_config.py"],
         [python, "ci/test_rust_c_toolchain.py"],
         [python, "ci/check-package.py", "--tracked", "--product-config", PRODUCT_CONFIG],
@@ -833,7 +835,14 @@ def check_commands(args, environment):
     lock = [python, str(ROOT / "tools/check-lock.py"), "--"]
     runner = [python, str(ROOT / "tools/cargo-test-parallel.py"), "--jobs", str(args.jobs), "--"]
     units = cargo + ["test", "--locked", "--lib", *packages]
-    native = [lock + runner + units,
+    # Resolve locale data before starting unrelated media binaries: an ICU data
+    # incompatibility otherwise fans out into many failures and can strand a
+    # consumer waiting for a locale-dependent worker. The complete suite below
+    # is retained for both normal and hostsim configurations.
+    locale_preflight = (runner[:-1] + ["--filter", "i18n::tests", "--require-match", "--"]
+                        + cargo + ["test", "--locked", "-p", "plx_platform", "--lib"])
+    native = [lock + locale_preflight,
+              lock + runner + units,
               lock + runner + units + ["--features", "hostsim"],
               lock + cargo + ["test", "--locked", "-p", "plx_shared_core", "--test", "seek"],
               lock + cargo + ["test", "--locked", "-p", "plxnative-storage", "--bin", "plxnative-storage"],
