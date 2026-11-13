@@ -336,12 +336,6 @@ impl icu_provider::DataProvider<icu_datetime::provider::names::DatetimeNamesMont
                 let mut locales = fallback.fallback_for(*locale);
                 loop {
                     match locales.get().region.as_ref().map(|r| r.as_str()) {
-                        Some("AU") => {
-                            names[5] = "June";
-                            names[6] = "July";
-                            names[8] = "Sept";
-                            break;
-                        }
                         Some("001") => {
                             names[8] = "Sept";
                             break;
@@ -353,7 +347,6 @@ impl icu_provider::DataProvider<icu_datetime::provider::names::DatetimeNamesMont
                     }
                 }
             }
-            ("es", Some("MX")) => names[8] = "sep",
             ("es", Some("PE" | "UY")) => {
                 names = [
                     "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "set.", "oct.",
@@ -365,6 +358,28 @@ impl icu_provider::DataProvider<icu_datetime::provider::names::DatetimeNamesMont
                     "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "sept.",
                     "oct.", "nov.", "dic.",
                 ]
+            }
+            ("es", _) => {
+                // Latin-American locales inherit the CLDR es-419 abbreviation.
+                let fallback =
+                    icu_locale::fallback::LocaleFallbacker::new().for_config(Default::default());
+                let mut locales = fallback.fallback_for(*locale);
+                loop {
+                    match locales.get().region.as_ref().map(|r| r.as_str()) {
+                        Some("419") => {
+                            names[8] = "sep";
+                            break;
+                        }
+                        None => break,
+                        _ => {
+                            locales.step();
+                        }
+                    }
+                }
+            }
+            ("de", Some("AT" | "IT")) => {
+                names[0] = "Jän.";
+                names[8] = "Sep.";
             }
             ("fr", Some("CA")) => names[6] = "juill.",
             ("fr", Some("MA")) => {
