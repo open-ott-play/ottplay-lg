@@ -4018,14 +4018,15 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::
     let mut resident_token = None;
     if active_external {
         if let Some((token, resident)) = SHARED.external_hls_resident(candidate_generation) {
-            let remaining = |(first, last): (i64, i64), high: i64| {
-                // Disjoint future timestamps cannot close a hole. Count only
-                // actual resident AUs overlapping this pipeline's existing
-                // prefix, excluding bytes already queued/accepted.
-                if first > high { 0 } else { last.saturating_sub(first.max(high)).max(0) }
+            let remaining = |ranges: &[(i64, i64)], high: i64| {
+                // Source-duration-backed ranges are already sorted/merged.
+                // Extend only the contiguous interval covering this real
+                // queued prefix: neither leading nor internal holes are data.
+                ranges.iter().find(|(first, last)| *first <= high && high < *last)
+                    .map_or(0, |(_, last)| last.saturating_sub(high))
             };
-            let video = remaining(resident.video, playable_video_high.saturating_sub(shift));
-            let audio = resident.audio.map_or(0, |range| remaining(range, playable_audio_high.saturating_sub(shift)));
+            let video = remaining(&resident.video, playable_video_high.saturating_sub(shift));
+            let audio = remaining(&resident.audio, playable_audio_high.saturating_sub(shift));
             if video > 0 || (audio_expected && audio > 0) { resident_token = Some(token); }
             playable_vbuf = playable_vbuf.saturating_add(video);
             playable_abuf = playable_abuf.saturating_add(audio);

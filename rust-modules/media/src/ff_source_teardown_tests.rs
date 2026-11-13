@@ -351,7 +351,7 @@ fn a_prefetched_segment_does_not_move_the_published_buffer() {
     let prev_audio = SHARED.hls_audio_tail_ns.swap(-1, Ordering::AcqRel);
     let prev_pos = SHARED.playpos_ns.swap(0, Ordering::AcqRel);
     let prev_base = SHARED.disp_base.swap(0, Ordering::AcqRel);
-    let held = HlsSegmentOutput { transport_timing: None,
+    let held = HlsSegmentOutput { resident: None, transport_timing: None,
         webvtt_clock: None,
         observed: None,
         aus: Vec::new(),

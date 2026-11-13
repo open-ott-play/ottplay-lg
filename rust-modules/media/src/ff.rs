@@ -5163,7 +5163,37 @@ std::thread_local! {
     static HLS_TEST_STREAM_COUNTS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
 }
 
+/// Merge only sample-duration-backed coverage. A source clock's sub-sample
+/// quantization may join its rounded boundary; never invent a frame-sized gap.
+fn hls_resident_intervals(samples: impl IntoIterator<Item = (i64, i64)>, quantum_ns: i64)
+    -> std::sync::Arc<[(i64, i64)]>
+{
+    let mut samples: Vec<_> = samples.into_iter().filter(|(start, end)| end > start).collect();
+    samples.sort_unstable();
+    let shortest = samples.iter().map(|(start, end)| end.saturating_sub(*start)).min().unwrap_or(0);
+    let quantum = if quantum_ns > 0 && quantum_ns < shortest { quantum_ns } else { 0 };
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    for (start, end) in samples {
+        if let Some(last) = ranges.last_mut().filter(|last| start <= last.1.saturating_add(quantum)) {
+            last.1 = last.1.max(end);
+        } else { ranges.push((start, end)); }
+    }
+    ranges.into()
+}
+fn hls_clock_quantum_ns(tb: AVRational) -> i64 {
+    if tb.num <= 0 || tb.den <= 0 { return 0; }
+    i64::try_from((i128::from(tb.num) * 1_000_000_000 + i128::from(tb.den) - 1)
+        / i128::from(tb.den)).unwrap_or(0)
+}
+unsafe fn hls_packet_end_ns(packet: *const AVPacket, stream: *mut AVStream) -> Option<i64> {
+    if (*packet).duration <= 0 { return None; }
+    let pts = if (*packet).pts != AV_NOPTS_VALUE { (*packet).pts } else { (*packet).dts };
+    if pts == AV_NOPTS_VALUE { return None; }
+    Some(av_rescale_q(pts.checked_add((*packet).duration)?, stream_time_base(stream), NS_TB))
+}
+
 struct HlsSegmentOutput {
+    resident: Option<crate::player::ExternalHlsResident>,
     transport_timing: Option<(i64, i64, i64, Option<i64>)>, // raw origin, local base, actual lane ends
     // Anchor from the actual decoded video PES clock, never playlist wall time.
     webvtt_clock: Option<hls_webvtt::Clock>,
@@ -5176,6 +5206,18 @@ struct HlsSegmentOutput {
     audio_tail_ns: Option<i64>,
 }
 impl HlsSegmentOutput {
+    fn shift_resident(&mut self, offset: i64) -> Result<(), &'static str> {
+        if let Some(resident) = &mut self.resident {
+            let shift = |ranges: &[(i64, i64)]| -> Result<std::sync::Arc<[(i64, i64)]>, &'static str> {
+                ranges.iter().map(|(start, end)| Ok((start.checked_add(offset)
+                    .ok_or("HLS resident clock overflow")?, end.checked_add(offset)
+                    .ok_or("HLS resident clock overflow")?))).collect::<Result<Vec<_>, _>>().map(Into::into)
+            };
+            resident.video = shift(&resident.video)?;
+            resident.audio = shift(&resident.audio)?;
+        }
+        Ok(())
+    }
     /// Muxed external HLS alone uses this persistent epoch clock. Separate
     /// renditions retain their proved lane join; PMS retains its existing clock.
     fn remap_transport(&mut self, clock: &mut crate::hls::TransportClock) -> Result<(), HlsExit> {
@@ -5186,6 +5228,7 @@ impl HlsSegmentOutput {
         let shifted = |pts: i64| pts.checked_add(offset)
             .ok_or(HlsExit::Failed("HLS transport timestamp overflow"));
         for au in &mut self.aus { au.pts_ns = shifted(au.pts_ns)?; }
+        self.shift_resident(offset).map_err(HlsExit::Failed)?;
         if let Some(anchor) = &mut self.webvtt_clock {
             anchor.presentation_ns = shifted(anchor.presentation_ns)?;
         }
@@ -5487,6 +5530,8 @@ unsafe fn hls_demux_segment_path(
     let mut audio_packets = 0usize;
     let mut audio_stamps = Vec::new();
     let mut video_stamps = Vec::new();
+    let mut video_ends = Vec::new();
+    let mut audio_ends = Vec::new();
     let mut first_video_raw_pts = None;
     let mut first_au_at = None;
     let mut aus = Vec::new();
@@ -5521,7 +5566,7 @@ unsafe fn hls_demux_segment_path(
             }
             let raw_stamp = pts_ns_opt(input.pkt, vst);
             let packet = std::slice::from_raw_parts((*input.pkt).data, (*input.pkt).size.max(0) as usize);
-            let (is_key, raw_pts) = if let Some(state) = hevc_state.as_deref_mut() {
+            let (is_key, raw_pts, picture) = if let Some(state) = hevc_state.as_deref_mut() {
                 let previous = raw_stamp.is_none().then(|| state.clone());
                 let info = hevc_ts::annexb(packet, state, &mut aubuf).map_err(HlsExit::Failed)?;
                 let Some(raw_pts) = raw_stamp else {
@@ -5542,7 +5587,7 @@ unsafe fn hls_demux_segment_path(
                     hevc_ts::Decision::Continue => {}
                 }
                 seen_vcl |= info.vcl;
-                (info.key, raw_pts)
+                (info.key, raw_pts, info.vcl)
             } else {
             let Some(raw_pts) = raw_stamp else {
                 av_packet_unref(input.pkt);
@@ -5571,7 +5616,7 @@ unsafe fn hls_demux_segment_path(
                     H264EntryDecision::Continue => {}
                 }
             }
-            (is_key, raw_pts)
+            (is_key, raw_pts, info.vcl)
             };
             au_bytes = au_bytes.saturating_add(aubuf.len() as u64);
             if body_limit.is_some_and(|limit| au_bytes > limit) {
@@ -5588,6 +5633,7 @@ unsafe fn hls_demux_segment_path(
                 .then(|| av_rescale_q((*input.pkt).duration, stream_time_base(vst), NS_TB))
                 .unwrap_or(0).max(0);
             video_stamps.push((au, raw_pts, duration));
+            if picture { video_ends.push((au, hls_packet_end_ns(input.pkt, vst))); }
             video_packets += 1;
             first_au_at.get_or_insert_with(std::time::Instant::now);
             av_packet_unref(input.pkt);
@@ -5651,6 +5697,7 @@ unsafe fn hls_demux_segment_path(
                 key: 1,
                 es: 2,
             });
+            audio_ends.push((au, if mp2.is_none() { hls_packet_end_ns(input.pkt, ast) } else { None }));
             audio_stamps.push(AudioStamp {
                 au,
                 raw_ns: raw_pts,
@@ -5753,6 +5800,19 @@ unsafe fn hls_demux_segment_path(
         .map(|stamp| aus[stamp.au].pts_ns.saturating_add(stamp.duration_ns.unwrap_or(0))).max();
     let transport_timing = origin.zip(actual_video_end).map(|(raw, end)|
         (raw, clock.normalize_shared_ns(raw, raw), end, actual_audio_end));
+    let video_ranges = hls_resident_intervals(video_ends.iter().filter_map(|(au, raw_end)| {
+        let end = clock.normalize_shared_ns((*raw_end)?, origin?);
+        (!aus[*au].data.is_empty()).then_some((aus[*au].pts_ns, end))
+    }), if vi >= 0 { hls_clock_quantum_ns(stream_time_base(vst)) } else { 0 });
+    let audio_ranges = hls_resident_intervals(audio_stamps.iter().zip(&audio_ends).filter_map(|(stamp, (au, raw_end))| {
+        if stamp.au != *au || aus[*au].data.is_empty()
+            || trim_audio_before_ns.is_some_and(|entry| aus[*au].pts_ns < entry) { return None; }
+        let end = if let Some(raw_end) = raw_end {
+            clock.normalize_shared_ns(*raw_end, audio_origin?)
+        } else { aus[*au].pts_ns.checked_add(stamp.duration_ns.filter(|duration| *duration > 0)?)? };
+        Some((aus[*au].pts_ns, end))
+    }), if ai >= 0 { hls_clock_quantum_ns(stream_time_base(ast)) } else { 0 });
+    let resident = Some(crate::player::ExternalHlsResident { video: video_ranges, audio: audio_ranges });
     if let Some(entry_ns) = trim_audio_before_ns {
         // Both clocks share the same segment origin. Discard
         // only audio preceding the retained random-access entry, never an entire
@@ -5825,6 +5885,7 @@ unsafe fn hls_demux_segment_path(
         hls_observed::Candidate::new(&table, &inventory, &pids, video_pid, selected_audio_pid).ok()
     });
     Ok(HlsSegmentOutput {
+        resident,
         transport_timing,
         webvtt_clock,
         observed,
@@ -5860,12 +5921,9 @@ fn hls_feed_external_segment(
         if !active { return Err(HlsExit::Aborted); }
         return hls_feed_segment_interruptible(output, aq, aqa, true);
     }
-    // Actual immutable AU bytes only: EXTINF/output-tail estimates are not data.
-    let lane = |es| output.aus.iter().filter(|au| au.es == es && !au.data.is_empty())
-        .map(|au| au.pts_ns).fold(None::<(i64, i64)>, |range, pts| match range {
-            None => Some((pts, pts)), Some((first, last)) => Some((first.min(pts), last.max(pts))),
-        });
-    let resident = lane(1).map(|video| crate::player::ExternalHlsResident { video, audio: lane(2) });
+    // Coverage came from actual packet/ADTS/PCM sample durations, after trim
+    // and transport remap. Unknown durations do not become resident proof.
+    let resident = output.resident.clone();
     // Only a tiny publication while the abort mutex is held. No queue operations
     // or blocking work may enter this closure (in particular no aq_is_aborted).
     let admitted = crate::aq::aq_if_not_aborted(aq, || {
@@ -7293,6 +7351,7 @@ fn hls_stall_abort_outcome(
     (
         segment,
         HlsSegmentOutput {
+            resident: None,
             transport_timing: None,
             webvtt_clock: None,
             observed: None,

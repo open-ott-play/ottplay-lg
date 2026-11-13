@@ -1516,3 +1516,62 @@ fn external_hls_cold_entry_deadline_bounds_http_without_shortening_normal_acquis
     FEED_AUDIO.store(feed, Ordering::Relaxed);
     SHARED.reset_session();
 }
+
+#[test]
+#[ignore = "requires bundled host FFmpeg and ffmpeg/libx264/AAC; synthetic localhost only"]
+fn external_hls_resident_coverage_uses_actual_25fps_48khz_samples_and_remaps_them() {
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    let file = dir.0.join("coverage.ts");
+    entry_fixture_command("ffmpeg", &["-v", "error", "-nostdin", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+        "-t", "1", "-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-bf", "2",
+        "-c:a", "aac", "-ar", "48000", "-f", "mpegts", file.to_str().unwrap()], true);
+    let http = HttpFixture::start(dir.0.clone());
+    SHARED.reset_session();
+    let previous = FEED_AUDIO.swap(true, Ordering::Relaxed);
+    let mut queue = crate::aq::aq_new(1024 * 1024);
+    let mut hs = plx_net::stream::http_stream_boxed();
+    let mut net = HlsNet { hs: &mut *hs, curl: None };
+    let segment = crate::hls::Segment { sequence: 0, duration: Duration::from_secs(1),
+        resource: crate::hls::Resource::new(plx_plex::plex::StreamUrl::parse(&http.url).origin,
+            "/coverage.ts").unwrap() };
+    let mut clock = crate::hls::SegmentTimeline::default().begin(segment.duration).unwrap();
+    let mut state = H264SegmentState::default();
+    let mut output = unsafe { hls_demux_segment_path(&segment,
+        HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External,
+            body_limit: Some(4 * 1024 * 1024), audio: None, rendition: None,
+            video: HlsVideoEntry::External(&mut state), mp2: None },
+        &mut clock, &mut *queue, &mut net, "aac", SegmentAcquisition::for_cursor(None)) }.unwrap();
+    let proof = output.resident.clone().expect("actual duration-backed media");
+    assert_eq!(proof.video.len(), 1, "B-frame PTS must be sorted into one real video interval");
+    assert_eq!(proof.audio.len(), 1, "48 kHz AAC tick rounding must not fragment real coverage");
+    assert_eq!(proof.video[0].1 - proof.video[0].0, 1_000_000_000);
+    assert!(proof.audio[0].1 - proof.audio[0].0 >= 1_000_000_000);
+    let mut transport = crate::hls::TransportClock::restart_at(Some(2_000_000_000));
+    output.remap_transport(&mut transport).unwrap();
+    let shifted = output.resident.as_ref().unwrap();
+    assert_eq!(shifted.video[0], (proof.video[0].0 + 2_000_000_000, proof.video[0].1 + 2_000_000_000));
+    assert_eq!(shifted.audio[0], (proof.audio[0].0 + 2_000_000_000, proof.audio[0].1 + 2_000_000_000));
+    drop(net);
+    plx_net::stream::http_close(&mut *hs);
+    crate::aq::aq_destroy(&mut *queue);
+    FEED_AUDIO.store(previous, Ordering::Relaxed);
+    SHARED.reset_session();
+}
+
+#[test]
+fn resident_sample_union_sorts_b_frames_but_does_not_fill_timestamp_holes() {
+    let ranges = hls_resident_intervals([(40, 80), (0, 40), (80, 120), (600, 640)], 1);
+    assert_eq!(&*ranges, &[(0, 120), (600, 640)]);
+    assert_eq!(&*hls_resident_intervals([(0, 40), (41, 81)], 1), &[(0, 81)],
+        "one actual clock tick may resolve only sub-sample quantization");
+    assert_eq!(&*hls_resident_intervals([(0, 0), (10, 9), (20, 40)], 1), &[(20, 40)],
+        "unknown/invalid sample duration cannot create resident media");
+    assert_eq!(&*hls_resident_intervals([(0, 40), (80, 120)], 40), &[(0, 40), (80, 120)],
+        "a source tick as large as a whole sample cannot disguise a missing sample");
+}

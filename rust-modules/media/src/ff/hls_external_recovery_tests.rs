@@ -5,11 +5,24 @@ use plx_base::task::MainThread;
 use plx_platform::tv::sink::VideoSink;
 use std::time::{Duration,Instant};
 fn interval()->HlsSegmentOutput {
- HlsSegmentOutput {transport_timing:None,webvtt_clock:None,observed:None,
+ let mut output=HlsSegmentOutput {resident:None,transport_timing:None,webvtt_clock:None,observed:None,
   aus:[(1,1_600_000_000),(2,1_600_000_000),(1,1_640_000_000),(2,1_640_000_000)].into_iter()
    .map(|(es,pts_ns)|HlsAu{data:vec![0;64],pts_ns,key:1,es}).collect(),
   transfer:SegmentTransfer{bytes:256,active_us:100_000,total_us:100_000,audio_expected:true},
-  video_width:160,video_height:90,video_tail_ns:1_680_000_000,audio_tail_ns:Some(1_680_000_000)}
+  video_width:160,video_height:90,video_tail_ns:1_680_000_000,audio_tail_ns:Some(1_680_000_000)};
+ fixture_resident(&mut output,40_000_000);output
+}
+// These mock encoded samples have an explicit fixture duration. Production
+// obtains durations from packets/codec frames; timestamp spacing is not proof.
+fn fixture_resident(output:&mut HlsSegmentOutput,duration_ns:i64){
+ let lane=|es| {
+  let mut samples:Vec<_>=output.aus.iter().filter(|au|au.es==es&&!au.data.is_empty())
+   .map(|au|(au.pts_ns,au.pts_ns+duration_ns)).collect();samples.sort_unstable();
+  let mut ranges:Vec<(i64,i64)>=Vec::new();
+  for (first,last) in samples {if let Some(previous)=ranges.last_mut(){if first<=previous.1 {previous.1=previous.1.max(last);continue;}}ranges.push((first,last));}
+  std::sync::Arc::from(ranges)
+ };
+ output.resident=Some(crate::player::ExternalHlsResident{video:lane(1),audio:lane(2)});
 }
 fn fixture(held:bool)->(engine::Engine,MainThread,u64){
  SHARED.reset_session();TX.reset();
@@ -149,6 +162,7 @@ fn fresh_external_hls_starts_from_real_queued_runway_when_paused_decoder_is_full
   let mut output=interval();output.transfer.total_us=2_000_000;
   output.aus=(0..33).flat_map(|n|[1,2].map(move|es|HlsAu{data:vec![0;64],pts_ns:n*100_000_000,key:1,es})).collect();
   output.video_tail_ns=3_300_000_000;output.audio_tail_ns=Some(3_300_000_000);
+  fixture_resident(&mut output,100_000_000);
   hls_feed_external_segment(&output,Duration::from_millis(3300),g,vp as *mut AuQueue,ap as *mut AuQueue)
  }))};
  let plays=ffi_host::play_calls_for_test();let mut volume=crate::player::volume::VolumeState::new();
@@ -173,7 +187,8 @@ fn fresh_external_hls_starts_from_real_queued_runway_when_paused_decoder_is_full
  drop(work);drop(cap);clear(&mut eng);
  assert!(full>0,"real Feed must encounter paused native BufferFull");
  assert!(accepted.0>=700_000_000&&accepted.1>=300_000_000,"decoder prime accepted: {accepted:?}");
- assert!(tails.0>=2_000_000_000&&tails.1>=2_000_000_000,"real queued runway: {tails:?}");
+ assert!(tails.0>0&&tails.1>0,"real queued prefix: {tails:?}");
+ assert!(accepted.0<2_000_000_000&&accepted.1<2_000_000_000,"native capacity alone cannot cover acquisition");
  assert!(played,"Fresh held forever at accepted {accepted:?}, queued {tails:?}, BufferFull={full}, retained={retained}");
  assert!(producer_drained,"Play must let the bounded producer drain");
 }
@@ -198,8 +213,10 @@ fn fresh_external_queued_runway_cannot_bypass_source_or_decoder_guards() {
    let mut output=interval();output.transfer.total_us=2_000_000;
    output.aus=(0..33).flat_map(|n|[1,2].map(move|es|HlsAu{data:vec![0;64],pts_ns:n*100_000_000,key:1,es})).collect();
    output.video_tail_ns=3_300_000_000;output.audio_tail_ns=Some(3_300_000_000);
+  fixture_resident(&mut output,100_000_000);
    if short { output.aus.retain(|au|au.pts_ns<=1_100_000_000); }
    if short { output.video_tail_ns=60_000_000_000;output.audio_tail_ns=Some(60_000_000_000); }
+   fixture_resident(&mut output,100_000_000);
    if uncredited { hls_feed_segment_interruptible(&output,vp as *mut AuQueue,ap as *mut AuQueue,true) }
    else { hls_feed_external_segment(&output,Duration::from_millis(3300),g,vp as *mut AuQueue,ap as *mut AuQueue) }
   }))};
@@ -241,6 +258,7 @@ fn completed_finite_external_segment_can_prime_after_its_producer_has_returned()
  let mut output=interval();output.transfer.total_us=2_000_000;
  output.aus=(0..33).flat_map(|n|[1,2].map(move|es|HlsAu{data:vec![0;64],pts_ns:n*100_000_000,key:1,es})).collect();
  output.video_tail_ns=3_300_000_000;output.audio_tail_ns=Some(3_300_000_000);
+  fixture_resident(&mut output,100_000_000);
  assert!(matches!(hls_feed_external_segment(&output,Duration::from_millis(3300),g,v,a),Ok(true)));
  assert!(!SHARED.has_retained_external_hls_interval_for_test(),"producer already returned");
  assert!(SHARED.external_hls_fresh_proof(g),"the complete push transferred evidence to real queues");
@@ -288,6 +306,7 @@ fn external_resident_segment_larger_than_native_and_queues_can_start_all_externa
   let mut output=interval();output.transfer.total_us=4_000_000;
   output.aus=(0..63).flat_map(|n|[1,2].map(move|es|HlsAu{data:vec![0;64],pts_ns:n*100_000_000,key:1,es})).collect();
   output.video_tail_ns=6_300_000_000;output.audio_tail_ns=Some(6_300_000_000);
+  fixture_resident(&mut output,100_000_000);
   hls_feed_external_segment(&output,Duration::from_millis(6300),g,vp as *mut AuQueue,ap as *mut AuQueue)
  }))};
  let plays=ffi_host::play_calls_for_test();let mut volume=crate::player::volume::VolumeState::new();
@@ -308,7 +327,8 @@ fn external_resident_segment_larger_than_native_and_queues_can_start_all_externa
  drop(work);drop(cap);clear(&mut eng);
  assert!(full>0,"real Feed must encounter paused native BufferFull");
  assert!(accepted.0>=700_000_000&&accepted.1>=300_000_000,"decoder prime accepted: {accepted:?}");
- assert!(tails.0>=2_000_000_000&&tails.1>=2_000_000_000,"real queued runway: {tails:?}");
+ assert!(tails.0>0&&tails.1>0&&tails.0<4_000_000_000&&tails.1<4_000_000_000,"real FIFO prefix remains below acquisition runway: {tails:?}");
+ assert!(accepted.0<4_000_000_000&&accepted.1<4_000_000_000,"native capacity alone cannot cover acquisition");
  if !played {stalled.push(format!("{hold}: accepted {accepted:?}, queued {tails:?}, BufferFull={full}, retained={retained}"));}
 
  }
@@ -316,9 +336,9 @@ fn external_resident_segment_larger_than_native_and_queues_can_start_all_externa
 }
 
 #[test]
-fn disjoint_or_empty_resident_aus_cannot_manufacture_fresh_runway() {
+fn disjoint_empty_or_internally_gapped_resident_aus_cannot_manufacture_fresh_runway() {
  let _serial=plx_base::testlock::serial();
- for case in ["disjoint","empty-audio"] {
+ for case in ["disjoint","empty-audio","internal-gap"] {
   SHARED.reset_session();TX.reset();ffi_host::force_clocksink_for_test(true);
   let native=SHARED.begin_native_session().unwrap();assert!(SHARED.mark_native_load_returned(native,None).is_some());
   let mut eng=engine::engine_after_reload_for_test();eng.native_epoch=native;
@@ -342,11 +362,13 @@ fn disjoint_or_empty_resident_aus_cannot_manufacture_fresh_runway() {
   engine::feed_both_lanes(&mt,&mut eng,&mut crate::player::volume::VolumeState::new());
   queued.aus=[1,2].into_iter().map(|es|HlsAu{data:vec![0;64],pts_ns:1_120_000_000,key:1,es}).collect();
   assert!(matches!(hls_feed_segment_interruptible(&queued,v,a,true),Ok(true)));
-  let(vp,ap)=(v as usize,a as usize);let empty=case=="empty-audio";
+  let(vp,ap)=(v as usize,a as usize);let empty=case=="empty-audio";let hole=case=="internal-gap";
   let work=Producer{video:vp,audio:ap,join:Some(std::thread::spawn(move||{
    let mut output=interval();output.transfer.total_us=4_000_000;
-   output.aus=(0..63).flat_map(|n|[1,2].map(move|es|HlsAu{data:if empty&&es==2{vec![]}else{vec![0;64]},pts_ns:if empty{n*100_000_000}else{1_600_000_000+n*100_000_000},key:1,es})).collect();
+   output.aus=(0..63).flat_map(|n|[1,2].map(move|es|HlsAu{data:if empty&&es==2{vec![]}else{vec![0;64]},pts_ns:if empty||hole{n*100_000_000}else{1_600_000_000+n*100_000_000},key:1,es})).collect();
+   if hole {output.aus.retain(|au|au.pts_ns<=1_200_000_000||au.pts_ns>=6_000_000_000);}
    output.video_tail_ns=600_000_000_000;output.audio_tail_ns=Some(600_000_000_000);
+   fixture_resident(&mut output,100_000_000);
    hls_feed_external_segment(&output,Duration::from_secs(600),g,vp as *mut AuQueue,ap as *mut AuQueue)
   }))};
   wait_retained();let plays=ffi_host::play_calls_for_test();

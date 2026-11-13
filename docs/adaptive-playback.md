@@ -506,7 +506,9 @@ jointly validated interval, using its actual video span and combined acquisition
 
 Decoder prime remains an accepted-data requirement. The separate acquisition
 runway can also use already-enqueued media and actual access units still resident
-in that immutable loader output. Each expected lane's resident span must overlap
+in that immutable loader output. Resident coverage comes from actual packet
+duration intervals, sorted and merged without bridging internal timestamp holes;
+unknown duration gives no extra coverage. Each expected lane must connect to
 the already-pushed prefix; a disjoint future interval, declared EXTINF or synthetic
 output tail cannot fill a hole. The enqueued-tail counters are not advanced for
 unpushed data. The final Play reservation revalidates the exact loader lease, so

@@ -1,7 +1,7 @@
 use super::*;
 
 fn output(raw: i64, local: i64, duration: i64) -> HlsSegmentOutput {
-    HlsSegmentOutput {
+    HlsSegmentOutput { resident: None,
         transport_timing: Some((raw, local, local + duration, Some(local + duration))),
         webvtt_clock: Some(hls_webvtt::Clock { pts_90k: raw / 1_000_000 * 90, presentation_ns: local }),
         observed: None,

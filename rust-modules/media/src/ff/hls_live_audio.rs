@@ -232,6 +232,7 @@ fn locate_audio(window: &Window, epoch: u64, target: i64, origin: i64, binding: 
 }
 
 fn rebase_output(output: &mut HlsSegmentOutput, offset: i64) -> Result<(), &'static str> {
+    output.shift_resident(offset.checked_neg().ok_or("Live HLS resident clock overflow")?)?;
     for au in &mut output.aus {
         au.pts_ns = au.pts_ns.checked_sub(offset).filter(|pts| *pts >= 0)
             .ok_or("Live HLS output precedes its common origin")?;

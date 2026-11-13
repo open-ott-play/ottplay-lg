@@ -157,13 +157,13 @@ pub(crate) enum ExternalHlsRetentionError {
     Retired,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ExternalHlsResident {
-    pub video: (i64, i64),
-    pub audio: Option<(i64, i64)>,
+    pub video: std::sync::Arc<[(i64, i64)]>,
+    pub audio: std::sync::Arc<[(i64, i64)]>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct RetainedHlsInterval {
     token: u64,
     generation: u64,
@@ -172,7 +172,7 @@ struct RetainedHlsInterval {
     resident: Option<ExternalHlsResident>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct HlsClockState {
     phase: HlsClockPhase,
     next_token: u64,
@@ -2092,7 +2092,7 @@ impl Shared {
         if generation & 1 != 0 || self.hls_candidate_generation.load(Ordering::Acquire) != generation
             || clock.phase == HlsClockPhase::Stopping
         { return Err(ExternalHlsRetentionError::Retired); }
-        if clock.retained.is_some_and(|p| p.generation != generation) {
+        if clock.retained.as_ref().is_some_and(|p| p.generation != generation) {
             clock.retained = None;
         }
         if clock.retained.is_some() { return Err(ExternalHlsRetentionError::Retired); }
@@ -2114,7 +2114,7 @@ impl Shared {
         generation & 1 == 0
             && shared.hls_candidate_generation.load(Ordering::Acquire) == generation
             && shared.seek_to_ns.load(Ordering::Acquire) < 0
-            && clock.retained.is_some_and(|p| p.generation == generation)
+            && clock.retained.as_ref().is_some_and(|p| p.generation == generation)
             && clock.phase != HlsClockPhase::Stopping
     }
 
@@ -2122,7 +2122,7 @@ impl Shared {
     /// producer to the real native/application queues. Drop/failure never does.
     pub(crate) fn complete_external_hls_interval(&self, token: u64) {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(retained) = clock.retained.filter(|p| p.token == token) else { return };
+        let Some(retained) = clock.retained.clone().filter(|p| p.token == token) else { return };
         let fresh = match clock.phase {
             HlsClockPhase::Held { hold } | HlsClockPhase::PlayIssuing { hold, .. } =>
                 hold.prime_kind() == Some(HlsPrimeKind::Fresh),
@@ -2136,8 +2136,8 @@ impl Shared {
     pub(crate) fn external_hls_resident(&self, generation: u64) -> Option<(u64, ExternalHlsResident)> {
         let clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         if !Self::external_interval_matches(&clock, self, generation) { return None; }
-        let retained = clock.retained?;
-        Some((retained.token, retained.resident?))
+        let retained = clock.retained.as_ref()?;
+        Some((retained.token, retained.resident.clone()?))
     }
 
     pub(crate) fn external_hls_fresh_proof(&self, generation: u64) -> bool {
@@ -2165,7 +2165,7 @@ impl Shared {
 
     pub(crate) fn release_external_hls_interval(&self, token: u64) {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
-        if clock.retained.is_some_and(|p| p.token == token) { clock.retained = None; }
+        if clock.retained.as_ref().is_some_and(|p| p.token == token) { clock.retained = None; }
     }
 
     pub fn hls_recovery(&self) -> HlsRecoveryEpoch {
@@ -2257,7 +2257,7 @@ impl Shared {
         let token = clock.token();
         clock.recovery.begin();
         let generation = self.hls_candidate_generation.load(Ordering::Acquire);
-        if let Some(retained) = clock.retained.filter(|p| generation & 1 == 0
+        if let Some(retained) = clock.retained.clone().filter(|p| generation & 1 == 0
             && p.generation == generation)
         { clock.recovery.observe(retained.acquisition_us, retained.media); }
         clock.phase = HlsClockPhase::PauseIssuing {
@@ -2522,7 +2522,7 @@ impl Shared {
     ) -> Option<(u64, HlsRecoveryEpoch)> {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         if resident_token.is_some_and(|token| {
-            !clock.retained.is_some_and(|p| p.token == token)
+            !clock.retained.as_ref().is_some_and(|p| p.token == token)
                 && clock.fresh_completed != Some((expected_candidate, token))
         }) { return None; }
         let external_current = if expected_kind == HlsPrimeKind::Fresh {
