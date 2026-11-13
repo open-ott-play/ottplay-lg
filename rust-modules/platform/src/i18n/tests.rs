@@ -721,6 +721,8 @@ fn named_month_dates_follow_interface_language_when_tv_format_language_differs()
 fn named_month_dates_match_icu_for_shipped_languages_and_regional_variants() {
     // Compare all months against ICU's full data, including region-specific abbreviations and
     // fallback regions. Only the test binary links the full Gregorian month-name database.
+    let mut mismatch_count = 0usize;
+    let mut mismatches = Vec::new();
     for preference in SHIPPED {
         let regions = (b'A'..=b'Z')
             .flat_map(|a| (b'A'..=b'Z').map(move |b| format!("{}{}", a as char, b as char)))
@@ -740,14 +742,24 @@ fn named_month_dates_match_icu_for_shipped_languages_and_regional_variants() {
             .unwrap();
             for month in 1..=12 {
                 let date = icu_calendar::Date::try_new_gregorian(2026, month, 9).unwrap();
-                assert_eq!(
-                    cx.date_medium(2026, month, 9).unwrap(),
-                    oracle.format(&date).to_string(),
-                    "{locale}, month {month}"
-                );
+                let actual = cx.date_medium(2026, month, 9).unwrap();
+                let expected = oracle.format(&date).to_string();
+                if actual != expected {
+                    mismatch_count += 1;
+                    if mismatches.len() < 64 {
+                        mismatches.push(format!(
+                            "{locale}, month {month}: actual {actual:?}, expected {expected:?}"
+                        ));
+                    }
+                }
             }
         }
     }
+    assert_eq!(
+        mismatch_count, 0,
+        "Named-month dates differ from ICU (first {} mismatches):\n{}",
+        mismatches.len(), mismatches.join("\n")
+    );
 }
 
 #[test]

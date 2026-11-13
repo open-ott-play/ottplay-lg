@@ -283,11 +283,11 @@ macro_rules! forward_caption_date_data {
     };
 }
 forward_caption_date_data!(
-    icu_datetime::provider::DatetimePatternsDateGregorianV1,
+    icu_datetime::provider::semantic_skeletons::DatetimePatternsDateGregorianV1,
     icu_datetime::provider::Baked
 );
 forward_caption_date_data!(
-    icu_datetime::provider::neo::DatetimeNamesYearGregorianV1,
+    icu_datetime::provider::names::DatetimeNamesYearGregorianV1,
     icu_datetime::provider::Baked
 );
 forward_caption_date_data!(
@@ -299,17 +299,25 @@ forward_caption_date_data!(
     icu_decimal::provider::Baked
 );
 
-impl icu_provider::DataProvider<icu_datetime::provider::neo::DatetimeNamesMonthGregorianV1>
+impl icu_provider::DataProvider<icu_datetime::provider::names::DatetimeNamesMonthGregorianV1>
     for CaptionDateProvider
 {
     fn load(
         &self,
         req: icu_provider::DataRequest,
     ) -> Result<
-        icu_provider::DataResponse<icu_datetime::provider::neo::DatetimeNamesMonthGregorianV1>,
+        icu_provider::DataResponse<icu_datetime::provider::names::DatetimeNamesMonthGregorianV1>,
         icu_provider::DataError,
     > {
-        use icu_datetime::provider::neo::{marker_attrs, MonthNames};
+        use icu_datetime::provider::{names::MonthNames, semantic_skeletons::marker_attrs};
+        // ICU 2.4 requests month data even for numeric M/MM and L/LL patterns.
+        // Gregorian numeric months need no localized month-name table.
+        if req.id.marker_attributes == marker_attrs::NUMERIC {
+            return Ok(icu_provider::DataResponse {
+                metadata: Default::default(),
+                payload: icu_provider::DataPayload::from_owned(MonthNames::Numeric),
+            });
+        }
         if req.id.marker_attributes != marker_attrs::ABBR {
             return Err(icu_provider::DataErrorKind::IdentifierNotFound.into_error());
         }
@@ -328,12 +336,6 @@ impl icu_provider::DataProvider<icu_datetime::provider::neo::DatetimeNamesMonthG
                 let mut locales = fallback.fallback_for(*locale);
                 loop {
                     match locales.get().region.as_ref().map(|r| r.as_str()) {
-                        Some("AU") => {
-                            names[5] = "June";
-                            names[6] = "July";
-                            names[8] = "Sept";
-                            break;
-                        }
                         Some("001") => {
                             names[8] = "Sept";
                             break;
@@ -345,7 +347,6 @@ impl icu_provider::DataProvider<icu_datetime::provider::neo::DatetimeNamesMonthG
                     }
                 }
             }
-            ("es", Some("MX")) => names[8] = "sep",
             ("es", Some("PE" | "UY")) => {
                 names = [
                     "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "set.", "oct.",
@@ -357,6 +358,28 @@ impl icu_provider::DataProvider<icu_datetime::provider::neo::DatetimeNamesMonthG
                     "ene.", "feb.", "mar.", "abr.", "may.", "jun.", "jul.", "ago.", "sept.",
                     "oct.", "nov.", "dic.",
                 ]
+            }
+            ("es", _) => {
+                // Latin-American locales inherit the CLDR es-419 abbreviation.
+                let fallback =
+                    icu_locale::fallback::LocaleFallbacker::new().for_config(Default::default());
+                let mut locales = fallback.fallback_for(*locale);
+                loop {
+                    match locales.get().region.as_ref().map(|r| r.as_str()) {
+                        Some("419") => {
+                            names[8] = "sep";
+                            break;
+                        }
+                        None => break,
+                        _ => {
+                            locales.step();
+                        }
+                    }
+                }
+            }
+            ("de", Some("AT" | "IT")) => {
+                names[0] = "Jän.";
+                names[8] = "Sep.";
             }
             ("fr", Some("CA")) => names[6] = "juill.",
             ("fr", Some("MA")) => {

@@ -191,7 +191,15 @@ class BuildAdmission(unittest.TestCase):
             commands = [command for _, command in build.check_commands(self.args(), environment)]
         self.assertEqual(reader.call_args.kwargs["env"], environment)
         self.assertTrue(any("scripts/check-shared-core.cjs" in command for command in commands))
-        units = [command for command in commands if "--lib" in command and "test" in command]
+        self.assertTrue(any("ci/test_cargo_test_parallel.py" in command for command in commands))
+        preflight = [command for command in commands if "i18n::tests" in command]
+        self.assertEqual(len(preflight), 1)
+        self.assertIn("plx_platform", preflight[0])
+        self.assertIn("--locked", preflight[0])
+        self.assertIn("--require-match", preflight[0])
+        units = [command for command in commands if "--lib" in command and "test" in command
+                 and "i18n::tests" not in command]
+        self.assertLess(commands.index(preflight[0]), commands.index(units[0]))
         self.assertEqual(len(units), 2)
         self.assertTrue(all("plx_shared_core" in command and "plxnative-modules" in command for command in units))
         self.assertTrue(any("hostsim" in command for command in units))
