@@ -8843,9 +8843,14 @@ pub(crate) mod lifecycle_regression_tests {
             "inside the credits the tile takes over",
         );
         assert!(!plx_media::route::play_pending(), "the countdown is still running");
+        assert_eq!(plx_media::route::playback_request_identity(&rig.app.player.session),
+            Some((rig.sid, "1")), "credits alone must retain the first episode");
         t += plx_appkit::up_next::COUNTDOWN_MS;
         step(&mut rig.app, &mut t, vec![]);
-        assert!(plx_media::route::play_pending(), "the countdown requests the successor");
+        // step also pumps a completed resolver in update. Its busy flag may
+        // already be cleared, but the exact admitted successor stays owned.
+        assert_eq!(plx_media::route::playback_request_identity(&rig.app.player.session),
+            Some((rig.sid, "2")), "the countdown requests the exact successor");
     }
 
     /// **Next episode: Off.** The end of an episode that HAS a successor leaves the player like a
