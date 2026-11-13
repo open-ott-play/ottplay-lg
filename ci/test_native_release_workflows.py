@@ -13,6 +13,19 @@ def workflow(name: str) -> str:
 
 
 class NativeReleaseWorkflowContracts(unittest.TestCase):
+    def test_required_source_lane_checks_notices_without_cargo(self):
+        body = workflow("ci.yml")
+        source = body.split("  source:", 1)[1].split("\n  native:", 1)[0]
+        self.assertIn("- run: python3 ci/gen-third-party-notices.py --check", source)
+        self.assertIn("- run: python3 -m unittest ci.test_gen_notices -v", source)
+        self.assertNotIn("--verify-graph", source)
+        self.assertNotIn("continue-on-error:", source)
+        self.assertNotRegex(source, r"(?m)^    if:")
+        self.assertIn("needs: [source, native, arm, release-contracts]", body)
+        native = body.split("  native:", 1)[1].split("\n  arm:", 1)[0]
+        self.assertLess(native.index("uses: ./.github/actions/rust-toolchain"),
+                        native.index("python3 scripts/lg-build.py check"))
+
     def test_release_dispatch_is_manual_serialized_and_channel_scoped(self):
         body = workflow("native-release-pipeline.yml")
         self.assertRegex(body, r"(?m)^  workflow_dispatch:")

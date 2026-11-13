@@ -13,7 +13,7 @@ the std workspace lock, and the rest (licence election, copyright holders, the g
                                                                of the one this script sits in; the Dependabot workflow runs the trusted
                                                                script on a pull request's files this way
     python3 ci/gen-third-party-notices.py --verify-graph       also compare the data file's crate set with
-                                                               `cargo tree` for the ARM runtime graph (needs cargo)
+                                                               `cargo tree` for the ARM app + storage runtime graph (needs cargo)
     python3 ci/gen-third-party-notices.py --verify-toolchain   also compare the std snapshot and rustc string with the
                                                                pinned toolchain's rust-src (needs rustup + that toolchain)
     python3 ci/gen-third-party-notices.py --derive-toolchain   after the pin in rust-toolchain.toml MOVED: re-derive the data file's
@@ -28,9 +28,10 @@ pulls in cannot reach the binary unclassified; every row exists in a lock; each 
 rust-modules/rust-toolchain.toml pins. It cannot tell which side of that line a NEW crate belongs on: that is the human act
 the failure message asks for, and `--verify-graph` re-derives it from cargo. `not_shipped` is by NAME
 and holds common crates (once_cell, thiserror, base64, ...) that dev and build dependencies pull in, so
-only the graph proves that no shipping crate has come to depend on one: `ci.yml`'s host-lint job runs
-`--check --verify-graph` on every pull request (`cargo tree --locked` resolves; it runs no build
-script), and the same pass rejects a version cell that only a build or dev dependency uses. The licence
+only the graph proves that no shipping crate has come to depend on one. `ci.yml`'s Source contracts
+job runs the offline `--check` and generator tests on every pull request. Native host tests run
+`--check --verify-graph` before compilation (`cargo tree --locked` resolves; it runs no build script),
+and that pass rejects a version cell that only a build or dev dependency uses. The licence
 and copyright columns come from the data file, not from any lock: nothing here notices that a crate's
 licence changed in a new release, so a major bump needs them re-read by a person.
 
@@ -338,7 +339,7 @@ def graph_problems(tree, data, project):
 
 
 def verify_graph(data, project):
-    cmd = ['cargo', '+' + pinned(ROOT), 'tree', '--locked', '--manifest-path', str(ROOT / 'rust-modules' / 'Cargo.toml'), '--no-default-features',
+    cmd = ['cargo', '+' + pinned(ROOT), 'tree', '--locked', '-p', 'plxnative-modules', '-p', 'plxnative-storage', '--manifest-path', str(ROOT / 'rust-modules' / 'Cargo.toml'), '--no-default-features',
            '--target', 'armv7-unknown-linux-gnueabi', '--edges', 'normal,no-proc-macro', '--prefix', 'none', '--format', '{p}']
     out = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, 'CARGO_INCREMENTAL': '0'})
     if out.returncode != 0:
