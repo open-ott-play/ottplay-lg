@@ -19,7 +19,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["4alvit","californiantiramisu","renovate[bot]"]'), github.event.pull_request.user.login) &&
       !github.event.pull_request.draft
-    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/auto-approve-reusable.yml@0047a13b5eb79dfa770e31070a83e9696ddd36d1 # main
+    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/auto-approve-reusable.yml@6472c9fea1eb72f9c706548092036de36230b7aa # main
     with:
       authors: '["4alvit","californiantiramisu","renovate[bot]"]'
       runner-labels: '["ubuntu-24.04"]'
