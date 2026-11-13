@@ -297,19 +297,23 @@ def main() -> int:
                 r.code = r.proc.returncode
             except subprocess.TimeoutExpired:
                 # Each test binary owns a fresh process group. Stop only that group,
-                # drain its output, and leave other packages queued/running so a red
-                # binary does not hide useful results from the rest of the suite.
+                # keep the direct child unreaped during the grace period (so its PID
+                # cannot be reused as another process-group ID), then kill the whole
+                # group before draining output. The parent may exit on TERM while a
+                # redirected child keeps running, so do not use communicate() as the
+                # grace-period wait.
                 try:
                     os.killpg(r.proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                stopping.wait(TERMINATE_GRACE_SECONDS)
+                try:
+                    os.killpg(r.proc.pid, signal.SIGKILL)
                 except OSError:
                     pass
                 try:
                     r.output, _ = r.proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(r.proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
                     try:
                         r.output, _ = r.proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
                     except subprocess.TimeoutExpired as error:
@@ -345,7 +349,9 @@ def main() -> int:
     def stop(signum, _frame):
         stopping.set()
         for r in list(live):
-            if r.proc and r.proc.poll() is None:
+            # Do not reap the process-group leader from this signal handler. A worker may be
+            # in its bounded TERM grace and still needs the original PGID for the final KILL.
+            if r.proc and r.proc.returncode is None:
                 try:
                     os.killpg(r.proc.pid, signal.SIGTERM)
                 except OSError:

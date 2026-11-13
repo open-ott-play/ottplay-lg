@@ -60,8 +60,9 @@ for i, a in enumerate(args):
 # itself, `leak_*` passes but leaves a per-pid directory (with a read-only subdirectory) in its
 # TMPDIR, `nomatch_*` passes having run nothing (what libtest prints when the filter matches no
 # test in the binary), `ignored_*` matched only an #[ignore]d test, `hang_*` prints a sentinel and
-# sleeps, `ignoreterm_*` ignores TERM, anything else passes. It records cwd/runtime/tmpdir/args so
-# the tests can read them back.
+# sleeps, `ignoreterm_*` ignores TERM, `termexitchild_*` exits on TERM while a started child ignores
+# it and redirects output, anything else passes. It records cwd/runtime/tmpdir/args so the tests can
+# read them back.
 FAKE_BIN = """#!/bin/sh
 name=$(basename "$0")
 echo "noproxy=$NO_PROXY,$no_proxy" >> "$FAKE_HOME/proxy.log"
@@ -71,6 +72,27 @@ case "$name" in
   kill_*) kill -9 $$;;
   hang_*) echo "partial output before timeout"; (sleep 1; echo late > "$FAKE_HOME/late-output") & sleep 30;;
   ignoreterm_*) trap '' TERM; echo "partial output before timeout"; sleep 30;;
+  termexitchild_*) cat > "$FAKE_HOME/term-parent.py" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+home = Path(os.environ["FAKE_HOME"])
+child = "import os,signal,time;from pathlib import Path;p=Path(os.environ['FAKE_HOME']);signal.signal(signal.SIGTERM,signal.SIG_IGN);signal.signal(signal.SIGHUP,signal.SIG_IGN);(p/'child-started').write_text(str(os.getpid())+':'+str(os.getpgid(0)));i=0\\nwhile True:\\n (p/'heartbeat').write_text(str(i));i+=1;time.sleep(.05)"
+child_process = subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+deadline = time.monotonic() + 2
+while not (home / "child-started").exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not (home / "child-started").exists():
+    raise SystemExit("child did not reach its ready handshake")
+print("partial output before timeout", flush=True)
+time.sleep(30)
+PY
+    exec python3 "$FAKE_HOME/term-parent.py";;
   leak_*) mkdir -p "$TMPDIR/plxnative-fixture-$$/sealed"; : > "$TMPDIR/plxnative-fixture-$$/sealed/f"; chmod 500 "$TMPDIR/plxnative-fixture-$$/sealed";;
   nomatch_*) echo "running 0 tests"; echo "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.00s"; exit 0;;
   ignored_*) echo "running 1 test"; echo "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 40 filtered out; finished in 0.00s"; exit 0;;
@@ -163,6 +185,35 @@ class RunnerGate(unittest.TestCase):
             self.assertIn("test result: ok. 1 passed", out.stdout)
             self.assertEqual(len(f.started()), 2, "later packages still run after a forced kill")
             self.assertLess(elapsed, 15, f"timeout and TERM/KILL cleanup exceeded bound: {elapsed:.1f}s")
+
+    def test_a_term_exiting_parent_cannot_leave_a_redirected_child_running(self):
+        with Fixture() as f:
+            out = f.run(["termexitchild_a", "plx_b"], "--jobs", "1", "--timeout-seconds", "1")
+            child_started = f.home / "child-started"
+            heartbeat = f.home / "heartbeat"
+            child_identity = tuple(map(int, child_started.read_text().split(":"))) if child_started.exists() else None
+            try:
+                self.assertEqual(out.returncode, 101, out.stdout + out.stderr)
+                self.assertIsNotNone(child_identity, "the child must start before timeout")
+                self.assertTrue(heartbeat.exists(), "the child must reach its heartbeat after startup")
+                self.assertIn("partial output before timeout", out.stdout)
+                self.assertIn("TIMED OUT termexitchild_a after 1s", out.stdout)
+                self.assertIn("test result: ok. 1 passed", out.stdout)
+                self.assertEqual(len(f.started()), 2, "later packages still run after the timeout")
+                heartbeat_at_return = heartbeat.read_text()
+                time.sleep(0.3)
+                self.assertEqual(heartbeat.read_text(), heartbeat_at_return,
+                                 "a redirected child must be stopped before the runner returns")
+            finally:
+                # The exact old runner is expected to fail this assertion and leave this fixture
+                # child alive. Retire only its recorded PID after confirming its group identity.
+                if child_identity is not None:
+                    child_pid, child_pgid = child_identity
+                    try:
+                        if os.getpgid(child_pid) == child_pgid:
+                            os.killpg(child_pgid, 9)
+                    except ProcessLookupError:
+                        pass
 
     def test_timeout_must_be_positive_and_finite(self):
         for value in ("0", "-1", "nan", "inf"):
