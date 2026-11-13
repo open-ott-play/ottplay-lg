@@ -8,7 +8,9 @@ notices pass the gate (so a hand edit of a generated table, or a bump without `m
 as well as in the gate). Nothing here runs cargo or touches the network."""
 import importlib.util
 import json
+import subprocess
 import unittest
+from unittest import mock
 from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location('gen_notices', Path(__file__).with_name('gen-third-party-notices.py'))
@@ -134,6 +136,32 @@ class Graph(unittest.TestCase):
 
     def test_a_consistent_graph_has_no_problems(self):
         self.assertEqual(self.check(self.TREE, *self.BASE), [])
+
+    def test_graph_checks_both_packaged_roots_and_catches_storage_only_dependencies(self):
+        classified = data()
+        classified["not_shipped"] = ["syn", "once_cell", "storage_runtime"]
+        project = gen.parse_lock(lock(*self.BASE, ("storage_runtime", "1.0.0", True)))
+
+        def cargo_tree(command, **kwargs):
+            roots = [command[i + 1] for i, value in enumerate(command[:-1]) if value == "-p"]
+            output = self.TREE
+            if "plxnative-storage" in roots:
+                output += "storage_runtime v1.0.0\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with mock.patch.object(gen, "pinned", return_value="1.99.1"), \
+                mock.patch.object(gen.subprocess, "run", side_effect=cargo_tree) as runner:
+            problems = gen.verify_graph(classified, project)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("storage_runtime", problems[0])
+        self.assertIn("ARM runtime graph", problems[0])
+        command = runner.call_args.args[0]
+        roots = [command[i + 1] for i, value in enumerate(command[:-1]) if value == "-p"]
+        self.assertEqual(roots, ["plxnative-modules", "plxnative-storage"])
+        self.assertIn("--locked", command)
+        self.assertNotIn("--workspace", command)
+        self.assertEqual(command[command.index("--target") + 1], "armv7-unknown-linux-gnueabi")
+        self.assertEqual(command[command.index("--edges") + 1], "normal,no-proc-macro")
 
     def test_a_shipping_crate_listed_not_shipped_is_caught(self):
         problems = self.check(self.TREE + 'once_cell v1.0.0\n', *self.BASE)

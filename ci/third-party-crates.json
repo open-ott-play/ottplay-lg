@@ -53,6 +53,7 @@
   "cc",
   "cexpr",
   "clang-sys",
+  "const-oid",
   "convert_case",
   "core_detect",
   "cpufeatures",
@@ -63,9 +64,9 @@
   "digest",
   "displaydoc",
   "find-msvc-tools",
-  "generic-array",
   "getrandom",
   "glob",
+  "hybrid-array",
   "indexmap",
   "itertools",
   "lazy_static",
@@ -117,7 +118,6 @@
   "unicode-ident",
   "unicode-segmentation",
   "untrusted",
-  "version_check",
   "wasi",
   "windows-link",
   "windows-sys",
@@ -343,6 +343,16 @@
      "name": "equivalent",
      "licence": "Apache-2.0 OR MIT",
      "copyright": "Copyright (c) 2016--2023 (the upstream notice names no holder; licenses/equivalent.txt)"
+    },
+    {
+     "name": "utf8_iter",
+     "licence": "Apache-2.0 OR MIT",
+     "copyright": "Mozilla Foundation"
+    },
+    {
+     "name": "utf_types",
+     "licence": "Apache-2.0 OR MIT",
+     "copyright": "Mozilla Foundation"
     }
    ],
    "lead": [
@@ -553,6 +563,12 @@
     },
     {
      "name": "zerovec"
+    },
+    {
+     "name": "icu_locale_fallback"
+    },
+    {
+     "name": "icu_locale_fallback_data"
     }
    ]
   },
