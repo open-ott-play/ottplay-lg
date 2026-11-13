@@ -11,7 +11,9 @@ gh run view RUN --repo open-ott-play/ottplay-lg --log-failed
 
 ICU datetime provider APIs can move between minor versions. The ICU 2.4 update
 requires Gregorian pattern markers from `provider::semantic_skeletons` and year
-and month-name markers from `provider::names`. Preserve locale fallback and run
+and month-name markers from `provider::names`. Numeric M/MM and L/LL patterns
+also request the `NUMERIC` month marker: return `MonthNames::Numeric` without
+requiring a localized text table. Preserve locale fallback and run
 the existing exhaustive regional-date oracle rather than weakening its expected
 results. sha2 0.11 changed the digest container; the build receipt verifier
 formats each digest byte as two lowercase hexadecimal digits and still compares
@@ -22,6 +24,21 @@ compiler targets. Keep locked dependency resolution, manifest validation, locale
 oracles and the aggregate CI gate enabled. A source compatibility error needs a
 code fix; repeating the unchanged build does not migrate an API. Host/ARM CI is
 not physical television or shipping-package qualification.
+
+## Early failures and hung test binaries
+
+The locked locale preflight runs before the full native suite, with a required
+nonzero test match. This catches missing compiled locale data before unrelated
+media workers begin. Both complete normal and hostsim suites still run after a
+successful preflight; the exhaustive date oracles are unchanged.
+
+The test runner limits each test executable to 900 seconds by default. An
+overrun terminates that executable's process group, retains its partial output,
+reports `TIMED OUT`, and fails the gate. Other package results remain visible.
+`--timeout-seconds` accepts only positive finite values for explicit diagnosis.
+This limit covers binary execution, not compilation or the entire suite; the
+outer 45-minute job limit remains unchanged. Fake-process regression tests run
+before native compilation and exercise timeouts, output and process cleanup.
 
 ## Reviewed merge scans and policy waits
 

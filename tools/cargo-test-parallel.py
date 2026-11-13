@@ -36,6 +36,9 @@ What it does, in order:
    fixture that creates a `$TMPDIR/<name>-<pid>` and never removes it used to pile up tens of
    thousands of directories in the developer's temp dir, because the only removal was a later
    process reusing the pid.
+   Each binary has a positive finite runtime limit (`--timeout-seconds`, default 900s). A timed-out
+   binary's process group receives TERM, then KILL after a five-second grace period; partial output
+   is printed and the remaining binaries still run.
 4. Prints each binary's output WHOLE, under a cargo-style `Running` line, in the order they
    finish -- never interleaved -- so every binary's literal `test result:` line is in the log.
    It does not stop at the first failing binary (cargo would): every binary runs, every failure
@@ -57,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import signal
@@ -69,6 +73,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 HEARTBEAT = 60.0
 EX_TESTFAIL = 101  # cargo's own status for "a test failed"
+DEFAULT_TIMEOUT_SECONDS = 900.0
+TERMINATE_GRACE_SECONDS = 5.0
 
 
 def default_jobs() -> int:
@@ -228,11 +234,15 @@ def main() -> int:
                     help="fail when a --filter was given and no binary ran a test")
     ap.add_argument("--threads", type=int, default=int(os.environ.get("PLX_TEST_THREADS") or 0),
                     help="RUST_TEST_THREADS for each binary (0: an even share of the CPUs, at least 2)")
+    ap.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS,
+                    help=f"maximum runtime for each test binary (default: {DEFAULT_TIMEOUT_SECONDS:g}s)")
     ap.add_argument("cargo", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     cargo = args.cargo[1:] if args.cargo[:1] == ["--"] else args.cargo
     if not cargo or args.jobs < 1:
         ap.error("need a cargo command after `--` and --jobs >= 1")
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
+        ap.error("--timeout-seconds must be a positive finite number")
     build_args, libtest = split_cargo(cargo)
 
     build = subprocess.run(with_json_no_run(build_args), stdout=subprocess.PIPE, text=True)
@@ -282,8 +292,37 @@ def main() -> int:
         else:
             with print_lock:
                 live.add(r)
-            r.output, _ = r.proc.communicate()
-            r.code = r.proc.returncode
+            try:
+                r.output, _ = r.proc.communicate(timeout=args.timeout_seconds)
+                r.code = r.proc.returncode
+            except subprocess.TimeoutExpired:
+                # Each test binary owns a fresh process group. Stop only that group,
+                # drain its output, and leave other packages queued/running so a red
+                # binary does not hide useful results from the rest of the suite.
+                try:
+                    os.killpg(r.proc.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                try:
+                    r.output, _ = r.proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(r.proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        r.output, _ = r.proc.communicate(timeout=TERMINATE_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired as error:
+                        # A detached descendant may keep the capture pipe open. The
+                        # owned group has already received SIGKILL; close our reader
+                        # after the final bound and still reap the direct child.
+                        r.output = error.output or b""
+                        if r.proc.stdout:
+                            r.proc.stdout.close()
+                        r.proc.wait(timeout=TERMINATE_GRACE_SECONDS)
+                r.code = 124
+                r.output += (f"\ncargo-test-parallel: TIMED OUT {r.name} after "
+                             f"{args.timeout_seconds:g}s; stopped its process group\n").encode()
             r.elapsed = time.monotonic() - r.started
             r.sweep_tmpdir()
             if r.leaked:

@@ -310,6 +310,14 @@ impl icu_provider::DataProvider<icu_datetime::provider::names::DatetimeNamesMont
         icu_provider::DataError,
     > {
         use icu_datetime::provider::{names::MonthNames, semantic_skeletons::marker_attrs};
+        // ICU 2.4 requests month data even for numeric M/MM and L/LL patterns.
+        // Gregorian numeric months need no localized month-name table.
+        if req.id.marker_attributes == marker_attrs::NUMERIC {
+            return Ok(icu_provider::DataResponse {
+                metadata: Default::default(),
+                payload: icu_provider::DataPayload::from_owned(MonthNames::Numeric),
+            });
+        }
         if req.id.marker_attributes != marker_attrs::ABBR {
             return Err(icu_provider::DataErrorKind::IdentifierNotFound.into_error());
         }
