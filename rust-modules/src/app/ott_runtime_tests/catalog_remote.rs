@@ -2236,3 +2236,34 @@ fn catalog_remote_completed_return_random_uses_the_same_completion_authority() {
     assert!(runtime.resolver_next.is_some());
     assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
 }
+
+
+#[test]
+fn catalog_remote_return_reads_and_refused_play_do_not_rebase_stopped_or_paused_intent() {
+    let _lock = plx_base::testlock::serial();
+    for paused in [false, true] {
+        let mut f = Fixture::new(2);
+        let old_generation = f.app.ott.as_ref().unwrap().generation;
+        back_from_completed_catalog(&mut f);
+        let runtime = f.app.ott.as_mut().unwrap();
+        if paused { runtime.continuity.pause(old_generation); }
+        else { runtime.continuity.stop(old_generation); }
+        let caps = f.request("capabilities", json!({})).unwrap();
+        assert!(caps["data"].get("categories").is_some());
+        let cats = f.categories();
+        let page = f.channels(cats["catalog"].as_str().unwrap(), "all", 0);
+        f.app.ott_standby = true;
+        let response = f.request("play_catalog", json!({"catalog":page["catalog"],"id":"video-0"})).unwrap();
+        assert_eq!(response["status"], "rejected");
+        let runtime = f.app.ott.as_mut().unwrap();
+        let generation = runtime.generation;
+        assert_ne!(generation, old_generation);
+        // Probe ownership only after all effects under test. If a read or
+        // refusal had rebased continuity, this current-generation intent would
+        // be accepted and expose that unauthorized transfer.
+        runtime.continuity.user_selected(generation, "video-0");
+        assert!(!runtime.continuity.accepts_end(generation, "video-0"));
+        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+        assert!(runtime.continuity.pending_retry().is_none());
+    }
+}

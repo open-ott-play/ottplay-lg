@@ -889,3 +889,69 @@ fn newer_explicit_selection_is_not_cancelled_by_old_live_retry_pause_receipt() {
 
 #[path = "player_startup_feedback.rs"]
 mod startup_feedback;
+
+#[test]
+fn live_retry_after_actual_catalog_rpc_and_back_keeps_the_rpc_selected_channel() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = fixture();
+    app.running = true;
+    let mut runtime = app.ott.take().unwrap();
+    let mut source = profile();
+    source.kind = ProviderKind::M3u;
+    source.source = "https://diag.invalid/list.m3u".into();
+    runtime.saved.profiles.profiles = vec![source.clone()];
+    runtime.saved.profiles.active_profile = Some(source.id.clone());
+    runtime.provider = ProviderKind::M3u;
+    for channel in &mut runtime.catalog.entries {
+        channel.duration_ms = None;
+        channel.live = Some(Default::default());
+        channel.media = MediaLocator::Http { url: PRIVATE_URL.into() };
+    }
+    runtime.page = "channels";
+    apply_ui_action(&mut runtime, &mut app, OttAction::Back, true, false, false);
+    assert!(runtime.returned_catalog_complete());
+    app.ott = Some(runtime);
+    let runtime_id = app.ott.as_ref().unwrap().remote.runtime().to_owned();
+    let cats = read_params(&mut app, "categories", 801,
+        json!({"op":"list","runtime":runtime_id,"offset":0,"limit":200}));
+    assert_eq!(cats["status"], "ok");
+    let page = read_params(&mut app, "channels", 802,
+        json!({"runtime":runtime_id,"catalog":cats["data"]["catalog"],"category":"all","offset":0,"limit":200}));
+    assert_eq!(page["status"], "ok");
+    let mut runtime = app.ott.take().unwrap();
+    let now = runtime.now_ms();
+    let body = json!({"commands":[],"server_time":1000,"requests":[{
+        "id":format!("{:032x}",803),"action":"play_catalog","expires_at":1020,
+        "params":{"catalog":page["data"]["catalog"],"id":"second"}
+    }]}).to_string();
+    let invocation = runtime.remote.raw_poll_for_test(&body, now).pop().unwrap();
+    let response = commands::command(&mut runtime, &mut app, &invocation);
+    assert!(response.is_none(), "actual exact RPC admission: {response:?}");
+    let request = runtime.resolver_next.take().expect("actual exact RPC resolver");
+    let channel = request.entry.clone().unwrap();
+    let mut info = unsupported_info();
+    info.video_codec = "h264".into(); info.audio_codec = "aac".into();
+    info.audio_channels = 2; info.audio_sample_rate = 48_000; info.audio_bit_depth = 16;
+    runtime.tx.send(Job::Play(request.generation, request.profile,
+        Ok((channel, ReadySource::External(plx_media::ff::ExternalSource::Http(PRIVATE_URL.into()), info, None)))))
+        .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
+    app.ott = Some(runtime);
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    let mut resources = AcceptedResources::default();
+    tick_with_start(&mut app, clock, |runtime, app, profile, entry, source|
+        start_resolved_with(runtime, app, profile, entry, source, &mut resources));
+    assert_eq!(resources.starts, 1);
+    assert_eq!(app.ott.as_ref().unwrap().playing.as_ref().unwrap().selection_id, "second");
+    let epoch = install_owned_engine(&mut app);
+    app.ott.as_mut().unwrap().saving = true;
+    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+    signal_error(&app, FailureKind::PlaybackInterrupted);
+    reconcile(&mut app);
+    let runtime = app.ott.as_mut().unwrap();
+    let retry = runtime.continuity.pending_retry().expect("actual RPC selection must own same-channel recovery after Back");
+    assert_eq!(retry.after, "second");
+    let due = retry.not_before_ms;
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    assert!(matches!(decision, continuity::Decision::Start { ref entry_id, reason: continuity::Reason::LiveRetry, .. } if entry_id == "second"));
+}

@@ -4286,6 +4286,11 @@ impl Runtime {
         transient::cancel_play_candidate(self, app);
         self.resume_pending = None;
         self.playback_epoch = self.playback_epoch.wrapping_add(1);
+        // Back retired the producer's generation. Only this fully admitted
+        // explicit selection may transfer the retained view's continuity owner.
+        if self.returned_catalog_complete() {
+            self.continuity.rebase(self.generation);
+        }
         self.continuity.user_selected(self.generation, &id);
         let result =
             self.queue_play_request_quality(request, profile, entry, favorite, true, interactive);
