@@ -1500,10 +1500,16 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             // above took the key; the row's press is the engine's, `PlayerScreen::row_pressed`.
             // The arm stays, empty, so OK keeps its place in front of the arms below.
         } else if matches!(key, Key::Pause) {
+            if super::ott_runtime::multiview_transport_unavailable(app) {
+                return;
+            }
             if key_pause(&mut app.adapters.player, app.last_input, &mut app.pages) {
                 super::ott_runtime::viewer_transport(app);
             }
         } else if matches!(key, Key::Play) {
+            if super::ott_runtime::multiview_transport_unavailable(app) {
+                return;
+            }
             if (app.adapters.player.is_live() && !app.player.lifecycle.awaiting_load()
                 || super::ott_runtime::foreign_native_start_allowed(app))
                 && key_play(&mut app.player.session,
@@ -1518,6 +1524,9 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
                 super::ott_runtime::viewer_transport(app);
             }
         } else if matches!(key, Key::PlayPause) {
+            if super::ott_runtime::multiview_transport_unavailable(app) {
+                return;
+            }
             // ONE key, both directions. `key_play`/`key_pause` are each half of the
             // toggle, so this arm picks; off the player route `key_play` is what starts
             // playback, which is the right answer for a PLAYPAUSE press on a card.

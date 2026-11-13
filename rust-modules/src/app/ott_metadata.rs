@@ -276,7 +276,7 @@ impl PlexRead<'_> {
 }
 
 fn hydrate_plex_with_read(
-    profile: &ProviderProfile, mut entry: CatalogEntry, cancel: &AtomicBool,
+    profile: &ProviderProfile, entry: CatalogEntry, cancel: &AtomicBool,
     read: Option<PlexRead<'_>>,
 ) -> Result<CatalogEntry, &'static str> {
     let MediaLocator::Plex {
@@ -311,6 +311,18 @@ fn hydrate_plex_with_read(
     if cancel.load(Ordering::Acquire) {
         return Err("Metadata request cancelled");
     }
+    apply_plex_metadata(entry, item)
+}
+
+/// Apply one exact, bounded source answer. Both ordinary metadata and independent
+/// multiview workers use this classification; portable labels cannot replace it.
+pub(super) fn apply_plex_metadata(
+    mut entry: CatalogEntry,
+    item: plx_plex::plex::Metadata,
+) -> Result<CatalogEntry, &'static str> {
+    let MediaLocator::Plex { rating_key, .. } = &entry.media else {
+        return Err("Favorite Plex source does not match");
+    };
     if item.rating_key != *rating_key {
         return Err("Plex returned a different item");
     }

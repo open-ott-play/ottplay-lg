@@ -976,6 +976,13 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
     }
     let p = &inv.params;
     let operation = p["operation"].as_str().unwrap_or("");
+    if multiview_owns_decoder_operation(operation)
+        && super::multiview_output::owns_picture(runtime, app)
+    {
+        runtime.status = "Per-window transport is unavailable for this source".into();
+        runtime.changed();
+        return Some(unsupported("Per-window transport is unavailable for multiview output"));
+    }
     if matches!(
         operation,
         "previous_channel" | "next_channel" | "step_channel"
@@ -1114,6 +1121,26 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
     Some(unsupported("Unsupported native playback operation"))
 }
 
+fn multiview_owns_decoder_operation(operation: &str) -> bool {
+    matches!(operation,
+        "previous_channel" | "next_channel" | "step_channel" | "pause" | "resume" | "seek" | "seek_relative")
+}
+
+#[cfg(all(test, feature = "hostsim"))]
+mod multiview_transport_guard_tests {
+    use super::multiview_owns_decoder_operation;
+
+    #[test]
+    fn remote_decoder_transport_is_separated_from_read_and_lifecycle_commands() {
+        for operation in ["previous_channel", "next_channel", "step_channel", "pause", "resume", "seek", "seek_relative"] {
+            assert!(multiview_owns_decoder_operation(operation), "{operation}");
+        }
+        for operation in ["status", "volume", "mute", "notifications", "exit_app", "unknown"] {
+            assert!(!multiview_owns_decoder_operation(operation), "{operation}");
+        }
+    }
+}
+
 /// Keep individual-setting failures inside their existing typed wire contract.
 /// Other command families retain their own response shapes.
 pub(super) fn settings_public_saved(runtime: &mut Runtime, inv: &Invocation, response: &mut Value) {
@@ -1167,6 +1194,12 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
 
 pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
     runtime.remote.note_command(inv, runtime.now_ms());
+    if inv.action == "multiview" {
+        let mut driver = std::mem::take(&mut runtime.multiview_driver);
+        let response = driver.command(runtime, app, inv);
+        runtime.multiview_driver = driver;
+        return response;
+    }
     if inv.action == "native_playback_diagnostics" {
         if runtime.now_ms() >= inv.deadline_ms {
             return Some(super::native_playback_diagnostics::failure(

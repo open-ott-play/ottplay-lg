@@ -34,6 +34,8 @@ mod ott_remote_tests;
 mod osd_tests;
 #[cfg(test)]
 mod channel_transition_tests;
+#[cfg(test)]
+mod multiview_tests;
 
 use std::borrow::Cow;
 
@@ -904,6 +906,21 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
                 _ => {}
             }
         }
+        // Page-owned modal entries receive input before this screen. The local
+        // repair sheet above also wins; only an explicit scene-selection offer
+        // can take directions/confirmation from the ordinary transport.
+        if let Some(frame) = H::multiview_offer(cx).filter(|frame| frame.state().input_owned) {
+            match ev {
+                ScreenEvent::Input(input) => if let Some(event) = multiview_input(&frame, &input.kind) {
+                    if let Some(event) = event { fx.push(Fx::App(AppFx::Player(PlayerReq::Multiview(event)))); }
+                    return Handled::Yes;
+                },
+                // A HUD press queued before scene selection acquired input may
+                // not turn into an ordinary playback action under the new scene.
+                ScreenEvent::PressCommit(_) | ScreenEvent::Activate(_) => return Handled::Yes,
+                _ => {}
+            }
+        }
         // A mode/geometry change can retire a control after its input was queued.
         // Do not reinterpret that old target as the picture's play/pause action.
         let target = match ev {
@@ -1072,6 +1089,36 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
             }
             _ => Handled::No,
         }
+    }
+}
+
+/// `Some(None)` consumes a scene-selection edge without falling through to
+/// transport (key-up or a boundary); `None` leaves unrelated controls untouched.
+fn multiview_input(frame: &plx_appkit::multiview_chrome::ChromeFrame,
+    kind: &InputKind<u32>) -> Option<Option<plx_appkit::multiview_chrome::Event>>
+{
+    use plx_appkit::multiview_chrome::Input;
+    use plx_appkit::multiview_layout::{PointerAction, PointerMap};
+    match *kind {
+        InputKind::Key { key, sym, wcode, edge, at_edge } => {
+            let input = match consts::classify_input(key, sym, wcode) {
+                consts::Key::Up => Input::Direction(Dir::Up),
+                consts::Key::Down => Input::Direction(Dir::Down),
+                consts::Key::Left { alt: false } => Input::Direction(Dir::Left),
+                consts::Key::Right { alt: false } => Input::Direction(Dir::Right),
+                consts::Key::Ok => Input::Confirm,
+                _ => return None,
+            };
+            Some(if edge != Edge::Up && !at_edge
+                && (!matches!(input, Input::Confirm) || edge == Edge::Down)
+                { frame.input(input) } else { None })
+        }
+        InputKind::Click { x, y, .. } => {
+            let viewport = frame.layout().viewport();
+            let map = PointerMap::contain(viewport, viewport).ok()?;
+            Some(frame.pointer(&map, PointerAction::PrimaryClick, x, y))
+        }
+        _ => None,
     }
 }
 
@@ -2300,6 +2347,14 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         // delivery, and the screen decides what the element means — including the scrubber, whose
         // meaning needs the click's `x` and so cannot be carried by a bare `ScreenEvent::Activate`
         // at all, and the tabs, which open a panel at once with no dip to wait for.
+        if let Some(frame) = H::multiview_offer(f.cx) {
+            let empty = plx_platform::i18n::msg::multiview_empty();
+            let loading = plx_platform::i18n::msg::multiview_loading();
+            let failed = plx_platform::i18n::msg::multiview_failed();
+            frame.draw(f.painter, f.measure, &plx_appkit::multiview_chrome::Labels {
+                empty, loading, failed,
+            });
+        }
         if self.permanent_clock_key().is_some() {
             let _ = self.render.osd_clock.draw(f.painter, &self.model, f.measure);
         }

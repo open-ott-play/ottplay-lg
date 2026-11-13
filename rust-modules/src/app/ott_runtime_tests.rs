@@ -7,6 +7,9 @@ mod notifications;
 #[path = "ott_runtime_tests/modern_shelves.rs"]
 mod modern_shelves;
 
+#[path = "ott_runtime_tests/multiview_authorization.rs"]
+mod multiview_authorization;
+
 #[path = "ott_runtime_tests/favorites_items_capability.rs"]
 mod favorites_items_capability;
 

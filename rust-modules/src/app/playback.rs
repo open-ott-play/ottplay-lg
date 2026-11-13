@@ -684,6 +684,11 @@ pub(crate) fn player_requests_checked(app: &mut super::App,
     use plx_screens::registry::PlayerReq;
     let mut accepted = ViewerTransport::None;
     for request in reqs {
+        if multiview_uses_global_transport(&request)
+            && super::ott_runtime::multiview_transport_unavailable(app)
+        {
+            continue;
+        }
         let result = match request {
             PlayerReq::RetryPlayback | PlayerReq::PlayAutomatically
                 if !super::ott_runtime::foreign_native_start_allowed(app) => ViewerTransport::None,
@@ -700,6 +705,46 @@ pub(crate) fn player_requests_checked(app: &mut super::App,
         accepted = accepted.merge(result);
     }
     accepted
+}
+
+#[cfg(test)]
+mod multiview_transport_guard_tests {
+    use super::{multiview_command_uses_global_transport, multiview_uses_global_transport};
+    use plx_appkit::player_hud::command::{HudCommand, Section};
+    use plx_screens::registry::PlayerReq;
+
+    #[test]
+    fn transport_requests_are_blocked_but_information_and_lifecycle_are_not() {
+        assert!(multiview_uses_global_transport(&PlayerReq::Transport(None)));
+        assert!(multiview_uses_global_transport(&PlayerReq::SeekTo(10)));
+        assert!(multiview_uses_global_transport(&PlayerReq::CommitSeek(10)));
+        assert!(multiview_uses_global_transport(&PlayerReq::RetryPlayback));
+        assert!(multiview_uses_global_transport(&PlayerReq::PlayAutomatically));
+        assert!(multiview_uses_global_transport(&PlayerReq::StandIn));
+        assert!(multiview_uses_global_transport(&PlayerReq::Command(HudCommand::TogglePlay)));
+        assert!(multiview_uses_global_transport(&PlayerReq::Command(HudCommand::Previous)));
+        assert!(multiview_uses_global_transport(&PlayerReq::Command(HudCommand::Next)));
+        assert!(multiview_uses_global_transport(&PlayerReq::Command(HudCommand::FromBeginning)));
+        assert!(!multiview_uses_global_transport(&PlayerReq::Exit));
+        assert!(!multiview_uses_global_transport(&PlayerReq::ExtendHud(1000)));
+        assert!(!multiview_uses_global_transport(&PlayerReq::Command(HudCommand::ToggleStats)));
+        assert!(!multiview_uses_global_transport(&PlayerReq::Command(
+            HudCommand::ToggleSection(Section::Info))));
+        assert!(!multiview_uses_global_transport(&PlayerReq::Command(
+            HudCommand::OpenTracks(plx_appkit::player_hud::command::TrackTab::Audio))));
+    }
+
+    #[test]
+    fn checked_hud_transport_classifier_does_not_swallow_information() {
+        assert!(multiview_command_uses_global_transport(HudCommand::TogglePlay));
+        assert!(multiview_command_uses_global_transport(HudCommand::Previous));
+        assert!(multiview_command_uses_global_transport(HudCommand::Next));
+        assert!(multiview_command_uses_global_transport(HudCommand::FromBeginning));
+        assert!(!multiview_command_uses_global_transport(HudCommand::ToggleStats));
+        assert!(!multiview_command_uses_global_transport(HudCommand::ToggleSection(Section::Info)));
+        assert!(!multiview_command_uses_global_transport(HudCommand::OpenTracks(
+            plx_appkit::player_hud::command::TrackTab::Audio)));
+    }
 }
 
 #[cfg(all(test, feature = "hostsim"))]
@@ -721,6 +766,11 @@ pub(crate) fn perform_hud_command_checked(app: &mut super::App,
     command: plx_appkit::player_hud::command::HudCommand, now: u32) -> ViewerTransport
 {
     use plx_appkit::player_hud::command::HudCommand;
+    if multiview_command_uses_global_transport(command)
+        && super::ott_runtime::multiview_transport_unavailable(app)
+    {
+        return ViewerTransport::None;
+    }
     if app.bridge.ott_player_offer().is_none() {
         match command {
             HudCommand::Previous => return queue_transport::step(app, plx_media::route::QueueStep::Previous),
@@ -730,6 +780,25 @@ pub(crate) fn perform_hud_command_checked(app: &mut super::App,
     }
     perform_hud_command(command, &mut app.player, &mut app.adapters.player,
         &mut app.repause_at, now, &mut app.refresh_hubs, &mut app.pages, &mut app.bridge)
+}
+
+fn multiview_command_uses_global_transport(
+    command: plx_appkit::player_hud::command::HudCommand,
+) -> bool {
+    use plx_appkit::player_hud::command::HudCommand;
+    matches!(command,
+        HudCommand::TogglePlay | HudCommand::Seek(_) | HudCommand::Previous | HudCommand::Next
+            | HudCommand::FromBeginning)
+}
+
+fn multiview_uses_global_transport(request: &plx_screens::registry::PlayerReq) -> bool {
+    use plx_screens::registry::PlayerReq;
+    match request {
+        PlayerReq::Transport(_) | PlayerReq::SeekTo(_) | PlayerReq::CommitSeek(_)
+        | PlayerReq::RetryPlayback | PlayerReq::PlayAutomatically | PlayerReq::StandIn => true,
+        PlayerReq::Command(command) => multiview_command_uses_global_transport(*command),
+        _ => false,
+    }
 }
 
 pub(crate) fn activate_player_row_checked(app: &mut super::App,
@@ -792,7 +861,7 @@ pub(crate) fn player_requests(
         match req {
             // The app consumes these before ordinary transport dispatch. A caller
             // bypassing that owner cannot turn an unverified request into navigation.
-            PlayerReq::OpenCatalog(_) | PlayerReq::OpenSettings(_) | PlayerReq::OttAction(_) | PlayerReq::Menu(_) => {}
+            PlayerReq::OpenCatalog(_) | PlayerReq::OpenSettings(_) | PlayerReq::OttAction(_) | PlayerReq::Menu(_) | PlayerReq::Multiview(_) => {}
             PlayerReq::RetryPlayback => {
                 retry_failed_playback(&mut player.session, pa, bridge.metadata_mut(), None, AttemptOrigin::UserRetry);
             }

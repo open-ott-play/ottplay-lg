@@ -1,6 +1,6 @@
 //! Pure, bounded control-server wire protocol. Time and IO are supplied by the runner.
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::VecDeque, net::IpAddr};
 
 pub(super) const BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -184,6 +184,8 @@ pub(crate) struct Invocation {
     pub(super) plex_servers_raw: Option<String>,
     /// Complete received queued envelope, duplicate-checked and bounded before admission.
     pub(super) provider_settings_raw: Option<String>,
+    /// Original duplicate-checked multiview action/params projection.
+    pub(super) multiview_raw: Option<String>,
     pub deadline_ms: u64,
     pub(super) request: bool,
     pub(super) generation: u64,
@@ -197,6 +199,9 @@ impl Invocation {
     }
     pub(crate) fn provider_settings_projection(&self) -> Option<&[u8]> {
         self.provider_settings_raw.as_deref().map(str::as_bytes)
+    }
+    pub(crate) fn multiview_projection(&self) -> Option<&[u8]> {
+        self.multiview_raw.as_deref().map(str::as_bytes)
     }
     pub(crate) fn expects_response(&self) -> bool {
         self.request
@@ -246,38 +251,53 @@ pub(crate) fn favorites_rejection(params: &Value, code: &str) -> Value {
         "subject":"global","error":code}})
 }
 fn refused_request(id: &str, action: &str, params: &Value, code: &str, message: &str) -> Value {
-    let mut response = if matches!(action, "favorites_global_items" | "favorites_global_recovery") {
-        let code = if action == "favorites_global_recovery" && code == "cancelled" { "expired" } else { code };
-        favorites_rejection(params, code) }
-        else if action == "plex_servers" {
-            let error = match code {
-                "expired" => super::plex_servers::Error::Expired,
-                "cancelled" => super::plex_servers::Error::Cancelled,
-                "limit_exceeded" => super::plex_servers::Error::LimitExceeded,
-                _ => super::plex_servers::Error::InvalidRequest,
-            };
-            super::plex_servers::Correlation::from_params(params)
-                .map_or_else(|| json!({"status":"rejected","data":{"error":message}}),
-                    |correlation| correlation.rejected(error))
-        }
-        else if matches!(action, "settings_compare" | "provider_settings") && params.get("version").is_some() {
-            json!({"status":"rejected","data":{"version":1,
+    let mut response = if matches!(
+        action,
+        "favorites_global_items" | "favorites_global_recovery"
+    ) {
+        let code = if action == "favorites_global_recovery" && code == "cancelled" {
+            "expired"
+        } else {
+            code
+        };
+        favorites_rejection(params, code)
+    } else if action == "plex_servers" {
+        let error = match code {
+            "expired" => super::plex_servers::Error::Expired,
+            "cancelled" => super::plex_servers::Error::Cancelled,
+            "limit_exceeded" => super::plex_servers::Error::LimitExceeded,
+            _ => super::plex_servers::Error::InvalidRequest,
+        };
+        super::plex_servers::Correlation::from_params(params).map_or_else(
+            || json!({"status":"rejected","data":{"error":message}}),
+            |correlation| correlation.rejected(error),
+        )
+    } else if matches!(action, "settings_compare" | "provider_settings")
+        && params.get("version").is_some()
+    {
+        json!({"status":"rejected","data":{"version":1,
                 "runtime":params["runtime"].as_str().filter(|s|valid_device(s)).unwrap_or(""),
                 "provider":params["provider"].as_str().filter(|s|s.len()<=64).unwrap_or(""),
                 "number":params["number"].as_u64().filter(|n|(1..=15).contains(n)).unwrap_or(0),
                 "reason":if code=="expired" {"expired"} else {"revision_conflict"}}})
-        }
-        else if action == "local_browser" || (action == "local_media" && params.get("source_handle").is_some()) {
-            // Delivery may expire a request before the application sees it. Keep
-            // the original correlation and the family's closed error vocabulary;
-            // never substitute a new runtime or imply that the command ran.
-            let code = if action == "local_media" { "runtime_changed" } else { code };
-            json!({"status":"rejected","data":{"version":1,
+    } else if action == "local_browser"
+        || (action == "local_media" && params.get("source_handle").is_some())
+    {
+        // Delivery may expire a request before the application sees it. Keep
+        // the original correlation and the family's closed error vocabulary;
+        // never substitute a new runtime or imply that the command ran.
+        let code = if action == "local_media" {
+            "runtime_changed"
+        } else {
+            code
+        };
+        json!({"status":"rejected","data":{"version":1,
                 "runtime":params["runtime"].as_str().filter(|s|s.len()<=256).unwrap_or(""),
                 "op":params["op"].as_str().filter(|s|s.len()<=16).unwrap_or(""),
                 "state":"error","error":code}})
-        }
-        else { json!({"status":"rejected","data":{"error":message}}) };
+    } else {
+        json!({"status":"rejected","data":{"error":message}})
+    };
     response["id"] = json!(id);
     response
 }
@@ -405,6 +425,7 @@ impl Delivery {
                         media_tracks_raw: None,
                         plex_servers_raw: None,
                         provider_settings_raw: None,
+                        multiview_raw: None,
                         deadline_ms: until,
                         request: false,
                         generation: 0,
@@ -446,8 +467,14 @@ impl Delivery {
                 // Receipt expiry/eviction says nothing about managed activation effects.
                 // Without an original cached result, remain silent: duplicate params
                 // cannot reconstruct its correlation or justify cancellation/retry.
-                if action != "plex_servers" {
-                    self.responses.push_back(refused_request(id, action, &params, "cancelled", "Request receipt expired; submit a new request"));
+                if !matches!(action, "plex_servers" | "multiview") {
+                    self.responses.push_back(refused_request(
+                        id,
+                        action,
+                        &params,
+                        "cancelled",
+                        "Request receipt expired; submit a new request",
+                    ));
                 }
             } else {
                 remember(&mut self.seen_requests, id);
@@ -464,14 +491,19 @@ impl Delivery {
                         media_tracks_raw: None,
                         plex_servers_raw: None,
                         provider_settings_raw: None,
+                        multiview_raw: None,
                         deadline_ms: until,
                         request: true,
                         generation: 0,
                     });
-                } else {
-                    self.responses.push_back(
-                        refused_request(id, action, &params, "expired", "Request expired"),
-                    );
+                } else if action != "multiview" {
+                    self.responses.push_back(refused_request(
+                        id,
+                        action,
+                        &params,
+                        "expired",
+                        "Request expired",
+                    ));
                 }
             }
         }
@@ -479,7 +511,10 @@ impl Delivery {
     }
     #[cfg(all(test, feature = "hostsim"))]
     pub(super) fn response_for_id_for_test(&self, id: &str) -> Option<Value> {
-        self.cache.iter().find(|(key, _)| key == id).map(|(_, value)| value.clone())
+        self.cache
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, value)| value.clone())
     }
 
     pub fn complete(&mut self, invocation: Invocation, result: Value) -> bool {
@@ -493,15 +528,38 @@ impl Delivery {
             && result.get("data").is_some();
         let mut response = if valid {
             json!({"id":invocation.id,"status":result["status"],"data":result["data"]})
+        } else if invocation.action == "multiview" {
+            let Some(response) =
+                multiview_failure_receipt(&invocation, super::multiview::Reason::Unavailable)
+            else {
+                return false;
+            };
+            response
         } else {
             json!({"id":invocation.id,"status":"rejected","data":{"error":"Invalid native result"}})
         };
-        let response_limit = if invocation.action == "plex_servers" { 64 * 1024 } else { BODY_LIMIT };
+        let response_limit = match invocation.action.as_str() {
+            "plex_servers" => 64 * 1024,
+            "multiview" => 256 * 1024,
+            _ => BODY_LIMIT,
+        };
         // Measure the complete escaped envelope after adding the original request ID.
         if response.to_string().len() > response_limit {
-            response = if invocation.action == "plex_servers" {
-                refused_request(&invocation.id, &invocation.action, &invocation.params,
-                    "limit_exceeded", "Result exceeds the control response limit")
+            response = if invocation.action == "multiview" {
+                let Some(response) =
+                    multiview_failure_receipt(&invocation, super::multiview::Reason::LimitExceeded)
+                else {
+                    return false;
+                };
+                response
+            } else if invocation.action == "plex_servers" {
+                refused_request(
+                    &invocation.id,
+                    &invocation.action,
+                    &invocation.params,
+                    "limit_exceeded",
+                    "Result exceeds the control response limit",
+                )
             } else {
                 json!({"id":invocation.id,"status":"rejected","data":{"error":"Result exceeds the control response limit"}})
             };
@@ -519,8 +577,22 @@ impl Delivery {
     }
 }
 
+/// Only the retained original lexical projection can bind a family receipt.
+/// An unbound bootstrap has no current runtime here; silence preserves unknown
+/// execution state instead of inventing one from mutable request parameters.
+fn multiview_failure_receipt(
+    invocation: &Invocation,
+    reason: super::multiview::Reason,
+) -> Option<Value> {
+    let request = super::multiview::Request::decode(invocation.multiview_projection()?).ok()?;
+    let mut response = request.rejected(request.runtime()?, reason).ok()?;
+    response["id"] = json!(invocation.id);
+    Some(response)
+}
+
 pub(super) fn valid_server_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 254
+    !value.is_empty()
+        && value.len() <= 254
         && !value.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
@@ -547,8 +619,7 @@ impl Pairing {
         device_id: &str,
         now: u64,
     ) -> Result<Self, &'static str> {
-        if !valid_server_id(server_id) || !valid_device(device_id)
-        {
+        if !valid_server_id(server_id) || !valid_device(device_id) {
             return Err("Invalid pairing identity");
         }
         Ok(Self {
@@ -762,26 +833,43 @@ mod items_ingress_tests {
     use super::*;
     #[test]
     fn expired_items_request_keeps_typed_common_fields_before_dispatch() {
-        let mut delivery=Delivery::default();
-        let params=json!({"runtime":"fixture","op":"list","subject":"global","cursor":null,"max_entries":100});
+        let mut delivery = Delivery::default();
+        let params = json!({"runtime":"fixture","op":"list","subject":"global","cursor":null,"max_entries":100});
         let actions=delivery.poll(&json!({"commands":[],"server_time":1000,"requests":[{
             "id":"00000000000000000000000000000001","action":"favorites_global_items","params":params,"expires_at":999}]}),100,0).unwrap();
-        assert!(actions.is_empty());let response=delivery.responses.front().unwrap();
-        assert_eq!(response["data"],json!({"version":1,"runtime":"fixture","op":"list","subject":"global","error":"expired"}));
+        assert!(actions.is_empty());
+        let response = delivery.responses.front().unwrap();
+        assert_eq!(
+            response["data"],
+            json!({"version":1,"runtime":"fixture","op":"list","subject":"global","error":"expired"})
+        );
     }
     #[test]
     fn recovery_early_refusal_uses_its_own_error_vocabulary() {
-        let params=json!({"runtime":"fixture","op":"inspect","subject":"global","cursor":null});
-        let response=refused_request("00000000000000000000000000000001","favorites_global_recovery",&params,"cancelled","expired receipt");
-        assert_eq!(response["data"],json!({"version":1,"runtime":"fixture","op":"inspect","subject":"global","error":"expired"}));
+        let params = json!({"runtime":"fixture","op":"inspect","subject":"global","cursor":null});
+        let response = refused_request(
+            "00000000000000000000000000000001",
+            "favorites_global_recovery",
+            &params,
+            "cancelled",
+            "expired receipt",
+        );
+        assert_eq!(
+            response["data"],
+            json!({"version":1,"runtime":"fixture","op":"inspect","subject":"global","error":"expired"})
+        );
     }
     #[test]
     fn evicted_items_receipt_is_typed_without_redispatch() {
-        let mut delivery=Delivery::default();let id="00000000000000000000000000000001";
+        let mut delivery = Delivery::default();
+        let id = "00000000000000000000000000000001";
         delivery.seen_requests.push_back(id.into());
         assert!(delivery.poll(&json!({"commands":[],"server_time":1000,"requests":[{
             "id":id,"action":"favorites_global_items","params":{"runtime":"fixture","op":"current","subject":"global"},"expires_at":1020}]}),100,0).unwrap().is_empty());
-        assert_eq!(delivery.responses.front().unwrap()["data"]["error"],"cancelled");
+        assert_eq!(
+            delivery.responses.front().unwrap()["data"]["error"],
+            "cancelled"
+        );
     }
 }
 
@@ -792,3 +880,7 @@ mod plex_receipt_tests;
 #[cfg(test)]
 #[path = "local_browser_ingress_tests.rs"]
 mod local_browser_ingress_tests;
+
+#[cfg(test)]
+#[path = "multiview_receipt_tests.rs"]
+mod multiview_receipt_tests;

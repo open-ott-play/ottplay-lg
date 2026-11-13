@@ -108,6 +108,23 @@ consume OpenSSH's `~/.ssh/config` settings.
 | `ares-install` throws `Callback was already called.` | Retry once with the stock CLI after checking the selected Node runtime and device alias. On the observed `@webos-tools/cli` 3.2.6 installation, the error persisted under Node 22 and Node 24; Node 16 was rejected by that CLI with a `>=20.0.0` requirement. This points to a CLI/library callback issue, not a TV reachability failure. |
 | `ares-install` still fails after key retrieval succeeds | Do not repeatedly reinstall or remove the app. Capture the exact error, CLI and Node versions, and check the package/IPK path. `ares-novacom --getkey` succeeding proves key retrieval, not package installation. |
 
+### Recovering after a Developer Mode reset
+
+A Developer Mode session reset can remove the installed development application.
+After signing in again and restarting the TV, check the installed application
+list before assuming the package is still present. Restore the verified IPK with
+the **same application ID**, then verify its version and launch it once.
+
+Do not delete or recreate profiles preemptively. In the recovery observed on
+2026-11-13, the application was absent, but reinstalling the same primary ID
+restored the saved profiles and remote-control identity. This is an observed
+recovery, not a guarantee that every reset preserves data. Confirm both the
+profile list and remote readiness before importing a backup or pairing again.
+
+The launcher name is `OTTPlay`, including localized manifests. The internal ID
+`com.openottplay.player.native` is a storage/update identity; its `native` suffix
+is not the launcher title and should not be changed for a display-name update.
+
 ### Last-resort callback workaround observed on 2026-11-08
 
 For the exact `Callback was already called.` failure above, installation of the

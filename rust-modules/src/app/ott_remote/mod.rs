@@ -11,6 +11,7 @@ pub(super) mod television;
 mod display;
 pub(super) mod media_tracks;
 pub(super) mod plex_servers;
+pub(crate) mod multiview;
 mod ingress;
 mod notifications;
 pub(crate) use protocol::{Config, Invocation};
@@ -1007,11 +1008,11 @@ impl Remote {
                 }
                 let parsed = match &kind {
                     SendKind::Poll => ingress::decode_poll(&response.body)
-                        .map(|poll| (poll.value, poll.media_tracks_raw, poll.plex_servers_raw, poll.provider_settings_raw)),
+                        .map(|poll| (poll.value, poll.media_tracks_raw, poll.plex_servers_raw, poll.provider_settings_raw, poll.multiview_raw)),
                     _ => serde_json::from_slice::<Value>(&response.body)
-                        .map(|value| (value, None, None, None)),
+                        .map(|value| (value, None, None, None, None)),
                 };
-                let Ok((value, media_tracks_raw, plex_servers_raw, provider_settings_raw)) = parsed else {
+                let Ok((value, media_tracks_raw, plex_servers_raw, provider_settings_raw, multiview_raw)) = parsed else {
                     self.fail(now, "Invalid command server response");
                     return actions;
                 };
@@ -1029,6 +1030,9 @@ impl Remote {
                                 }
                                 if invocation.expects_response() && matches!(invocation.action.as_str(), "settings_compare" | "provider_settings") {
                                     invocation.provider_settings_raw = provider_settings_raw.clone();
+                                }
+                                if invocation.expects_response() && invocation.action == "multiview" {
+                                    invocation.multiview_raw = multiview_raw.clone();
                                 }
                             }
                             actions = incoming;

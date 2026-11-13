@@ -1,0 +1,14 @@
+{
+  "multiview.empty": {
+    "value": "Empty",
+    "description": "Unconfigured video slot in a multi-view scene."
+  },
+  "multiview.loading": {
+    "value": "Loading…",
+    "description": "A configured multi-view video slot is starting."
+  },
+  "multiview.failed": {
+    "value": "Playback unavailable",
+    "description": "A multi-view video slot cannot currently play; no raw server error is shown."
+  }
+}
