@@ -618,12 +618,15 @@ fn transient_hls() -> IoFailureDetails {
         outcome: Some(TraceOutcome::Transport) }
 }
 fn live_failure() -> Box<App> {
+    live_failure_with(transient_hls())
+}
+fn live_failure_with(cause: IoFailureDetails) -> Box<App> {
     let mut app = fixture();
     app.ott.as_mut().unwrap().saving = true;
     admit(&mut app, "first");
     make_live(&mut app);
     let epoch = install_owned_engine(&mut app);
-    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, cause));
     signal_error(&app, FailureKind::PlaybackInterrupted);
     reconcile(&mut app);
     // Real admission consumed its Job and freed the slot. Hold the next worker
@@ -637,13 +640,15 @@ fn live_transport_recovery_requires_precise_closed_transient_cause() {
     use plx_media::player::report::FailureDetails;
     for exit in [DemuxExitClass::HlsTransportOpenFailed, DemuxExitClass::HlsTransportFailed,
         DemuxExitClass::HlsPlaylistFetchFailed,
-        DemuxExitClass::HlsPlaylistInvalid, DemuxExitClass::Other, DemuxExitClass::NoVideoStream] {
+        DemuxExitClass::HlsPlaylistWindow, DemuxExitClass::HlsPlaylistInvalid,
+        DemuxExitClass::Other, DemuxExitClass::NoVideoStream] {
         for outcome in [None, Some(TraceOutcome::Transport), Some(TraceOutcome::Deadline),
             Some(TraceOutcome::ServerState), Some(TraceOutcome::Refused),
             Some(TraceOutcome::Inconclusive), Some(TraceOutcome::Started), Some(TraceOutcome::NoBody)] {
             let expected = matches!(exit, DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
                 | DemuxExitClass::HlsPlaylistFetchFailed)
-                && matches!(outcome, Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState));
+                && matches!(outcome, Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
+                || (exit == DemuxExitClass::HlsPlaylistWindow && outcome == Some(TraceOutcome::ServerState));
             assert_eq!(recoverable_live_transport(Some(FailureDetails {
                 demux_exit: exit, pipeline_error: 0,
                 io_failure: Some(IoFailureDetails::Hls { exit, outcome }),
@@ -721,6 +726,41 @@ fn owned_live_transient_failure_retries_only_exact_channel_without_new_viewer_in
     // Automatic admission must not reset the shared bounded failure budget.
     assert_eq!(runtime.continuity.live_disconnected(generation, "first", due), continuity::Decision::Wait);
     assert_eq!(runtime.continuity.pending_retry().unwrap().failures, 2);
+}
+
+#[test]
+fn live_window_slip_reopens_original_catalog_source_and_pause_cancels_it() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure_with(IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsPlaylistWindow, outcome: Some(TraceOutcome::ServerState),
+    });
+    let runtime = app.ott.as_mut().unwrap();
+    let due = runtime.continuity.pending_retry().expect("owned live-window slip").not_before_ms;
+    assert!(matches!(runtime.retry_continuity(due - 1, &["first", "second"], true), continuity::Decision::Wait));
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    assert!(matches!(&decision, continuity::Decision::Start {
+        entry_id, reason: continuity::Reason::LiveRetry, ..
+    } if entry_id == "first"));
+    runtime.apply_continuity(decision);
+    let request = runtime.resolver_next.as_ref().expect("original source must be resolved again");
+    assert_eq!(request.profile.source, "https://diag.invalid/list.m3u");
+    let entry = request.entry.as_ref().expect("same catalog entry");
+    assert_eq!(entry.id, "first");
+    assert!(matches!(&entry.media, MediaLocator::Http { url } if url == PRIVATE_URL));
+    assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
+    let generation = runtime.play_generation;
+    let cancel = request.cancel.clone();
+    runtime.resolver_next.take();
+    late_live_result(&app, generation);
+    accepted_pause(&mut app);
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    tick_with_start(&mut app, clock, |_, _, _, _, _| panic!("Pause must fence window recovery"));
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+    assert_ne!(runtime.play_generation, generation);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert!(runtime.continuity.pending_retry().is_none());
 }
 
 #[test]

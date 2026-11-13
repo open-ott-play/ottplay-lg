@@ -4973,8 +4973,8 @@ pub(super) fn draw_notifications(app: &mut App) {
     }
 }
 
-/// Closed, current-native evidence only. Unknown/malformed/refused sources and
-/// decoder failures are terminal; they cannot gain an automatic retry policy.
+/// Closed, current-native evidence only. A window slip needs positive server-state
+/// attribution; unknown/malformed/refused sources and decoder failures stay terminal.
 fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
     use plx_media::player::report::IoFailureDetails;
     use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
@@ -4982,6 +4982,9 @@ fn recoverable_live_transport(details: Option<plx_media::player::report::Failure
         exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
             | DemuxExitClass::HlsPlaylistFetchFailed,
         outcome: Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState),
+    } | IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsPlaylistWindow,
+        outcome: Some(TraceOutcome::ServerState),
     }))
 }
 

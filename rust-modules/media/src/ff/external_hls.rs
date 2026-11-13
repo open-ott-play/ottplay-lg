@@ -714,8 +714,18 @@ pub(super) fn demux_video(
             }
         });
         if media.segments[0].inner.sequence > expected {
+            if !media.ended && next.is_some() {
+                // This producer has an exact committed cursor, but the live
+                // server no longer advertises it. A fresh same-source decoder
+                // may recover; never bridge missing reference pictures here.
+                return Err(HlsExit::OpenFailed {
+                    reason: "HLS live window advanced past playback",
+                    outcome: TraceOutcome::ServerState,
+                });
+            }
             return Err(HlsExit::Failed("HLS live window advanced past playback"));
         }
+        let mut progressed = false;
         for segment in media.segments.iter().filter(|s| s.inner.sequence >= expected) {
             if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 {
                 continue 'refresh;
@@ -776,6 +786,7 @@ pub(super) fn demux_video(
                     timeline.commit(clock);
                     next = Some(segment.inner.sequence.checked_add(1)
                         .ok_or(HlsExit::Failed("HLS sequence overflow"))?);
+                    progressed = true;
                     mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
                     continue;
                 }
@@ -851,6 +862,7 @@ pub(super) fn demux_video(
                     .ok_or(HlsExit::Failed("HLS sequence overflow"))?,
             );
             last_progress = Instant::now();
+            progressed = true;
         }
         if media.ended {
             if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 {
@@ -861,8 +873,18 @@ pub(super) fn demux_video(
             }
             return Ok(());
         }
+        // Feeding can itself spend the whole availability window blocked on
+        // bounded A/V queues. Refresh after progress before adding any poll
+        // delay; unchanged manifests retain their ordinary bounded wait.
+        if progressed { continue; }
         if last_progress.elapsed() > media.target.saturating_mul(6).max(Duration::from_secs(30)) {
-            return Err(HlsExit::Failed("HLS playlist stopped advancing"));
+            // The live server has supplied only unchanged snapshots for the
+            // existing bounded allowance. Reopen the same source through its
+            // owner; this is not permission to advance channels or reuse refs.
+            return Err(HlsExit::OpenFailed {
+                reason: "HLS playlist stopped advancing",
+                outcome: TraceOutcome::ServerState,
+            });
         }
         hls_wait(
             aq,
