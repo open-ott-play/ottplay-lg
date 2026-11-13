@@ -386,9 +386,8 @@ pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
     if state.admission.as_ref().is_some_and(|receipt| {
         policy.is_err()
             || state.generation == 0
-            || !route::playback_identity_matches(&app.player.session, &receipt.identity)
+            || !receipt_route_current(receipt, runtime, app)
             || !receipt.proof.current(runtime, app)
-            || receipt.play_generation != runtime.play_generation
     }) {
         let receipt = state.admission.as_ref().expect("checked admission");
         let pending = state.pending.as_ref().filter(|pending| {
@@ -406,13 +405,7 @@ pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
         // is inspected. This grants no new Load for the stale output generation.
         let keep_old = policy.is_ok()
             && state.generation != 0
-            && route::has_url(&app.player.session)
-            && route::playback_identity_matches(&app.player.session, &receipt.identity)
-            && route::external_source(&app.player.session).as_ref() == Some(&receipt.source)
-            && route::worker_ticket() == receipt.worker
-            && route::play_request_is_current(receipt.request)
-            && receipt.play_generation == runtime.play_generation
-            && runtime.multiview_picture.as_ref() == Some(&receipt.identity)
+            && receipt_route_current(receipt, runtime, app)
             && runtime.clock_sample.is_some_and(|sample| {
                 !receipt
                     .proof
@@ -737,9 +730,8 @@ fn admit(
     }
     Ok(receipt)
 }
-fn receipt_current(receipt: &NativeAdmission, runtime: &Runtime, app: &App) -> bool {
-    runtime.multiview_output.generation != 0
-        && receipt.proof.current(runtime, app)
+fn receipt_route_current(receipt: &NativeAdmission, runtime: &Runtime, app: &App) -> bool {
+    route::has_url(&app.player.session)
         && runtime.play_generation == receipt.play_generation
         && route::external_source(&app.player.session).as_ref() == Some(&receipt.source)
         && route::worker_ticket() == receipt.worker
@@ -747,19 +739,40 @@ fn receipt_current(receipt: &NativeAdmission, runtime: &Runtime, app: &App) -> b
         && route::playback_identity_matches(&app.player.session, &receipt.identity)
         && runtime.multiview_picture.as_ref() == Some(&receipt.identity)
 }
+fn receipt_current(receipt: &NativeAdmission, runtime: &Runtime, app: &App) -> bool {
+    runtime.multiview_output.generation != 0
+        && receipt_route_current(receipt, runtime, app)
+        && receipt.proof.current(runtime, app)
+}
 
-/// Automatic ordinary-provider recovery must not run behind this picture.
-/// This checks route ownership rather than merely a retained scene or label;
-/// an explicit new ordinary play can supersede it through normal admission.
+/// Logical target identity survives Stop. Only the still-installed exact route
+/// owns the picture; this intentionally does not require the old service proof
+/// to remain current during bounded, authorized successor inspection.
+pub(super) fn admitted_route_current(
+    runtime: &Runtime,
+    app: &App,
+    recorded_identity: &route::PlaybackIdentity,
+) -> bool {
+    !runtime.multiview_output.shutdown
+        && runtime.multiview_output.generation != 0
+        && runtime
+            .multiview_output
+            .admission
+            .as_ref()
+            .is_some_and(|receipt| {
+                &receipt.identity == recorded_identity
+                    && receipt_route_current(receipt, runtime, app)
+            })
+}
+
+/// Automatic ordinary-provider recovery must not run behind an installed
+/// composite route. A stopped logical target cannot suppress normal recovery.
 pub(super) fn owns_picture(runtime: &Runtime, app: &App) -> bool {
     runtime
         .multiview_output
         .admission
         .as_ref()
-        .is_some_and(|receipt| {
-            route::playback_identity_matches(&app.player.session, &receipt.identity)
-                && runtime.multiview_picture.as_ref() == Some(&receipt.identity)
-        })
+        .is_some_and(|receipt| admitted_route_current(runtime, app, &receipt.identity))
 }
 
 /// A process-local composite descriptor owns the footer only while its exact

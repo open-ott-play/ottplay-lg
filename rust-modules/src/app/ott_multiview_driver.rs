@@ -817,7 +817,7 @@ impl Driver {
         if !self.shutting_down
             && !self.retiring
             && self.admitted_picture.as_ref().is_some_and(|identity| {
-                !route::playback_identity_matches(&app.player.session, identity)
+                !super::multiview_output::admitted_route_current(runtime, app, identity)
             })
         {
             self.retiring = true;
@@ -1967,7 +1967,7 @@ impl Driver {
     ) -> Result<(), &'static str> {
         if self.shutting_down
             || self.retiring
-            || !route::playback_identity_matches(&app.player.session, identity)
+            || !super::multiview_output::admitted_route_current(runtime, app, identity)
             || runtime.multiview_picture.as_ref() != Some(identity)
             || !self.output_current(runtime, generation, session, epoch, output_generation)
         {

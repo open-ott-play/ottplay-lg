@@ -814,3 +814,102 @@ fn replacement_inspection_cannot_retain_picture_after_playback_policy_revocation
     assert!(!rig.app.adapters.player.is_live());
     rig.app.ott = Some(runtime);
 }
+
+fn assert_stopped_logical_target_retires_composite_service(exit: bool) {
+    let mut rig = admitted();
+    let identity = route::playback_identity(&rig.app.player.session).unwrap();
+    let request = route::play_request_ticket();
+    let worker = route::worker_ticket();
+    if exit {
+        playback::exit_player(
+            &mut rig.app.player,
+            &mut rig.app.adapters.player,
+            &mut rig.app.repause_at,
+            &mut rig.app.refresh_hubs,
+            &mut rig.app.pages,
+        );
+        assert!(rig.app.player.pending_exit.is_some());
+    } else {
+        playback::replace_player_in_place(
+            &mut rig.app.player,
+            &mut rig.app.adapters.player,
+            &mut rig.app.repause_at,
+            &mut rig.app.pages,
+        );
+    }
+    assert_eq!(
+        route::playback_identity(&rig.app.player.session).as_ref(),
+        Some(&identity),
+        "real stop retains the logical retry target"
+    );
+    assert!(!route::has_url(&rig.app.player.session));
+    assert!(
+        worker != route::worker_ticket() || !route::play_request_is_current(request),
+        "real stop must retire route tickets"
+    );
+    {
+        let runtime = rig.app.ott.as_ref().unwrap();
+        assert!(!multiview_output::admitted_route_current(
+            runtime, &rig.app, &identity
+        ));
+        assert!(
+            !multiview_output::owns_picture(runtime, &rig.app),
+            "stopped composite must not suppress ordinary recovery"
+        );
+    }
+    let end = Instant::now() + Duration::from_secs(3);
+    while !rig
+        .app
+        .ott
+        .as_ref()
+        .unwrap()
+        .multiview_driver
+        .shutdown_confirmed()
+    {
+        assert!(
+            Instant::now() < end,
+            "stopped composite original Off must settle"
+        );
+        tick_real_driver_and_output(&mut rig);
+        assert!(!route::has_url(&rig.app.player.session));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let settled_paths = rig.server.lock().unwrap().paths.len();
+    for _ in 0..10 {
+        tick_real_driver_and_output(&mut rig);
+        assert!(!route::has_url(&rig.app.player.session));
+    }
+    let server = rig.server.lock().unwrap();
+    assert_eq!(
+        server
+            .operations
+            .iter()
+            .filter(|operation| *operation == "off")
+            .count(),
+        1
+    );
+    assert_eq!(
+        server.paths.len(),
+        settled_paths,
+        "closed scene must not poll or renew"
+    );
+    assert_eq!(
+        rig.inspected.load(Ordering::Acquire),
+        1,
+        "stopped scene must not reoffer output"
+    );
+    assert!(rig.output_jobs.lock().unwrap().is_empty());
+    assert!(rig.app.ott.as_ref().unwrap().multiview_picture.is_none());
+    assert!(!rig.app.adapters.player.is_live());
+    assert!(!rig.app.adapters.player.release_has_queued_start());
+}
+#[test]
+fn real_route_stop_retires_service_despite_retained_logical_identity() {
+    let _serial = plx_base::testlock::serial();
+    assert_stopped_logical_target_retires_composite_service(false);
+}
+#[test]
+fn real_player_exit_retires_service_despite_retained_logical_identity() {
+    let _serial = plx_base::testlock::serial();
+    assert_stopped_logical_target_retires_composite_service(true);
+}
