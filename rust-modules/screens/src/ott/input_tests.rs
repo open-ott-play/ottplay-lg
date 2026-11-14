@@ -230,6 +230,39 @@ fn loading_cover_first_ready_snapshot_seats_requested_row_without_input_and_refr
 }
 
 #[test]
+fn loading_cover_ready_snapshot_then_memory_restore_keeps_newer_selection_on_queued_enter() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let rows = vec![
+            navigation_row("settings.open:interface", OttAction::EditSetting("settings.open:interface".into())),
+            navigation_row("settings.open:lists", OttAction::EditSetting("settings.open:lists".into())),
+        ];
+        let (previous, _) = mount_snapshot_in_mode(
+            navigation_view("settings", 1, rows.clone(), Some("settings.open:lists")), mode);
+        assert_focus(&previous, "item:settings.open:lists");
+        let memory = previous.return_state().memory;
+
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(OttView::default()), mode);
+        assert!(d.focus().is_none(), "the initial cover must keep its rows unfocusable");
+        let ready = navigation_view("settings", 2, rows, Some("settings.open:interface"));
+        rig.snapshot = ready.clone();
+        let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
+        // App publication precedes menu memory restoration. The ready snapshot
+        // queues Enter behind this RestoreMemory in the same delivery batch.
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
+            Delivery::Screen(ScreenEvent::App(AppMsg::OttSnapshot(ready)))));
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
+            Delivery::Screen(ScreenEvent::RestoreMemory(memory))));
+        frame(&mut d, &mut rig, 256, vec![]);
+        frame(&mut d, &mut rig, 272, vec![]);
+        assert_focus(&d, "item:settings.open:lists");
+        assert!(rig.actions.is_empty(), "focus restoration cannot activate a settings group");
+        press_navigation_ok(&mut d, &mut rig, 304, true);
+        assert_eq!(rig.actions, vec![OttAction::EditSetting("settings.open:lists".into())]);
+    }
+}
+
+#[test]
 fn configured_startup_cover_never_seats_hidden_rows_and_release_restores_actual_requested_focus() {
     let _guard = plx_base::testlock::serial();
     for mode in [UiMode::Classic, UiMode::Modern] {

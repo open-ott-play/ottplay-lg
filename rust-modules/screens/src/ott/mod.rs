@@ -1609,6 +1609,15 @@ impl OttScreen {
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { to, by, .. } => {
+                // The cover's queued Enter can arrive after RestoreMemory. Keep
+                // that newer target until reconciliation seats it, provided it
+                // still belongs to the current, placeable surface.
+                if matches!(by, plx_ui::screen::By::Restore)
+                    && self.focus_request.is_some_and(|requested| requested != to.elem
+                        && Focusable::<H>::group_of(self, &requested, cx).is_some()
+                        && Focusable::<H>::place(self, &requested, cx, At::SpringTarget).is_some()) {
+                    return Handled::Yes;
+                }
                 let header_focus = self.header(cx.measure).is_some_and(|header| header.stops.iter().any(|(key, _)| *key == to.elem))
                     || self.modern_footer(cx.measure).is_some_and(|footer| footer.stops.iter().any(|(key, _)| *key == to.elem));
                 if matches!(by, plx_ui::screen::By::Dir | plx_ui::screen::By::Pointer) {
