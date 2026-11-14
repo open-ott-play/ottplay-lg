@@ -853,16 +853,11 @@ pub(crate) struct OttClassicLayout {
     pub transport_offset: (f32, f32),
 }
 
-// Tauri setFontSize: 22px minimum on its 1280×720 design, projected onto
-// our 1920×1080 logical surface. The renderer performs the physical 4K scale;
-// the existing Measure capability applies the user's independent text scale.
-pub(super) const CLASSIC_FOOTER_SIZE: i32 = 33;
-pub(super) const CLASSIC_TECHNICAL_SIZE: i32 = 24;
 const CLASSIC_FOOTER_PAD: f32 = 30.0;
 const CLASSIC_RAIL_H: f32 = 12.0;
 
 fn classic_row_heights(measure: &dyn Measure, contextual_controls: bool) -> [f32; 4] {
-    let line_h = plx_ui::text_view::TextView::new("", CLASSIC_FOOTER_SIZE, theme::CLASSIC_TEXT)
+    let line_h = plx_ui::text_view::TextView::new("", theme::size::OTT_FOOTER, theme::CLASSIC_TEXT)
         .with_measure(measure).line_h();
     [if contextual_controls { line_h.max(BTN_S * plx_ui::widgets::CTRL_FOCUS_SCALE) } else { line_h },
         CLASSIC_RAIL_H, line_h, line_h]
@@ -878,15 +873,15 @@ fn classic_panel_height(_playing: Option<&plx_data::metadata::NowPlaying>, measu
 /// Shared measured digit columns from Tauri's setFontSize, rather than widths
 /// of whichever channel number or programme start happens to be displayed.
 pub(super) fn classic_digit_width(measure: &dyn Measure) -> f32 {
-    measure.width_str("9", CLASSIC_FOOTER_SIZE, false)
+    measure.width_str("9", theme::size::OTT_FOOTER, false)
 }
 pub(super) fn classic_clock_width(measure: &dyn Measure) -> f32 {
     let clock = (0..10).map(|digit| {
         let pair = format!("{digit}{digit}");
-        measure.width_str(&format!("{pair}:{pair}:{pair}"), CLASSIC_FOOTER_SIZE, false)
+        measure.width_str(&format!("{pair}:{pair}:{pair}"), theme::size::OTT_FOOTER, false)
     }).fold(0.0, f32::max);
     (clock.max(classic_digit_width(measure) * 8.0)
-        + measure.font_scale().points(CLASSIC_FOOTER_SIZE as f32 * 0.5)).ceil()
+        + measure.font_scale().points(theme::size::OTT_FOOTER as f32 * 0.5)).ceil()
 }
 
 /// The expanded Classic description ends at this same measured footer edge.
@@ -909,7 +904,7 @@ pub(crate) fn ott_classic_layout(slot: ControlSlot, motion: &HudMotion, _tabs: u
     let art_width = digit * 7.0;
     let art_size = 120.0;
     let technical_width = classic_clock_width(measure)
-        + measure.font_scale().points(CLASSIC_FOOTER_SIZE as f32 * 2.0);
+        + measure.font_scale().points(theme::size::OTT_FOOTER as f32 * 2.0);
     let right = SCR_W - inset - technical_width - inset;
     let content_x = inset + art_width + inset;
     let heights = classic_row_heights(measure, contextual);
@@ -1102,11 +1097,11 @@ fn draw_route_title(painter: Painter, title: *const std::os::raw::c_char,
     use plx_ui::label::{HAlign, Label};
     {
         let _clip = plx_ui::screen::ClipScope::open_in(painter, layout.heading);
-        Label::new(title, CLASSIC_FOOTER_SIZE, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
+        Label::new(title, theme::size::OTT_FOOTER, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
             .h(HAlign::Start).draw(painter, layout.heading);
     }
     let _clip = plx_ui::screen::ClipScope::open_in(painter, layout.programme_rows[0]);
-    Label::new(context, CLASSIC_FOOTER_SIZE, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::CLASSIC_SECONDARY))
+    Label::new(context, theme::size::OTT_FOOTER, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::CLASSIC_SECONDARY))
         .h(HAlign::Start).draw(painter, layout.programme_rows[0]);
 }
 

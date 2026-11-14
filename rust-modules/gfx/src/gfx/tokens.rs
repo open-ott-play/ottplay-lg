@@ -129,6 +129,11 @@ pub mod size {
     pub const DISPLAY: c_int = 48;
     /// Screen / panel title — the in-player Info card title, the scrolled compact title, About column heads.
     pub const TITLE: c_int = 40;
+    /// Classic OTT footer channel/programme rows and wall clock: Tauri's
+    /// 22px minimum on its 1280×720 design projects to 33px on our 1920×1080
+    /// logical surface. This parity role deliberately preserves 33 rather than
+    /// substituting HEADLINE's 32; normal UI text scaling still applies.
+    pub const OTT_FOOTER: c_int = 33;
     /// Section headers ("Related", "Cast & Crew") + list-row titles.
     pub const HEADLINE: c_int = 32;
     /// Default reading text (synopsis, hero meta, About paragraphs, empty states) + control labels (Play / action buttons, tabs, pills — one rung under a header).

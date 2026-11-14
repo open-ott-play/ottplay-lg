@@ -229,7 +229,7 @@ struct ClassicInfo<'a> {
 fn classic_info<'a>(playing: &'a NowPlaying, info: &'a OttNowPlaying,
     clocks: &'a ClockLabels, wall_now_s: Option<i64>) -> ClassicInfo<'a> {
     let mut rows = lines(playing, info, clocks);
-    for row in &mut rows { row.size = super::classic::CLASSIC_FOOTER_SIZE; }
+    for row in &mut rows { row.size = theme::size::OTT_FOOTER; }
     rows[0].bold = true; rows[1].bold = false;
     let Some(live) = &info.live else { return ClassicInfo { lines: rows, ordinal: None }; };
     let (current, next) = live.guide.as_ref().map(|guide|
@@ -260,7 +260,7 @@ fn classic_band(info: &ClassicInfo<'_>, _clocks: &ClockLabels,
     let wall = layout.technical;
     let rows = [heading, layout.programme_rows[0], layout.programme_rows[1]];
     let natural_clock = super::classic::classic_clock_width(measure);
-    let clock_padding = measure.font_scale().points(super::classic::CLASSIC_FOOTER_SIZE as f32 * 0.5);
+    let clock_padding = measure.font_scale().points(theme::size::OTT_FOOTER as f32 * 0.5);
     let actual_clock = info.lines.iter().skip(1)
         .map(|line| measure.width_str(line.clock, line.size, false) + clock_padding)
         .fold(natural_clock, f32::max);
@@ -310,10 +310,10 @@ pub(super) fn draw_classic(
         Some(info) => classic_info(playing, info, clocks, wall_now_s),
         None => ClassicInfo {
             lines: [
-                Line { title: "", clock: "", end: "", size: super::classic::CLASSIC_FOOTER_SIZE, bold: true },
+                Line { title: "", clock: "", end: "", size: theme::size::OTT_FOOTER, bold: true },
                 Line { title: playing.programme_title(), clock: "", end: &clocks.remaining,
-                    size: super::classic::CLASSIC_FOOTER_SIZE, bold: false },
-                Line { title: "", clock: "", end: "", size: super::classic::CLASSIC_FOOTER_SIZE, bold: false },
+                    size: theme::size::OTT_FOOTER, bold: false },
+                Line { title: "", clock: "", end: "", size: theme::size::OTT_FOOTER, bold: false },
             ],
             ordinal: None,
         },
@@ -333,16 +333,16 @@ pub(super) fn draw_classic(
         TextView::new(&ordinal.to_string(), content.lines[0].size, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
             .bold().max_lines(1).with_measure(measure).draw(painter, band.ordinal);
     }
-    let clock_h = TextView::new("", super::classic::CLASSIC_FOOTER_SIZE, theme::TEXT_SECONDARY)
+    let clock_h = TextView::new("", theme::size::OTT_FOOTER, theme::TEXT_SECONDARY)
         .with_measure(measure).line_h();
-    TextView::new(&clocks.wall, super::classic::CLASSIC_FOOTER_SIZE,
+    TextView::new(&clocks.wall, theme::size::OTT_FOOTER,
         plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
         .max_lines(1).h(HAlign::Right).with_measure(measure)
         .draw(painter, Rect::new(band.wall.x, band.wall.y, band.wall.w, clock_h));
-    let technical_h = TextView::new("", super::classic::CLASSIC_TECHNICAL_SIZE, theme::TEXT_SECONDARY)
+    let technical_h = TextView::new("", theme::size::CAPTION, theme::TEXT_SECONDARY)
         .with_measure(measure).line_h();
     for (index, text) in [&clocks.raster, &clocks.media_rate].into_iter().enumerate() {
-        TextView::new(text, super::classic::CLASSIC_TECHNICAL_SIZE,
+        TextView::new(text, theme::size::CAPTION,
             plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
             .max_lines(1).h(HAlign::Right).with_measure(measure)
             .draw(painter, Rect::new(band.wall.x, band.wall.y + clock_h + index as f32 * technical_h,
@@ -797,8 +797,8 @@ mod tests {
                 assert!(cells[0].x + cells[0].w <= cells[1].x);
                 assert!(cells[1].x + cells[1].w <= cells[2].x);
                 assert!(cells[2].x + cells[2].w <= layout.programme_rows[row].x + layout.programme_rows[row].w + 0.01);
-                assert!(cells[0].w >= measure.width_str(if row == 0 { &clocks.current } else { &clocks.next }, super::super::classic::CLASSIC_FOOTER_SIZE, false));
-                assert!(cells[2].w >= measure.width_str(if row == 0 { &clocks.remaining } else { &clocks.next_duration }, super::super::classic::CLASSIC_FOOTER_SIZE, false));
+                assert!(cells[0].w >= measure.width_str(if row == 0 { &clocks.current } else { &clocks.next }, theme::size::OTT_FOOTER, false));
+                assert!(cells[2].w >= measure.width_str(if row == 0 { &clocks.remaining } else { &clocks.next_duration }, theme::size::OTT_FOOTER, false));
             }
         }
     }

@@ -66,6 +66,9 @@ enum Cue {
     Text { track: i32, start: i64, end: i64, payload: Vec<u8>, identity: u64 },
     Ass { track: i32, start: i64, end: i64, payload: Vec<u8> },
     Bitmap(subs::SubCue<'static>),
+    // Decoder-provided duration belongs to this authored set, unlike an
+    // explicit clear, which closes the display active at its timestamp.
+    BitmapEnd { track: i32, start: i64, end: i64 },
 }
 #[derive(Default)]
 struct Pending { cues: Vec<Cue>, bytes: usize, packets: usize }
@@ -89,7 +92,8 @@ impl Batch {
     pub fn shifted(mut self, shift: i64) -> Option<Self> {
         for cue in &mut self.cues {
             match cue {
-                Cue::Text { start, end, .. } | Cue::Ass { start, end, .. } => {
+                Cue::Text { start, end, .. } | Cue::Ass { start, end, .. }
+                | Cue::BitmapEnd { start, end, .. } => {
                     *start = start.checked_add(shift)?; *end = end.checked_add(shift)?;
                 }
                 Cue::Bitmap(subs::SubCue::BitmapSet { pts, .. } | subs::SubCue::BitmapClear { pts, .. }) => {
@@ -133,8 +137,19 @@ impl Batch {
                     }
                     crate::player::push_subtitle_bitmap(track, pts, cw, ch, rects);
                 }
-                Cue::Bitmap(subs::SubCue::BitmapClear { track, pts }) =>
-                    crate::player::close_subtitle_bitmap(track, pts.saturating_add(shift_ns)),
+                Cue::Bitmap(subs::SubCue::BitmapClear { track, pts }) => {
+                    let pts = pts.saturating_add(shift_ns);
+                    for old in SHARED.sub_bitmaps.lock().unwrap_or_else(|error| error.into_inner()).iter_mut() {
+                        if old.track == track && old.start_ns <= pts && old.end_ns > pts { old.end_ns = pts; }
+                    }
+                }
+                Cue::BitmapEnd { track, start, end } => {
+                    let start = start.saturating_add(shift_ns);
+                    let end = end.saturating_add(shift_ns);
+                    for old in SHARED.sub_bitmaps.lock().unwrap_or_else(|error| error.into_inner()).iter_mut() {
+                        if old.track == track && old.start_ns == start && old.end_ns > end { old.end_ns = end; }
+                    }
+                }
                 Cue::Bitmap(_) => {},
             }
         }
@@ -278,7 +293,7 @@ unsafe fn decode_bitmap(decoder: &Decoder, pending: &mut Pending, pkt: *mut AVPa
         cw: canvas.0, ch: canvas.1, total_rects: rects.len(), rects }));
     if let Some(end) = end {
         pending.admit(0)?;
-        pending.cues.push(Cue::Bitmap(subs::SubCue::BitmapClear { track: decoder.track, pts: end }));
+        pending.cues.push(Cue::BitmapEnd { track: decoder.track, start: pts, end });
     }
     Ok(())
 }

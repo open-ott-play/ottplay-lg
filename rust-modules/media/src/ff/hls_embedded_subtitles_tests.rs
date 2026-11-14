@@ -85,11 +85,13 @@ fn owned_batch_remaps_all_timestamps_and_refuses_overflow() {
         Cue::Text { track: 0, start: 10, end: 20, payload: b"text".to_vec(), identity: 1 },
         Cue::Ass { track: 0, start: 12, end: 22, payload: b"ass".to_vec() },
         Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 25 }),
+        Cue::BitmapEnd { track: 0, start: 10, end: 30 },
     ], header: Header::Text(TextDialect::WebVtt), track: 0, reset: true };
     let batch = batch.shifted(100).unwrap();
     assert!(matches!(batch.cues[0], Cue::Text { start: 110, end: 120, .. }));
     assert!(matches!(batch.cues[1], Cue::Ass { start: 112, end: 122, .. }));
     assert!(matches!(batch.cues[2], Cue::Bitmap(subs::SubCue::BitmapClear { pts: 125, .. })));
+    assert!(matches!(batch.cues[3], Cue::BitmapEnd { start: 110, end: 130, .. }));
     assert!(batch.shifted(i64::MAX).is_none());
 }
 
@@ -123,10 +125,10 @@ fn committed_bitmap_end_is_finite_and_newer_display_cannot_reveal_older_overlap(
     let batch = Batch { cues: vec![
         Cue::Bitmap(subs::SubCue::BitmapSet { track: 0, pts: 100, cw: 1, ch: 1,
             rects: vec![rect()], total_rects: 1 }),
-        Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 1000 }),
+        Cue::BitmapEnd { track: 0, start: 100, end: 1000 },
         Cue::Bitmap(subs::SubCue::BitmapSet { track: 0, pts: 200, cw: 1, ch: 1,
             rects: vec![rect()], total_rects: 1 }),
-        Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 300 }),
+        Cue::BitmapEnd { track: 0, start: 200, end: 300 },
     ], header: Header::Bitmap, track: 0, reset: true };
     batch.publish("fixture:bitmap", TextStyle::default(), &mut None, 0);
     let cues = SHARED.sub_bitmaps.lock().unwrap();
@@ -136,4 +138,99 @@ fn committed_bitmap_end_is_finite_and_newer_display_cannot_reveal_older_overlap(
     SHARED.sub_bitmaps.lock().unwrap().clear();
     ass_source::retire_selection();
     SHARED.reset_session();
+}
+
+fn bitmap_set(track: i32, pts: i64) -> Cue {
+    Cue::Bitmap(subs::SubCue::BitmapSet { track, pts, cw: 1, ch: 1, total_rects: 1,
+        rects: vec![crate::player::SubRect { x: 0, y: 0, w: 1, h: 1,
+            index: vec![1], palette: Box::new([[0; 4]; 256]) }] })
+}
+fn publish_bitmaps(cues: Vec<Cue>, reset: bool, generation: &mut Option<u64>) {
+    Batch { cues, header: Header::Bitmap, track: 0, reset }
+        .publish("fixture:bitmap-clear", TextStyle::default(), generation, 0);
+}
+struct BitmapReset(i64);
+impl BitmapReset {
+    fn new() -> Self {
+        let previous = crate::player::subtitle_offset_ms();
+        crate::player::set_subtitle_offset(0);
+        Self(previous)
+    }
+}
+impl Drop for BitmapReset {
+    fn drop(&mut self) {
+        crate::player::request_subtitle(-1);
+        ass_source::retire_selection();
+        SHARED.reset_session();
+        crate::player::set_subtitle_offset(self.0);
+    }
+}
+
+#[test]
+fn explicit_bitmap_clear_shortens_a_previous_finite_end() {
+    let _serial = plx_base::testlock::serial();
+    SHARED.reset_session();
+    let _reset = BitmapReset::new();
+    crate::player::request_subtitle(0);
+    let mut generation = None;
+    publish_bitmaps(vec![bitmap_set(0, 0), Cue::BitmapEnd { track: 0, start: 0, end: 10_000_000_000 }],
+        true, &mut generation);
+    assert_eq!(crate::player::active_bitmap_key(6_000_000_000), Some(0));
+    publish_bitmaps(vec![Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 5_000_000_000 })],
+        false, &mut generation);
+    assert_eq!(SHARED.sub_bitmaps.lock().unwrap()[0].end_ns, 5_000_000_000);
+    assert_eq!(crate::player::active_bitmap_key(6_000_000_000), None);
+}
+
+#[test]
+fn explicit_bitmap_clear_preserves_other_tracks_and_future_displays() {
+    let _serial = plx_base::testlock::serial();
+    SHARED.reset_session();
+    let _reset = BitmapReset::new();
+    crate::player::request_subtitle(0);
+    let mut generation = None;
+    publish_bitmaps(vec![
+        bitmap_set(0, 0), Cue::BitmapEnd { track: 0, start: 0, end: 10_000_000_000 },
+        bitmap_set(1, 1_000_000_000), Cue::BitmapEnd { track: 1, start: 1_000_000_000, end: 11_000_000_000 },
+        bitmap_set(0, 8_000_000_000), Cue::BitmapEnd { track: 0, start: 8_000_000_000, end: 12_000_000_000 },
+    ], true, &mut generation);
+    publish_bitmaps(vec![Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 5_000_000_000 })],
+        false, &mut generation);
+    let cues = SHARED.sub_bitmaps.lock().unwrap();
+    assert_eq!(cues.iter().map(|cue| (cue.track, cue.start_ns, cue.end_ns)).collect::<Vec<_>>(), vec![
+        (0, 0, 5_000_000_000), (1, 1_000_000_000, 11_000_000_000),
+        (0, 8_000_000_000, 12_000_000_000),
+    ]);
+    drop(cues);
+    assert_eq!(crate::player::active_bitmap_key(6_000_000_000), None);
+    assert_eq!(crate::player::active_bitmap_key(9_000_000_000), Some(8_000_000_000));
+    crate::player::request_subtitle(1);
+    assert_eq!(crate::player::active_bitmap_key(6_000_000_000), Some(1_000_000_000));
+}
+
+#[test]
+fn scheduled_bitmap_end_only_bounds_its_authored_display_and_never_extends_it() {
+    let _serial = plx_base::testlock::serial();
+    SHARED.reset_session();
+    let _reset = BitmapReset::new();
+    crate::player::request_subtitle(0);
+    let mut generation = None;
+    publish_bitmaps(vec![bitmap_set(0, 0), bitmap_set(0, 5_000_000_000),
+        Cue::BitmapEnd { track: 0, start: 5_000_000_000, end: 15_000_000_000 }], true, &mut generation);
+    publish_bitmaps(vec![Cue::BitmapEnd { track: 0, start: 0, end: 10_000_000_000 }],
+        false, &mut generation);
+    let cues = SHARED.sub_bitmaps.lock().unwrap();
+    assert_eq!(cues.iter().map(|cue| (cue.start_ns, cue.end_ns)).collect::<Vec<_>>(),
+        vec![(0, 5_000_000_000), (5_000_000_000, 15_000_000_000)]);
+    drop(cues);
+    assert_eq!(crate::player::active_bitmap_key(12_000_000_000), Some(5_000_000_000));
+}
+
+#[test]
+fn scheduled_bitmap_end_shifting_checks_both_authored_timestamps() {
+    for (start, end, shift) in [(i64::MAX, i64::MAX, 1), (0, i64::MAX, 1), (i64::MIN, 0, -1)] {
+        let batch = Batch { cues: vec![Cue::BitmapEnd { track: 0, start, end }],
+            header: Header::Bitmap, track: 0, reset: false };
+        assert!(batch.shifted(shift).is_none());
+    }
 }
