@@ -204,6 +204,57 @@ fn publish_snapshot(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, snapshot: A
     frame(d, rig, ms, vec![]);
 }
 
+#[test]
+fn loading_cover_first_ready_snapshot_seats_requested_row_without_input_and_refresh_keeps_browse_focus() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(OttView::default()), mode);
+        assert!(d.focus().is_none(), "the initial cover must expose no hidden focus stop");
+        let ready = navigation_view("channels", 1,
+            vec![navigation_row("one", OttAction::Play("one".into())),
+                navigation_row("two", OttAction::Play("two".into()))], Some("two"));
+        publish_snapshot(&mut d, &mut rig, ready.clone(), 256);
+        frame(&mut d, &mut rig, 272, vec![]);
+        assert_focus(&d, "item:two");
+        assert!(!rig.actions.iter().any(|action| matches!(action, OttAction::Play(_))),
+            "restoring a focus cursor cannot admit playback");
+        frame(&mut d, &mut rig, 288, vec![key(Key::Up, tick(288)), key_up(Key::Up, tick(288))]);
+        assert_focus(&d, "item:one");
+        let mut updated = (*ready).clone();
+        updated.revision += 1;
+        updated.status = "Metadata updated".into();
+        publish_snapshot(&mut d, &mut rig, Arc::new(updated), 320);
+        frame(&mut d, &mut rig, 336, vec![]);
+        assert_focus(&d, "item:one");
+    }
+}
+
+#[test]
+fn configured_startup_cover_never_seats_hidden_rows_and_release_restores_actual_requested_focus() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut covered = (*navigation_view("channels", 1,
+            vec![navigation_row("one", OttAction::Play("one".into())),
+                navigation_row("two", OttAction::Play("two".into()))], Some("two"))).clone();
+        covered.startup_pending = true;
+        covered.startup_target = Some("two".into());
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(covered.clone()), mode);
+        assert!(d.focus().is_none());
+        frame(&mut d, &mut rig, 256, vec![key(Key::Ok, tick(256)), key_up(Key::Ok, tick(256))]);
+        assert!(rig.actions.is_empty(), "hidden startup rows cannot activate");
+        frame(&mut d, &mut rig, 272, vec![key(Key::Back, tick(272)), key_up(Key::Back, tick(272))]);
+        assert_eq!(rig.actions, vec![OttAction::Back]);
+        assert!(d.focus().is_none(), "Back alone does not invent a ready snapshot");
+        covered.startup_pending = false;
+        covered.startup_target = None;
+        covered.revision += 1;
+        publish_snapshot(&mut d, &mut rig, Arc::new(covered), 304);
+        frame(&mut d, &mut rig, 320, vec![]);
+        assert_focus(&d, "item:two");
+        assert_eq!(rig.actions, vec![OttAction::Back], "ready focus restoration cannot play the row");
+    }
+}
+
 fn press_navigation_ok(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32, same_batch: bool) {
     if same_batch {
         frame(d, rig, ms, vec![key(Key::Ok, tick(ms)), key_up(Key::Ok, tick(ms))]);

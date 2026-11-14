@@ -8,7 +8,7 @@
   "ott.favorites": "Preferiti",
   "ott.description": "Descrizione",
   "ott.value": "Valore",
-  "ott.value_empty": "Inserisci un valore…",
+  "ott.value_empty": "Inserisci…",
   "ott.save": "Salva",
   "ott.editor_help": "Seleziona il valore per modificarlo. Salva applica la modifica; Annulla mantiene il valore precedente.",
   "ott.channel_list": "Elenco canali",
@@ -20,9 +20,9 @@
   "ott.search_this_list": "Cerca in questo elenco",
   "ott.search_help": "Inserisci un titolo per filtrare questo elenco. Una ricerca vuota mostra l’intero elenco attuale; Annulla mantiene la ricerca precedente.",
   "ott.search_pending": "Ricerca in questo elenco…",
-  "ott.search_empty": "Inserisci un titolo…",
+  "ott.search_empty": "Titolo…",
   "ott.search_favorites": "Cerca nei preferiti",
-  "ott.search_empty_favorites": "Inserisci un titolo…",
+  "ott.search_empty_favorites": "Preferiti…",
   "ott.search_help_favorites": "Inserisci un titolo per filtrare i preferiti. Una ricerca vuota mostra tutti i preferiti; Annulla mantiene la ricerca precedente.",
   "ott.search_scope_title": "Cerca: {scope}",
   "ott.favorite_add": "Aggiungi ai preferiti",
@@ -50,6 +50,6 @@
   "ott.favorite_added": "Aggiunto ai preferiti",
   "ott.favorite_removed": "Rimosso dai preferiti",
   "ott.favorite_update_failed": "Impossibile aggiornare i preferiti",
-  "ott.input_keyboard_hint": "OK: apri tastiera",
-  "ott.input_hidden_hint": "Valore nascosto · OK: modifica"
+  "ott.input_keyboard_hint": "OK · Modifica",
+  "ott.input_hidden_hint": "Nascosto · OK"
 }

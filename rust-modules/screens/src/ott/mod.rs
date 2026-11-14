@@ -1072,7 +1072,7 @@ impl OttScreen {
         let empty_hint = if !search { msg::ott_value_empty() }
             else if favorites_page(&editor.return_page) { msg::ott_search_empty_favorites() }
             else { msg::ott_search_empty() };
-        let hint = if pending { msg::settings_playback_saving() }
+        let hint = if pending { if search { msg::ott_search_pending() } else { msg::settings_playback_saving() } }
             else if editor.spec.secret && !value.is_empty() { msg::ott_input_hidden_hint() }
             else { msg::ott_input_keyboard_hint() };
         let value_row = (if value.is_empty() { Row::new(empty_hint) }
@@ -1388,6 +1388,7 @@ impl<H: AppLike<Memory = PageMemory>> Machine<H> for OttScreen {
             }
             return Handled::Yes;
         }
+        let was_covered = self.loading_cover();
         let handled = self.step_inner(ev, cx, fx);
         // The prompt owns focus and presentation, but video-source and placement
         // acknowledgements must still settle their existing addressed lease.
@@ -1397,6 +1398,19 @@ impl<H: AppLike<Memory = PageMemory>> Machine<H> for OttScreen {
         }
         let viewport = self.viewport_event(ev, fx);
         self.sync_viewport(fx);
+        if was_covered && !self.loading_cover() && self.classic_visible {
+            // Initial Enter has no focusable groups while the cover is up.
+            // Reconcile cannot seat an empty engine cursor when a ready
+            // snapshot arrives, so enter the newly interactive presentation at
+            // its exact form/card/restoration target. Ordinary refreshes never
+            // pass this edge and keep the viewer's current focus.
+            let focus = self.focus_request.or_else(|| self.form.selected_key()
+                .map(|key| self.card_target(key.0)))
+                .map(|elem| plx_ui::screen::FocusTarget::Elem(FocusKey { entry: self.entry, elem }))
+                .unwrap_or(plx_ui::screen::FocusTarget::ContainerGroup(GroupId(0)));
+            fx.push(Fx::Deliver(MachineId::Instance(self.instance),
+                Delivery::Screen(ScreenEvent::Enter(plx_ui::screen::Enter::Fresh { focus }))));
+        }
         if viewport { Handled::Yes } else { handled }
     }
 }

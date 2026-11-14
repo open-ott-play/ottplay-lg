@@ -36,7 +36,7 @@
     "description": "Native OTT setting editor section heading."
   },
   "ott.value_empty": {
-    "value": "Enter a value…",
+    "value": "Enter…",
     "description": "Native OTT setting editor button when the value is empty. Selecting it opens text entry."
   },
   "ott.save": {
@@ -84,7 +84,7 @@
     "description": "Native OTT status while applying a list search."
   },
   "ott.search_empty": {
-    "value": "Enter a title…",
+    "value": "Title…",
     "description": "Empty search value: clearing the query shows the entire current list, retaining its profile, folder and category."
   },
   "ott.search_favorites": {
@@ -92,7 +92,7 @@
     "description": "Search action and editor title for the global Favorites list."
   },
   "ott.search_empty_favorites": {
-    "value": "Enter a title…",
+    "value": "Favorites…",
     "description": "Empty search value for Favorites; clearing the query shows all favorites without changing the active source."
   },
   "ott.search_help_favorites": {
@@ -217,11 +217,11 @@
     "description": "Native fullscreen Favorites update result; success appears only after durable save."
   },
   "ott.input_keyboard_hint": {
-    "value": "OK: open keyboard",
+    "value": "OK · Edit",
     "description": "Hint inside a visible text-entry field: OK opens the on-screen keyboard."
   },
   "ott.input_hidden_hint": {
-    "value": "Hidden value · OK: edit",
+    "value": "Hidden · OK",
     "description": "Hint inside a populated protected text-entry field. Never contains the secret value."
   }
 }
