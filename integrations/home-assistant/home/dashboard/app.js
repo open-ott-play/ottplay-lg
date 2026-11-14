@@ -105,17 +105,364 @@
         serviceProbe.start(byId("service-origin").value.replace(/^\s+|\s+$/g, ""), byId("service-path").value, byId("service-trusted-lan").checked);
     };
     byId("service-cancel").onclick = function () { serviceProbe.cancel(); };
+    var connectionGeneration = 0,
+        connectionClosed = false;
+    // Dedicated IndexedDB: profile/localStorage exporters never see the client key.
+    function credentialStore() {
+        var db = null,
+            active = false,
+            pending = null,
+            closing = false;
+        function finishClose() {
+            if (db) db.close();
+            db = null;
+        }
+        function pump() {
+            if (active || !pending) {
+                if (!active && closing) finishClose();
+                return;
+            }
+            var op = pending,
+                finished = false,
+                timer,
+                request = null,
+                transaction = null,
+                missing = false;
+            pending = null;
+            active = true;
+            function finish(error, value) {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                active = false;
+                op.done(error, value);
+                pump();
+            }
+            function armTimeout() {
+                clearTimeout(timer);
+                timer = setTimeout(function () {
+                    if (transaction) {
+                        try {
+                            transaction.abort();
+                        } catch (ignored) {}
+                    }
+                    finishClose();
+                    finish("STORAGE_TIMEOUT");
+                }, 5000);
+            }
+            function run() {
+                if (finished) return;
+                try {
+                    transaction = db.transaction(
+                        "connection",
+                        op.kind === "read" ? "readonly" : "readwrite"
+                    );
+                    armTimeout();
+                    var store = transaction.objectStore("connection"),
+                        result = null;
+                    request =
+                        op.kind === "read"
+                            ? store.get("saved")
+                            : op.kind === "save"
+                              ? store.put(op.value, "saved")
+                              : store.delete("saved");
+                    request.onsuccess = function () {
+                        result = request.result;
+                    };
+                    transaction.oncomplete = function () {
+                        finish(null, result === undefined ? null : result);
+                    };
+                    transaction.onerror = transaction.onabort = function () {
+                        finish("STORAGE_UNAVAILABLE");
+                    };
+                } catch (ignored) {
+                    finish("STORAGE_UNAVAILABLE");
+                }
+            }
+            if (db) {
+                run();
+                return;
+            }
+            try {
+                armTimeout();
+                request = window.indexedDB.open(
+                    "ottplay-home-connection-v1",
+                    1
+                );
+                request.onupgradeneeded = function (event) {
+                    if (finished) {
+                        try {
+                            request.transaction.abort();
+                        } catch (ignored) {}
+                        return;
+                    }
+                    if (event.oldVersion === 0 && op.kind !== "save") {
+                        missing = true;
+                        request.transaction.abort();
+                    } else request.result.createObjectStore("connection");
+                };
+                request.onerror = function () {
+                    finish(missing ? null : "STORAGE_UNAVAILABLE", null);
+                };
+                request.onsuccess = function () {
+                    if (finished) {
+                        request.result.close();
+                        return;
+                    }
+                    db = request.result;
+                    db.onversionchange = function () {
+                        finishClose();
+                    };
+                    run();
+                };
+            } catch (ignored) {
+                finish("STORAGE_UNAVAILABLE");
+            }
+        }
+        return {
+            request: function (kind, value, done) {
+                if (closing) {
+                    done("STORAGE_CLOSED");
+                    return;
+                }
+                pending = { kind: kind, value: value, done: done };
+                pump();
+            },
+            close: function () {
+                closing = true;
+                // Keep a requested final deletion ahead of close; discard other pending work.
+                if (pending && pending.kind !== "remove") pending = null;
+                if (!active) pump();
+            },
+        };
+    }
+    var credentials = credentialStore();
+    function persistenceAllowed() {
+        try {
+            var loc = window.location,
+                tizen = window.tizen;
+            if (!loc) return false;
+            if (loc.protocol === "https:") return true;
+            if (
+                loc.protocol === "file:" &&
+                String(loc.href).indexOf("file:///") === 0
+            )
+                return !!(
+                    typeof window.PalmServiceBridge === "function" ||
+                    (tizen &&
+                        tizen.application &&
+                        typeof tizen.application.getCurrentApplication ===
+                            "function")
+                );
+            if (
+                !(
+                    (loc.protocol === "tauri:" && loc.host === "localhost") ||
+                    (loc.protocol === "http:" &&
+                        loc.host === "tauri.localhost") ||
+                    (loc.protocol === "capacitor:" && loc.host === "localhost")
+                )
+            )
+                return false;
+            function nativeEvidence(host) {
+                return !!(
+                    (host.__TAURI_INTERNALS__ &&
+                        typeof host.__TAURI_INTERNALS__.invoke ===
+                            "function") ||
+                    (host.__TAURI__ &&
+                        host.__TAURI__.core &&
+                        typeof host.__TAURI__.core.invoke === "function") ||
+                    (host.Capacitor &&
+                        typeof host.Capacitor.isNativePlatform === "function" &&
+                        host.Capacitor.isNativePlatform() === true)
+                );
+            }
+            if (nativeEvidence(window)) return true;
+            var parent = window.parent;
+            return !!(
+                parent &&
+                parent !== window &&
+                parent.location.protocol === loc.protocol &&
+                parent.location.host === loc.host &&
+                nativeEvidence(parent)
+            );
+        } catch (ignored) {
+            return false;
+        }
+    }
+    function savedGatewayAllowed(base, trustedLAN) {
+        return (
+            /^https:\/\//i.test(base) ||
+            (trustedLAN === true && /^http:\/\//i.test(base))
+        );
+    }
+    function removeSaved(token, success, failure) {
+        credentials.request("remove", null, function (error) {
+            if (connectionClosed || token !== connectionGeneration) return;
+            text("settings-state", error ? failure : success);
+        });
+    }
+    function restoreConnection() {
+        var token = connectionGeneration;
+        credentials.request("read", null, function (error, raw) {
+            if (connectionClosed || token !== connectionGeneration) return;
+            if (error) {
+                text(
+                    "settings-state",
+                    "Could not read saved connection. Connect for this session."
+                );
+                return;
+            }
+            if (raw === null) return;
+            try {
+                if (
+                    typeof raw !== "string" ||
+                    raw.length > 1024 ||
+                    !persistenceAllowed()
+                )
+                    throw new Error("INVALID_SAVED_CONNECTION");
+                var record = JSON.parse(raw);
+                if (
+                    !record ||
+                    typeof record !== "object" ||
+                    Array.isArray(record) ||
+                    Object.keys(record).sort().join(",") !==
+                        "base,key,trustedLAN,version" ||
+                    record.version !== 1 ||
+                    typeof record.base !== "string" ||
+                    record.base.length > 512 ||
+                    typeof record.key !== "string" ||
+                    record.key.length > 256 ||
+                    typeof record.trustedLAN !== "boolean" ||
+                    !savedGatewayAllowed(record.base, record.trustedLAN) ||
+                    !client.configure(
+                        record.base,
+                        record.key,
+                        record.trustedLAN
+                    )
+                )
+                    throw new Error("INVALID_SAVED_CONNECTION");
+                byId("base").value = record.base;
+                byId("trusted-lan").checked = record.trustedLAN;
+                byId("remember-connection").checked = true;
+                text(
+                    "settings-state",
+                    "Saved connection restored on this device."
+                );
+            } catch (ignored) {
+                removeSaved(
+                    token,
+                    "Saved connection was invalid or unavailable here. Connect again.",
+                    "Could not remove saved connection. Clear app data or revoke the gateway client key."
+                );
+            }
+            byId("key").value = "";
+        });
+    }
+    function editConnection() {
+        connectionGeneration++;
+    }
+    byId("base").oninput = byId("base").onchange = editConnection;
+    byId("key").oninput = byId("key").onchange = editConnection;
+    byId("trusted-lan").onchange = editConnection;
+    byId("remember-connection").onchange = function () {
+        var token = ++connectionGeneration;
+        if (!byId("remember-connection").checked) {
+            removeSaved(
+                token,
+                "Saved connection removed. Current session stays connected.",
+                "Could not remove saved connection. Clear app data or revoke the gateway client key."
+            );
+        }
+    };
     byId("connection-form").onsubmit = function (event) {
         event.preventDefault();
-        var ok = client.configure(byId("base").value.replace(/^\s+|\s+$/g, ""), byId("key").value, byId("trusted-lan").checked);
-        text("settings-state", ok ? "Connection set for this session." : "Enter an HTTPS gateway origin and client key. For trusted private HTTP, enable the LAN option.");
+        var token = ++connectionGeneration;
+        var base = byId("base").value.replace(/^\s+|\s+$/g, ""),
+            key = byId("key").value,
+            trustedLAN = byId("trusted-lan").checked;
+        var ok = client.configure(base, key, trustedLAN),
+            remember = byId("remember-connection").checked;
         byId("key").value = "";
-        if (ok) { tab("home"); nav[0].focus(); }
+        text(
+            "settings-state",
+            ok
+                ? "Connection set for this session."
+                : "Enter an HTTPS gateway origin and client key. For trusted private HTTP, enable the LAN option."
+        );
+        if (
+            ok &&
+            remember &&
+            persistenceAllowed() &&
+            savedGatewayAllowed(base, trustedLAN)
+        ) {
+            var stored = JSON.stringify({
+                version: 1,
+                base: base,
+                key: key,
+                trustedLAN: trustedLAN,
+            });
+            if (base.length > 512 || stored.length > 1024) {
+                byId("remember-connection").checked = false;
+                removeSaved(token,
+                    "Connected for this session, but connection is too large to save. Earlier saved connection removed.",
+                    "Connected for this session, but connection is too large to save and could not remove earlier saved connection. Clear app data or revoke the gateway client key.");
+            } else {
+                text(
+                    "settings-state",
+                    "Connected for this session. Saving connection…"
+                );
+                credentials.request("save", stored, function (error) {
+                    if (connectionClosed || token !== connectionGeneration)
+                        return;
+                    text(
+                        "settings-state",
+                        error
+                            ? "Connected for this session, but could not save connection. An earlier saved connection may remain."
+                            : "Connection remembered on this device. Revoke the gateway client key if needed."
+                    );
+                });
+            }
+        } else {
+            byId("remember-connection").checked = false;
+            // A user submission supersedes any startup read or prior pending save.
+            removeSaved(
+                token,
+                ok
+                    ? "Connected for this session only. Remembering requires HTTPS or a packaged app, and explicit trusted-LAN consent for HTTP gateways."
+                    : "Connection rejected. Saved connection removed.",
+                "Could not remove saved connection. Session settings were applied; clear app data or revoke the gateway client key."
+            );
+        }
+        if (ok) {
+            tab("home");
+            nav[0].focus();
+        }
     };
-    byId("disconnect").onclick = function () { cancelWork(); client.configure("", ""); byId("key").value = ""; latest = null; connected = false; text("settings-state", "Disconnected. Session key cleared."); };
+    byId("disconnect").onclick = function () {
+        var token = ++connectionGeneration;
+        cancelWork();
+        client.configure("", "");
+        byId("key").value = "";
+        byId("remember-connection").checked = false;
+        latest = null;
+        connected = false;
+        text(
+            "settings-state",
+            "Session disconnected. Removing saved connection…"
+        );
+        removeSaved(
+            token,
+            "Disconnected. Session and saved connection cleared.",
+            "Session disconnected, but could not remove saved connection. Clear app data or revoke the gateway client key."
+        );
+    };
     document.addEventListener("visibilitychange", syncVisibility);
     window.addEventListener("offline", syncVisibility); window.addEventListener("online", syncVisibility);
-    window.addEventListener("pagehide", function () { cancelWork(); client.visible(false); });
+    window.addEventListener("pagehide", function () { connectionClosed = true; connectionGeneration++; credentials.close(); cancelWork(); client.visible(false); });
+    window.addEventListener("pageshow", function (event) {
+        // BFCache restores a retired controller; rebuild it from this same document.
+        if (event.persisted) window.location.reload();
+    });
     window.addEventListener("keydown", function (event) {
         var code = event.keyCode, focus = document.activeElement, tag = focus && focus.tagName,
             select = tag === "SELECT", editing = tag === "TEXTAREA" || (tag === "INPUT" && !/^(checkbox|radio|button|submit|reset|image|hidden)$/.test(focus.type)),
@@ -137,7 +484,7 @@
             }
             tab("home"); nav[0].focus(); return;
         }
-        if (code === 13 && focus && focus.type === "checkbox") { event.preventDefault(); focus.checked = !focus.checked; return; }
+        if (code === 13 && focus && focus.type === "checkbox") { event.preventDefault(); focus.checked = !focus.checked; if (typeof focus.onchange === "function") focus.onchange(); return; }
         if (code < 37 || code > 40 || (editing && (code === 37 || code === 39)) || (select && (code === 38 || code === 40))) return;
         event.preventDefault(); all = document.querySelectorAll("button,input,select,textarea");
         for (j = 0; j < all.length; j++) if (!all[j].disabled && all[j].offsetWidth && all[j].offsetHeight) candidates.push(all[j]);
@@ -151,5 +498,5 @@
         }
         if (best) best.focus();
     });
-    syncVisibility(); nav[0].focus();
+    restoreConnection(); syncVisibility(); nav[0].focus();
 }());
