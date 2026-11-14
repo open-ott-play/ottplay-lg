@@ -18,15 +18,17 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
         "-preset", "ultrafast", "-g", "25", "-bf", "0", "-c:s", "copy",
         "-streamid", "0:256", "-streamid", "1:288", "-mpegts_service_id", "1",
         "-mpegts_transport_stream_id", "1", "-f", "mpegts", ts.to_str().unwrap()], true);
+    std::fs::write(dir.0.join("master.m3u8"),
+        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\ncaptions.ts\n#EXT-X-ENDLIST\n").unwrap();
     let http = HttpFixture::start(dir.0.clone());
     let source = format!("{}/master.m3u8", http.url);
-    let variant = format!("{}/video.m3u8", http.url);
+    let variant = source.clone();
     SHARED.reset_session();
     let previous_feed = FEED_AUDIO.swap(false, Ordering::Relaxed);
-    let playback = hls_presentation::HlsPlayback::fixture_for_test();
+    let info = inspect::http(&source, Arc::new(AtomicBool::new(false))).unwrap();
     let mut session = crate::route::PlaybackSession::IDLE;
     crate::route::reset_player_control_for_test(&session);
-    crate::route::request_external_source(&mut session, &playback.media_info_for_test(),
+    crate::route::request_external_source(&mut session, &info,
         ExternalSource::Hls(source.clone()), "Fixture", "M3U", plx_platform::devcaps::assumed_shared()).unwrap();
     let logical = crate::route::playback_identity(&session).unwrap();
     let native = SHARED.begin_native_session().unwrap();
@@ -38,6 +40,13 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
     let mut timeline = crate::hls::SegmentTimeline::default();
     with_observed_hls_worker(native, logical, || {
         for sequence in 0..4 {
+            if sequence == 1 {
+                // Content time survives a cold-prefix/seek rebase. The engine
+                // separately adds pts_shift before sink feed and removes it
+                // from position callbacks; captions must not apply it again.
+                SHARED.disp_base.store(9_000_000_000, Ordering::Release);
+                SHARED.pts_shift.store(3_000_000_000, Ordering::Release);
+            }
             let segment = crate::hls::Segment { sequence, duration: Duration::from_secs(2),
                 resource: crate::hls::Resource::new(plx_plex::plex::StreamUrl::parse(&http.url).origin,
                     "/captions.ts").unwrap() };
@@ -61,6 +70,7 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
             output.remap_transport(&mut crate::hls::TransportClock::default()).unwrap();
             let shift = local_shift.and_then(|local| output.aus[0].pts_ns.checked_sub(before)
                 .and_then(|offset| local.checked_add(offset)));
+            let first_video = output.aus.iter().find(|au| au.es == 1).unwrap().pts_ns;
             if sequence == 2 {
                 // Caption decode failure is deliberately contained in the
                 // private transaction; the valid media output stays feedable.
@@ -85,6 +95,15 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
                 let cues = SHARED.sub_bitmaps.lock().unwrap();
                 assert!(!cues.is_empty(), "the real selected PGS decoder must publish pixels after feeding");
                 assert!(cues.iter().all(|cue| cue.start_ns >= 0 && !cue.rects.is_empty()));
+                let sink_pts = first_video + SHARED.pts_shift.load(Ordering::Acquire);
+                let callback_position = sink_pts - SHARED.pts_shift.load(Ordering::Acquire)
+                    + SHARED.disp_base.load(Ordering::Acquire);
+                assert!((cues[0].start_ns - callback_position).abs() <= 40_000_000,
+                    "the first authored PGS cue and first picture share content time: caption={} callback={callback_position}",
+                    cues[0].start_ns);
+                drop(cues);
+                assert!(crate::player::active_bitmap_key(callback_position + 40_000_000).is_some(),
+                    "the renderer must find the caption at the nonzero content playhead");
             } else if sequence == 2 {
                 assert!(SHARED.sub_bitmaps.lock().unwrap().is_empty(),
                     "a current failed caption decode retires its old open display after valid A/V feeding");

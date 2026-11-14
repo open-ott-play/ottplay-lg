@@ -16,19 +16,34 @@ fn loading_catalog() -> (App, plx_machine::machine::InstanceId) {
     (app, panel)
 }
 
+fn panel_snapshot_revision(app: &App, panel: plx_machine::machine::InstanceId) -> u64 {
+    app.pages.nav.instance(panel).unwrap().screen.as_any().unwrap()
+        .downcast_ref::<plx_screens::ott::OttScreen>().unwrap()
+        .guide_presentation_diagnostics()["revision"].as_u64().unwrap()
+}
+
 #[test]
 fn loading_catalog_modal_rocker_replaces_latest_target_and_rejects_late_completion() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     let (mut app, panel) = loading_catalog();
+    crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+    let stale = OttPlayerRequest { owner: panel,
+        source: app.bridge.ott_player_offer().unwrap().source.clone(), action: Action::Next };
     let old = app.ott.as_mut().unwrap().resolver_next.take().unwrap();
     let installed = route::playback_identity(&app.player.session);
     native_edge(&mut app, 0, 480, Edge::Down);
+    let accepted_revision = app.ott.as_ref().unwrap().revision;
     native_edge(&mut app, 0, 480, Edge::Up);
     assert_eq!(queued(&app), Some("3"));
     assert!(old.cancel.load(Ordering::Acquire));
     assert_eq!(app.ott.as_ref().unwrap().view().pending_play.as_deref(), Some("3"),
         "a replacement keeps the cover bound to its new generation and modal owner");
+    assert!(panel_snapshot_revision(&app, panel) >= accepted_revision,
+        "the mounted loading panel receives the replacement capability before another physical press");
+    assert!(crate::app::ott_runtime::remote_player_action(&mut app, stale).is_err(),
+        "publishing the fresh panel token must not authorize a previous frame's source");
+    assert_eq!(queued(&app), Some("3"));
     native_edge(&mut app, 0, 480, Edge::Down);
     native_edge(&mut app, 0, 480, Edge::Up);
     assert_eq!(queued(&app), Some("4"));

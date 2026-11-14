@@ -672,7 +672,10 @@ mod tests {
             assert!(band.ground.y >= 0.0);
             assert!(band.art.x + band.art.w < band.rows[0].x);
             assert!(band.rows[0].x + band.rows[0].w <= band.wall.x);
-            assert!(band.wall.x + band.wall.w <= layout.heading.x + layout.heading.w);
+            assert_eq!(band.wall, layout.technical);
+            assert!(band.wall.x + band.wall.w <= band.ground.x + band.ground.w - 30.0);
+            assert!(band.wall.y >= band.ground.y);
+            assert!(band.wall.y + band.wall.h <= band.ground.y + band.ground.h);
             assert!(band.rows[0].y + band.rows[0].h < layout.geometry.playbar.y);
             assert!(layout.geometry.playbar.y + layout.geometry.playbar.h <= band.rows[1].y);
             assert!(band.rows[1].y + band.rows[1].h <= band.rows[2].y);
@@ -827,10 +830,18 @@ mod tests {
     #[test]
     fn observed_media_rate_fits_separate_technical_line_without_growing_footer() {
         use plx_machine::machine::{FontScale, TypographyMeasure};
+        let _serial = plx_base::testlock::serial();
+        struct Restore(FontScale);
+        impl Drop for Restore {
+            fn drop(&mut self) { plx_gfx::text::set_ui_typography(self.0); }
+        }
+        let _restore = Restore(plx_ui::typography::current());
         let playing = live_playing();
         for scale in [20, 100, 200] {
             let mut measure = TypographyMeasure::new(plx_ui::fixture::FixtureMeasure);
-            measure.set_font_scale(FontScale::from_percent(scale).unwrap());
+            // Recording paint has the same frame-boundary scale as layout in
+            // the application. Changing only Measure leaves paint at 100%.
+            plx_ui::typography::apply(scale, &mut measure).unwrap();
             let frame = layout(&playing, &measure);
             let mut labels = ClockLabels::default();
             labels.refresh_raster((1920, 1080));
@@ -843,6 +854,7 @@ mod tests {
             assert!(rate.at.y > raster.at.y);
             assert!(rate.at.y < frame.technical.y + frame.technical.h);
             assert!(rate.at.x - rate.at.w >= frame.technical.x);
+            assert!(rate.at.x <= frame.technical.x + frame.technical.w);
             assert_eq!(layout(&playing, &measure).panel, frame.panel);
             labels.refresh_media_rate(None);
             let cleared = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(), &playing,

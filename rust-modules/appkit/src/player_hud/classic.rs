@@ -933,7 +933,12 @@ pub(crate) fn ott_classic_layout(slot: ControlSlot, motion: &HudMotion, _tabs: u
     geometry.row = Rect::new(control_left, frames[0].y, right - control_left,
         if contextual { frames[0].h } else { 0.0 });
     geometry.playbar = frames[1];
-    geometry.grab = Rect::new(content_x, frames[1].y - gap, right - content_x, CLASSIC_RAIL_H + gap * 2.0);
+    // The reference rail has 9px above and only 6px below it. Its hit
+    // surface must stop before the programme row rather than reusing the
+    // symmetric 8px transport margin and covering that row's first pixels.
+    let grab_below = gap.min((frames[2].y - frames[1].y - frames[1].h).max(0.0));
+    geometry.grab = Rect::new(content_x, frames[1].y - gap, right - content_x,
+        frames[1].h + gap + grab_below);
     geometry.tabs = [None; HUD_TABS];
     geometry.tab_row = Rect::new(right, frames[3].y, 0.0, 0.0);
     let heading = Rect::new(content_x, frames[0].y,

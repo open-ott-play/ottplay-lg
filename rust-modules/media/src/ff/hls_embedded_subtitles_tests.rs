@@ -94,6 +94,27 @@ fn owned_batch_remaps_all_timestamps_and_refuses_overflow() {
 }
 
 #[test]
+fn text_ass_and_bitmap_share_content_clock_with_display_base_and_cancelled_sink_shift() {
+    let source = 1_000_000_000i64;
+    let transport = 2_000_000_000i64;
+    let display_base = 9_000_000_000i64;
+    let sink_shift = 3_000_000_000i64;
+    let callback_position = (source + transport + sink_shift) - sink_shift + display_base;
+    let batch = Batch { cues: vec![
+        Cue::Text { track: 0, start: source, end: source + 1_000_000_000, payload: b"text".to_vec(), identity: 1 },
+        Cue::Ass { track: 0, start: source, end: source + 1_000_000_000, payload: b"ass".to_vec() },
+        Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: source }),
+    ], header: Header::Text(TextDialect::WebVtt), track: 0, reset: true };
+    let batch = batch.shifted(transport).unwrap().shifted(display_base).unwrap();
+    assert!(matches!(batch.cues[0], Cue::Text { start, end, .. }
+        if start == callback_position && end == callback_position + 1_000_000_000));
+    assert!(matches!(batch.cues[1], Cue::Ass { start, end, .. }
+        if start == callback_position && end == callback_position + 1_000_000_000));
+    assert!(matches!(batch.cues[2], Cue::Bitmap(subs::SubCue::BitmapClear { pts, .. })
+        if pts == callback_position));
+}
+
+#[test]
 fn committed_bitmap_end_is_finite_and_newer_display_cannot_reveal_older_overlap() {
     let _serial = plx_base::testlock::serial();
     SHARED.reset_session();

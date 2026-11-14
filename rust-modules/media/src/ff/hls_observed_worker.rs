@@ -153,11 +153,17 @@ fn publish_subtitle_segment(source: &str, variant: &str, discontinuity: u64,
     }
     let Some(request) = subtitles.request.clone() else { subtitles.abort(); return false; };
     let style = crate::player::text_style::TextStyle::current(Default::default());
+    let mut reset_decoder = false;
     let published = SHARED.with_active_native_load(owner.epoch, || {
         hls_observed::with_current_subtitle_request(&request, || {
             if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0
                 || SHARED.hls_candidate_generation.load(Ordering::Acquire) != recovery_generation
             { return false; }
+            // The renderer follows content time, including a VOD seek/cold
+            // prefix's display base. Sample after the segment's cold-offset
+            // publication. The engine adds pts_shift before feeding the sink
+            // and subtracts it in the position callback, so it cancels here.
+            let batch = batch.and_then(|batch| batch.shifted(SHARED.disp_base.load(Ordering::Acquire)));
             if let Some(batch) = batch {
                 batch.publish(source, style, &mut subtitles.renderer, 0);
             } else {
@@ -167,11 +173,12 @@ fn publish_subtitle_segment(source: &str, variant: &str, discontinuity: u64,
                 crate::player::ass_source::retire_selection();
                 SHARED.sub_bitmaps.lock().unwrap_or_else(|error| error.into_inner()).clear();
                 subtitles.renderer = None;
+                reset_decoder = true;
             }
             true
         }).unwrap_or(false)
     }).unwrap_or(false);
-    if !published { subtitles.abort(); }
+    if !published || reset_decoder { subtitles.abort(); }
     published
 }
 pub(super) fn scope(source: &str, variant: &str, discontinuity: u64) -> Option<hls_observed::Scope> {

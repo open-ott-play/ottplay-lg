@@ -205,5 +205,14 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
         }
     };
     runtime.changed();
+    if step && current.source.pending()
+        && runtime.reply == Some(request.owner) && current_ui_owner(app) == Some(request.owner)
+    {
+        // Content requests run before Runtime::tick captures its revision, so
+        // that tick cannot infer this input's presentation change. Deliver the
+        // replacement token to its exact interactive catalogue now; the next
+        // physical press must not reuse the previous frame's pending source.
+        runtime.publish(app);
+    }
     Ok(forward)
 }
