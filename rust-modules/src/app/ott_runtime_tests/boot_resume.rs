@@ -170,7 +170,7 @@ fn automatic_resolver_projects_exact_target_source_number_and_accepted_opacity()
     assert!(display.live, "live is a source fact even with no EPG");
     assert_eq!(display.ordinal, Some(2));
     assert_eq!(display.poster, Some(plx_data::metadata::MediaArt::Http {
-        url: "https://boot.invalid/two.png".into() }));
+        url: "https://boot.invalid:443/two.png".into() }));
     assert!(view.startup_pending);
     assert_eq!(view.startup_target.as_deref(), Some(id.as_str()));
     assert_eq!(view.pending_play, None, "automatic restore is not an interactive receipt");
