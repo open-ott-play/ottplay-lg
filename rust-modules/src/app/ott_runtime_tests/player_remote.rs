@@ -126,7 +126,9 @@ fn browsing_after_channel_change_survives_publication_without_following_playback
         let mut app = forty_channels(mode);
         step_to_thirty_three(&mut app, 480, 32);
         open_fullscreen_catalog(&mut app);
-        key(&mut app, Key::Down);
+        // Classic is a vertical channel list; Modern presents this category
+        // as one horizontal shelf. Both inputs select its next media row.
+        key(&mut app, if mode == UiMode::Classic { Key::Down } else { Key::Right });
         let generation = app.ott.as_ref().unwrap().play_generation;
         let identity = route::playback_identity(&app.player.session);
         let mut runtime = app.ott.take().unwrap();
