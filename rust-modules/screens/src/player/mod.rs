@@ -347,6 +347,16 @@ impl PlayerScreen {
 
     /// Presentation consumes the application's source-fenced loading fact, never clears media errors.
     pub fn set_playback_feedback(&mut self, busy: player_hud::Busy, now: u32) {
+        let acquiring = matches!(busy,
+            player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Working, _));
+        // Restoring playback has no explicit CH press to raise its footer.
+        // Enter the same bounded loading hold on a genuine pre-picture wait;
+        // later ordinary rebuffering (Transport) must not reopen a hidden HUD.
+        if acquiring && !matches!(self.busy,
+            player_hud::Busy::Readout(plx_ui::widgets::StatusKind::Working, _))
+            && !self.hud.dismissed {
+            self.channel_change_hud = true;
+        }
         self.busy = busy;
         if self.channel_change_hud {
             // A deliberate Back/dismiss remains authoritative even during a slow resolve.
@@ -717,7 +727,13 @@ impl PlayerScreen {
     /// gated HERE, not just at the draw call site, so [`Self::clock_fingerprint`] (which calls this
     /// too) sees the same answer the frame draws.
     pub fn hud_up(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
-        self.hud.visible(ps, now, plx_media::player::TX.paused.load(std::sync::atomic::Ordering::Relaxed))
+        // A source-fenced replacement can be resolving before the outgoing
+        // decoder reports loading (or after its own HUD timer has expired).
+        // This projection owns display only; dismissal and surface policy still
+        // win, and clearing it restores the ordinary finite timer immediately.
+        let pending = self.pending_channel_display.is_some() && !self.hud.dismissed;
+        (pending || self.hud.visible(ps, now,
+            plx_media::player::TX.paused.load(std::sync::atomic::Ordering::Relaxed)))
             && self.hud_policy != HudPolicy::Hidden
     }
 
@@ -2357,6 +2373,9 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         if let Some(frame) = H::multiview_offer(f.cx) {
             let empty = plx_platform::i18n::msg::multiview_empty();
             let loading = plx_platform::i18n::msg::multiview_loading();
+            for _ in frame.slots().iter().filter(|slot| slot.state == plx_appkit::multiview_chrome::SlotState::Loading) {
+                plx_ui::placeholder::note(f.painter, plx_ui::placeholder::Reason::WorkingReadout, loading);
+            }
             let failed = plx_platform::i18n::msg::multiview_failed();
             frame.draw(f.painter, f.measure, &plx_appkit::multiview_chrome::Labels {
                 empty, loading, failed,

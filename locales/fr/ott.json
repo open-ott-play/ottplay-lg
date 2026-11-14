@@ -8,7 +8,7 @@
   "ott.favorites": "Favoris",
   "ott.description": "Description",
   "ott.value": "Valeur",
-  "ott.value_empty": "Sélectionnez pour saisir une valeur",
+  "ott.value_empty": "Saisir…",
   "ott.save": "Enregistrer",
   "ott.editor_help": "Sélectionnez la valeur pour la modifier. Enregistrer applique le changement ; Annuler conserve la valeur précédente.",
   "ott.channel_list": "Liste des chaînes",
@@ -20,9 +20,9 @@
   "ott.search_this_list": "Rechercher dans cette liste",
   "ott.search_help": "Saisissez un titre pour filtrer cette liste. Une recherche vide affiche toute la liste actuelle ; Annuler conserve la recherche précédente.",
   "ott.search_pending": "Recherche dans cette liste…",
-  "ott.search_empty": "Vide : toute la liste actuelle",
+  "ott.search_empty": "Titre…",
   "ott.search_favorites": "Rechercher dans les favoris",
-  "ott.search_empty_favorites": "Vide : tous les favoris",
+  "ott.search_empty_favorites": "Favoris…",
   "ott.search_help_favorites": "Saisissez un titre pour filtrer les favoris. Une recherche vide affiche tous les favoris ; Annuler conserve la recherche précédente.",
   "ott.search_scope_title": "Rechercher : {scope}",
   "ott.favorite_add": "Ajouter aux favoris",
@@ -49,5 +49,7 @@
   "ott.reminder_soon": "Commence dans {minutes} min.",
   "ott.favorite_added": "Ajouté aux favoris",
   "ott.favorite_removed": "Retiré des favoris",
-  "ott.favorite_update_failed": "Impossible de mettre à jour les favoris"
+  "ott.favorite_update_failed": "Impossible de mettre à jour les favoris",
+  "ott.input_keyboard_hint": "OK · Saisir",
+  "ott.input_hidden_hint": "Masqué · OK"
 }

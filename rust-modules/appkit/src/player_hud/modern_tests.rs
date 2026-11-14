@@ -372,7 +372,7 @@ fn modern_live_footer_has_real_clock_raster_and_read_only_broadcast_rail() {
 }
 
 #[test]
-fn modern_spinner_hides_ordinal_but_directional_seek_keeps_it() {
+fn modern_footer_keeps_proven_ordinal_while_loading_buffering_or_seeking() {
     use plx_data::metadata::OttLivePlaying;
     let mut playing = footer_playing();
     playing.ott.as_mut().unwrap().live = Some(OttLivePlaying {
@@ -384,11 +384,11 @@ fn modern_spinner_hides_ordinal_but_directional_seek_keeps_it() {
     let layout = compose(base, slot, &motion, None, "", Some(&playing), Some(150), &FixtureMeasure);
     let mut clocks = super::super::ott_footer::ClockLabels::default();
     for (busy, displayed_ns, expected_mark, numbered) in [
-        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), 10, TransportMark::None, false),
-        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), 10, TransportMark::None, false),
-        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), 10, TransportMark::None, false),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), 10, TransportMark::None, true),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), 10, TransportMark::None, true),
+        (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), 10, TransportMark::None, true),
         (Busy::None, 10, TransportMark::None, true),
-        (Busy::Transport, 10, TransportMark::Working, false),
+        (Busy::Transport, 10, TransportMark::Working, true),
         (Busy::Transport, 5, TransportMark::Rewind, true),
         (Busy::Transport, 15, TransportMark::FastForward, true),
         (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), 10, TransportMark::None, true),

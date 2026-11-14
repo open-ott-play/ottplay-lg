@@ -7,17 +7,11 @@ use plx_ui::text_view::TextView;
 use plx_ui::label::HAlign;
 use plx_ui::{theme, Painter, Rect};
 
-/// Keep the channel name without its catalogue ordinal during the central
-/// loading readout or a transport spinner. A directional seek owns an arrow,
-/// not a spinner, and keeps its ordinary number. The caller supplies the same
-/// resolved mark used by its transport; this projection does not rederive it.
-pub(super) fn visible_ordinal(ordinal: Option<u32>, busy: Busy, mark: TransportMark) -> Option<u32> {
-    if matches!(busy, Busy::Readout(plx_ui::widgets::StatusKind::Working, _))
-        || (busy == Busy::Transport && mark == TransportMark::Working) {
-        None
-    } else {
-        ordinal
-    }
+/// A proven channel number belongs to the footer in every playback state.
+/// Loading changes the centre indicator, not catalogue identity. Never infer a
+/// number from a title or substitute a synthetic zero for missing metadata.
+pub(super) fn visible_ordinal(ordinal: Option<u32>, _busy: Busy, _mark: TransportMark) -> Option<u32> {
+    ordinal.filter(|ordinal| *ordinal > 0)
 }
 
 /// Cached rendering labels only. Conversion runs when the supplied timestamps or
@@ -254,7 +248,7 @@ fn classic_band(info: &ClassicInfo<'_>, _clocks: &ClockLabels,
     let ordinal_width = digit * 8.0;
     let ordinal_x = layout.heading.x;
     let mut heading = layout.heading;
-    // Keep the channel-name origin fixed when loading suppresses its ordinal.
+    // Keep the channel-name origin fixed when ordinal metadata is unavailable.
     heading.x += ordinal_width;
     heading.w = (heading.w - ordinal_width).max(0.0);
     let wall = layout.technical;
@@ -628,18 +622,18 @@ mod tests {
     }
 
     #[test]
-    fn classic_spinner_hides_ordinal_but_directional_seek_keeps_it() {
+    fn classic_footer_keeps_proven_ordinal_while_loading_buffering_or_seeking() {
         let mut playing = live_playing();
         playing.ott.as_mut().unwrap().live.as_mut().unwrap().channel_title = "123 Channel A".into();
         let measure = plx_ui::fixture::FixtureMeasure;
         let frame = layout(&playing, &measure);
         let mut clocks = ClockLabels::default();
         for (busy, displayed_ns, expected_mark, numbered) in [
-            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), 10, TransportMark::None, false),
-            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), 10, TransportMark::None, false),
-            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), 10, TransportMark::None, false),
+            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Preparing"), 10, TransportMark::None, true),
+            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Connecting"), 10, TransportMark::None, true),
+            (Busy::Readout(plx_ui::widgets::StatusKind::Working, c"Buffering"), 10, TransportMark::None, true),
             (Busy::None, 10, TransportMark::None, true),
-            (Busy::Transport, 10, TransportMark::Working, false),
+            (Busy::Transport, 10, TransportMark::Working, true),
             (Busy::Transport, 5, TransportMark::Rewind, true),
             (Busy::Transport, 15, TransportMark::FastForward, true),
             (Busy::Readout(plx_ui::widgets::StatusKind::Failed, c"Playback failed"), 10, TransportMark::None, true),

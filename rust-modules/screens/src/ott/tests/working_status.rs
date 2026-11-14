@@ -104,13 +104,19 @@ fn settled_and_untyped_status_text_does_not_create_pending_debt() {
 }
 
 #[test]
-fn classic_initial_loading_retains_its_existing_draw_accounting() {
+fn initial_loading_draws_only_the_shared_orbit_and_counts_one_visible_wait() {
     let _serial = plx_base::testlock::serial();
-    let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
-    screen.refresh_presentation(UiMode::Classic, &plx_ui::fixture::FixtureMeasure);
-    let (text, debt) = observed(&mut screen);
-    assert!(text.iter().any(|run| run.contains(msg::browse_library_loading())));
-    assert_eq!(debt.of(Reason::WorkingReadout), 1);
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
+        screen.refresh_presentation(mode, &plx_ui::fixture::FixtureMeasure);
+        let (text, debt) = observed(&mut screen);
+        assert!(text.is_empty(), "the initial orbit has no central caption or channel text: {text:?}");
+        assert_eq!(debt.of(Reason::WorkingReadout), 1,
+            "a spinner-only waiting surface is still counted exactly once");
+        let dots = plx_ui::draw_census::capture(|| paint(&mut screen, plx_ui::Painter::recording()));
+        assert_eq!(dots.len(), 4, "paint the shared four-dot orbit, not an empty waiting screen");
+        assert!(dots.iter().all(|(kind, _)| *kind == 9), "the orbit uses outlined coloured dots");
+    }
 }
 
 #[test]

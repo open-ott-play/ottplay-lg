@@ -7,6 +7,7 @@ use plx_machine::machine::{EntryId, InputOwner, NavOp, UiMode};
 pub(super) struct State {
     origin: Option<Origin>,
     startup_considered: bool,
+    startup_home: Option<(EntryId, String)>,
 }
 #[derive(Clone, Copy)]
 struct Origin {
@@ -82,14 +83,9 @@ fn startup_provider(runtime: &Runtime) -> Option<ProviderKind> {
     }).filter(|provider| *provider != ProviderKind::Plex)
 }
 
-pub(super) fn reconcile(runtime: &mut Runtime, app: &mut App) -> bool {
-    observe(runtime, app);
-    // Input while state/auth is still loading also retires this one-shot claim.
-    if app.last_input != app.t0 || runtime.navigation_epoch != 0 {
-        runtime.classic_navigation.startup_considered = true;
-    }
-    let mode = app.bridge.ui_mode();
-    if runtime.interface_mode() != mode
+/// Shared durable refusal gates for navigation and its temporary boot paint.
+fn semantic_ready(runtime: &Runtime, app: &App) -> bool {
+    if runtime.interface_mode() != app.bridge.ui_mode()
         || !runtime.loaded || runtime.persistence_uncertain
         || public_preferences::write_refusal(runtime).is_some()
         || runtime.setup.is_some() || runtime.edit_session.is_some()
@@ -98,14 +94,50 @@ pub(super) fn reconcile(runtime: &mut Runtime, app: &mut App) -> bool {
         || app.bridge.is_controlled_replay()
         || matches!(&app.rec, super::super::recorder::Recplay::Replaying(_))
         || !app.bridge.session_ready_current()
-        || app.pages.surface_up() || app.pages.has_pending_surface_navigation() || app.pages.has_pending_navigation()
-        || app.pages.nav.tabs.stack.is_pending()
-        || app.pages.nav.tabs.stack.transition.in_flight()
+        || app.pages.surface_up() || app.pages.has_pending_surface_navigation()
     { return false; }
+    true
+}
+
+fn settled_owner(app: &App) -> bool {
+    if app.pages.has_pending_navigation() || app.pages.nav.tabs.stack.is_pending()
+        || app.pages.nav.tabs.stack.transition.in_flight() { return false; }
+    app.pages.nav.top_page().is_some_and(|entry|
+        entry.inst.as_ref().is_some_and(|body| !body.staged)
+            && app.pages.nav.input_owner() == Some(InputOwner::Entry(entry.id)))
+}
+
+/// The coordinator's exact source/ownership eligibility, reused by boot paint.
+/// A queued initial Root keeps its cover until the existing dispatcher commits.
+pub(super) fn startup_home_cover(runtime: &Runtime, app: &App) -> bool {
+    if !semantic_ready(runtime, app) || !matches!(app.route(), AppArg::Home)
+        || app.pages.nav.tabs.stack.depth() != 1 || runtime.transient.accepted.is_some()
+        || managed::profile(runtime).is_some() || classic_source::profile(runtime).is_some()
+        || startup_provider(runtime).is_none() { return false; }
+    if runtime.classic_navigation.startup_considered {
+        let source = runtime.active().map(profile_fingerprint);
+        let owned = runtime.classic_navigation.startup_home.as_ref().is_some_and(|(native, fingerprint)|
+            app.pages.nav.top_page().is_some_and(|entry| entry.id == *native)
+                && source.as_ref() == Some(fingerprint));
+        owned && match app.pages.nav.tabs.stack.pending_dest() {
+            Some(AppArg::Ott) => true,
+            Some(_) => false,
+            // pages.request parks outside-step operations until NAV COMMIT.
+            // Retain this exact coordinator receipt across that first frame.
+            None => app.pages.has_pending_navigation(),
+        }
+    } else { settled_owner(app) }
+}
+
+pub(super) fn reconcile(runtime: &mut Runtime, app: &mut App) -> bool {
+    observe(runtime, app);
+    // Input while state/auth is still loading also retires this one-shot claim.
+    if app.last_input != app.t0 || runtime.navigation_epoch != 0 {
+        runtime.classic_navigation.startup_considered = true;
+    }
+    let mode = app.bridge.ui_mode();
+    if !semantic_ready(runtime, app) || !settled_owner(app) { return false; }
     let Some(entry) = app.pages.nav.top_page() else { return false; };
-    if entry.inst.as_ref().is_none_or(|body| body.staged)
-        || app.pages.nav.input_owner() != Some(InputOwner::Entry(entry.id))
-    { return false; }
     let native = entry.id;
     let owner = entry.inst.as_ref().expect("checked mounted page").id;
     let root_home = matches!(entry.arg, AppArg::Home)
@@ -130,6 +162,8 @@ pub(super) fn reconcile(runtime: &mut Runtime, app: &mut App) -> bool {
                 // This is the initial application route, not a reversible
                 // projection of a user-opened native Plex page. Keeping Home
                 // underneath would make Modern Back expose the wrong provider.
+                runtime.classic_navigation.startup_home = runtime.active()
+                    .map(|profile| (native, profile_fingerprint(profile)));
                 app.pages.request(MachineId::Instance(owner), NavOp::Root(AppArg::Ott));
                 return true;
             }
