@@ -9,8 +9,8 @@ use super::multiview_sources::{
 };
 use super::{App, Runtime};
 use plx_data::ott::multiview::{
-    AdmissionOutcome, AudioPolicy, Error as SceneError, Layout, ResolveOutcome, ResolveTicket,
-    Scene, SceneId, SlotFailure, SlotId, SlotStatus,
+    AdmissionOutcome, AudioPolicy, Error as SceneError, Layout, PipelineStoppedPreview,
+    ResolveOutcome, ResolveTicket, Scene, SceneId, SlotFailure, SlotId, SlotStatus,
 };
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,6 +62,14 @@ impl From<SceneError> for Error {
     fn from(value: SceneError) -> Self {
         Self::Scene(value)
     }
+}
+
+/// A pending Stop's predicted metadata, never a new ticket or an admission grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct StopCompletionPreview {
+    pub retirement: PipelineStoppedPreview,
+    pub slot_generation: String,
+    pub source_revision: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1035,6 +1043,38 @@ impl Coordinator {
             .as_ref()
             .map_or(transition.revision, Scene::revisions);
         Ok(transition)
+    }
+
+    pub fn preview_stop_completion(
+        &self,
+        runtime: &Runtime,
+        ticket: ResolveTicket,
+    ) -> Result<StopCompletionPreview, Error> {
+        self.require_current_ticket(ticket)?;
+        if self.stopping[ticket.slot().index()] != Some(ticket)
+            || !self.closing_slots[ticket.slot().index()]
+            || self.scene_runtime.as_deref() != Some(runtime.remote.runtime())
+            || self
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !snapshot.current_for(runtime))
+        {
+            return Err(Error::StaleCompletion);
+        }
+        let retirement = self
+            .scene
+            .as_ref()
+            .ok_or(Error::SceneInactive)?
+            .preview_pipeline_stopped(ticket)?;
+        Ok(StopCompletionPreview {
+            slot_generation: slot_generation(
+                retirement.slot,
+                retirement.source_generation,
+                retirement.request_generation,
+            ),
+            source_revision: source_revision(retirement.slot, retirement.source_generation),
+            retirement,
+        })
     }
 
     pub fn stop_completed(
