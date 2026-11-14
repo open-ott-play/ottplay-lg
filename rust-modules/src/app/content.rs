@@ -546,6 +546,10 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
     }
     for request in player_reqs {
         let request = match request {
+            plx_screens::registry::PlayerReq::Multiview(event) => {
+                super::ott_runtime::multiview_player_action(app, event);
+                continue;
+            }
             plx_screens::registry::PlayerReq::Menu(request) => {
                 match super::ott_runtime::player_menu_action(app, request) {
                     Ok(Some(request)) => request,

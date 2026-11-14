@@ -159,8 +159,11 @@ fn first_run_settings_row_preserves_provider_and_setup_selection() {
 
         runtime.page = "profiles";
         let view = runtime.view();
-        let first = if provider == ProviderKind::Plex { "action/plex.connect" }
-            else { "action/profile.add" };
+        let first = match provider {
+            ProviderKind::Plex => "action/plex.connect",
+            ProviderKind::M3u => "m3u-slot/1",
+            _ => "action/profile.add",
+        };
         assert_eq!(view.rows[0].id, first);
         assert_eq!(view.selected_row.as_deref(), Some(first));
         assert_eq!(view.rows.last().unwrap().action, OttAction::ShowSettings,

@@ -382,7 +382,7 @@ fn the_lookahead_wiring_aborts_through_the_shared_reducer_when_the_guard_is_arme
                     audio_expected: true,
                 }))
             } else {
-                Ok(HlsSegmentOutput { transport_timing: None,
+                Ok(HlsSegmentOutput { resident: None, transport_timing: None,
                     webvtt_clock: None,
         observed: None,
                     aus: Vec::new(),

@@ -1,6 +1,8 @@
 //! Native OTT integration. The app owns IO and publishes immutable screen snapshots;
 //! provider parsing and portable identities remain independent of rendering and Plex.
 use super::*;
+#[path = "ott_system_tv.rs"]
+mod system_tv;
 #[path = "ott_auth_return.rs"]
 pub(super) mod auth_return;
 #[path = "ott_catalog_return.rs"]
@@ -46,6 +48,46 @@ mod live_label;
 mod live_witness;
 #[path = "ott_managed.rs"]
 mod managed;
+#[path = "ott_multiview_authorization.rs"]
+mod multiview_authorization;
+#[path = "ott_multiview_sources.rs"]
+mod multiview_sources;
+#[path = "ott_multiview_plex.rs"]
+mod multiview_plex;
+#[path = "ott_multiview/mod.rs"]
+mod multiview;
+#[path = "ott_multiview_ui.rs"]
+mod multiview_ui;
+#[path = "ott_multiview_service.rs"]
+mod multiview_service;
+#[path = "ott_multiview_connection.rs"]
+mod multiview_connection;
+#[path = "ott_multiview_driver.rs"]
+mod multiview_driver;
+#[path = "ott_multiview_output.rs"]
+mod multiview_output;
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "ott_multiview_admission_tests.rs"]
+mod multiview_admission_tests;
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "ott_multiview_v1_bridge_tests.rs"]
+mod multiview_v1_bridge_tests;
+pub(super) fn multiview_player_action(app: &mut App, event: plx_appkit::multiview_chrome::Event) {
+    multiview_ui::player_action(app, event);
+}
+pub(super) fn multiview_picture_owned(app: &App) -> bool {
+    app.ott.as_ref().is_some_and(|runtime| multiview_output::owns_picture(runtime, app))
+}
+/// Unsupported per-input transport must never target the entire composite or
+/// an old provider queue. Master volume and lifecycle use their existing paths.
+pub(super) fn multiview_transport_unavailable(app: &mut App) -> bool {
+    if !multiview_picture_owned(app) { return false; }
+    if let Some(runtime) = app.ott.as_mut() {
+        runtime.status = "Per-window transport is unavailable for this source".into();
+        runtime.changed();
+    }
+    true
+}
 #[path = "ott_favorite_profile_rename.rs"]
 mod profile_rename;
 #[path = "ott_selected_guide.rs"]
@@ -549,6 +591,17 @@ struct SetupSession {
 }
 
 pub(super) struct Runtime {
+    multiview_connection: multiview_connection::State,
+    multiview_driver: multiview_driver::Driver,
+    multiview_output: multiview_output::State,
+    multiview_ui: multiview_ui::State,
+    multiview: Box<multiview::Coordinator>,
+    multiview_effects: std::collections::VecDeque<multiview::Effect>,
+    multiview_picture: Option<plx_media::route::PlaybackIdentity>,
+    // A content hash cannot fence remove/re-add. This stamp observes accepted
+    // source-policy images without invalidating them for ordinary UI changes.
+    multiview_authority_epoch: u64,
+    system_tv: system_tv::State,
     settings_groups: settings_groups::State,
     classic_navigation: classic_navigation::State,
     auth_return: auth_return::State,
@@ -964,8 +1017,8 @@ impl Runtime {
         }
     }
 
-    pub(super) fn new() -> Self {
-        let mut runtime = Self::unloaded(companion_adapter::init());
+    pub(super) fn new() -> Box<Self> {
+        let mut runtime = Box::new(Self::unloaded(companion_adapter::init()));
         runtime.start_state_load();
         runtime
     }
@@ -1040,6 +1093,14 @@ impl Runtime {
         let (metadata_tx, metadata_rx) = mpsc::channel();
         let (catalog_tx, catalog_rx) = mpsc::sync_channel(4);
         Self {
+            multiview_connection: Default::default(),
+            multiview_driver: Default::default(),
+            multiview_output: Default::default(),
+            multiview_ui: Default::default(),
+            multiview: Box::default(),
+            multiview_effects: std::collections::VecDeque::new(),
+            multiview_picture: None,
+            multiview_authority_epoch: 1,
             settings_groups: settings_groups::State::default(),
             classic_navigation: classic_navigation::State::default(),
             auth_return: auth_return::State::default(),
@@ -1127,6 +1188,7 @@ impl Runtime {
             archive_hours_editor: None,
             m3u_media_editor: None,
             remote: Remote::from_install("", ""),
+            system_tv: Default::default(),
             play_generation: 0,
             resolver_busy: false,
             resolver_next: None,
@@ -1303,6 +1365,18 @@ impl Runtime {
         }
     }
     fn observe_profile_edits(&mut self, next: &Saved) {
+        if self.saved.favorites != next.favorites
+            || parental::Policy::read(&self.saved.settings).ok()
+                != parental::Policy::read(&next.settings).ok()
+            || self.saved.settings.get(crate::app::ott_kiosk_stored::KEY)
+                != next.settings.get(crate::app::ott_kiosk_stored::KEY)
+            || self.saved.settings.get("nativeMultiviewService")
+                != next.settings.get("nativeMultiviewService")
+        {
+            if self.multiview_authority_epoch != 0 {
+                self.multiview_authority_epoch = self.multiview_authority_epoch.checked_add(1).unwrap_or(0);
+            }
+        }
         if self.saved.profiles != next.profiles || m3u_slots::settings_changed(&self.saved, next) {
             self.retire_profile_edits();
         }
@@ -3111,6 +3185,7 @@ impl Runtime {
                     fields
                 })
                 .unwrap_or_default(),
+            "system-tv" => system_tv::rows(self),
             "providers" => ProviderKind::all()
             .into_iter()
             .map(|kind| {
@@ -3133,6 +3208,7 @@ impl Runtime {
                     false,
                 )
             })
+            .chain(std::iter::once(system_tv::entry(self)))
             .collect(),
             "profiles" => {
                 let mut profiles: Vec<_> = if self.classic_m3u_slots() {
@@ -3632,6 +3708,7 @@ impl Runtime {
             page_id,
             revision: self.revision,
             title: match self.page {
+                "system-tv" => "System television / LG Channels",
                 "providers" => "Providers",
                 "profiles" => "Profiles",
                 "profile-setup" => "Profile setup",
@@ -4279,6 +4356,11 @@ impl Runtime {
         transient::cancel_play_candidate(self, app);
         self.resume_pending = None;
         self.playback_epoch = self.playback_epoch.wrapping_add(1);
+        // Back retired the producer's generation. Only this fully admitted
+        // explicit selection may transfer the retained view's continuity owner.
+        if self.returned_catalog_complete() {
+            self.continuity.rebase(self.generation);
+        }
         self.continuity.user_selected(self.generation, &id);
         let result =
             self.queue_play_request_quality(request, profile, entry, favorite, true, interactive);
@@ -4966,8 +5048,8 @@ pub(super) fn draw_notifications(app: &mut App) {
     }
 }
 
-/// Closed, current-native evidence only. Unknown/malformed/refused sources and
-/// decoder failures are terminal; they cannot gain an automatic retry policy.
+/// Closed, current-native evidence only. A window slip needs positive server-state
+/// attribution; unknown/malformed/refused sources and decoder failures stay terminal.
 fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
     use plx_media::player::report::IoFailureDetails;
     use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
@@ -4975,6 +5057,9 @@ fn recoverable_live_transport(details: Option<plx_media::player::report::Failure
         exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
             | DemuxExitClass::HlsPlaylistFetchFailed,
         outcome: Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState),
+    } | IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsPlaylistWindow,
+        outcome: Some(TraceOutcome::ServerState),
     }))
 }
 
@@ -5075,12 +5160,16 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
     let Some(mut runtime) = app.ott.take() else {
         return;
     };
+    // Capture one shared allowance for ordinary and composite cleanup. No
+    // subsystem is allowed to restart a separate shutdown waiting budget.
+    let started = ClockSample::capture_main(app.adapters.player.mt()).ok();
+    let mut multiview_driver = std::mem::take(&mut runtime.multiview_driver);
+    multiview_driver.begin_shutdown(&mut runtime, app);
+    runtime.multiview_connection.shutdown();
+    multiview_output::begin_shutdown(&mut runtime, app);
     // Release overlay textures on the owning thread while the GL context is
     // still alive, and cancel ephemeral feed/media before the bounded drain.
     runtime.remote.suspend_notifications();
-    // This sample belongs to post-loop IO, not to a machine step. Projection
-    // through steady_from keeps wall-clock adjustments from extending cleanup.
-    let started = ClockSample::capture_main(app.adapters.player.mt()).ok();
     Runtime::withdraw_reminder_ui(app);
     runtime.reminders.invalidate();
     hls_tracks::shutdown(&mut runtime, app);
@@ -5105,7 +5194,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
         lease.begin_release();
         leases.push(lease.into_lease());
     }
-    let remaining = || {
+    let remaining = |app: &App| {
         started
             .and_then(|start| {
                 ClockSample::capture_main(app.adapters.player.mt())
@@ -5120,23 +5209,56 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
             })
             .unwrap_or(Duration::ZERO)
     };
+    fn pump_multiview(runtime: &mut Runtime, app: &mut App,
+        driver: &mut multiview_driver::Driver) -> bool
+    {
+        if let Ok(sample) = ClockSample::capture_main(app.adapters.player.mt()) {
+            runtime.clock_sample = Some(sample.steady_from(runtime.clock_anchor.unwrap_or(sample)));
+        }
+        driver.tick_shutdown(runtime, app);
+        let connection = runtime.multiview_connection.shutdown_pending();
+        let output = multiview_output::shutdown_pending(runtime);
+        driver.shutdown_pending() || connection || output
+    }
     let rx = std::mem::replace(&mut runtime.rx, mpsc::channel().1);
     // A completed resolver may already be queued even when no state write is
     // outstanding. Collect it before dropping the receiver and its lease.
     while let Ok(job) = rx.try_recv() {
         collect(&mut runtime, &mut leases, job);
     }
-    if runtime.saving {
-        drain_for(&rx, remaining().min(Duration::from_secs(3)), |job| {
+    // Interleave terminal composite completion/Off with ordinary receipts.
+    // Waiting on only the ordinary mailbox could otherwise hide a late Create
+    // reply until the whole allowance had already been consumed.
+    let saving_started = remaining(app);
+    while runtime.saving && !remaining(app).is_zero()
+        && saving_started.saturating_sub(remaining(app)) < Duration::from_secs(3)
+    {
+        pump_multiview(&mut runtime, app, &mut multiview_driver);
+        drain_for(&rx, remaining(app).min(Duration::from_millis(25)), |job| {
             collect(&mut runtime, &mut leases, job);
-            runtime.saving
+            false
         });
     }
-    if runtime.resolver_busy {
-        drain_for(&rx, remaining(), |job| {
+    while runtime.resolver_busy && !remaining(app).is_zero() {
+        pump_multiview(&mut runtime, app, &mut multiview_driver);
+        drain_for(&rx, remaining(app).min(Duration::from_millis(25)), |job| {
             collect(&mut runtime, &mut leases, job);
-            runtime.resolver_busy
+            false
         });
+    }
+    while !remaining(app).is_zero()
+        && pump_multiview(&mut runtime, app, &mut multiview_driver)
+    {
+        drain_for(&rx, remaining(app).min(Duration::from_millis(25)), |job| {
+            collect(&mut runtime, &mut leases, job);
+            false
+        });
+    }
+    let composite_unconfirmed = !multiview_driver.shutdown_confirmed()
+        || runtime.multiview_connection.shutdown_pending()
+        || multiview_output::shutdown_pending(&mut runtime);
+    if composite_unconfirmed {
+        plx_base::eventlog::log("ott: multiview shutdown cleanup unconfirmed");
     }
     while let Ok(job) = rx.try_recv() {
         collect(&mut runtime, &mut leases, job);
@@ -5162,7 +5284,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
     }
     // This UI-only patch shares the existing writer and CAS door. Never race an
     // outstanding writer or retry an uncertain public transaction at teardown.
-    if let Some(value) = classic_bookmark.filter(|_| !remaining().is_zero()) {
+    if let Some(value) = classic_bookmark.filter(|_| !remaining(app).is_zero()) {
         if public_preferences::write_refusal(&runtime).is_none()
             && public_preferences::classic_bookmark(&runtime.public_preferences, &value.source)
                 != Some(Some(value.clone()))
@@ -5175,7 +5297,7 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
         }
     }
     for lease in leases {
-        if lease.finish_after_loop(remaining()).is_err() {
+        if lease.finish_after_loop(remaining(app)).is_err() {
             plx_base::eventlog::log(
                 "ott: shutdown session stop did not finish within its allowance",
             );
@@ -5220,7 +5342,7 @@ pub(super) fn commit_track(app: &mut App, commit: plx_appkit::track_menu::TrackC
 pub(super) fn before_playback_tick(app: &mut App) {
     if !app
         .ott
-        .as_ref()
+        .as_deref()
         .is_some_and(commands::track_request_pending)
     {
         return;
@@ -5275,6 +5397,7 @@ fn tick_with_start(
         app.rec
             .refuse("Nondefault UI typography is not bound in this recording format");
     }
+    system_tv::tick(&mut runtime, app);
     hls_tracks::tick(&mut runtime, app);
     // The cooldown may already have issued a resolver request. Accepted Pause
     // still wins over its late completion, without cancelling a newer explicit
@@ -6527,7 +6650,9 @@ fn tick_with_start(
     if let Err(error) = kiosk_capture::tick(&mut runtime, app) {
         runtime.status = error.message().into();
     }
-    if playback_allowed(app) && runtime.play_work_allowed() {
+    if playback_allowed(app) && runtime.play_work_allowed()
+        && !multiview_output::owns_picture(&runtime, app)
+    {
         let resume = match runtime
             .resume_pending
             .as_ref()
@@ -6712,6 +6837,14 @@ fn tick_with_start(
             }
         }
     }
+    // Discover only the explicitly paired service. A saved provider, a discovered
+    // URL or a previous foreground session cannot confer service authority.
+    runtime.multiview_connection.tick(
+        runtime.loaded && runtime.state_load == StateLoad::Idle && !runtime.persistence_uncertain,
+        app.running && playback_allowed(app),
+        runtime.saved.settings.get("nativeMultiviewService"),
+        runtime.remote.persisted_device_id(),
+    );
     let now = runtime.now_ms();
     runtime.favorites.expire(now);
     let notification_policy =
@@ -6723,7 +6856,11 @@ fn tick_with_start(
     );
     let state = state(app, &runtime);
     for invocation in runtime.remote.tick(now, state) {
-        let response = if let Err(error) = input_policy::remote(&mut runtime, &invocation) {
+        let response = if invocation.action == "multiview" {
+            // This family validates the original lexical request and emits its
+            // own correlated policy/deadline failures before any effects.
+            commands::command(&mut runtime, app, &invocation)
+        } else if let Err(error) = input_policy::remote(&mut runtime, &invocation) {
             Some(if invocation.action == "local_browser" {
                 runtime.usb_remote_failure(&invocation, "restricted")
             } else if invocation.action == "local_media"
@@ -6766,6 +6903,17 @@ fn tick_with_start(
         runtime.remote_snapshot = snapshot;
         runtime.changed();
     }
+    let mut driver = std::mem::take(&mut runtime.multiview_driver);
+    driver.tick(&mut runtime, app);
+    let output = driver.take_ready_output(&runtime);
+    runtime.multiview_driver = driver;
+    if let Some(output) = output {
+        if let Err(error) = multiview_output::offer(&mut runtime, app, output) {
+            runtime.status = error.into();
+        }
+    }
+    multiview_output::tick(&mut runtime, app);
+    multiview_ui::publish(&mut runtime, app);
     managed::tick(&mut runtime, app);
     commands::after_tick(&mut runtime, app);
     let active_playback = native_playback_diagnostics::playback_owner(&runtime, app);
@@ -6792,6 +6940,7 @@ fn tick_with_start(
     }
     if playback_allowed(app)
         && runtime.play_work_allowed()
+        && !multiview_output::owns_picture(&runtime, app)
         && runtime.play_target.is_none()
         && runtime
             .continuity
@@ -7301,6 +7450,9 @@ fn handle_action(
             }
         }
         OttAction::Back => {
+            if runtime.page == "system-tv" {
+                system_tv::leave(runtime); runtime.page = "providers"; return Ok(());
+            }
             if runtime.usb_browsing() {
                 return runtime.usb_browser_back(app);
             }
@@ -7353,6 +7505,7 @@ fn handle_action(
             }
         }
         OttAction::EditSetting(key) => {
+            if let Some(result) = system_tv::action(runtime, app, &key) { return result; }
             if let Some(result) = runtime.usb_action(app, &key) {
                 return result;
             }
@@ -8283,6 +8436,9 @@ struct ProgrammeLeaf {
 }
 
 fn publish_programme(runtime: &mut Runtime, app: &mut App, changed: bool) {
+    // Composite ownership is independent of the previous OTT/Plex item. Keep
+    // late single-item metadata replies out of its footer and information view.
+    if multiview_output::publish_metadata(runtime, app) { return; }
     if archive_programme::publish(runtime, app) {
         return;
     }
@@ -8823,5 +8979,5 @@ pub(super) fn install_legacy_lifecycle_test_runtime(app: &mut App, sid: plx_plex
     runtime.metadata_done.store(false, Ordering::Release);
     runtime.resolver_busy = true;
     app.running = true;
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
 }

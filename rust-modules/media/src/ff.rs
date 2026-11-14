@@ -2700,12 +2700,25 @@ fn classify_hls_avio_operation(
         total_us: request_started.elapsed().as_micros().max(1) as u64,
         audio_expected,
     });
-    classify_hls_avio_facts(
+    let terminal = classify_hls_avio_facts(
         stall,
         state.reserve_deadline.expired,
         state.io_failed,
         operation_failed,
-    )
+    );
+    if matches!(terminal, Some(HlsExit::Failed("segment body transport failed"))) {
+        if let Src::Curl(source) = &state.src {
+            if let Some(failure) = source.body_failure() {
+                let outcome = hls_curl_open_outcome(crate::curlio::OpenErr::Transport(failure.rc));
+                if matches!(outcome, TraceOutcome::Transport | TraceOutcome::Deadline) {
+                    return Some(HlsExit::OpenFailed {
+                        reason: "segment body transport failed", outcome,
+                    });
+                }
+            }
+        }
+    }
+    terminal
 }
 
 /// Pure terminal reduction for one completed native operation. The callback records facts while
@@ -3173,18 +3186,8 @@ fn frame_read_failed(state: &mut AvioState, result: c_int, native_epoch: u32) ->
         crate::player::log(&format!(
             "ff: media transport failed during av_read_frame r={result}{cause}"
         ));
-        if let Some(f) = failure {
-            SHARED.dg_transport_rc.store(f.rc, Ordering::Release);
-            SHARED
-                .dg_transport_age_ms
-                .store(f.age_ms.min(i64::MAX as u64) as i64, Ordering::Release);
-            SHARED
-                .dg_transport_reopen_failed
-                .store(f.reopen_failed, Ordering::Release);
-        }
-        let (rc, reopen_failed) = failure.map_or((0, false), |f| (f.rc, f.reopen_failed));
-        SHARED.note_io_failure_for(native_epoch, IoFailureDetails::source_io(rc, reopen_failed));
-        SHARED.demux_io_failed.store(true, Ordering::Release);
+        SHARED.fail_source_io_for(native_epoch, failure.map(|f|
+            (f.rc, f.age_ms.min(i64::MAX as u64) as i64, f.reopen_failed)));
     }
     true
 }
@@ -4309,6 +4312,8 @@ fn adts_duration_ns(data: &[u8]) -> Option<i64> {
 
 #[derive(Clone, Copy, Debug)]
 enum HlsExit {
+    /// Complete, validated external segment contained no safe decoder entry.
+    NoRandomAccessEntry { bytes: u64 },
     Aborted,
     NotReady,
     PrimeExpired,
@@ -5161,7 +5166,37 @@ std::thread_local! {
     static HLS_TEST_STREAM_COUNTS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
 }
 
+/// Merge only sample-duration-backed coverage. A source clock's sub-sample
+/// quantization may join its rounded boundary; never invent a frame-sized gap.
+fn hls_resident_intervals(samples: impl IntoIterator<Item = (i64, i64)>, quantum_ns: i64)
+    -> std::sync::Arc<[(i64, i64)]>
+{
+    let mut samples: Vec<_> = samples.into_iter().filter(|(start, end)| end > start).collect();
+    samples.sort_unstable();
+    let shortest = samples.iter().map(|(start, end)| end.saturating_sub(*start)).min().unwrap_or(0);
+    let quantum = if quantum_ns > 0 && quantum_ns < shortest { quantum_ns } else { 0 };
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    for (start, end) in samples {
+        if let Some(last) = ranges.last_mut().filter(|last| start <= last.1.saturating_add(quantum)) {
+            last.1 = last.1.max(end);
+        } else { ranges.push((start, end)); }
+    }
+    ranges.into()
+}
+fn hls_clock_quantum_ns(tb: AVRational) -> i64 {
+    if tb.num <= 0 || tb.den <= 0 { return 0; }
+    i64::try_from((i128::from(tb.num) * 1_000_000_000 + i128::from(tb.den) - 1)
+        / i128::from(tb.den)).unwrap_or(0)
+}
+unsafe fn hls_packet_end_ns(packet: *const AVPacket, stream: *mut AVStream) -> Option<i64> {
+    if (*packet).duration <= 0 { return None; }
+    let pts = if (*packet).pts != AV_NOPTS_VALUE { (*packet).pts } else { (*packet).dts };
+    if pts == AV_NOPTS_VALUE { return None; }
+    Some(av_rescale_q(pts.checked_add((*packet).duration)?, stream_time_base(stream), NS_TB))
+}
+
 struct HlsSegmentOutput {
+    resident: Option<crate::player::ExternalHlsResident>,
     transport_timing: Option<(i64, i64, i64, Option<i64>)>, // raw origin, local base, actual lane ends
     // Anchor from the actual decoded video PES clock, never playlist wall time.
     webvtt_clock: Option<hls_webvtt::Clock>,
@@ -5174,6 +5209,18 @@ struct HlsSegmentOutput {
     audio_tail_ns: Option<i64>,
 }
 impl HlsSegmentOutput {
+    fn shift_resident(&mut self, offset: i64) -> Result<(), &'static str> {
+        if let Some(resident) = &mut self.resident {
+            let shift = |ranges: &[(i64, i64)]| -> Result<std::sync::Arc<[(i64, i64)]>, &'static str> {
+                ranges.iter().map(|(start, end)| Ok((start.checked_add(offset)
+                    .ok_or("HLS resident clock overflow")?, end.checked_add(offset)
+                    .ok_or("HLS resident clock overflow")?))).collect::<Result<Vec<_>, _>>().map(Into::into)
+            };
+            resident.video = shift(&resident.video)?;
+            resident.audio = shift(&resident.audio)?;
+        }
+        Ok(())
+    }
     /// Muxed external HLS alone uses this persistent epoch clock. Separate
     /// renditions retain their proved lane join; PMS retains its existing clock.
     fn remap_transport(&mut self, clock: &mut crate::hls::TransportClock) -> Result<(), HlsExit> {
@@ -5184,6 +5231,7 @@ impl HlsSegmentOutput {
         let shifted = |pts: i64| pts.checked_add(offset)
             .ok_or(HlsExit::Failed("HLS transport timestamp overflow"));
         for au in &mut self.aus { au.pts_ns = shifted(au.pts_ns)?; }
+        self.shift_resident(offset).map_err(HlsExit::Failed)?;
         if let Some(anchor) = &mut self.webvtt_clock {
             anchor.presentation_ns = shifted(anchor.presentation_ns)?;
         }
@@ -5380,7 +5428,10 @@ unsafe fn hls_demux_segment_path(
                 }
             }
             Err(HlsExit::NotReady) => {
-                return Err(HlsExit::Failed("HLS segment was not produced in time"));
+                return Err(HlsExit::OpenFailed {
+                    reason: "HLS segment was not produced in time",
+                    outcome: TraceOutcome::ServerState,
+                });
             }
             Err(error) => return Err(error),
         }
@@ -5485,6 +5536,8 @@ unsafe fn hls_demux_segment_path(
     let mut audio_packets = 0usize;
     let mut audio_stamps = Vec::new();
     let mut video_stamps = Vec::new();
+    let mut video_ends = Vec::new();
+    let mut audio_ends = Vec::new();
     let mut first_video_raw_pts = None;
     let mut first_au_at = None;
     let mut aus = Vec::new();
@@ -5519,7 +5572,7 @@ unsafe fn hls_demux_segment_path(
             }
             let raw_stamp = pts_ns_opt(input.pkt, vst);
             let packet = std::slice::from_raw_parts((*input.pkt).data, (*input.pkt).size.max(0) as usize);
-            let (is_key, raw_pts) = if let Some(state) = hevc_state.as_deref_mut() {
+            let (is_key, raw_pts, picture) = if let Some(state) = hevc_state.as_deref_mut() {
                 let previous = raw_stamp.is_none().then(|| state.clone());
                 let info = hevc_ts::annexb(packet, state, &mut aubuf).map_err(HlsExit::Failed)?;
                 let Some(raw_pts) = raw_stamp else {
@@ -5540,7 +5593,7 @@ unsafe fn hls_demux_segment_path(
                     hevc_ts::Decision::Continue => {}
                 }
                 seen_vcl |= info.vcl;
-                (info.key, raw_pts)
+                (info.key, raw_pts, info.vcl)
             } else {
             let Some(raw_pts) = raw_stamp else {
                 av_packet_unref(input.pkt);
@@ -5569,7 +5622,7 @@ unsafe fn hls_demux_segment_path(
                     H264EntryDecision::Continue => {}
                 }
             }
-            (is_key, raw_pts)
+            (is_key, raw_pts, info.vcl)
             };
             au_bytes = au_bytes.saturating_add(aubuf.len() as u64);
             if body_limit.is_some_and(|limit| au_bytes > limit) {
@@ -5586,6 +5639,7 @@ unsafe fn hls_demux_segment_path(
                 .then(|| av_rescale_q((*input.pkt).duration, stream_time_base(vst), NS_TB))
                 .unwrap_or(0).max(0);
             video_stamps.push((au, raw_pts, duration));
+            if picture { video_ends.push((au, hls_packet_end_ns(input.pkt, vst))); }
             video_packets += 1;
             first_au_at.get_or_insert_with(std::time::Instant::now);
             av_packet_unref(input.pkt);
@@ -5649,6 +5703,7 @@ unsafe fn hls_demux_segment_path(
                 key: 1,
                 es: 2,
             });
+            audio_ends.push((au, if mp2.is_none() { hls_packet_end_ns(input.pkt, ast) } else { None }));
             audio_stamps.push(AudioStamp {
                 au,
                 raw_ns: raw_pts,
@@ -5682,10 +5737,8 @@ unsafe fn hls_demux_segment_path(
         return Err(HlsExit::Failed("segment body ended before Content-Length"));
     }
 
-    if external && (needs_entry || hevc_state.as_deref().is_some_and(hevc_ts::State::needs_entry)) {
-        return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
-    }
-    if (video_packets == 0 || (external && !seen_vcl))
+    let awaiting_entry = external && (needs_entry || hevc_state.as_deref().is_some_and(hevc_ts::State::needs_entry));
+    if !awaiting_entry && (video_packets == 0 || (external && !seen_vcl))
         && lane != Some(hls_rendition::Lane::Audio)
     {
         return Err(HlsExit::Failed(
@@ -5713,6 +5766,9 @@ unsafe fn hls_demux_segment_path(
         }
     }
     let synthesized_audio = resolve_audio_stamps(&mut audio_stamps).map_err(HlsExit::Failed)?;
+    if awaiting_entry {
+        return Err(HlsExit::NoRandomAccessEntry { bytes: input.state.body_bytes });
+    }
     let first_audio_raw_pts = audio_stamps.first().and_then(|stamp| stamp.raw_ns);
     // When every audio PTS was synthesized from AAC frame durations, its zero is
     // segment-local rather than on the transport clock. Keep that lane anchored
@@ -5750,6 +5806,19 @@ unsafe fn hls_demux_segment_path(
         .map(|stamp| aus[stamp.au].pts_ns.saturating_add(stamp.duration_ns.unwrap_or(0))).max();
     let transport_timing = origin.zip(actual_video_end).map(|(raw, end)|
         (raw, clock.normalize_shared_ns(raw, raw), end, actual_audio_end));
+    let video_ranges = hls_resident_intervals(video_ends.iter().filter_map(|(au, raw_end)| {
+        let end = clock.normalize_shared_ns((*raw_end)?, origin?);
+        (!aus[*au].data.is_empty()).then_some((aus[*au].pts_ns, end))
+    }), if vi >= 0 { hls_clock_quantum_ns(stream_time_base(vst)) } else { 0 });
+    let audio_ranges = hls_resident_intervals(audio_stamps.iter().zip(&audio_ends).filter_map(|(stamp, (au, raw_end))| {
+        if stamp.au != *au || aus[*au].data.is_empty()
+            || trim_audio_before_ns.is_some_and(|entry| aus[*au].pts_ns < entry) { return None; }
+        let end = if let Some(raw_end) = raw_end {
+            clock.normalize_shared_ns(*raw_end, audio_origin?)
+        } else { aus[*au].pts_ns.checked_add(stamp.duration_ns.filter(|duration| *duration > 0)?)? };
+        Some((aus[*au].pts_ns, end))
+    }), if ai >= 0 { hls_clock_quantum_ns(stream_time_base(ast)) } else { 0 });
+    let resident = Some(crate::player::ExternalHlsResident { video: video_ranges, audio: audio_ranges });
     if let Some(entry_ns) = trim_audio_before_ns {
         // Both clocks share the same segment origin. Discard
         // only audio preceding the retained random-access entry, never an entire
@@ -5822,6 +5891,7 @@ unsafe fn hls_demux_segment_path(
         hls_observed::Candidate::new(&table, &inventory, &pids, video_pid, selected_audio_pid).ok()
     });
     Ok(HlsSegmentOutput {
+        resident,
         transport_timing,
         webvtt_clock,
         observed,
@@ -5832,6 +5902,53 @@ unsafe fn hls_demux_segment_path(
         video_tail_ns,
         audio_tail_ns,
     })
+}
+
+/// Complete external intervals are retained before a bounded queue can park
+/// their producer. Real overlapping resident AU spans can cover acquisition
+/// runway while a full FIFO parks, but decoder prime still requires accepted
+/// data. Declared/output-tail estimates never become resident-media evidence.
+fn hls_feed_external_segment(
+    output: &HlsSegmentOutput, media: std::time::Duration, generation: u64,
+    aq: *mut AuQueue, aqa: *mut AuQueue,
+) -> Result<bool, HlsExit> {
+    if media.is_zero() || !output.aus.iter().any(|au| au.es == 1) {
+        return Err(HlsExit::Failed("HLS segment produced no video access units"));
+    }
+    if output.transfer.audio_expected
+        && (output.audio_tail_ns.is_none() || !output.aus.iter().any(|au| au.es == 2))
+    {
+        // A muxed segment may legitimately omit its declared audio lane. Keep
+        // the existing feed behavior, but it cannot prove joined recovery.
+        let active = crate::aq::aq_if_not_aborted(aq, || {
+            generation & 1 == 0
+                && SHARED.hls_candidate_generation.load(Ordering::Acquire) == generation
+        }).ok_or(HlsExit::Aborted)?;
+        if !active { return Err(HlsExit::Aborted); }
+        return hls_feed_segment_interruptible(output, aq, aqa, true);
+    }
+    // Coverage came from actual packet/ADTS/PCM sample durations, after trim
+    // and transport remap. Unknown durations do not become resident proof.
+    let resident = output.resident.clone();
+    // Only a tiny publication while the abort mutex is held. No queue operations
+    // or blocking work may enter this closure (in particular no aq_is_aborted).
+    let admitted = crate::aq::aq_if_not_aborted(aq, || {
+        if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 { return Some(None); }
+        match SHARED.retain_external_hls_interval_with_resident(generation, output.transfer.total_us, media, resident) {
+            Ok(token) => Some(Some(token)),
+            Err(crate::player::ExternalHlsRetentionError::SeekPending) => Some(None),
+            Err(crate::player::ExternalHlsRetentionError::Retired) => None,
+        }
+    }).flatten().ok_or(HlsExit::Aborted)?;
+    let Some(token) = admitted else { return Ok(false); };
+    struct Retained(u64);
+    impl Drop for Retained {
+        fn drop(&mut self) { SHARED.release_external_hls_interval(self.0); }
+    }
+    let _retained = Retained(token);
+    let result = hls_feed_segment_interruptible(output, aq, aqa, true);
+    if matches!(result, Ok(true)) { SHARED.complete_external_hls_interval(token); }
+    result
 }
 
 fn hls_feed_segment(
@@ -7118,7 +7235,7 @@ fn publish_hls_candidate(
 fn abr_reject_for_hls_exit(exit: HlsExit) -> crate::abr::RejectCause {
     match exit {
         HlsExit::PrimeExpired | HlsExit::StallAbort(_) => crate::abr::RejectCause::Censored,
-        HlsExit::Aborted | HlsExit::NotReady | HlsExit::Failed(_) | HlsExit::OpenFailed { .. } => {
+        HlsExit::Aborted | HlsExit::NotReady | HlsExit::NoRandomAccessEntry { .. } | HlsExit::Failed(_) | HlsExit::OpenFailed { .. } => {
             crate::abr::RejectCause::Circumstance
         }
     }
@@ -7240,6 +7357,7 @@ fn hls_stall_abort_outcome(
     (
         segment,
         HlsSegmentOutput {
+            resident: None,
             transport_timing: None,
             webvtt_clock: None,
             observed: None,
@@ -9528,6 +9646,8 @@ mod pre_audio_headroom_tests {
 /// attach details to the next Load, even when its existing failure flag is raised.
 fn settle_hls_demux(native_epoch: u32, outcome: std::thread::Result<Result<(), HlsExit>>) {
     match outcome {
+        Ok(Err(HlsExit::NoRandomAccessEntry { .. })) => settle_hls_demux(native_epoch,
+            Ok(Err(HlsExit::Failed("HLS segment does not begin with an IDR")))),
         Ok(Ok(())) | Ok(Err(HlsExit::Aborted)) => {}
         Ok(Err(HlsExit::OpenFailed { reason, outcome })) => {
             crate::player::log(&format!("hls: demux open failed: {reason} outcome={}", outcome.code()));
@@ -9538,45 +9658,28 @@ fn settle_hls_demux(native_epoch: u32, outcome: std::thread::Result<Result<(), H
         }
         Ok(Err(HlsExit::Failed(why))) => {
             crate::player::log(&format!("hls: demux failed: {why}"));
-            if PUSHED_ANY.load(Ordering::Relaxed) {
-                SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                    exit: hls_failure::classify(why), outcome: None,
-                });
-                SHARED.demux_io_failed.store(true, Ordering::Release);
-            } else {
-                SHARED.fail_demux(hls_failure::classify(why));
-            }
+            SHARED.fail_hls_terminal_for(native_epoch, hls_failure::classify(why), None,
+                PUSHED_ANY.load(Ordering::Relaxed));
         }
         Ok(Err(HlsExit::NotReady)) => {
             crate::player::log("hls: demux failed: playlist resource was not ready");
-            if PUSHED_ANY.load(Ordering::Relaxed) {
-                SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                    exit: DemuxExitClass::HlsNotReady, outcome: None,
-                });
-                SHARED.demux_io_failed.store(true, Ordering::Release);
-            } else {
-                SHARED.fail_demux(DemuxExitClass::HlsNotReady);
-            }
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::HlsNotReady, None,
+                PUSHED_ANY.load(Ordering::Relaxed));
         }
         Ok(Err(HlsExit::PrimeExpired)) => {
             crate::player::log("hls: demux failed: unexpected active-stream prime deadline");
-            SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                exit: DemuxExitClass::Other, outcome: Some(TraceOutcome::Deadline),
-            });
-            SHARED.demux_io_failed.store(true, Ordering::Release);
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::Other,
+                Some(TraceOutcome::Deadline), true);
         }
         Ok(Err(HlsExit::StallAbort(_))) => {
             // The abort rule is handled where it fires, inside the segment loop; reaching here
             // means it escaped one of the candidate paths, which do not arm it.
             crate::player::log("hls: demux failed: stall abort escaped the segment loop");
-            SHARED.note_io_failure_for(native_epoch, IoFailureDetails::Hls {
-                exit: DemuxExitClass::Other, outcome: None,
-            });
-            SHARED.demux_io_failed.store(true, Ordering::Release);
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::Other, None, true);
         }
         Err(_) => {
             crate::player::log("hls: demux panicked");
-            SHARED.fail_demux(DemuxExitClass::DemuxPanicked);
+            SHARED.fail_hls_terminal_for(native_epoch, DemuxExitClass::DemuxPanicked, None, false);
         }
     }
 }
@@ -10996,3 +11099,7 @@ mod h264_continuation_metadata_tests {
 #[cfg(test)]
 #[path = "ff/hls_transport_tests.rs"]
 mod hls_transport_tests;
+
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "ff/hls_external_recovery_tests.rs"]
+mod hls_external_recovery_tests;

@@ -26,11 +26,15 @@ fn profile(kind: ProviderKind, slot: usize) -> ProviderProfile {
     }
 }
 
-fn full_runtime(kind: ProviderKind) -> Runtime {
+fn full_runtime(kind: ProviderKind) -> Box<Runtime> {
     // Use the normal decoded-state boundary so settings identities are ready,
     // then observe the same synthetic profile image without loading a source.
     let mut app = Box::new(ready_app_fixture());
     let mut runtime = app.ott.take().unwrap();
+    // These cases exercise the structured profile editor, which is distinct
+    // from Classic M3U's fixed slot list.
+    runtime.saved.settings.insert("interfaceMode".into(), serde_json::json!(1));
+    app.bridge.apply_ui_mode(plx_machine::machine::UiMode::Modern);
     runtime.provider = kind;
     runtime.page = "profiles";
     runtime.saved.profiles.profiles = (1..=15).map(|slot| profile(kind, slot)).collect();

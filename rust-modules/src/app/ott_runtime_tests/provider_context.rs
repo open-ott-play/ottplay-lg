@@ -154,3 +154,31 @@ fn provider_context_reports_load_and_permit_without_error_details() {
     expected["write_permit_valid"] = json!(false);
     assert_eq!(read_status(&mut app, "status", 4)["data"]["provider_context"], expected);
 }
+
+#[test]
+fn command_activity_status_reports_rejected_ingress_without_playback_or_private_arguments() {
+    let _serial = plx_base::testlock::serial();
+    let mut app = Box::new(app_fixture());
+    let mut runtime = app.ott.take().unwrap();
+    let saved = serde_json::to_value(&runtime.saved).unwrap();
+    let generation = runtime.play_generation;
+    let mut invocation = runtime.remote.request_for_test("play", json!({"url":PRIVATE_SOURCE}));
+    invocation.deadline_ms = 0;
+    let response = commands::command(&mut runtime, &mut app, &invocation).unwrap();
+    assert_eq!(response["status"], "rejected");
+    runtime.remote.complete(invocation, response);
+    assert_eq!(runtime.play_generation, generation);
+    assert!(runtime.resolver_next.is_none());
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+    app.ott = Some(runtime);
+    for (serial, action) in [(1, "status"), (2, "state")] {
+        let status = read_status(&mut app, action, serial);
+        let activity = &status["data"]["command_activity"];
+        assert_eq!(activity["scope"], "remote_ingress");
+        let entries = activity["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "status reads must not evict ingress evidence");
+        assert_eq!(entries[0]["action"], "play");
+        assert_eq!(entries[0]["result"], "rejected");
+        assert_eq!(entries[0].as_object().unwrap().len(), 4);
+    }
+}

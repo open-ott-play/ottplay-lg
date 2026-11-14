@@ -38,6 +38,8 @@ enum Policy {
     /// Non-adaptive playback: there is no ladder to abandon a rung on, so there is no reserve
     /// deadline and no stall guard to arm.
     Fixed,
+    /// A bounded search for a fresh external decoder entry; not an ABR exploration.
+    ColdEntry(std::time::Instant),
 }
 
 /// Payload of [`Policy::Active`]. Private, in a module whose only `Active`-producing path is
@@ -92,6 +94,10 @@ impl SegmentAcquisition {
         }))
     }
 
+    pub(super) fn cold_entry(deadline: std::time::Instant) -> Self {
+        Self(Policy::ColdEntry(deadline))
+    }
+
     pub(super) fn candidate(deadline: ReserveDeadlineState) -> Self {
         SegmentAcquisition(Policy::Candidate(deadline))
     }
@@ -102,7 +108,7 @@ impl SegmentAcquisition {
     pub(super) fn stall(&self) -> Option<StallGuard> {
         match &self.0 {
             Policy::Active(active) => active.stall,
-            Policy::Candidate(_) | Policy::Fixed => None,
+            Policy::Candidate(_) | Policy::Fixed | Policy::ColdEntry(_) => None,
         }
     }
 
@@ -116,6 +122,7 @@ impl SegmentAcquisition {
             Policy::Active(active) => (active.reserve_deadline, active.stall),
             Policy::Candidate(deadline) => (deadline, None),
             Policy::Fixed => (ReserveDeadlineState::new(None, false), None),
+            Policy::ColdEntry(deadline) => (ReserveDeadlineState::new(Some(deadline), false), None),
         };
         (
             reserve_deadline,

@@ -39,7 +39,7 @@ fn entry() -> CatalogEntry {
 fn binding() -> context::Binding {
     context::Binding { candidate_generation: 1, authority_tag: 1, scope_tag: 1 }
 }
-fn fixture() -> (App, Runtime, ProviderProfile, Favorite) {
+fn fixture() -> (App, Box<Runtime>, ProviderProfile, Favorite) {
     let mut app = run::lifecycle_regression_tests::app();
     app.running = true;
     let disk = Session { client_id: "reentry-install".into(), ..Default::default() };
@@ -62,7 +62,7 @@ fn fixture() -> (App, Runtime, ProviderProfile, Favorite) {
     let completion = app.bridge.take_managed_completion().expect("actual registry/profile publication");
     assert!(completion.accepted);
     assert!(app.bridge.managed_active_current(7));
-    let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+    let mut runtime = Box::new(Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test()));
     // Direct dispatch in this held fixture has the same initial clock input as
     // the frame runner, including PIN-policy paths that consult now_ms().
     let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
@@ -479,7 +479,7 @@ fn managed_favorite_cannot_escape_nondurable_checkpoint_through_global_selection
 // Reuse the real Session/registry publication above. Only the already-playing
 // media identity is modeled with the existing route seam; no resolver, metadata
 // runner or decoder starts, and the temporary profile never enters Saved.
-fn playing_favorite_fixture() -> (App, Runtime, ProviderProfile, Favorite) {
+fn playing_favorite_fixture() -> (App, Box<Runtime>, ProviderProfile, Favorite) {
     let (mut app, mut runtime, profile, favorite) = fixture();
     bridge::show_page(&mut app.pages, AppArg::Ott);
     settle(&mut app);
@@ -640,7 +640,7 @@ fn managed_playing_favorite_late_completion_cannot_borrow_replacement_authority(
 
 // The route preparation below never starts a decoder or reads its synthetic URL.
 // It leaves a real pending native start for the normal retirement path to cancel.
-fn prepare_navigation_media(app: &mut App, runtime: Runtime) -> Runtime {
+fn prepare_navigation_media(app: &mut App, runtime: Box<Runtime>) -> Box<Runtime> {
     app.ott = Some(runtime);
     crate::app::ott_runtime::tests::local_integration::install(app, None, "managed-navigation-media");
     assert!(plx_media::route::playback_identity(&app.player.session).is_some());

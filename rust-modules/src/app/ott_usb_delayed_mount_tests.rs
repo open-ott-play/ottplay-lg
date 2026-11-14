@@ -3,7 +3,7 @@
 //! No worker threads, player, private writer, network or device are started.
 use super::*;
 
-fn sampled_runtime(app: &App) -> Runtime {
+fn sampled_runtime(app: &App) -> Box<Runtime> {
     let mut runtime = runtime();
     runtime.clock_sample = Some(
         plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt())
@@ -12,7 +12,7 @@ fn sampled_runtime(app: &App) -> Runtime {
     runtime
 }
 
-fn start() -> (App, Runtime) {
+fn start() -> (App, Box<Runtime>) {
     // App first: its native initialization precedes the captured USB ticket.
     let app = app();
     let mut runtime = sampled_runtime(&app);

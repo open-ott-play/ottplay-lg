@@ -122,16 +122,21 @@ pub(super) fn native_start_allowed(app: &mut App) -> bool {
             .map(|(sid, key)| (sid, key.to_owned()));
         let source = plx_media::route::external_source(&app.player.session);
         let ticket = plx_media::route::play_request_ticket();
-        let owned = native_start_admission::owned(&mut runtime, app);
-        let catalogue_owner = owned.is_some();
-        let admitted = owned.or_else(|| companion_adapter::native_start_admission(&mut runtime, app));
+        enum Owner { Catalogue, Multiview, Companion }
+        let (owner, admitted) = if let Some(result) = native_start_admission::owned(&mut runtime, app) {
+            (Owner::Catalogue, Some(result))
+        } else if let Some(result) = multiview_output::native_start_admission(&mut runtime, app) {
+            (Owner::Multiview, Some(result))
+        } else {
+            (Owner::Companion, companion_adapter::native_start_admission(&mut runtime, app))
+        };
         if let Some(result) = admitted {
             if let Err(message) = result {
                 if let Some(identity) = identity.as_ref() {
-                    if catalogue_owner {
-                        native_start_admission::retire_denied(&mut runtime, app, identity, ticket);
-                    } else {
-                        companion_adapter::retire_native_start(&mut runtime, app, identity, ticket);
+                    match owner {
+                        Owner::Catalogue => native_start_admission::retire_denied(&mut runtime, app, identity, ticket),
+                        Owner::Multiview => multiview_output::retire_native_start(&mut runtime, app, identity, ticket),
+                        Owner::Companion => companion_adapter::retire_native_start(&mut runtime, app, identity, ticket),
                     }
                 }
                 runtime.status = message.into(); runtime.changed();

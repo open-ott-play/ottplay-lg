@@ -127,6 +127,7 @@ pub(crate) struct AppViews<'a> {
     /// Read-only, source-bound offer; the runtime revalidates it before navigation.
     pub(crate) ott_catalog_offer: Option<&'a plx_media::route::PlaybackIdentity>,
     pub(crate) ott_player_offer: Option<&'a plx_screens::registry::OttPlayerOffer>,
+    pub(crate) multiview_offer: Option<&'a plx_appkit::multiview_chrome::ChromeFrame>,
     pub(crate) playback_menu_offer: Option<&'a plx_screens::registry::PlayerMenuOffer>,
     pub(crate) geometry_offer: Option<&'a plx_screens::registry::PlayerGeometryOffer>,
     /// **The kind of page beneath the page these views are read for** on the navigation stack,
@@ -164,7 +165,7 @@ impl Bridge {
         AppViews { auth: self.session.read(), hubs: self.hubs.view(), listing: self.listing.view(),
             directory: self.directory.view(), section_hubs: self.section_hubs.view(),
             search: self.search.view(), metadata: self.stores.metadata_view(),
-            person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session, ott_catalog_offer: self.ott_catalog_offer.as_ref(), ott_player_offer: self.ott_player_offer.as_ref(), playback_menu_offer: self.playback_menu_offer.as_ref(), geometry_offer: self.geometry_offer.as_ref(), hud_key_paused: plx_media::player::transport::paused(), beneath: None, ui_mode: self.ui_mode, info_timeout: self.info_timeout }
+            person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session, ott_catalog_offer: self.ott_catalog_offer.as_ref(), ott_player_offer: self.ott_player_offer.as_ref(), multiview_offer: self.multiview_offer.as_ref(), playback_menu_offer: self.playback_menu_offer.as_ref(), geometry_offer: self.geometry_offer.as_ref(), hud_key_paused: plx_media::player::transport::paused(), beneath: None, ui_mode: self.ui_mode, info_timeout: self.info_timeout }
     }
 }
 
@@ -292,6 +293,9 @@ impl plx_screens::registry::PlayerLike for AppHost {
     }
     fn ott_player_offer(cx: &Cx<'_, Self>, source: plx_machine::machine::Source) -> Option<plx_screens::registry::OttPlayerOffer> {
         super::events::uses_native_remote_source(source).then(|| cx.views.ott_player_offer.cloned()).flatten()
+    }
+    fn multiview_offer(cx: &Cx<'_, Self>) -> Option<plx_appkit::multiview_chrome::ChromeFrame> {
+        cx.views.multiview_offer.cloned()
     }
     fn ott_catalog_offer(cx: &Cx<'_, Self>) -> Option<plx_media::route::PlaybackIdentity> {
         cx.views.ott_catalog_offer.cloned()
@@ -477,6 +481,7 @@ pub(crate) struct Bridge {
     /// Current frame offer only. It owns no catalog or playback resources.
     ott_catalog_offer: Option<plx_media::route::PlaybackIdentity>,
     ott_player_offer: Option<plx_screens::registry::OttPlayerOffer>,
+    multiview_offer: Option<plx_appkit::multiview_chrome::ChromeFrame>,
     playback_menu_offer: Option<plx_screens::registry::PlayerMenuOffer>,
     geometry_offer: Option<plx_screens::registry::PlayerGeometryOffer>,
     /// Last observed native geometry, also while the player page is covered.
@@ -750,6 +755,7 @@ impl Bridge {
             playback_live: false,
             ott_catalog_offer: None,
             ott_player_offer: None,
+            multiview_offer: None,
             playback_menu_offer: None,
             geometry_offer: None,
             native_subtitle_preferences: None,
@@ -896,6 +902,15 @@ impl Bridge {
     }
     pub(crate) fn playback_menu_offer(&self) -> Option<&plx_screens::registry::PlayerMenuOffer> {
         self.playback_menu_offer.as_ref()
+    }
+    pub(crate) fn publish_multiview_offer(&mut self, offer: Option<plx_appkit::multiview_chrome::ChromeFrame>) {
+        if self.multiview_offer != offer {
+            self.multiview_offer = offer;
+            plx_machine::idle::invalidate();
+        }
+    }
+    pub(crate) fn multiview_offer(&self) -> Option<&plx_appkit::multiview_chrome::ChromeFrame> {
+        self.multiview_offer.as_ref()
     }
     pub(crate) fn publish_ott_player_offer(&mut self, offer: Option<plx_screens::registry::OttPlayerOffer>) {
         self.ott_player_offer = offer;
@@ -2240,7 +2255,7 @@ impl Bridge {
             let publication = self.session.publication();
             let cx = parts.cx::<AppHost>(AppViews { auth: publication.read(),
                 hubs: self.hubs.view(), listing: self.listing.view(), directory: self.directory.view(),
-                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session: &self.playback, ott_catalog_offer: self.ott_catalog_offer.as_ref(), ott_player_offer: self.ott_player_offer.as_ref(), playback_menu_offer: self.playback_menu_offer.as_ref(), geometry_offer: self.geometry_offer.as_ref(), hud_key_paused: plx_media::player::transport::paused(), beneath: None, ui_mode: self.ui_mode, info_timeout: self.info_timeout,
+                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session: &self.playback, ott_catalog_offer: self.ott_catalog_offer.as_ref(), ott_player_offer: self.ott_player_offer.as_ref(), multiview_offer: self.multiview_offer.as_ref(), playback_menu_offer: self.playback_menu_offer.as_ref(), geometry_offer: self.geometry_offer.as_ref(), hud_key_paused: plx_media::player::transport::paused(), beneath: None, ui_mode: self.ui_mode, info_timeout: self.info_timeout,
             }, &self.measure);
             let handled = self.session.step(event, &cx, fx);
             // #132: the owner logs nothing, and the Profiles screen cannot see a read-out that
@@ -2438,7 +2453,7 @@ impl Rig<AppHost> for Bridge {
                 hubs: self.hubs.view(),
                 listing: self.listing.view(),
                 directory: self.directory.view(),
-                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session: &self.playback, ott_catalog_offer: self.ott_catalog_offer.as_ref(), ott_player_offer: self.ott_player_offer.as_ref(), playback_menu_offer: self.playback_menu_offer.as_ref(), geometry_offer: self.geometry_offer.as_ref(), hud_key_paused: plx_media::player::transport::paused(), beneath: None, ui_mode: self.ui_mode, info_timeout: self.info_timeout,
+                section_hubs: self.section_hubs.view(), search: self.search.view(), metadata: self.stores.metadata_view(), person: self.stores.person_view(), collection: self.stores.collection_view(), subtitle_search: self.stores.subtitle_search_view(), session: &self.playback, ott_catalog_offer: self.ott_catalog_offer.as_ref(), ott_player_offer: self.ott_player_offer.as_ref(), multiview_offer: self.multiview_offer.as_ref(), playback_menu_offer: self.playback_menu_offer.as_ref(), geometry_offer: self.geometry_offer.as_ref(), hud_key_paused: plx_media::player::transport::paused(), beneath: None, ui_mode: self.ui_mode, info_timeout: self.info_timeout,
             },
             measure: &self.measure,
         }

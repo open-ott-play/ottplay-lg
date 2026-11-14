@@ -635,7 +635,7 @@ mod saved_delivery {
 
     fn setup() -> Box<App> {
         let mut app = Box::new(crate::app::run::lifecycle_regression_tests::app());
-        app.ott = Some(runtime());
+        app.ott = Some(Box::new(runtime()));
         let runtime = app.ott.as_mut().unwrap();
         runtime.catalog_done.store(false, Ordering::Release);
         runtime.metadata_done.store(false, Ordering::Release);

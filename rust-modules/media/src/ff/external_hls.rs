@@ -69,6 +69,39 @@ impl VideoContinuation {
         VideoState::fresh(video_codec)
     }
 }
+/// Cold entry may skip complete dependent segments, never an arbitrary decode error.
+/// The first request retains its ordinary transport budget. Follow-ups share
+/// one 15 s deadline, at most three total requests and the existing 64 MiB cap.
+struct ColdEntrySearch {
+    requests: u8,
+    remaining_bytes: u64,
+    binding: Option<(String, u64)>,
+    deadline: Option<Instant>,
+}
+impl ColdEntrySearch {
+    fn new() -> Self {
+        Self { requests: 0, remaining_bytes: 64 * 1024 * 1024, binding: None, deadline: None }
+    }
+    fn begin(&mut self, source: &str, discontinuity: u64) -> Result<u64, HlsExit> {
+        if self.requests >= 3 || self.remaining_bytes == 0
+            || self.deadline.is_some_and(|at| Instant::now() >= at)
+            || self.binding.as_ref().is_some_and(|(old, epoch)| old != source || *epoch != discontinuity)
+        {
+            return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
+        }
+        self.binding.get_or_insert_with(|| (source.to_owned(), discontinuity));
+        self.requests += 1;
+        Ok(self.remaining_bytes)
+    }
+    fn skipped(&mut self, bytes: u64) -> Result<(), HlsExit> {
+        // The first complete acquisition keeps its normal HTTP budget. Only
+        // follow-up entry search shares this absolute open/retry/probe/body cap.
+        self.deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(15));
+        self.remaining_bytes = self.remaining_bytes.checked_sub(bytes)
+            .ok_or(HlsExit::Failed("HLS segment exceeds size limit"))?;
+        Ok(())
+    }
+}
 enum Playlist {
     Master(Vec<Variant>),
     Media(Media),
@@ -636,15 +669,20 @@ pub(super) fn demux_video(
     let mut net = HlsNet { hs, curl: None };
     let mut next = None;
     let mut video_continuation: Option<VideoContinuation> = None;
+    let mut cold_entry = Some(ColdEntrySearch::new());
+    let cold_display_base = SHARED.disp_base.load(Ordering::Acquire);
     let mut mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
     let mut timeline = crate::hls::SegmentTimeline::default();
     let mut last_progress = Instant::now();
+    let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
     'refresh: loop {
         if unsafe { crate::aq::aq_is_aborted(aq) } {
             return Err(HlsExit::Aborted);
         }
+        let playlist_deadline = cold_entry.as_ref().and_then(|search| search.deadline)
+            .map_or(Instant::now() + Duration::from_secs(15), |at| at.min(Instant::now() + Duration::from_secs(15)));
         let (landed, text) = fetch_traced_failure(url, &mut Owner::Playback(aq),
-            Instant::now() + Duration::from_secs(15), PlaylistStage::Playback, 0).map_err(FetchFailure::into_hls)?;
+            playlist_deadline, PlaylistStage::Playback, 0).map_err(FetchFailure::into_hls)?;
         let Playlist::Media(media) = parse(&landed, &text).map_err(HlsExit::Failed)? else {
             return Err(HlsExit::Failed(
                 "HLS media address became a master playlist",
@@ -652,6 +690,7 @@ pub(super) fn demux_video(
         };
         let target = SHARED.seek_to_ns.swap(-1, Ordering::Acquire);
         if target >= 0 {
+            cold_entry = None; // A seek keeps its existing strict target-entry contract.
             video_continuation = None;
             mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
             if media.ended {
@@ -675,8 +714,18 @@ pub(super) fn demux_video(
             }
         });
         if media.segments[0].inner.sequence > expected {
+            if !media.ended && next.is_some() {
+                // This producer has an exact committed cursor, but the live
+                // server no longer advertises it. A fresh same-source decoder
+                // may recover; never bridge missing reference pictures here.
+                return Err(HlsExit::OpenFailed {
+                    reason: "HLS live window advanced past playback",
+                    outcome: TraceOutcome::ServerState,
+                });
+            }
             return Err(HlsExit::Failed("HLS live window advanced past playback"));
         }
+        let mut progressed = false;
         for segment in media.segments.iter().filter(|s| s.inner.sequence >= expected) {
             if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 {
                 continue 'refresh;
@@ -703,10 +752,14 @@ pub(super) fn demux_video(
             {
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
             }
-            let mut output = unsafe {
+            let search_limit = if !media.independent {
+                cold_entry.as_mut().map(|search|
+                    search.begin(&landed, segment.discontinuity_sequence)).transpose()?
+            } else { None };
+            let output = unsafe {
                 hls_demux_segment_path(
                     &segment.inner,
-                    HlsSegmentRequest { path: &segment.inner.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(64 * 1024 * 1024), audio, rendition: None,
+                    HlsSegmentRequest { path: &segment.inner.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(search_limit.unwrap_or(64 * 1024 * 1024)), audio, rendition: None,
                         video: match &mut candidate {
                             VideoState::H264(state) => HlsVideoEntry::External(state),
                             VideoState::Hevc(state) => HlsVideoEntry::ExternalHevc(state),
@@ -715,11 +768,62 @@ pub(super) fn demux_video(
                     aq,
                     &mut net,
                     acodec,
-                    SegmentAcquisition::for_cursor(None),
+                    cold_entry.as_ref().and_then(|search| search.deadline)
+                        .filter(|_| search_limit.is_some())
+                        .map_or_else(|| SegmentAcquisition::for_cursor(None), SegmentAcquisition::cold_entry),
                 )
-            }?;
+            };
+            let mut output = match output {
+                Err(HlsExit::NoRandomAccessEntry { bytes }) if search_limit.is_some() => {
+                    if unsafe { crate::aq::aq_is_aborted(aq) } { return Err(HlsExit::Aborted); }
+                    if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 { continue 'refresh; }
+                    if SHARED.hls_candidate_generation.load(Ordering::Acquire) != recovery_generation {
+                        return Err(HlsExit::Aborted);
+                    }
+                    cold_entry.as_mut().expect("bounded cold entry").skipped(bytes)?;
+                    // No AU, audio, decoder reference or recovery credit is published.
+                    // Only the declared presentation time and cursor advance.
+                    timeline.commit(clock);
+                    next = Some(segment.inner.sequence.checked_add(1)
+                        .ok_or(HlsExit::Failed("HLS sequence overflow"))?);
+                    progressed = true;
+                    mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
+                    continue;
+                }
+                Err(HlsExit::NoRandomAccessEntry { .. }) =>
+                    return Err(HlsExit::Failed("HLS segment does not begin with an IDR")),
+                Err(HlsExit::PrimeExpired) if search_limit.is_some() => {
+                    crate::player::log("hls: bounded cold-entry search expired");
+                    return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
+                }
+                other => other?,
+            };
+            let rebased_cold = cold_entry.as_ref().is_some_and(|search| search.requests > 1);
+            let source_first = rebased_cold.then(|| output.aus.iter().find(|au| au.es == 1)
+                .map(|au| au.pts_ns)).flatten();
+            if rebased_cold {
+                // Only the new cross-segment cold search discards a whole
+                // source prefix. Keep its declared timeline for seek/cursor
+                // bookkeeping, but never count that empty prefix as sink runway.
+                transport_clock = crate::hls::TransportClock::restart_at(Some(0));
+            }
             output.remap_transport(&mut transport_clock)?;
-            if !hls_feed_segment_interruptible(&output, aq, aqa, true)? {
+            if media.ended {
+                if let Some(source_first) = source_first {
+                    let fed_first = output.aus.iter().find(|au| au.es == 1).expect("validated video").pts_ns;
+                    let display_base = source_first.checked_sub(fed_first)
+                        .and_then(|removed| cold_display_base.checked_add(removed))
+                        .ok_or(HlsExit::Failed("HLS timeline overflow"))?;
+                    let published = crate::aq::aq_if_not_aborted(aq, ||
+                        SHARED.publish_external_cold_offset(recovery_generation, cold_display_base, display_base))
+                        .unwrap_or(false);
+                    if !published {
+                        if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 { continue 'refresh; }
+                        return Err(HlsExit::Aborted);
+                    }
+                }
+            }
+            if !hls_feed_external_segment(&output, segment.inner.duration, recovery_generation, aq, aqa)? {
                 video_continuation = None;
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
                 continue 'refresh;
@@ -730,6 +834,7 @@ pub(super) fn demux_video(
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
                 continue 'refresh;
             }
+            cold_entry = None;
             // Commit references with the sequence/timeline, never on read success
             // alone: a seek may have interrupted feeding partway through the AUs.
             video_continuation = Some(VideoContinuation {
@@ -757,15 +862,29 @@ pub(super) fn demux_video(
                     .ok_or(HlsExit::Failed("HLS sequence overflow"))?,
             );
             last_progress = Instant::now();
+            progressed = true;
         }
         if media.ended {
             if SHARED.seek_to_ns.load(Ordering::Acquire) >= 0 {
                 continue;
             }
+            if video_continuation.is_none() {
+                return Err(HlsExit::Failed("HLS segment does not begin with an IDR"));
+            }
             return Ok(());
         }
+        // Feeding can itself spend the whole availability window blocked on
+        // bounded A/V queues. Refresh after progress before adding any poll
+        // delay; unchanged manifests retain their ordinary bounded wait.
+        if progressed { continue; }
         if last_progress.elapsed() > media.target.saturating_mul(6).max(Duration::from_secs(30)) {
-            return Err(HlsExit::Failed("HLS playlist stopped advancing"));
+            // The live server has supplied only unchanged snapshots for the
+            // existing bounded allowance. Reopen the same source through its
+            // owner; this is not permission to advance channels or reuse refs.
+            return Err(HlsExit::OpenFailed {
+                reason: "HLS playlist stopped advancing",
+                outcome: TraceOutcome::ServerState,
+            });
         }
         hls_wait(
             aq,
@@ -1033,5 +1152,33 @@ pub(super) fn rendition_window(base: &str, text: &str)
         Playlist::Media(media) => Ok((media.segments.into_iter()
             .map(|s| (s.inner, s.discontinuity_sequence)).collect(), media.target, media.ended)),
         _ => Err("HLS rendition address became a master playlist"),
+    }
+}
+
+#[cfg(test)]
+mod cold_entry_tests {
+    use super::*;
+    #[test]
+    fn cold_entry_search_is_bounded_and_cannot_cross_source_or_discontinuity() {
+        let mut search = ColdEntrySearch::new();
+        assert_eq!(search.begin("source", 1).unwrap(), 64 * 1024 * 1024);
+        assert!(search.deadline.is_none(), "normal first acquisition has no extra deadline");
+        search.skipped(1024).unwrap();
+        let deadline = search.deadline.expect("follow-up bounded search");
+        search.skipped(0).unwrap();
+        assert_eq!(search.deadline, Some(deadline), "later segments cannot refresh the budget");
+        assert!(search.begin("other", 1).is_err());
+        assert!(search.begin("source", 2).is_err());
+        assert_eq!(search.begin("source", 1).unwrap(), 64 * 1024 * 1024 - 1024);
+        assert!(search.begin("source", 1).is_ok());
+        assert!(search.begin("source", 1).is_err());
+        let mut search = ColdEntrySearch::new();
+        search.begin("source", 1).unwrap();
+        search.skipped(64 * 1024 * 1024).unwrap();
+        assert!(search.begin("source", 1).is_err());
+        assert!(search.skipped(1).is_err());
+        let mut search = ColdEntrySearch::new();
+        search.deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert!(search.begin("source", 1).is_err(), "expired search cannot issue another GET");
     }
 }

@@ -21,12 +21,12 @@ impl Drop for RegistryReset {
     }
 }
 
-fn fixture(initial: Saved) -> (App, Runtime, Session, Sender<CandidateResult>) {
+fn fixture(initial: Saved) -> (App, Box<Runtime>, Session, Sender<CandidateResult>) {
     let mut app = crate::app::run::lifecycle_regression_tests::app();
     app.running = true;
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
     runtime.remote = Remote::disabled_for_test("dev_fixture", "fixture");
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     // Establish ordinary empty OTT readiness through its actual result handler.
     for ready in [false, true] {
         if ready {
@@ -237,7 +237,7 @@ fn accepted_managed_completion_preserves_the_unmounted_initial_ott_root() {
     assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
     assert_eq!(serde_json::to_value(app.bridge.snapshot_session_init()).unwrap(), owner);
     assert!(app.bridge.take_managed_completion().is_none(), "one completion was consumed");
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     for step in 1..=24 {
         bridge::frame(&mut app.pages, &mut app.bridge,
             plx_machine::machine::Tick { ms: step * 16, dt_us: 16_000 }, Vec::new());

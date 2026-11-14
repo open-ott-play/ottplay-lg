@@ -17,7 +17,7 @@ fn classic_channel_footer_uses_current_capabilities_and_short_labels() {
     screen.install(Arc::new(view));
     screen.refresh_presentation(UiMode::Classic, &measure);
     let ids = |screen: &OttScreen| screen.header(&measure).unwrap().stops.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-    assert_eq!(ids(&screen), ["nav:guide", "nav:categories", "nav:actions", "nav:description", "nav:browse"]
+    assert_eq!(ids(&screen), ["nav:guide", "nav:categories", "nav:actions", "nav:description", "nav:favorite", "nav:browse"]
         .map(|id| screen.keys[id]));
     let before = screen.header(&measure).unwrap();
     let actions = navigation::available(&screen.snapshot, screen.media, Visibility::default());
@@ -28,7 +28,7 @@ fn classic_channel_footer_uses_current_capabilities_and_short_labels() {
     let second = screen.keys["item:two"];
     classic_deliver(&mut screen, ScreenEvent::FocusMoved { from: None,
         to: FocusKey { entry: EntryId(1), elem: second }, by: plx_ui::screen::By::Dir });
-    assert_eq!(ids(&screen), ["nav:description", "nav:categories", "nav:actions", "nav:browse"]
+    assert_eq!(ids(&screen), ["nav:description", "nav:categories", "nav:actions", "nav:favorite", "nav:browse"]
         .map(|id| screen.keys[id]), "Description replaces unavailable EPG without a duplicate");
     assert!(!std::rc::Rc::ptr_eq(&before, &screen.header(&measure).unwrap()), "selected capabilities invalidate the footer");
     assert!(effects(|fx| screen.activate(screen.keys["nav:guide"], false, fx)).is_empty(), "old guide key stays inert");
@@ -37,7 +37,7 @@ fn classic_channel_footer_uses_current_capabilities_and_short_labels() {
     hidden.hide(Item::Description); hidden.hide(Item::Categories);
     let actions = navigation::available(&screen.snapshot, screen.media, hidden);
     let controls = navigation::classic_controls(&screen.snapshot, &actions, &screen.keys);
-    assert_eq!(controls.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![screen.keys["nav:actions"]]);
+    assert_eq!(controls.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![screen.keys["nav:actions"], screen.keys["nav:favorite"]]);
     let mut disabled = (*screen.snapshot).clone();
     disabled.revision += 1;
     disabled.rows[1].enabled = false;
@@ -58,10 +58,34 @@ fn compact_classic_footer_preserves_browse_actions_and_modern_header() {
     let modern_stops = modern.stops.clone();
     screen.refresh_presentation(UiMode::Classic, &measure);
     let compact = screen.header(&measure).unwrap();
-    for id in ["nav:play", "nav:favorite", "nav:favorites"] {
+    for id in ["nav:play", "nav:favorites"] {
         assert!(!compact.stops.iter().any(|(key, _)| *key == screen.keys[id]));
     }
+    assert!(compact.stops.iter().any(|(key, _)| *key == screen.keys["nav:favorite"]),
+        "the current item's Favorite action is directly discoverable");
     assert!(compact.stops.iter().any(|(key, _)| *key == screen.keys["nav:browse"]));
+    let actions = navigation::available(&screen.snapshot, screen.media, Default::default());
+    let controls = navigation::classic_controls(&screen.snapshot, &actions, &screen.keys);
+    let prior: Vec<_> = controls.iter().filter(|(key, _)|
+        !["nav:search", "nav:favorite"].iter().any(|id| screen.keys.get(*id) == Some(key))).cloned().collect();
+    for percent in [20, 100, 200] {
+        let mut scaled = TypographyMeasure::new(plx_ui::fixture::FixtureMeasure);
+        scaled.set_font_scale(FontScale::from_percent(percent).unwrap());
+        for width in [640.0, 1280.0, 1920.0] {
+            let shortcuts = navigation::classic_footer_keys(&screen.snapshot, &controls, &screen.keys);
+            let baseline = navigation::context_header_classic(&scaled, width, screen.keys["nav:browse"],
+                &prior, false, &shortcuts, 33);
+            let expanded = navigation::context_header_classic(&scaled, width, screen.keys["nav:browse"],
+                &controls, false, &shortcuts, 33);
+            assert!(expanded.classic_footer_fits(width));
+            for (key, _) in &baseline.stops {
+                assert!(expanded.stops.iter().any(|(candidate, _)| candidate == key),
+                    "new common actions cannot displace an existing priority at {width}/{percent}%");
+            }
+            assert!(expanded.stops.iter().any(|(key, _)| *key == screen.keys["nav:browse"]),
+                "overflow must retain the path to every contextual action");
+        }
+    }
     effects(|fx| screen.open_browse(fx));
     for id in ["nav:play", "nav:favorite", "nav:favorites"] {
         assert!(screen.form.index_of(&id.to_owned()).is_some(), "{id} retains its ordinary Browse route");

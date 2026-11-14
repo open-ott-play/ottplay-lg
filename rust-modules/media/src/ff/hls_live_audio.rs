@@ -232,6 +232,7 @@ fn locate_audio(window: &Window, epoch: u64, target: i64, origin: i64, binding: 
 }
 
 fn rebase_output(output: &mut HlsSegmentOutput, offset: i64) -> Result<(), &'static str> {
+    output.shift_resident(offset.checked_neg().ok_or("Live HLS resident clock overflow")?)?;
     for au in &mut output.aus {
         au.pts_ns = au.pts_ns.checked_sub(offset).filter(|pts| *pts >= 0)
             .ok_or("Live HLS output precedes its common origin")?;
@@ -254,6 +255,7 @@ pub(in crate::ff) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut A
     let pair = playback.live_audio.clone().ok_or(HlsExit::Failed("Missing live HLS paired presentation"))?;
     let mut video = Refresh::new(pair.0);
     let mut audio = Refresh::new(pair.1);
+    let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
     let mut next_video = video.window.media.segments[video.window.media.segments.len().saturating_sub(3)].segment.sequence;
     let mut next_audio = 0;
     let mut epoch = None;
@@ -305,6 +307,9 @@ pub(in crate::ff) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut A
             next_audio = next_audio.checked_add(1).ok_or(HlsExit::Failed("Live HLS sequence overflow"))?;
         }
         let end = frames.end_ns;
+        let media_ns = frames.end_ns.checked_sub(frames.start_ns)
+            .and_then(|ns| u64::try_from(ns).ok()).filter(|ns| *ns > 0)
+            .ok_or(HlsExit::Failed("Live HLS output clock overflow"))?;
         let mut output = joined.join(frames).map_err(HlsExit::Failed)?;
         // Prime with retained explicit epoch anchors, then start the native
         // timeline at the earliest actual retained AU, preserving AAC/video
@@ -313,7 +318,7 @@ pub(in crate::ff) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut A
             .ok_or(HlsExit::Failed("Empty live HLS joined interval"))?);
         output.webvtt_clock = video_clock.webvtt_clock();
         rebase_output(&mut output, offset).map_err(HlsExit::Failed)?;
-        if !crate::ff::hls_feed_segment_interruptible(&output, aq, aqa, true)? { return Err(HlsExit::Aborted); }
+        if !crate::ff::hls_feed_external_segment(&output, std::time::Duration::from_nanos(media_ns), recovery_generation, aq, aqa)? { return Err(HlsExit::Aborted); }
         stopped(aq)?;
         playback.commit_live_clock(&video.window.media.url, current_epoch, output.webvtt_clock, output.video_tail_ns);
         tail = end; epoch = Some(current_epoch);

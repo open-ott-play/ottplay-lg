@@ -8,7 +8,9 @@ pub(super) fn marked(entry: Option<&CatalogEntry>) -> bool {
     let Some(entry) = entry else { return true; };
     if entry.protection == Some(true) { return true; }
     let category = entry.category.to_lowercase();
-    ["xxx", "ххх", "взрослые", "для взрослых", "эротика", "18+", "adults"]
+    // This is the union of the active FOSS provider category expressions. A
+    // single application-level classifier must cover every registered source.
+    ["xxx", "ххх", "взрослые", "взрослый", "для взрослых", "эротика", "18+", "adults"]
         .iter().any(|marker| category.contains(marker))
 }
 
@@ -35,5 +37,29 @@ mod tests {
         assert!(marked(Some(&ordinary)), "a source flag must survive an ordinary category");
         protected.protection = Some(false);
         assert!(marked(Some(&protected)), "a false flag cannot remove a category's protection");
+    }
+
+    #[test]
+    fn source_category_vocabulary_covers_all_active_provider_matchers() {
+        for category in [
+            "XXX",
+            "ХХХ",
+            "Взрослые",
+            "Взрослый",
+            "Для взрослых",
+            "Эротика",
+            "18+",
+            "Adults",
+        ] {
+            assert!(marked(Some(&entry(category))), "source category {category:?} must retain protection");
+        }
+    }
+
+    #[test]
+    fn source_title_does_not_supply_missing_protection_metadata() {
+        let mut ordinary = entry("Documentary");
+        ordinary.title = "XXX 18+ Adults".into();
+        ordinary.protection = Some(false);
+        assert!(!marked(Some(&ordinary)));
     }
 }

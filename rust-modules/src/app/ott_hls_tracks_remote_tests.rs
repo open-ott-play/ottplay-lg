@@ -51,7 +51,7 @@ fn fixture() -> App {
     runtime.loaded = true;
     runtime.entropy = Some([21; 16]);
     runtime.write_permit.revoke();
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     app.running = true;
     install(&mut app, &HlsPlayback::fixture_for_test());
     bridge::show_page(&mut app.pages, AppArg::Ott);

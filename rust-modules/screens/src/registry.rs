@@ -285,6 +285,8 @@ pub struct OttPlayerRequest {
 /// So the panel decides and the loop performs, exactly as `LibraryReq` does for the Library.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerReq {
+    /// Revision-bound selection in an explicitly admitted multi-view scene.
+    Multiview(plx_appkit::multiview_chrome::Event),
     /// Source-bound OTT action from the actual fullscreen Player instance.
     OttAction(OttPlayerRequest),
     /// Open the shared OTT catalog without replacing the admitted player.
@@ -1439,6 +1441,8 @@ pub trait PlayerLike: AppLike<Memory = PageMemory> + Sized {
     fn hud_key_prelude(_cx: &Cx<'_, Self>, _source: plx_machine::machine::Source) -> Option<bool> {
         None
     }
+    /// Exact admitted scene chrome; absent for ordinary fullscreen playback.
+    fn multiview_offer(_cx: &Cx<'_, Self>) -> Option<plx_appkit::multiview_chrome::ChromeFrame> { None }
     fn session<'a>(cx: &Cx<'a, Self>) -> &'a plx_media::route::PlaybackSession;
     /// Passive capability and accepted transform of the current fullscreen picture.
     fn geometry_offer(_cx: &Cx<'_, Self>) -> Option<PlayerGeometryOffer> { None }
