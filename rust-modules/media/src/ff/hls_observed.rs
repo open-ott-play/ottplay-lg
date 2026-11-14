@@ -589,6 +589,16 @@ pub fn subtitle_request_is_current(request:&SubtitleRequest)->bool {
     SUBTITLE.lock().unwrap_or_else(|e| e.into_inner()).1.as_ref().is_some_and(|current|
         current.generation==request.generation && current.playback==request.playback && current.source==request.source && current.variant==request.variant)
 }
+/// Order a bounded renderer publication against Off and newer selections.
+/// The caller must first hold its native Load epoch guard. This closure must
+/// not inspect OBSERVED, perform IO, or acquire the native epoch lock again.
+pub(crate) fn with_current_subtitle_request<T>(request: &SubtitleRequest, publish: impl FnOnce() -> T) -> Option<T> {
+    let desired = SUBTITLE.lock().unwrap_or_else(|error| error.into_inner());
+    let current = desired.1.as_ref()?;
+    (current.generation == request.generation && current.playback == request.playback
+        && current.source == request.source && current.variant == request.variant)
+        .then(publish)
+}
 
 #[cfg(test)]
 mod video_codec_tests {

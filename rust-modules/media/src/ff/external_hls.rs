@@ -777,6 +777,8 @@ pub(super) fn demux_video_for_epoch(
                 cold_entry.as_mut().map(|search|
                     search.begin(&landed, segment.discontinuity_sequence)).transpose()?
             } else { None };
+            let subtitle_segment = super::hls_observed_worker::begin_subtitle_segment(
+                url, &landed, segment.discontinuity_sequence, segment.inner.sequence);
             let output = unsafe {
                 hls_demux_segment_path(
                     &segment.inner,
@@ -828,7 +830,12 @@ pub(super) fn demux_video_for_epoch(
                 // bookkeeping, but never count that empty prefix as sink runway.
                 transport_clock = crate::hls::TransportClock::restart_at(Some(0));
             }
+            let subtitle_local_shift = output.transport_timing.and_then(|(raw, local, _, _)| local.checked_sub(raw));
+            let before_remap = output.aus.first().map(|au| au.pts_ns);
             output.remap_transport(&mut transport_clock)?;
+            let subtitle_shift = before_remap.zip(output.aus.first()).and_then(|(before, after)|
+                after.pts_ns.checked_sub(before)).zip(subtitle_local_shift)
+                .and_then(|(transport, local)| transport.checked_add(local));
             if media.ended {
                 if let Some(source_first) = source_first {
                     let fed_first = output.aus.iter().find(|au| au.es == 1).expect("validated video").pts_ns;
@@ -877,6 +884,8 @@ pub(super) fn demux_video_for_epoch(
                     super::hls_observed::retire_observed(u32::try_from(scope.worker()).unwrap_or(0));
                 }
             }
+            subtitle_segment.publish(url, &landed, segment.discontinuity_sequence,
+                segment.inner.sequence, subtitle_shift, recovery_generation);
             if let Some(presentation) = presentation {
                 presentation.commit_live_clock(&landed, segment.discontinuity_sequence,
                     output.webvtt_clock, transport_clock.end_ns().unwrap_or_else(|| timeline.end_ns()));

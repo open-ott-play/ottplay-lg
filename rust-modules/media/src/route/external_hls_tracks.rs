@@ -262,15 +262,11 @@ pub fn install_observed_hls_tracks(ps: &mut PlaybackSession, snapshot: &crate::f
     commit_in_place_route_projection(ps, false);
     Ok(true)
 }
-// Packet decode and post-feed publication must both be wired before this gate
-// can be enabled. A compiled decoder helper alone is not an active transport.
-const OBSERVED_SUBTITLE_DECODER_READY: bool = false;
+// Only selected, current-PMT PID packets decoded by the observed HLS worker
+// can publish subtitles, after its complete segment was fed successfully.
 pub(super) fn classify_observed_hls_subtitle(inventory: &crate::ff::inspect::TrackInventory,
     track: &crate::ff::inspect::InspectedTrack) -> TrackAvailability {
     if crate::ff::hls_observed::Selection::new(inventory, crate::ff::inspect::TrackKind::Subtitle, track.ordinal).is_err() {
-        return TrackAvailability::Unsupported(crate::route::TrackUnavailable::Transport);
-    }
-    if !OBSERVED_SUBTITLE_DECODER_READY {
         return TrackAvailability::Unsupported(crate::route::TrackUnavailable::Transport);
     }
     if !crate::ff::hls_embedded_subtitles::supported(track) {
@@ -287,6 +283,34 @@ fn retire_observed_subtitle(ps: &mut PlaybackSession) -> bool {
     crate::player::request_subtitle(-1);
     crate::player::ass_source::retire_selection();
     true
+}
+
+#[cfg(test)]
+mod observed_subtitle_transport_tests {
+    use super::*;
+    use crate::ff::{inspect::{InspectedTrack, TrackInventory, TrackKind}, hls_observed::TransportIdentity};
+
+    #[test]
+    fn only_pid_bound_decodable_subtitles_are_selectable() {
+        for (codec, decoder, supported) in [
+            ("dvb_subtitle", true, true), ("hdmv_pgs_subtitle", true, true),
+            ("dvd_subtitle", true, true), ("ass", false, true), ("webvtt", false, true),
+            ("dvb_subtitle", false, false), ("dvb_teletext", true, false),
+            ("eia_608", true, false), ("cea_708", true, false),
+        ] {
+            let track = InspectedTrack { kind: TrackKind::Subtitle, stream_index: 2, ordinal: 0,
+                codec: codec.into(), language: "eng".into(), title: "English".into(), channels: 0,
+                sample_rate: 0, bit_depth: 0, decoder_available: decoder,
+                disposition_known: false, default: false, forced: false };
+            let unbound = TrackInventory::from_partial(Vec::new(), vec![track.clone()]);
+            assert!(matches!(classify_observed_hls_subtitle(&unbound, &track), TrackAvailability::Unsupported(_)));
+            let bound = unbound.with_transport_for_test(&[(2, TransportIdentity {
+                transport_stream_id: 1, program_id: 1, pid: 0x120, stream_type: 0x06,
+            })]).unwrap();
+            assert_eq!(classify_observed_hls_subtitle(&bound, &track) == TrackAvailability::Supported,
+                supported, "{codec}, decoder={decoder}");
+        }
+    }
 }
 
 pub fn hls_track_catalog(ps: &PlaybackSession) -> Option<HlsTrackCatalog> {

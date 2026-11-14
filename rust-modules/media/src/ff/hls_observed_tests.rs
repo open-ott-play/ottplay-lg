@@ -60,3 +60,70 @@ fn observed_finite_segment_before_load_returns_stays_available_until_native_reti
     assert!(super::super::SHARED.retire_native_session(native));
     assert!(observed_hls_tracks().is_none());
 }
+
+#[test]
+fn guarded_subtitle_publication_is_drained_by_off_and_rejected_after_epoch_retirement() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = crate::route::HlsTrackRequest::test_globals_guard();
+    let playback = crate::ff::hls_presentation::HlsPlayback::fixture_for_test();
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    crate::route::reset_player_control_for_test(&ps);
+    crate::route::request_external_source(&mut ps, &playback.media_info_for_test(),
+        crate::ff::ExternalSource::Hls("https://example.invalid/master.m3u8".into()), "Fixture", "M3U",
+        plx_platform::devcaps::assumed_shared()).unwrap();
+    let native = super::super::SHARED.begin_native_session().unwrap();
+    let logical = crate::route::playback_identity(&ps).unwrap();
+    let scope = Scope::new("https://example.invalid/master.m3u8", "https://example.invalid/video.m3u8",
+        u64::from(native), 0).unwrap().with_playback(logical);
+    let row = InspectedTrack { kind: TrackKind::Subtitle, stream_index: 2, ordinal: 0,
+        codec: "webvtt".into(), language: "eng".into(), title: "English".into(), channels: 0,
+        sample_rate: 0, bit_depth: 0, decoder_available: false,
+        disposition_known: false, default: false, forced: false };
+    let inventory = TrackInventory::from_partial(Vec::new(), vec![row]).with_transport_for_test(&[
+        (2, TransportIdentity { transport_stream_id: 1, program_id: 1, pid: 0x120, stream_type: 0x06 }),
+    ]).unwrap();
+    let previous = OBSERVED.lock().unwrap().take();
+    let previous_subtitle = SUBTITLE.lock().unwrap().clone();
+    let snapshot = State::default().commit(scope.clone(), 0, inventory).unwrap();
+    let mut state = State::default();
+    state.current = Some(snapshot.clone());
+    *OBSERVED.lock().unwrap() = Some(state);
+    let selection = Selection::new(snapshot.inventory(), TrackKind::Subtitle, 0).unwrap();
+    set_subtitle_selection(&snapshot, selection.clone()).unwrap();
+    let request = subtitle_request(scope.playback().unwrap(), "https://example.invalid/master.m3u8").unwrap();
+    crate::player::request_subtitle(0);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let producer = std::thread::spawn(move || {
+        super::super::SHARED.with_active_native_load(native, || with_current_subtitle_request(&request, || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            super::super::hls_embedded_subtitles::text_batch_for_test().publish(
+                "fixture:guarded", crate::player::text_style::TextStyle::default(), &mut None, 0);
+        })).flatten().unwrap();
+    });
+    started_rx.recv().unwrap();
+    let (off_tx, off_rx) = std::sync::mpsc::channel();
+    let off = std::thread::spawn(move || {
+        clear_subtitle_selection();
+        crate::player::ass_source::retire_selection();
+        off_tx.send(()).unwrap();
+    });
+    assert!(off_rx.recv_timeout(std::time::Duration::from_millis(20)).is_err(),
+        "Off cannot pass an in-flight selection-guarded publication");
+    release_tx.send(()).unwrap();
+    producer.join().unwrap(); off.join().unwrap();
+    assert!(crate::player::ass_source::selected(0, crate::player::text_style::TextStyle::default()).is_none(),
+        "Off wins after the previously admitted batch finishes");
+    set_subtitle_selection(&snapshot, selection).unwrap();
+    let request = subtitle_request(scope.playback().unwrap(), "https://example.invalid/master.m3u8").unwrap();
+    assert!(super::super::SHARED.retire_native_session(native));
+    let mut ran = false;
+    assert!(super::super::SHARED.with_active_native_load(native, ||
+        with_current_subtitle_request(&request, || ran = true)).is_none());
+    assert!(!ran, "a retired Load cannot reach the caption store");
+    *OBSERVED.lock().unwrap() = previous;
+    *SUBTITLE.lock().unwrap() = previous_subtitle;
+    crate::player::request_subtitle(-1);
+    crate::player::ass_source::retire_selection();
+}

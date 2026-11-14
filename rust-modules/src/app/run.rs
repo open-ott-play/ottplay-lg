@@ -513,6 +513,9 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
             && !app.pages.surface_up();
         publish_pending_channel_display(app);
         if let Some(player) = super::bridge::player_mut(&mut app.pages) {
+            // The paint-only destination may still cover the outgoing decoder.
+            // Its observed rate cannot be attributed to the requested channel.
+            if player.pending_channel_display.is_some() { model.measured_media_bps = None; }
             player.model = model;
             player.set_osd_uncovered(uncovered);
         }

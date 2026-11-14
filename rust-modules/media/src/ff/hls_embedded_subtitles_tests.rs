@@ -68,3 +68,51 @@ fn invalid_packet_poisons_the_segment_instead_of_committing_partial_cues() {
     assert!(unsafe { state.packet(std::ptr::null_mut(), std::ptr::null_mut()) }.is_err());
     assert!(state.commit().is_err());
 }
+
+#[test]
+fn bitmap_display_intervals_use_authored_offsets_and_unknown_end_is_open() {
+    assert_eq!(bitmap_times(10_000_000_000, AV_NOPTS_VALUE, 250, 1750),
+        Ok((10_250_000_000, Some(11_750_000_000))));
+    assert_eq!(bitmap_times(0, 2_000_000, 100, u32::MAX), Ok((2_100_000_000, None)));
+    assert_eq!(bitmap_times(0, AV_NOPTS_VALUE, 0, 0), Ok((0, None)));
+    assert!(bitmap_times(0, AV_NOPTS_VALUE, 200, 100).is_err());
+    assert!(bitmap_times(i64::MAX, AV_NOPTS_VALUE, 1, 2).is_err());
+}
+
+#[test]
+fn owned_batch_remaps_all_timestamps_and_refuses_overflow() {
+    let batch = Batch { cues: vec![
+        Cue::Text { track: 0, start: 10, end: 20, payload: b"text".to_vec(), identity: 1 },
+        Cue::Ass { track: 0, start: 12, end: 22, payload: b"ass".to_vec() },
+        Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 25 }),
+    ], header: Header::Text(TextDialect::WebVtt), track: 0, reset: true };
+    let batch = batch.shifted(100).unwrap();
+    assert!(matches!(batch.cues[0], Cue::Text { start: 110, end: 120, .. }));
+    assert!(matches!(batch.cues[1], Cue::Ass { start: 112, end: 122, .. }));
+    assert!(matches!(batch.cues[2], Cue::Bitmap(subs::SubCue::BitmapClear { pts: 125, .. })));
+    assert!(batch.shifted(i64::MAX).is_none());
+}
+
+#[test]
+fn committed_bitmap_end_is_finite_and_newer_display_cannot_reveal_older_overlap() {
+    let _serial = plx_base::testlock::serial();
+    SHARED.reset_session();
+    let rect = || crate::player::SubRect { x: 0, y: 0, w: 1, h: 1,
+        index: vec![1], palette: Box::new([[0; 4]; 256]) };
+    let batch = Batch { cues: vec![
+        Cue::Bitmap(subs::SubCue::BitmapSet { track: 0, pts: 100, cw: 1, ch: 1,
+            rects: vec![rect()], total_rects: 1 }),
+        Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 1000 }),
+        Cue::Bitmap(subs::SubCue::BitmapSet { track: 0, pts: 200, cw: 1, ch: 1,
+            rects: vec![rect()], total_rects: 1 }),
+        Cue::Bitmap(subs::SubCue::BitmapClear { track: 0, pts: 300 }),
+    ], header: Header::Bitmap, track: 0, reset: true };
+    batch.publish("fixture:bitmap", TextStyle::default(), &mut None, 0);
+    let cues = SHARED.sub_bitmaps.lock().unwrap();
+    assert_eq!(cues.iter().map(|cue| (cue.start_ns, cue.end_ns)).collect::<Vec<_>>(),
+        vec![(100, 200), (200, 300)]);
+    drop(cues);
+    SHARED.sub_bitmaps.lock().unwrap().clear();
+    ass_source::retire_selection();
+    SHARED.reset_session();
+}

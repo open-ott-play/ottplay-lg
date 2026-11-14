@@ -5491,6 +5491,11 @@ unsafe fn hls_demux_segment_path(
     // AVStream objects remain owned by the format context. Retain this object,
     // not the streams array: a late PMT can grow/reallocate the array during reads.
     let ast = if ai >= 0 { *streams.add(ai as usize) } else { std::ptr::null_mut() };
+    if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+        if let Ok(inventory) = hls_bound_inventory(&input, vi) {
+            hls_observed_worker::prepare_subtitle_segment(input.fmt, &inventory);
+        } else { hls_observed_worker::abort_subtitle_segment(); }
+    }
     let mut ac3_shape = None;
     let aac_adts = if ai >= 0 {
         let acp = stream_codecpar(ast);
@@ -5566,6 +5571,9 @@ unsafe fn hls_demux_segment_path(
             break;
         }
         let si = (*input.pkt).stream_index;
+        if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+            hls_observed_worker::subtitle_packet(input.fmt, input.pkt);
+        }
         if vi >= 0 && si == vi {
             if let Some(capture) = rendition.as_mut() {
                 capture.packet(input.pkt, vst).map_err(HlsExit::Failed)?;
@@ -5890,6 +5898,11 @@ unsafe fn hls_demux_segment_path(
         let selected_audio_pid = (ai >= 0 && audio_packets > 0).then(|| stream_transport_pid(*streams.add(ai as usize))).flatten();
         hls_observed::Candidate::new(&table, &inventory, &pids, video_pid, selected_audio_pid).ok()
     });
+    if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+        if let Some(candidate) = &observed {
+            hls_observed_worker::finish_subtitle_segment(input.fmt, candidate.inventory());
+        } else { hls_observed_worker::abort_subtitle_segment(); }
+    }
     Ok(HlsSegmentOutput {
         resident,
         transport_timing,

@@ -247,7 +247,11 @@ impl TrackMenuAvailability {
         // Match the track panel's owner precedence and available HLS candidates;
         // ordinary external playback must not borrow retained Plex metadata.
         if let Some(hls) = route::hls_track_catalog(ps) {
-            let (audio, subtitles) = hls.embedded_tracks().map_or((0, 0), embedded_counts);
+            // Discovered HLS tracks remain inspectable when this transport or
+            // decoder cannot select them. The picker displays those rows as
+            // unavailable; its addressed admission still enforces capability.
+            let (audio, subtitles) = hls.embedded_tracks().map_or((0, 0), |external|
+                (external.inventory().audio.len(), external.inventory().subtitles.len()));
             return Self::from_counts(hls.rows().len() + audio, hls.subtitle_rows().len() + subtitles);
         }
         if let Some(external) = route::external_tracks(ps) {

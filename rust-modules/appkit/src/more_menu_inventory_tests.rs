@@ -271,3 +271,43 @@ fn more_refreshes_live_embedded_inventory_without_borrowing_retired_track_addres
     assert!(!more.focus_key(audio.key().0));
     assert_eq!(route::external_tracks(&replacement).unwrap().selected_audio(), None);
 }
+
+#[test]
+fn more_keeps_unsupported_embedded_hls_subtitles_inspectable_without_admitting_them() {
+    use crate::{player_hud::command::TrackTab, track_menu::{TrackMenuState, TrackOk, TrackRow}};
+    use plx_media::ff::{hls_observed::{Scope, Snapshot}, hls_presentation::HlsPlayback, inspect::TrackKind};
+    let _lock = plx_base::testlock::serial();
+    let _globals = route::HlsTrackRequest::test_globals_guard();
+    let [without_clock, _] = HlsPlayback::unavailable_subtitle_fixtures_for_test();
+    let scope = Scope::new("https://example.invalid/master.m3u8",
+        "https://example.invalid/video.m3u8", 1, 0).unwrap();
+    let observed = Snapshot::fixture_for_test(scope);
+    let mut info = without_clock.media_info_for_test();
+    info.tracks = observed.inventory().clone();
+    let mut ps = route::PlaybackSession::IDLE;
+    route::reset_player_control_for_test(&ps);
+    route::request_external_source(&mut ps, &info,
+        plx_media::ff::ExternalSource::Hls("https://example.invalid/master.m3u8".into()),
+        "Fixture", "M3U", plx_platform::devcaps::assumed_shared()).unwrap();
+    route::reset_player_control_for_test(&ps);
+    let meta = store(5, 5);
+    let catalog = route::hls_track_catalog(&ps).unwrap();
+    assert!(catalog.subtitle_rows().is_empty(), "unusable manifest timing still hides those candidates");
+    let embedded = catalog.embedded_tracks().unwrap();
+    assert_eq!(embedded.inventory().subtitles[0].language, "eng");
+    assert_eq!(embedded.inventory().subtitles[0].codec, "dvb_teletext");
+    assert!(matches!(embedded.availability(TrackKind::Subtitle, 0), route::TrackAvailability::Unsupported(_)));
+    let mut more = MoreMenuState::new(&ps)
+        .with_track_availability(&ps, TrackMenuAvailability::for_playback(&ps, meta.view()));
+    let subtitles = Action::OpenTracks(TrackTab::Subtitles);
+    assert!(more.focus_key(subtitles.key().0), "known unsupported languages must remain discoverable");
+    assert_eq!(more.on_ok(&ps), MoreOk::Action(subtitles));
+    let mut tracks = TrackMenuState::new(&ps, meta.view(), TrackTab::Subtitles.index(), Vec::new());
+    assert!(tracks.ids().contains(&TrackRow::Sub(0)));
+    assert!(tracks.ids().contains(&TrackRow::SubOff));
+    assert!(tracks.focus_id(TrackRow::Sub(0)));
+    assert_eq!(tracks.on_ok_addressed(meta.view()), TrackOk::Inert,
+        "even addressed activation of the unavailable row emits no track commit");
+    assert!(route::external_tracks(&ps).unwrap().choice(TrackKind::Subtitle, Some(0)).is_err());
+    assert_eq!(route::external_tracks(&ps).unwrap().selected_subtitle(), None);
+}

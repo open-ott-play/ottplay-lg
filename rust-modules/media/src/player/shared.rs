@@ -1759,6 +1759,12 @@ impl Shared {
         }).is_some()
     }
 
+    /// A bounded subtitle-store publication must drain before this Load retires.
+    /// The closure may not acquire the native session lock again or perform IO.
+    pub(crate) fn with_active_native_load<R>(&self, epoch: u32, publish: impl FnOnce() -> R) -> Option<R> {
+        self.with_native_session(epoch, NativeEventClass::Other, 0, publish)
+    }
+
     /// [`with_native_session`](Self::with_native_session), telling the event whose state it may
     /// write: [`EventScope::Live`] for the session that owns the process-long diagnostics,
     /// [`EventScope::Release`] for the lifecycle evidence of an object already handed to a release
