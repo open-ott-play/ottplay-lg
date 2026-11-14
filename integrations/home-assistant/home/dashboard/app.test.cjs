@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs"), vm = require("node:vm");
 const api = require("./core.js");
-function ui(overrides) {
+function ui(overrides, realClient = false) {
     const html = fs.readFileSync(__dirname + "/index.html", "utf8"), elements = {}, windowEvents = {}, documentEvents = {}, requests = [], visibility = [], timers = new Map();
     let serial = 0, render;
     const doc = { hidden: false, activeElement: null, getElementById: id => elements[id], addEventListener(name, fn) { documentEvents[name] = fn; } };
@@ -22,7 +22,7 @@ function ui(overrides) {
     doc.createElement = tag => element(tag);
     doc.querySelectorAll = selector => selector === ".panel" ? ["home", "apps", "network", "settings"].map(id => elements[id]) : selector === "[data-tab]" ? nav : descendants().filter(e => selector === "[data-item]" ? e.getAttribute("data-item") : e.tagName === "BUTTON" || e.tagName === "INPUT" || e.tagName === "SELECT" || e.tagName === "TEXTAREA");
     const client = { visible(value) { visibility.push(value); }, configure() { return true; }, action(id) { requests.push({ action: id }); return true; } };
-    const window = { OTTHome: { ...api, createClient(options) { render = options.onState; return client; }, xhrTransport() { return (request, done) => { const r = { request, done, aborted: false }; requests.push(r); return () => { r.aborted = true; }; }; } }, addEventListener(name, fn) { windowEvents[name] = fn; } };
+    const window = { OTTHome: { ...api, createClient(options) { render = options.onState; if (realClient) return api.createClient({ ...options, clock: { set(fn, ms) { const id = ++serial; timers.set(id, { fn, ms }); return id; }, clear(id) { timers.delete(id); } } }); return client; }, xhrTransport() { return (request, done) => { const r = { request, done, aborted: false }; requests.push(r); return () => { r.aborted = true; }; }; } }, addEventListener(name, fn) { windowEvents[name] = fn; } };
     const navigator = { onLine: true };
     Object.assign(window, overrides || {});
     const context = { window, document: doc, navigator, setTimeout(fn, ms) { const id = ++serial; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); }, console, Date, isFinite };
@@ -143,4 +143,45 @@ test("select keeps native option arrows and uses horizontal arrows to leave the 
     assert.equal(press(u, 39), true); assert.equal(u.doc.activeElement, button);
     assert.equal(press(u, 37), true); assert.equal(u.doc.activeElement, select);
     assert.equal(press(u, 461), true); assert.equal(u.doc.activeElement, u.nav[3]);
+});
+
+test("real client refresh cannot overwrite failed or throwing host-close feedback", () => {
+    for (const close of [
+        (done) => done(false),
+        () => {
+            throw new Error("host unavailable");
+        },
+    ]) {
+        const u = ui({ OTTHomeHost: { close } }, true);
+        u.elements.base.value = "https://gateway.example";
+        u.elements.key.value = "x".repeat(32);
+        u.elements["connection-form"].onsubmit({ preventDefault() {} });
+        const reply = () =>
+            u.requests.at(-1).done(null, {
+                text: JSON.stringify({
+                    version: 1,
+                    entities: [],
+                    actions: [],
+                    apps: [],
+                }),
+            });
+        reply();
+        assert.equal(u.elements.connection.textContent, "Home connected");
+        u.windowEvents.keydown({ keyCode: 461, preventDefault() {} });
+        const message =
+            "Return to OTT is unavailable. Open OTT from the TV launcher.";
+        assert.equal(u.elements.connection.textContent, "Connecting…");
+        assert.equal(u.elements["home-message"].textContent, message);
+        reply();
+        assert.equal(u.elements.connection.textContent, "Home connected");
+        assert.equal(u.elements["home-message"].textContent, message);
+        u.nav[2].onclick();
+        u.nav[0].onclick();
+        assert.equal(u.elements.connection.textContent, "Connecting…");
+        assert.equal(u.elements["home-message"].textContent, message);
+        reply();
+        assert.equal(u.elements["home-message"].textContent, message);
+        u.windowEvents.pagehide();
+        assert.equal(u.timers.size, 0);
+    }
 });
