@@ -27,6 +27,7 @@ pub mod modern;
 pub mod motion;
 pub mod osd;
 mod ott_footer;
+pub mod pending;
 pub mod seek_jump;
 pub mod state;
 use plx_gfx::gfx::{delete_tex, upload_rgba};

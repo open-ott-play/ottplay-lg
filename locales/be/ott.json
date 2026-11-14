@@ -8,7 +8,7 @@
   "ott.favorites": "Абранае",
   "ott.description": "Апісанне",
   "ott.value": "Значэнне",
-  "ott.value_empty": "Выберыце, каб увесці значэнне",
+  "ott.value_empty": "Увядзіце значэнне…",
   "ott.save": "Захаваць",
   "ott.editor_help": "Выберыце значэнне для змянення. «Захаваць» ужывае змяненне; «Адмена» пакідае ранейшае значэнне.",
   "ott.channel_list": "Спіс каналаў",
@@ -20,9 +20,9 @@
   "ott.search_this_list": "Пошук у гэтым спісе",
   "ott.search_help": "Увядзіце назву для пошуку ў гэтым спісе. Пусты запыт пакажа ўвесь бягучы спіс; скасаванне захавае ранейшы пошук.",
   "ott.search_pending": "Пошук у спісе…",
-  "ott.search_empty": "Пуста: увесь бягучы спіс",
+  "ott.search_empty": "Увядзіце назву…",
   "ott.search_favorites": "Пошук у абраным",
-  "ott.search_empty_favorites": "Пуста: усё абранае",
+  "ott.search_empty_favorites": "Увядзіце назву…",
   "ott.search_help_favorites": "Увядзіце назву для пошуку ў абраным. Пусты запыт пакажа ўсё абранае; скасаванне захавае ранейшы пошук.",
   "ott.search_scope_title": "Пошук: {scope}",
   "ott.favorite_add": "Дадаць у абранае",
@@ -49,5 +49,7 @@
   "ott.reminder_soon": "Пачатак праз {minutes} хв.",
   "ott.favorite_added": "Дададзена ў абранае",
   "ott.favorite_removed": "Выдалена з абранага",
-  "ott.favorite_update_failed": "Не ўдалося абнавіць абранае"
+  "ott.favorite_update_failed": "Не ўдалося абнавіць абранае",
+  "ott.input_keyboard_hint": "OK: адкрыць клавіятуру",
+  "ott.input_hidden_hint": "Значэнне схавана · OK: змяніць"
 }

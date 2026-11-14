@@ -8,7 +8,7 @@
   "ott.favorites": "Ulubione",
   "ott.description": "Opis",
   "ott.value": "Wartość",
-  "ott.value_empty": "Wybierz, aby wprowadzić wartość",
+  "ott.value_empty": "Wpisz wartość…",
   "ott.save": "Zapisz",
   "ott.editor_help": "Wybierz wartość do edycji. Zapisz stosuje zmianę; Anuluj zachowuje poprzednią wartość.",
   "ott.channel_list": "Lista kanałów",
@@ -20,9 +20,9 @@
   "ott.search_this_list": "Szukaj na tej liście",
   "ott.search_help": "Wpisz tytuł, aby filtrować tę listę. Puste wyszukiwanie pokazuje całą bieżącą listę; Anuluj zachowuje poprzednie wyszukiwanie.",
   "ott.search_pending": "Przeszukiwanie listy…",
-  "ott.search_empty": "Puste: cała bieżąca lista",
+  "ott.search_empty": "Wpisz tytuł…",
   "ott.search_favorites": "Szukaj w ulubionych",
-  "ott.search_empty_favorites": "Puste: wszystkie ulubione",
+  "ott.search_empty_favorites": "Wpisz tytuł…",
   "ott.search_help_favorites": "Wpisz tytuł, aby filtrować ulubione. Puste wyszukiwanie pokazuje wszystkie ulubione; Anuluj zachowuje poprzednie wyszukiwanie.",
   "ott.search_scope_title": "Szukaj: {scope}",
   "ott.favorite_add": "Dodaj do ulubionych",
@@ -49,5 +49,7 @@
   "ott.reminder_soon": "Początek za {minutes} min.",
   "ott.favorite_added": "Dodano do ulubionych",
   "ott.favorite_removed": "Usunięto z ulubionych",
-  "ott.favorite_update_failed": "Nie udało się zaktualizować ulubionych"
+  "ott.favorite_update_failed": "Nie udało się zaktualizować ulubionych",
+  "ott.input_keyboard_hint": "OK: otwórz klawiaturę",
+  "ott.input_hidden_hint": "Wartość ukryta · OK: edytuj"
 }

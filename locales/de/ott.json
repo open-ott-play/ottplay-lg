@@ -8,7 +8,7 @@
   "ott.favorites": "Favoriten",
   "ott.description": "Beschreibung",
   "ott.value": "Wert",
-  "ott.value_empty": "Auswählen, um einen Wert einzugeben",
+  "ott.value_empty": "Wert eingeben…",
   "ott.save": "Speichern",
   "ott.editor_help": "Wert zum Bearbeiten auswählen. Speichern übernimmt die Änderung; Abbrechen behält den bisherigen Wert.",
   "ott.channel_list": "Senderliste",
@@ -20,9 +20,9 @@
   "ott.search_this_list": "Diese Liste durchsuchen",
   "ott.search_help": "Titel eingeben, um diese Liste zu filtern. Eine leere Suche zeigt die gesamte aktuelle Liste; Abbrechen behält die vorherige Suche bei.",
   "ott.search_pending": "Liste wird durchsucht…",
-  "ott.search_empty": "Leer: gesamte aktuelle Liste",
+  "ott.search_empty": "Titel eingeben…",
   "ott.search_favorites": "Favoriten durchsuchen",
-  "ott.search_empty_favorites": "Leer: alle Favoriten",
+  "ott.search_empty_favorites": "Titel eingeben…",
   "ott.search_help_favorites": "Titel eingeben, um Favoriten zu filtern. Eine leere Suche zeigt alle Favoriten; Abbrechen behält die vorherige Suche bei.",
   "ott.search_scope_title": "Suchen: {scope}",
   "ott.favorite_add": "Zu Favoriten hinzufügen",
@@ -49,5 +49,7 @@
   "ott.reminder_soon": "Beginnt in {minutes} Min.",
   "ott.favorite_added": "Zu Favoriten hinzugefügt",
   "ott.favorite_removed": "Aus Favoriten entfernt",
-  "ott.favorite_update_failed": "Favoriten konnten nicht aktualisiert werden"
+  "ott.favorite_update_failed": "Favoriten konnten nicht aktualisiert werden",
+  "ott.input_keyboard_hint": "OK: Tastatur öffnen",
+  "ott.input_hidden_hint": "Wert verborgen · OK: bearbeiten"
 }

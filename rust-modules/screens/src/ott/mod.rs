@@ -11,6 +11,7 @@ pub use memory::Memory;
 mod navigation;
 mod remote;
 mod exit_prompt;
+mod loading_cover;
 pub mod ui_text;
 
 use std::borrow::Cow;
@@ -35,7 +36,7 @@ use plx_ui::table_screen::{DocumentFocus, DocumentPart};
 use plx_ui::{theme, Rect};
 use plx_ui::widgets::{CtlPop, TabStrip};
 
-pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,pending_play:Option<str>,pending_step:Option<(u64,u64,u32)>,pending_step_sdl:bool,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
+pub const SHAPE: &str = "Ott{classic:bool,visible:bool,guide_clock:{sample:Option<i64>,anchor:u32,elapsed_s:u32},viewport:{source:bool,next:Option<u32>,pending:Option<Request>,submitted:Option<Request>,blocked:Option<Target>},category_label:Option<str>,classic_preferences:{page_size:u32,list_left:bool,arrow_mode:u32,seek13_seconds:u32,show_number:bool,show_name:bool,show_program:bool,show_progress:bool,show_description:bool},volume_available:bool,startup_pending:bool,startup_target:Option<str>,pending_play_ordinal:Option<u32>,pending_display:Option<{title:str,description:str,live:bool,ordinal:Option<u32>,guide:Option<{now_s:u64,rows:[Option<{title:str,description:str,start_s:u64,end_s:u64}>];2]},poster:Option<str>}>,osd_opacity:u32,pending_play:Option<str>,pending_step:Option<(u64,u64,u32)>,pending_step_sdl:bool,page:str,revision:u64,rows:[{id:str,enabled:bool,favorite:bool,guide_available:bool,records_available:bool}],shelves:[{id:str,rows:[u64]}],shelf_context:Option<str>,card_focus:Option<u32>,preview_context:Option<str>,random_context:Option<str>,order_context:Option<str>,editor:bool,editing:bool,editor_session:Option<u64>,editor_search:bool,editor_literal:bool,browse:bool,browse_return:Option<str>,focus_request:Option<u32>,editor_origin:Option<str>,editor_focus:Option<str>,pending:bool,error:bool,media:Option<str>,reading:bool,read_target:u32,preview:Option<str>,preview_token:Option<str>,previewed:Option<str>,preview_dwell:f32,selected:u32,table:TableViewMotion,header_capsules:TabStrip{sel:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32},foc:Capsule{x:Spring{pos:f32,vel:f32},w:Spring{pos:f32,vel:f32},a:Spring{pos:f32,vel:f32},at:u32}},header_pop:{sp:[Spring{pos:f32,vel:f32};1],focused:Option<u32>},cards:Stack{scroll:{pos:f32,vel:f32},target:f32,sections:[Grid{bands,pop}|Shelf{motion}]},restore_memory:Option<OttMemory>,search_return:{origin:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,draft:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,from_actions:Option<SearchOrigin{memory:OttMemory,context:Option<str>}>,pending:Option<u64>},number:{until:Option<u32>,notice:bool},exit:{token:Option<u64>,open:bool,affirm:bool,scroll:u32,return_focus:Option<u32>}}";
 
 /// Presentation order for the already loaded single-channel guide window.
 /// This does not request or claim a complete archive/recordings history.
@@ -297,6 +298,18 @@ pub struct OttShelf {
     pub rows: Vec<usize>,
 }
 
+/// Source-fenced facts for painting a pending target independently of list filters.
+/// This descriptor never grants playback, transport, preview or navigation authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OttPendingDisplay {
+    pub title: String,
+    pub description: String,
+    pub live: bool,
+    pub ordinal: Option<u32>,
+    pub guide: Option<plx_data::metadata::OttNowNext>,
+    pub poster: Option<OttPoster>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttView {
     pub classic_preferences: plx_appkit::classic_settings::Preferences,
@@ -318,6 +331,14 @@ pub struct OttView {
     pub status: String,
     /// The status describes pending work; accounted only where its text is drawn.
     pub status_working: bool,
+    /// Initial automatic restore cover only; never grants playback or navigation authority.
+    pub startup_pending: bool,
+    /// Current automatic restore target for painting only; never an interactive receipt.
+    pub startup_target: Option<String>,
+    pub pending_display: Option<OttPendingDisplay>,
+    pub osd_opacity: plx_appkit::player_hud::model::OsdOpacity,
+    /// Canonical source ordinal for the pending target; never a filtered row position.
+    pub pending_play_ordinal: Option<u32>,
     /// Runtime-owned pending Play identity; presentation must not claim playback admission.
     pub pending_play: Option<String>,
     /// Rocker-only input publication; never authorizes hidden catalogue rows.
@@ -337,7 +358,7 @@ pub struct OttView {
 impl Default for OttView {
     fn default() -> Self {
         Self { classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: None, random_context: None, catalog_progress: None, page_id: "loading".into(), revision: 0, title: msg::ott_brand().into(),
-            description: msg::ott_intro().into(), status: String::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false,
+            description: msg::ott_intro().into(), status: String::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false,
             rows: Vec::new(), shelves: Vec::new(), shelf_context: None, selected_row: None, search: None }
     }
 }
@@ -350,6 +371,8 @@ pub struct OttScreen {
     classic_visible: bool,
     // Decorative application observation, like Player clock labels: not canonical state.
     classic_clock: Option<String>,
+    wall_now_s: Option<i64>,
+    pending_footer: plx_appkit::player_hud::pending::PendingFooter,
     classic_layout: std::cell::Cell<Option<plx_ui::classic::Layout>>,
     guide_clock: classic::GuideClock,
     viewport: viewport::ViewportState,
@@ -423,7 +446,7 @@ impl OttScreen {
 
     /// Numbering applies to the canonical catalogue, never an editor or reader.
     pub fn accepts_channel_number(&self) -> bool {
-        self.classic_visible && self.editor.is_none() && !self.reading && !self.browse
+        self.classic_visible && !self.loading_cover() && self.editor.is_none() && !self.reading && !self.browse
             && (matches!(self.snapshot.page_id.split(':').next(), Some("channels" | "favorites"))
                 || (self.classic_mode && self.form.table.is_classic_catalogue()
                     && matches!(self.snapshot.page_id.as_str(), "torrent-results" | "torrent-files")))
@@ -477,7 +500,7 @@ impl OttScreen {
 
     pub fn new(entry: EntryId, instance: InstanceId) -> Self {
         let mut screen = Self { entry, instance, snapshot: Arc::new(OttView::default()),
-            classic_mode: false, classic_visible: false, classic_clock: None, classic_layout: std::cell::Cell::new(None), guide_clock: Default::default(), viewport: Default::default(),
+            classic_mode: false, classic_visible: false, classic_clock: None, wall_now_s: None, pending_footer: Default::default(), classic_layout: std::cell::Cell::new(None), guide_clock: Default::default(), viewport: Default::default(),
             form: FormTable::new_hashed(crate::registry::BAND), keys: HashMap::new(), next_key: 1,
             copy: String::new(), status: String::new(),
             card_stack: plx_ui::cards::Stack::new(entry).clipped(navigation::route().content),
@@ -1049,8 +1072,11 @@ impl OttScreen {
         let empty_hint = if !search { msg::ott_value_empty() }
             else if favorites_page(&editor.return_page) { msg::ott_search_empty_favorites() }
             else { msg::ott_search_empty() };
-        let value_row = if value.is_empty() { Row::new(empty_hint) }
-            else { Row::new(value).server_label() };
+        let hint = if pending { msg::settings_playback_saving() }
+            else if editor.spec.secret && !value.is_empty() { msg::ott_input_hidden_hint() }
+            else { msg::ott_input_keyboard_hint() };
+        let value_row = (if value.is_empty() { Row::new(empty_hint) }
+            else { Row::new(value).server_label() }).detail(hint).text_entry();
         let section = FormSection::new(if search { msg::ott_search() } else { msg::ott_value() })
             .item_keyed("edit:value".to_owned(), self.row_key("edit:value"), RowKind::Button,
                 FormAction::Edit, value_row).disabled(pending)
@@ -1118,8 +1144,13 @@ impl OttScreen {
         controls.sections = self.form.table.sections.iter().map(|section| {
             let mut control_section = plx_ui::table::Section::new(section.header.clone());
             control_section.rows = section.rows.iter()
-                .filter(|row| row.label_origin == plx_ui::table::Origin::App)
-                .map(|row| Row::new(row.label.clone())).collect();
+                .filter_map(|row| {
+                    let app_label = row.label_origin == plx_ui::table::Origin::App;
+                    let app_detail = row.detail_origin == plx_ui::table::Origin::App;
+                    if !app_label && !(row.is_text_entry() && app_detail) { return None; }
+                    Some(Row::new(if app_label { row.label.clone() } else { String::new() })
+                        .detail(if app_detail { row.detail.clone() } else { String::new() }))
+                }).collect();
             control_section
         }).collect();
         controls.measured_width(measure)
@@ -1347,9 +1378,11 @@ impl<H: AppLike<Memory = PageMemory>> Machine<H> for OttScreen {
         // Bypass all form, guide, focus and viewport machinery for this paint-only delta.
         if let ScreenEvent::App(AppMsg::OttClock(sample)) = ev {
             let time_changed = self.form.table.set_classic_clock(sample.utc_s);
-            if self.classic_clock != sample.label || time_changed {
+            let wall_changed = self.wall_now_s != sample.utc_s;
+            self.wall_now_s = sample.utc_s;
+            if self.classic_clock != sample.label || time_changed || wall_changed {
                 self.classic_clock = sample.label.clone();
-                if self.classic_visible && H::ui_mode(&cx.views) == plx_machine::machine::UiMode::Classic {
+                if self.classic_visible && (self.loading_cover() || H::ui_mode(&cx.views) == plx_machine::machine::UiMode::Classic) {
                     fx.invalidate(plx_machine::present::Provenance::Resource(plx_machine::present::ResourceKind::Text));
                 }
             }
@@ -1400,7 +1433,7 @@ impl OttScreen {
         // A selected item leaves the list immediately, while the runtime still
         // resolves/admit its source. Hidden rows cannot receive navigation or
         // preview input; Back cancels the addressed request in the runtime.
-        if self.snapshot.pending_play.is_some() {
+        if self.loading_cover() {
             match ev {
                 ScreenEvent::Input(input) => {
                     if matches!(input.kind, InputKind::Key { key: Key::Back, edge: Edge::Down, at_edge: false, .. }) {
@@ -1659,6 +1692,7 @@ impl OttScreen {
 
 impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
     fn groups(&self, cx: &Cx<'_, H>, out: &mut Vec<GroupSpec>) {
+        if self.loading_cover() { return; }
         if self.exit.prompt.groups(out, cx.measure) { return; }
         let first = out.len();
         if self.reading { Focusable::<H>::groups(&self.document_focus(), cx, out); }
@@ -1678,6 +1712,7 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
         }
     }
     fn group_of(&self, key: &u32, cx: &Cx<'_, H>) -> Option<GroupId> {
+        if self.loading_cover() { return None; }
         if let Some(group) = self.exit.prompt.group_of(*key) { return group; }
         if self.header(cx.measure).is_some_and(|header| header.stops.iter().any(|(elem, _)| elem == key)) {
             return Some(navigation::GROUP);
@@ -1692,6 +1727,7 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
             .filter(|row| row.enabled && matches!(row.action, OttAction::Play(_) | OttAction::GuideProgramme { .. })).map(|_| ElemKind::Card)
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, H>) -> Step<u32> {
+        if self.loading_cover() { return Step::Edge; }
         if let Some(step) = self.exit.prompt.neighbour(key, dir) { return step; }
         if let Some(header) = self.header(cx.measure) {
             let focus = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip());
@@ -1704,6 +1740,7 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
         if self.reading { Focusable::<H>::neighbour(&self.document_focus(), key, dir, cx) } else if self.grid_active() { Focusable::<H>::neighbour(&self.grid_view(), key, dir, cx) } else { Focusable::<H>::neighbour(&self.view(cx.measure), key, dir, cx) }
     }
     fn place(&self, key: &u32, cx: &Cx<'_, H>, at: At) -> Option<Placed> {
+        if self.loading_cover() { return None; }
         if let Some(placed) = self.exit.prompt.place(*key, cx.measure) { return placed; }
         if let Some(header) = self.header(cx.measure) {
             if let Some(placed) = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).place(*key, at) { return Some(placed); }
@@ -1753,7 +1790,28 @@ impl LogicalState for OttScreen {
         out.u32(preferences.page_size() as u32).bool(preferences.list_left())
             .u32(u32::from(preferences.arrow_mode())).u32(preferences.seek13_seconds());
         out.bool(preferences.show_number()).bool(preferences.show_name()).bool(preferences.show_program()).bool(preferences.show_progress()).bool(preferences.show_description());
-        out.bool(self.snapshot.volume_available);
+        out.bool(self.snapshot.volume_available).bool(self.snapshot.startup_pending);
+        out.option(self.snapshot.startup_target.as_ref(), |out, id| { out.str(id); });
+        out.option(self.snapshot.pending_play_ordinal, |out, ordinal| { out.u32(ordinal); });
+        out.option(self.snapshot.pending_display.as_ref(), |out, display| {
+            out.str(&display.title).str(&display.description).bool(display.live);
+            out.option(display.ordinal, |out, ordinal| { out.u32(ordinal); });
+            out.option(display.guide.as_ref(), |out, guide| {
+                out.u64(guide.now_s as u64);
+                for programme in [&guide.current, &guide.next] {
+                    out.option(programme.as_ref(), |out, programme| {
+                        out.str(&programme.title).str(&programme.description)
+                            .u64(programme.start_s as u64).u64(programme.end_s as u64);
+                    });
+                }
+            });
+            out.option(display.poster.as_ref(), |out, poster| { match poster {
+                OttPoster::Local { key } => { out.str("local").str(key); }
+                OttPoster::Http { url } => { out.str("http").str(url); }
+                OttPoster::Plex { server, key } => { out.str("plex").u32(u32::from(*server)).str(key); }
+            } });
+        });
+        out.u32(u32::from(self.snapshot.osd_opacity.level()));
         out.option(self.snapshot.pending_play.as_ref(), |out, id| { out.str(id); });
         out.option(self.snapshot.pending_step.as_ref(), |out, source| {
             if let crate::registry::OttPlayerSource::Pending { generation, play_generation, ticket } = source {
@@ -1848,22 +1906,9 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
     fn draw(&mut self, frame: &mut DrawFrame<'_, '_, H>) {
         // Use the same mode-specific surface with or without an admitted preview.
         let ground = if self.classic_mode { plx_ui::palette::color(plx_ui::palette::Role::Background, theme::CLASSIC_BACKGROUND) } else { plx_ui::palette::color(plx_ui::palette::Role::Background, theme::SURFACE_APP) };
-        if let Some(id) = &self.snapshot.pending_play {
-            // Opaque cover, not a Player route: old preview geometry and list
-            // focus stops must never flash while source admission is pending.
-            use plx_ui::View;
+        if self.loading_cover() {
             plx_gfx::gfx::frame_clear(ground[0], ground[1], ground[2]);
-            let caption = std::ffi::CString::new(if self.snapshot.status.is_empty() {
-                msg::browse_library_loading()
-            } else { &self.snapshot.status }).unwrap_or_default();
-            let title = std::ffi::CString::new(self.snapshot.rows.iter()
-                // Catalogue row labels carry their ordinal. This wait begins
-                // before the Player HUD exists, so use the separate source
-                // title here too; never strip digits from a real channel name.
-                .find(|row| &row.id == id).map_or("", |row|
-                    row.content_title.as_deref().unwrap_or(&row.title))).unwrap_or_default();
-            plx_ui::widgets::StatusOverlay::new(Rect::FULL, &caption, plx_ui::widgets::StatusKind::Working)
-                .reason(&title).phase(frame.cx.tick.ms).draw(&plx_ui::Env::inert(), frame.painter);
+            self.draw_loading_cover(frame);
             return;
         }
         // This owned page paints the ground before its foreground-only parts.
@@ -1888,22 +1933,6 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
             }
         } else {
             let mut view = self.view(frame.measure);
-            let initial_copy;
-            if !self.classic_mode && self.editor.is_none() && self.snapshot.page_id == "loading" {
-                // The initial wait belongs to the rendered frame, not the model
-                // constructor: discovery and hidden snapshots must not accrue debt.
-                let loading = msg::browse_library_loading();
-                plx_ui::placeholder::note(frame.painter, plx_ui::placeholder::Reason::WorkingReadout, loading);
-                initial_copy = format!("{}\n\n{loading}", self.copy);
-                view.header.copy = &initial_copy;
-            }
-            if self.classic_mode && self.snapshot.page_id == "loading" {
-                use plx_ui::View;
-                let loading = std::ffi::CString::new(msg::browse_library_loading()).unwrap_or_default();
-                plx_ui::widgets::StatusOverlay::new(self.route().narrative,
-                    &loading, plx_ui::widgets::StatusKind::Working)
-                    .phase(frame.cx.tick.ms).draw(&plx_ui::Env::inert(), frame.painter);
-            }
             if self.grid_active() { Part::<H>::draw(&mut self.grid_view(), frame, self.route().content); }
             else {
                 if !self.classic_mode && self.editor.is_none() && !self.browse && self.media.is_none() && self.status_working() {
@@ -1960,6 +1989,7 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
         self.exit.prompt.draw(frame, self.entry);
     }
     fn links(&self, out: &mut Vec<Link>) {
+        if self.loading_cover() { return; }
         if self.exit.prompt.visible() { return; }
         if self.editor.is_none() && !self.reading {
             let first = if self.grid_active() { self.shelves.first().map_or(GroupId(0), |shelf| shelf.group) } else { GroupId(0) };
@@ -2039,6 +2069,8 @@ mod tests {
     mod reader;
     mod media;
     mod editor_layout;
+    mod editor_affordance;
+    mod loading_cover;
     mod editor_repair;
     mod editor_locale;
     mod classic_presentation;
@@ -2112,7 +2144,7 @@ mod tests {
             kind: InputKind::Key { key, sym: 0, wcode: 0, edge: Edge::Down, at_edge: true } })
     }
     fn snapshot(revision: u64, ids: &[&str]) -> Arc<OttView> {
-        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
+        Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, page_id: "channels".into(), revision, title: "Channels".into(),
             description: String::new(), status: String::new(), selected_row: None, search: None,
             rows: ids.iter().map(|id| OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: id.to_string(), title: id.to_string(), detail: String::new(),
                 description: "Complete description. A second sentence remains available.".into(), poster: None,

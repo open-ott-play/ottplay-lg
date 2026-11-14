@@ -104,3 +104,75 @@ fn channel_footer_replaces_outgoing_facts_when_target_is_published() {
         assert!(!after.iter().any(|r| r.text == "Outgoing channel"));
     }
 }
+
+
+#[test]
+fn restored_first_load_reveals_footer_without_a_channel_key_and_then_auto_hides() {
+    let _lock = plx_base::testlock::serial();
+    let mut page = PlayerScreen::new(EntryId(1));
+    assert!(!page.channel_change_hud);
+    page.set_playback_feedback(working(), 10_000);
+    assert!(page.channel_change_hud);
+    assert!(page.hud.until >= 15_000);
+    assert!(page.hud_drawn(&plx_media::route::PlaybackSession::IDLE, 10_000));
+    page.set_playback_feedback(working(), 20_000);
+    assert!(page.hud.until >= 25_000, "a slow initial load cannot lose its information");
+    page.set_playback_feedback(player_hud::Busy::None, 30_000);
+    assert!(!page.channel_change_hud);
+    let until = page.hud.until;
+    assert!(until >= 35_000);
+    page.set_playback_feedback(player_hud::Busy::None, 40_000);
+    assert_eq!(page.hud.until, until);
+    assert!(!page.hud_drawn(&plx_media::route::PlaybackSession::IDLE, 40_000),
+        "completed loading must not permanently pin the footer");
+}
+
+#[test]
+fn dismissed_initial_load_and_failed_load_do_not_reopen_or_permanently_pin_footer() {
+    let _lock = plx_base::testlock::serial();
+    let mut page = PlayerScreen::new(EntryId(1));
+    page.hud.hide(false);
+    page.set_playback_feedback(working(), 10_000);
+    assert!(!page.channel_change_hud);
+    assert!(page.hud.dismissed);
+    page.begin_channel_change(20_000);
+    page.set_playback_feedback(working(), 25_000);
+    page.set_playback_feedback(player_hud::Busy::Readout(StatusKind::Failed, c"Playback failed"), 30_000);
+    assert!(!page.channel_change_hud);
+    let until = page.hud.until;
+    page.set_playback_feedback(player_hud::Busy::Readout(StatusKind::Failed, c"Playback failed"), 40_000);
+    assert_eq!(page.hud.until, until);
+}
+
+
+#[test]
+fn pending_target_footer_does_not_depend_on_outgoing_decoder_loading_or_timer() {
+    use plx_data::metadata::NowPlaying;
+    let _lock = plx_base::testlock::serial();
+    let mut page = PlayerScreen::new(EntryId(1));
+    let ps = &plx_media::route::PlaybackSession::IDLE;
+    let was_paused = plx_media::player::TX.paused.swap(false, std::sync::atomic::Ordering::Relaxed);
+    page.hud.until = 1;
+    assert!(!page.hud_up(ps, 10_000));
+    page.pending_channel_display = Some(NowPlaying {
+        title: "Accepted target".into(), summary: String::new(), ott: None,
+        is_episode: false, is_real_episode: false, ep_title: String::new(),
+        season: 0, index: 0, year: 0, dur_ms: 0, rating: String::new(),
+        thumb: String::new(), detail_rk: String::new(),
+    });
+    assert!(page.hud_up(ps, 10_000), "pending information cannot rely on the old decoder");
+    assert!(page.hud_drawn(ps, 10_000));
+    page.set_hud_policy(HudPolicy::Hidden);
+    assert!(!page.hud_up(ps, 10_000), "a surface hiding transport remains authoritative");
+    page.set_hud_policy(HudPolicy::Normal);
+    assert!(!page.hud_up(ps, 10_000), "closing that surface preserves explicit dismissal");
+    page.hud.dismissed = false;
+    assert!(page.hud_up(ps, 10_000));
+    page.hud.hide(false);
+    assert!(!page.hud_up(ps, 10_000));
+    page.hud.dismissed = false;
+    page.pending_channel_display = None;
+    assert!(!page.hud_up(ps, 10_000), "settled, failed or cancelled target cannot pin the footer");
+    assert_eq!(page.hud.until, 1, "the pin never rewrites the ordinary auto-hide timer");
+    plx_media::player::TX.paused.store(was_paused, std::sync::atomic::Ordering::Relaxed);
+}
