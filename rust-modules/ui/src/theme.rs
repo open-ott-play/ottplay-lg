@@ -67,6 +67,12 @@ const STUDIO_YELLOW: [f32; 4] = rgb8(0xde, 0xc8, 0x89);
 const STUDIO_900: [f32; 4] = rgb8(0x11, 0x21, 0x19);
 const STUDIO_950: [f32; 4] = rgb8(0x0e, 0x11, 0x14);
 
+// Orbit — the shared OTT working indicator, matching the web/desktop palette.
+const ORBIT_MINT: [f32; 4] = rgb8(0xe1, 0xff, 0xf7);
+const ORBIT_CYAN: [f32; 4] = rgb8(0x82, 0xe4, 0xe0);
+const ORBIT_BLUE: [f32; 4] = rgb8(0x9e, 0xbc, 0xff);
+const ORBIT_LAVENDER: [f32; 4] = rgb8(0xc4, 0xa8, 0xf0);
+
 // Caption — the achromatic ladder under `WHITE`, and it has exactly one job: the subtitle tones.
 // Not more Neutral stops, because Neutral is the app's own dark SURFACES and these are light
 // INKS that happen to have no hue. Stops are named by their sRGB level, in percent of `WHITE`.
@@ -335,6 +341,12 @@ pub const CONTROL_SPENT_FOCUS_W: f32 = 0.76;
 /// BOTH sides — the first version flipped the ink at the sweep line and cut the label in half
 /// mid-word.
 pub const CONTROL_SPENT_FILL: [f32; 4] = mix(COOL_0, NEUTRAL_500, 1.0 - CONTROL_SPENT_FOCUS_W);
+
+/// Four persistent dot identities on the OTT working orbit, in clockwise order.
+/// The wheel rotates as a group while individual dots breathe; colour is not status.
+pub const WORKING_ORBIT_DOTS: [[f32; 4]; 4] = [ORBIT_MINT, ORBIT_CYAN, ORBIT_BLUE, ORBIT_LAVENDER];
+/// Dark perimeter keeps the light working dots readable over a bright video frame.
+pub const WORKING_ORBIT_EDGE: [f32; 4] = with_a(BLACK, 0.85);
 
 /// The Search query field's **editing** ink — the bright endpoint of the `hot` cross-fade in
 /// `search::field::draw` (idle end: `TEXT_SECONDARY`) while the television's keyboard is up. Its own

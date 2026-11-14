@@ -49,7 +49,7 @@ impl OttScreen {
                 .and_then(|row| metadata::preview_rect(row,&self.status,measure,self.route(),self.guide_clock.now_for(row.guide.as_ref()))) };
     }
     pub fn viewport_target(&self) -> Option<Target> {
-        if !self.classic_visible || self.editor.is_some() || self.reading
+        if self.loading_cover() || !self.classic_visible || self.editor.is_some() || self.reading
             || self.snapshot.page_id == "loading" { return None; }
         let rect = if self.classic_mode { self.classic_layout.get()?.preview }
             else { if self.browse || self.media.is_none() { return None; } self.viewport.modern_rect? };

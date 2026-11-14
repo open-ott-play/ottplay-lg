@@ -25,6 +25,8 @@ mod menu_settings;
 mod player_browse;
 #[path = "ott_player_startup.rs"]
 mod player_startup;
+#[path = "ott_boot_resume.rs"]
+mod boot_resume;
 #[path = "ott_row_guide.rs"]
 pub(super) mod row_guide;
 #[path = "ott_vportal_quality.rs"]
@@ -676,6 +678,7 @@ pub(super) struct Runtime {
     public_preferences: public_preferences::State,
     loaded: bool,
     state_load: StateLoad,
+    boot_resume: boot_resume::State,
     cancel: Arc<AtomicBool>,
     catalog_tx: SyncSender<CatalogEvent>,
     catalog_rx: Receiver<CatalogEvent>,
@@ -1019,7 +1022,9 @@ impl Runtime {
 
     pub(super) fn new() -> Box<Self> {
         let mut runtime = Box::new(Self::unloaded(companion_adapter::init()));
-        runtime.start_state_load();
+        if runtime.start_state_load() {
+            boot_resume::arm(&mut runtime);
+        }
         runtime
     }
 
@@ -1165,6 +1170,7 @@ impl Runtime {
             public_preferences: public_preferences::State::default(),
             loaded: false,
             state_load: StateLoad::Idle,
+            boot_resume: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             catalog_tx,
             catalog_rx,
@@ -1342,6 +1348,7 @@ impl Runtime {
     /// An accepted UI action or a visible partial navigation advances this
     /// stamp. Only a save begun by the accepted action acquires its new stamp.
     fn accepted_navigation(&mut self, started_save: bool) {
+        boot_resume::retire(self);
         auth_return::navigation(self);
         managed::navigation(&mut self.managed);
         browse_focus::request_flush(self);
@@ -2446,6 +2453,7 @@ impl Runtime {
                     break;
                 }
                 Err(error) => {
+                    boot_resume::retire(self);
                     // A synchronous refusal may leave a queued target behind.
                     // Retire it before waiting, so standby cannot save the failed
                     // attempt as a new playback request to retry on wake.
@@ -3072,7 +3080,12 @@ impl Runtime {
         plx_base::diag::spans::span("ott_view", || {
             let mut view = menu_settings::view(self)
                 .unwrap_or_else(|| settings_groups::view(self, self.raw_view()));
+            view.startup_pending = boot_resume::pending(self);
+            view.startup_target = boot_resume::target(self);
+            view.osd_opacity = self.osd_preferences().0;
+            view.pending_display = boot_resume::display(self);
             view.pending_play = classic_play_handoff::selected(self);
+            view.pending_play_ordinal = view.pending_play.as_ref().or(view.startup_target.as_ref()).and_then(|_| player_startup::pending_ordinal(self));
             view.pending_step = playback_step::pending_source(self);
             view.pending_step_sdl = !cfg!(feature = "hostsim");
             if view.pending_play.is_some() {
@@ -3694,6 +3707,11 @@ impl Runtime {
             shelf_context,
             shelves,
             status_working: false,
+            startup_pending: false,
+            startup_target: None,
+            pending_display: None,
+            osd_opacity: Default::default(),
+            pending_play_ordinal: None,
             pending_play: None,
             pending_step: playback_step::pending_source(self),
             pending_step_sdl: !cfg!(feature = "hostsim"),
@@ -5015,6 +5033,11 @@ pub(super) fn locale_changed(app: &mut App) {
     app.ott = Some(runtime);
 }
 
+/// Paint/input fence for the initial authorized Home while saved OTT intent loads.
+pub(super) fn home_boot_pending(app: &App) -> bool {
+    boot_resume::home_pending(app)
+}
+
 /// Apply Classic presentation only after the existing auth and preference owners settle.
 pub(super) fn reconcile_classic_navigation(app: &mut App) -> bool {
     let Some(mut runtime) = app.ott.take() else {
@@ -6137,6 +6160,7 @@ fn tick_with_start(
                     })
                 };
                 let response_failed = response.is_err();
+                if response_failed { boot_resume::retire(&mut runtime); }
                 classic_play_handoff::completed(&mut runtime, generation, !response_failed);
                 let refused_step = response_failed && !resolved && !expired && !superseded
                     && playback_allowed(app) && commands::pending_catalog_current(&runtime)
@@ -6408,6 +6432,7 @@ fn tick_with_start(
         runtime.catalog_dirty = true;
         runtime.catalog_loading = false;
         runtime.catalog_complete = result.is_ok();
+        if result.is_err() { boot_resume::retire(&mut runtime); }
         if result.is_ok() {
             runtime.catalog_diagnostics.clear();
         } else {
@@ -6976,6 +7001,7 @@ fn tick_with_start(
     {
         runtime.changed();
     }
+    boot_resume::reconcile(&mut runtime, app);
     let programme_dirty = programme_changed || runtime.revision != before;
     publish_programme(&mut runtime, app, programme_dirty);
     if runtime.revision != before {
@@ -7054,6 +7080,9 @@ fn handle_action(
     app: &mut App,
     selected: OttAction,
 ) -> Result<(), &'static str> {
+    if let Some(result) = boot_resume::back(runtime, app, &selected) {
+        return result;
+    }
     if let Some(result) = exit_confirmation::action(runtime, app, &selected) {
         return result;
     }

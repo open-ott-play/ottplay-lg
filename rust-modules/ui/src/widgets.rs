@@ -3527,11 +3527,25 @@ pub struct Spinner {
     pub col: [f32; 4],
     pub dots: usize,
     pub dot_r: f32,
+    ott_orbit: bool,
 }
 impl Spinner {
     /// One full revolution, in ms. Public because a caller that accumulates its own phase clock
     /// can only wrap it losslessly on a whole period (see `home.rs`'s `status_ms`).
     pub const PERIOD_MS: u32 = 760;
+    /// Web/desktop `.ott-spinner`: a 30px box on the 1280-wide design,
+    /// projected to this UI's 1920-wide logical surface.
+    pub const OTT_BOX: f32 = 45.0;
+    pub const OTT_PERIOD_MS: u32 = 1_600;
+    const OTT_EDGE_W: f32 = 1.5;
+    /// Opt-in shared four-dot orbit. Ordinary menu/transport rings are unchanged.
+    pub fn ott_orbit(cx: f32, cy: f32) -> Self {
+        let mut spinner = Self::new(cx, cy, Self::OTT_BOX * 0.27);
+        spinner.ott_orbit = true;
+        spinner.dots = 4;
+        spinner.dot_r = Self::OTT_BOX * 0.10;
+        spinner
+    }
     /// The **page** radius — a wait that owns a whole surface: the [`StatusOverlay`] read-out, and
     /// any screen whose content is simply not there yet. Sized to be read from the couch.
     ///
@@ -3588,6 +3602,7 @@ impl Spinner {
             col: [1.0, 1.0, 1.0, 1.0],
             dots: 10,
             dot_r: Self::dot_r(r),
+            ott_orbit: false,
         }
     }
     pub fn phase(mut self, ms: u32) -> Self {
@@ -3620,24 +3635,107 @@ impl View for Spinner {
             plx_machine::idle::invalidate();
         }
         #[cfg_attr(feature = "placeholder-sentinel", allow(unused_variables))]
-        let t = (self.phase % Self::PERIOD_MS) as f32 / Self::PERIOD_MS as f32;
+        let period = if self.ott_orbit { Self::OTT_PERIOD_MS } else { Self::PERIOD_MS };
+        let t = (self.phase % period) as f32 / period as f32;
         for i in 0..self.dots {
-            let ang =
-                i as f32 / self.dots as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let ang = i as f32 / self.dots as f32 * std::f32::consts::TAU
+                - std::f32::consts::FRAC_PI_2
+                + if self.ott_orbit { t * std::f32::consts::TAU } else { 0.0 };
             #[cfg(not(feature = "placeholder-sentinel"))]
-            let c = {
+            let c = if self.ott_orbit {
+                let color = theme::WORKING_ORBIT_DOTS[i % theme::WORKING_ORBIT_DOTS.len()];
+                [color[0] * self.col[0], color[1] * self.col[1], color[2] * self.col[2], color[3] * self.col[3]]
+            } else {
                 let lead = (t - i as f32 / self.dots as f32).rem_euclid(1.0);
-                let a = (1.0 - lead) * 0.85 + 0.12; // bright at the leading dot, fading behind it
+                let a = (1.0 - lead) * 0.85 + 0.12;
                 [self.col[0], self.col[1], self.col[2], self.col[3] * a]
             };
-            // The sentinel build paints every dot at alpha 1 in the one exact colour, whatever the
-            // tint, the leading-dot fade or the cascade (`placeholder.rs`).
             #[cfg(feature = "placeholder-sentinel")]
             let (c, p) = (theme::PLACEHOLDER_SENTINEL, crate::placeholder::painter(p));
             let (dx, dy) = (self.cx + self.r * ang.cos(), self.cy + self.r * ang.sin());
-            let d = self.dot_r;
-            p.rect(Rect::new(dx - d, dy - d, 2.0 * d, 2.0 * d), d, c, c, 0.0);
+            let d = if self.ott_orbit {
+                // Separate authored dot sizes (22%/20%) and quarter-cycle
+                // breathing, matching the web indicator's 1 -> .8 -> 1 motion.
+                let breath = 0.9 + 0.1 * ((t - i as f32 * 0.25) * std::f32::consts::TAU).cos();
+                self.dot_r * (if i == 0 { 1.1 } else { 1.0 }) * breath
+            } else { self.dot_r };
+            if self.ott_orbit {
+                #[cfg(not(feature = "placeholder-sentinel"))]
+                let edge = theme::with_a(theme::WORKING_ORBIT_EDGE, theme::WORKING_ORBIT_EDGE[3] * self.col[3]);
+                #[cfg(feature = "placeholder-sentinel")]
+                let edge = c;
+                let r = d + Self::OTT_EDGE_W;
+                p.rect_rimmed_w(Rect::new(dx - r, dy - r, r * 2.0, r * 2.0),
+                    r, c, c, edge, 0.0, Self::OTT_EDGE_W);
+            } else {
+                p.rect(Rect::new(dx - d, dy - d, 2.0 * d, 2.0 * d), d, c, c, 0.0);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod ott_orbit_tests {
+    use super::*;
+
+    fn rectangles(spinner: Spinner) -> Vec<(u64, Rect)> {
+        crate::draw_census::capture(|| spinner.draw(&Env::inert(), Painter::recording()))
+    }
+
+    #[test]
+    fn opt_in_orbit_keeps_default_spinner_unchanged_and_draws_four_separated_dots() {
+        let _serial = plx_base::testlock::serial();
+        let ordinary = rectangles(Spinner::new(100.0, 100.0, Spinner::R_PAGE));
+        assert_eq!(ordinary.len(), 10);
+        assert!(ordinary.iter().all(|(kind, _)| *kind == 1));
+        for ms in (0..Spinner::OTT_PERIOD_MS).step_by(50) {
+            let dots = rectangles(Spinner::ott_orbit(100.0, 100.0).phase(ms));
+            assert_eq!(dots.len(), 4);
+            for (index, (kind, dot)) in dots.iter().enumerate() {
+                assert_eq!(*kind, 9, "one rimmed pass per coloured dot");
+                assert!(dot.x >= 100.0 - Spinner::OTT_BOX * 0.5);
+                assert!(dot.y >= 100.0 - Spinner::OTT_BOX * 0.5);
+                assert!(dot.x + dot.w <= 100.0 + Spinner::OTT_BOX * 0.5);
+                assert!(dot.y + dot.h <= 100.0 + Spinner::OTT_BOX * 0.5);
+                for (_, other) in dots.iter().skip(index + 1) {
+                    let distance = ((dot.cx() - other.cx()).powi(2) + (dot.cy() - other.cy()).powi(2)).sqrt();
+                    assert!(distance > (dot.w + other.w) * 0.5, "dots must retain a clear centre and gaps");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ott_orbit_requests_frames_only_when_drawn_and_not_under_a_held_clock() {
+        let _serial = plx_base::testlock::serial();
+        let _ = plx_machine::idle::take_local_damage();
+        let spinner = Spinner::ott_orbit(100.0, 100.0).phase(100);
+        assert_eq!(plx_machine::idle::take_local_damage(), 0);
+        let _ = rectangles(spinner);
+        assert!(plx_machine::idle::take_local_damage() > 0);
+        assert_eq!(plx_machine::idle::take_local_damage(), 0, "retired cover leaves no animation worker");
+        #[cfg(feature = "devtriggers")]
+        {
+            struct Restore(Option<u32>);
+            impl Drop for Restore { fn drop(&mut self) { plx_machine::motion::hold_phase_clocks(self.0); } }
+            let _restore = Restore(plx_machine::motion::held_clock_ms());
+            plx_machine::motion::hold_phase_clocks(Some(100));
+            let _ = rectangles(Spinner::ott_orbit(100.0, 100.0));
+            assert_eq!(plx_machine::idle::take_local_damage(), 0);
+        }
+    }
+
+    #[test]
+    fn ott_orbit_rotates_and_breathes_then_repeats_at_the_shared_period() {
+        let _serial = plx_base::testlock::serial();
+        let start = rectangles(Spinner::ott_orbit(100.0, 100.0));
+        let quarter = rectangles(Spinner::ott_orbit(100.0, 100.0).phase(400));
+        let half = rectangles(Spinner::ott_orbit(100.0, 100.0).phase(800));
+        let end = rectangles(Spinner::ott_orbit(100.0, 100.0).phase(Spinner::OTT_PERIOD_MS));
+        assert_eq!(start, end);
+        assert!(start[0].1.cy() < 100.0 && (start[0].1.cx() - 100.0).abs() < 0.01);
+        assert!(quarter[0].1.cx() > 100.0 && (quarter[0].1.cy() - 100.0).abs() < 0.01);
+        assert!(half[0].1.w < start[0].1.w, "size, not merely opacity, animates");
     }
 }
 

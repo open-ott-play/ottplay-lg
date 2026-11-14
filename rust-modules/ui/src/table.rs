@@ -66,6 +66,9 @@ pub enum Origin {
 
 pub struct Row {
     pub label: String,
+    /// Editable text uses an outlined field even when its value is empty or hidden.
+    /// Presentation only; the form owner retains editing and keyboard authority.
+    text_entry: bool,
     /// Display ordinal only; never a row key, selection index or playback identity.
     catalogue_number: Option<String>,
     progress_interval: Option<(i64, i64)>,
@@ -127,6 +130,7 @@ impl Row {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            text_entry: false,
             catalogue_number: None,
             progress_interval: None,
             secondary_label_start: None,
@@ -152,6 +156,10 @@ impl Row {
             note_leading: std::cell::Cell::new(NOTE_LEADING),
         }
     }
+    /// Identify a real text-entry action without changing its focus, value or binding.
+    pub fn text_entry(mut self) -> Self { self.text_entry = true; self }
+    pub fn is_text_entry(&self) -> bool { self.text_entry }
+
     /// An optional ASCII-decimal display ordinal, drawn only by an explicitly
     /// opted-in Classic catalogue. Empty or non-digit input clears the number.
     pub fn catalogue_number(mut self, value: impl Into<String>) -> Self {
@@ -2263,6 +2271,15 @@ impl TableView {
             };
             let base = on_pill(if row.dim { dimc } else { white }, ink);
             let row_bg = on_pill(background, selection);
+            if row.text_entry {
+                // An idle value must still read as an input, rather than as an
+                // unexplained sentence or a run of password dots. Use the same
+                // row frame and focus cover as its text and pointer target.
+                let clear = theme::with_a(background, 0.0);
+                p.rect_rimmed(Rect::new(content_x, sy + PILL_INSET,
+                    (text_right - content_x).max(0.0), (h - 2.0 * PILL_INSET).max(0.0)),
+                    theme::space::XS, clear, clear, on_pill(theme::TEXT_SECONDARY, ink), 0.0);
+            }
             let cyc = sy + h * 0.5; // row vertical center
 
             // Leading column (SVG): the PICKER's tick, or an ACTION's glyph — one or the other, and
@@ -4504,5 +4521,32 @@ mod detail_marker_tests {
             let removed = crate::draw_census::capture_rect_inks(|| table.draw(Painter::recording(), frame, &measure));
             assert!(!removed.iter().any(|(rect, _, _)| rect.w == 8.0 && rect.h == 8.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod text_entry_tests {
+    use super::*;
+
+    #[test]
+    fn text_entry_has_a_visible_rim_without_changing_pointer_or_focus_geometry() {
+        let measure = crate::fixture::FixtureMeasure;
+        let frame = Rect::new(80.0, 120.0, 900.0, 600.0);
+        let mut table = TableView::new();
+        table.set_sections(vec![Section::new("Address")
+            .row(Row::new("Enter a value…").detail("OK: open keyboard"))
+            .row(Row::new("Save"))], 0, false);
+        table.list_focused = false;
+        table.fit_layout(&measure);
+        let band = table.row_frame(frame, 0).unwrap();
+        let before = crate::draw_census::capture(|| table.draw(Painter::recording(), frame, &measure));
+        table.row_mut(0).unwrap().text_entry = true;
+        let after = crate::draw_census::capture(|| table.draw(Painter::recording(), frame, &measure));
+        let rims = |runs: &[(u64, Rect)]| runs.iter().filter(|(tag, rect)| *tag == 8
+            && rect.y >= band.y && rect.y + rect.h <= band.y + band.h).count();
+        assert_eq!(rims(&after), rims(&before) + 1, "an unfocused field still has its own visible boundary");
+        assert_eq!(table.row_frame(frame, 0).unwrap(), band);
+        assert_eq!(table.hit_row(frame, band.x + band.w * 0.5, band.y + band.h * 0.5), Some(0));
+        assert_eq!(table.next_selectable(0, 1), Some(1));
     }
 }

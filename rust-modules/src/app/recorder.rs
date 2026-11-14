@@ -2930,6 +2930,25 @@ mod fixture_preflight_tests {
     }
 
     #[test]
+    fn pre_ott_startup_footer_recording_headers_remain_refused() {
+        // Only three reviewed anchors that cannot instantiate OTT migrate their
+        // unused census header. The production parser still rejects the prior
+        // contract before reading arbitrary old recordings.
+        const OLD: u64 = 12606294384504129118;
+        assert_ne!(OLD, state_fp());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/replay");
+        for name in ["1-boot-home-chip-grid", "6-settings-family", "12-filmography-detail-return"] {
+            let dir = root.join(name);
+            let mut manifest: Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+            manifest["state_fp"] = json!(OLD);
+            let malformed_segment: &[u8] = b"not a recording record\n";
+            assert_eq!(Recording::parse(&manifest.to_string(), &[malformed_segment], state_fp()).err(),
+                Some(RecError::StateShape { theirs: OLD, ours: state_fp() }), "{name}");
+        }
+    }
+
+    #[test]
     fn committed_recordings_keep_valid_page_requests_and_initial_hashes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/replay");
         for name in ["1-boot-home-chip-grid", "6-settings-family", "12-filmography-detail-return"] {

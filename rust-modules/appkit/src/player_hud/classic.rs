@@ -223,9 +223,17 @@ pub fn draw_readout(
         draw_failed_readout(ps, Painter::root(), failure_focus, measure);
         return;
     }
-    StatusOverlay::new(readout_frame(), caption, kind)
-        .phase(now)
-        .draw(&hud_env(), Painter::root());
+    if kind == StatusKind::Working {
+        // This is our SDL overlay, not firmware player chrome. Channel identity
+        // belongs in the ordinary footer, never in a second central caption.
+        let frame = readout_frame();
+        Spinner::ott_orbit(frame.cx(), frame.cy()).phase(now)
+            .draw(&hud_env(), Painter::root());
+    } else {
+        StatusOverlay::new(readout_frame(), caption, kind)
+            .phase(now)
+            .draw(&hud_env(), Painter::root());
+    }
 }
 
 /// The support line's cap top this far above the canvas bottom — inside the safe area's
@@ -628,7 +636,7 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
     draw_playbar_at(p, bar, measure, Rect::new(SB_X, SB_Y, sb_w(), SB_H), None);
 }
 
-fn draw_playbar_track(p: Painter, bar: Playbar, rail: Rect) {
+pub(super) fn draw_playbar_track(p: Painter, bar: Playbar, rail: Rect) {
     let white = plx_ui::palette::color(plx_ui::palette::Role::Text, theme::TEXT_PRIMARY);
     let track = theme::RAIL_TRACK;
     let (sx, sw, sy, sh) = (rail.x, rail.w, rail.y, rail.h);
