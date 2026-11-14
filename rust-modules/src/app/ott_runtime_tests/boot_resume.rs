@@ -160,8 +160,8 @@ fn automatic_resolver_projects_exact_target_source_number_and_accepted_opacity()
     assert!(runtime.resolver_next.is_some(), "normal queue must own the resolver request");
     // A target footer is independent of the presently filtered list. Changing
     // this view does not change the queued source or its canonical number.
-    runtime.saved.category = runtime.organization_projection().unwrap().categories.iter()
-        .find(|category| category.label == "First").unwrap().id.clone();
+    runtime.saved.category = runtime.catalog.category_choices().into_iter()
+        .find(|category| category.label == "First").expect("parsed M3U category").id;
     let view = runtime.view();
     assert!(!view.rows.iter().any(|row| row.id == id));
     let display = view.pending_display.as_ref().expect("source-owned target facts");
@@ -206,6 +206,9 @@ impl Drop for NativeSession {
 
 fn authorized_home() -> App {
     let mut app = app_fixture();
+    // The generic lifecycle fixture is stopped by default; this scenario models
+    // the real running application before its protected boot image arrives.
+    app.running = true;
     let mut init = plx_session::auth::SessionInit::captured(Default::default());
     init.epoch = 10;
     init.phase = plx_session::auth::Phase::Ready;
