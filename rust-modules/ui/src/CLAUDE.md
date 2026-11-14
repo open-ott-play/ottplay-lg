@@ -40,7 +40,8 @@ arguments, and its time is the `dt` it is handed.
    (`tokens/primitives.css` + `tokens/colors.css`), so a palette decision is one edit in each.
 
 2. **Never write a raw text size — every text size in the UI is a `theme::size` token.** The named
-   rungs are `size::HERO` 72 / `size::DISPLAY` 48 / `size::TITLE` 40 / `size::HEADLINE` 32 /
+   rungs are `size::HERO` 72 / `size::DISPLAY` 48 / `size::TITLE` 40 /
+   `size::OTT_FOOTER` 33 (Classic OTT footer parity with Tauri) / `size::HEADLINE` 32 /
    `size::BODY` 28 / `size::LABEL` 26 / `size::CAPTION` 24 / `size::MICRO` 22 /
    `size::DIAGNOSTIC` 20 — the *size* axis of the design system.
    `CAPTION` (24) is the **couch legibility floor for ordinary product content**; `MICRO` exists

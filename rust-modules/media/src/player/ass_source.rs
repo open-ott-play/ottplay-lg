@@ -563,16 +563,23 @@ pub fn begin(media_key: &str, headers: Vec<(i32, TrackHeader)>, fonts: Vec<Font>
 /// the cue's length, never its text (subtitle text is viewing content and the event log is shared
 /// in issue threads), which `tests/run.py` reads to see that a text cue arrived.
 pub fn push_text(generation: u64, track: i32, start_ns: i64, end_ns: i64, text: &str, identity: u64) {
+    let shown = push_text_quiet(generation, track, start_ns, end_ns, text, identity);
+    let (start_ms, end_ms) = (start_ns / 1_000_000, end_ns / 1_000_000);
+    if let Some(len) = shown {
+        super::log(&format!("sub cue [{start_ms}..{end_ms}ms] len={len}"));
+    }
+}
+/// Store-only variant for an epoch/selection-guarded HLS batch publication.
+/// No logging, observer callback, native session lock or IO occurs here.
+pub(crate) fn push_text_quiet(generation: u64, track: i32, start_ns: i64, end_ns: i64, text: &str, identity: u64) -> Option<usize> {
     let floor_ms = super::subtitle_floor_ns() / 1_000_000;
     let (start_ms, end_ms) = (start_ns / 1_000_000, end_ns / 1_000_000);
     let selected = Some(super::desired_sub_idx()).filter(|&t| t >= 0);
-    let shown = {
+    {
         let mut store = store();
         store.selected_track = selected;
         store.push_text_keyed(generation, track, start_ms, end_ms, text, identity, floor_ms)
-    };
-    if let Some(len) = shown.filter(|_| selected == Some(track)) {
-        super::log(&format!("sub cue [{start_ms}..{end_ms}ms] len={len}"));
+            .filter(|_| selected == Some(track))
     }
 }
 pub fn push(generation: u64, track: i32, start_ns: i64, end_ns: i64, payload: &[u8]) {
@@ -1581,6 +1588,26 @@ mod tests {
     }
 
     // ---- the `sub cue` log line ----
+
+    #[test]
+    fn quiet_text_publication_has_the_same_store_events_as_public_text_ingestion() {
+        let _serial = plx_base::testlock::serial();
+        super::super::request_subtitle(0);
+        let style = TextStyle::default();
+        let make = |key| begin(key, vec![(0, TrackHeader::Text(TextDialect::Srt))], vec![], style);
+        let generation = make("fixture:quiet");
+        assert!(push_text_quiet(generation, 0, 1_000_000_000, 2_000_000_000,
+            "Same <i>caption</i>", 7).is_some());
+        let quiet = selected(0, style).unwrap();
+        let generation = make("fixture:public");
+        push_text(generation, 0, 1_000_000_000, 2_000_000_000, "Same <i>caption</i>", 7);
+        let public = selected(0, style).unwrap();
+        let Content::Embedded { events: left, .. } = &quiet.content else { panic!("embedded"); };
+        let Content::Embedded { events: right, .. } = &public.content else { panic!("embedded"); };
+        assert_eq!(left.as_ref(), right.as_ref());
+        reset();
+        super::super::request_subtitle(-1);
+    }
 
     #[test]
     fn the_sub_cue_line_logs_a_length_for_the_selected_track_only_and_never_the_text() {

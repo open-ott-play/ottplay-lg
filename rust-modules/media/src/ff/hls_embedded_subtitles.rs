@@ -66,6 +66,9 @@ enum Cue {
     Text { track: i32, start: i64, end: i64, payload: Vec<u8>, identity: u64 },
     Ass { track: i32, start: i64, end: i64, payload: Vec<u8> },
     Bitmap(subs::SubCue<'static>),
+    // Decoder-provided duration belongs to this authored set, unlike an
+    // explicit clear, which closes the display active at its timestamp.
+    BitmapEnd { track: i32, start: i64, end: i64 },
 }
 #[derive(Default)]
 struct Pending { cues: Vec<Cue>, bytes: usize, packets: usize }
@@ -86,10 +89,28 @@ pub struct Batch {
 }
 impl Batch {
     pub fn cue_count(&self) -> usize { self.cues.len() }
+    pub fn shifted(mut self, shift: i64) -> Option<Self> {
+        for cue in &mut self.cues {
+            match cue {
+                Cue::Text { start, end, .. } | Cue::Ass { start, end, .. }
+                | Cue::BitmapEnd { start, end, .. } => {
+                    *start = start.checked_add(shift)?; *end = end.checked_add(shift)?;
+                }
+                Cue::Bitmap(subs::SubCue::BitmapSet { pts, .. } | subs::SubCue::BitmapClear { pts, .. }) => {
+                    *pts = pts.checked_add(shift)?;
+                }
+                Cue::Bitmap(_) => return None,
+            }
+        }
+        Some(self)
+    }
     /// Call only after exact source/epoch/selection admission and complete A/V
     /// feed. `shift_ns` maps source packet timestamps into the committed clock.
     pub fn publish(self, media_key: &str, style: TextStyle, generation: &mut Option<u64>, shift_ns: i64) {
         if self.reset || generation.is_none() {
+            // A transport epoch or selection reset must not inherit same-URL
+            // authored cues from an earlier subtitle timeline.
+            ass_source::retire_selection();
             let headers = match self.header {
                 Header::Text(dialect) => vec![(self.track, ass_source::TrackHeader::Text(dialect))],
                 Header::Ass(bytes) => vec![(self.track, ass_source::TrackHeader::Authored(bytes))],
@@ -101,13 +122,35 @@ impl Batch {
         let generation = generation.unwrap_or(0);
         for cue in self.cues {
             match cue {
-                Cue::Text { track, start, end, payload, identity } => subs::SubCue::Text {
-                    track, start, end, payload: std::borrow::Cow::Owned(payload), identity,
-                }.shifted(shift_ns).push(generation),
-                Cue::Ass { track, start, end, payload } => subs::SubCue::Ass {
-                    track, start, end, payload: &payload,
-                }.shifted(shift_ns).push(generation),
-                Cue::Bitmap(cue) => cue.shifted(shift_ns).push(generation),
+                Cue::Text { track, start, end, payload, identity } => {
+                    ass_source::push_text_quiet(generation, track, start.saturating_add(shift_ns),
+                        end.saturating_add(shift_ns), &String::from_utf8_lossy(&payload), identity);
+                }
+                Cue::Ass { track, start, end, payload } => ass_source::push(generation, track,
+                    start.saturating_add(shift_ns), end.saturating_add(shift_ns), &payload),
+                Cue::Bitmap(subs::SubCue::BitmapSet { track, pts, cw, ch, rects, .. }) => {
+                    let pts = pts.saturating_add(shift_ns);
+                    // A newer authored display supersedes even an earlier set
+                    // with a finite decoder-provided end time.
+                    for old in SHARED.sub_bitmaps.lock().unwrap_or_else(|error| error.into_inner()).iter_mut() {
+                        if old.track == track && old.start_ns <= pts && old.end_ns > pts { old.end_ns = pts; }
+                    }
+                    crate::player::push_subtitle_bitmap(track, pts, cw, ch, rects);
+                }
+                Cue::Bitmap(subs::SubCue::BitmapClear { track, pts }) => {
+                    let pts = pts.saturating_add(shift_ns);
+                    for old in SHARED.sub_bitmaps.lock().unwrap_or_else(|error| error.into_inner()).iter_mut() {
+                        if old.track == track && old.start_ns <= pts && old.end_ns > pts { old.end_ns = pts; }
+                    }
+                }
+                Cue::BitmapEnd { track, start, end } => {
+                    let start = start.saturating_add(shift_ns);
+                    let end = end.saturating_add(shift_ns);
+                    for old in SHARED.sub_bitmaps.lock().unwrap_or_else(|error| error.into_inner()).iter_mut() {
+                        if old.track == track && old.start_ns == start && old.end_ns > end { old.end_ns = end; }
+                    }
+                }
+                Cue::Bitmap(_) => {},
             }
         }
     }
@@ -124,6 +167,12 @@ pub struct State {
 }
 impl State {
     pub fn abort(&mut self) { *self = Self::default(); }
+    pub unsafe fn format_is_current(&self, cp: *const AVCodecParameters, ordinal: i32) -> bool {
+        let Some(decoder) = self.decoder.as_ref() else { return false; };
+        !cp.is_null() && (*cp).codec_type == AVMEDIA_TYPE_SUBTITLE && decoder.track == ordinal
+            && decoder.codec_id == (*cp).codec_id
+            && Decoder::extradata(cp).ok().as_ref() == Some(&decoder.extra)
+    }
     /// Call with the selected stream from a currently validated PID snapshot.
     /// Existing decoder state is reused only after a committed contiguous segment.
     pub unsafe fn begin(&mut self, scope: Scope, sequence: u64, track: &InspectedTrack,
@@ -201,9 +250,11 @@ unsafe fn decode_bitmap(decoder: &Decoder, pending: &mut Pending, pkt: *mut AVPa
     impl Drop for Display { fn drop(&mut self) { unsafe { avsubtitle_free(&mut self.0); } } }
     let mut display = Display(std::mem::zeroed());
     let sub = &mut display.0;
+    sub.pts = AV_NOPTS_VALUE;
     let mut got = 0;
     if avcodec_decode_subtitle2(decoder.context, sub, &mut got, pkt) < 0 { return Err("HLS subtitle decode failed"); }
     if got == 0 { return Ok(()); }
+    let (pts, end) = bitmap_times(pts, sub.pts, sub.start_display_time, sub.end_display_time)?;
     if sub.num_rects == 0 {
         pending.admit(0)?;
         pending.cues.push(Cue::Bitmap(subs::SubCue::BitmapClear { track: decoder.track, pts }));
@@ -216,6 +267,7 @@ unsafe fn decode_bitmap(decoder: &Decoder, pending: &mut Pending, pkt: *mut AVPa
         if rect.is_null() { return Err("Invalid HLS subtitle rectangle"); }
         let r = &*rect;
         if r.type_ != 1 || r.w <= 0 || r.h <= 0 || r.w > 4096 || r.h > 4096 || r.linesize[0] < r.w || r.linesize[0] > 8192
+            || !(1..=256).contains(&r.nb_colors)
             || r.data[0].is_null() || r.data[1].is_null() { return Err("Invalid HLS subtitle bitmap"); }
         let pixels = (r.w as usize).checked_mul(r.h as usize).ok_or("HLS subtitle bitmap overflow")?;
         pending.admit(pixels.checked_add(1024).ok_or("HLS subtitle bitmap overflow")?)?;
@@ -223,8 +275,9 @@ unsafe fn decode_bitmap(decoder: &Decoder, pending: &mut Pending, pkt: *mut AVPa
         for row in 0..r.h as usize {
             indices.extend_from_slice(std::slice::from_raw_parts(r.data[0].add(row * r.linesize[0] as usize), r.w as usize));
         }
+        if indices.iter().any(|index| i32::from(*index) >= r.nb_colors) { return Err("Invalid HLS subtitle palette index"); }
         let mut palette = Box::new([[0; 4]; 256]);
-        for (index, color) in palette.iter_mut().enumerate() {
+        for (index, color) in palette.iter_mut().enumerate().take(r.nb_colors as usize) {
             let argb = *(r.data[1] as *const u32).add(index);
             *color = [(argb >> 16) as u8, (argb >> 8) as u8, argb as u8, (argb >> 24) as u8];
         }
@@ -238,9 +291,35 @@ unsafe fn decode_bitmap(decoder: &Decoder, pending: &mut Pending, pkt: *mut AVPa
     avcodec_parameters_free(&mut cp);
     pending.cues.push(Cue::Bitmap(subs::SubCue::BitmapSet { track: decoder.track, pts,
         cw: canvas.0, ch: canvas.1, total_rects: rects.len(), rects }));
+    if let Some(end) = end {
+        pending.admit(0)?;
+        pending.cues.push(Cue::BitmapEnd { track: decoder.track, start: pts, end });
+    }
     Ok(())
+}
+
+fn bitmap_times(packet_ns: i64, subtitle_us: i64, start_ms: u32, end_ms: u32)
+    -> Result<(i64, Option<i64>), &'static str>
+{
+    let base = if subtitle_us == AV_NOPTS_VALUE { packet_ns }
+        else { subtitle_us.checked_mul(1000).ok_or("HLS subtitle timestamp overflow")? };
+    let start = base.checked_add(i64::from(start_ms) * 1_000_000).ok_or("HLS subtitle timestamp overflow")?;
+    // PGS/DVB may leave a display open until an explicit clear. DVD and timed
+    // bitmap sets additionally supply an end relative to the subtitle PTS.
+    let end = if end_ms == 0 || end_ms == u32::MAX { None } else {
+        if end_ms <= start_ms { return Err("Invalid HLS bitmap subtitle interval"); }
+        Some(base.checked_add(i64::from(end_ms) * 1_000_000).ok_or("HLS subtitle timestamp overflow")?)
+    };
+    Ok((start, end))
 }
 
 #[cfg(test)]
 #[path = "hls_embedded_subtitles_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) fn text_batch_for_test() -> Batch {
+    Batch { cues: vec![Cue::Text { track: 0, start: 1_000_000_000, end: 2_000_000_000,
+        payload: b"Synthetic caption".to_vec(), identity: 7 }],
+        header: Header::Text(TextDialect::WebVtt), track: 0, reset: true }
+}

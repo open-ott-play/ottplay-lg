@@ -13,6 +13,8 @@ mod hevc_ac3_tests;
 mod hevc_aac_tests;
 #[path = "hls_single_window_tests.rs"]
 mod single_window_tests;
+#[path = "hls_embedded_transport_tests.rs"]
+mod embedded_subtitle_tests;
 
 struct Scratch(PathBuf);
 impl Scratch {

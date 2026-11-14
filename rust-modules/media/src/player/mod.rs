@@ -29,6 +29,7 @@ pub mod engine;
 pub mod foreground;
 pub mod lifecycle;
 pub mod machine;
+pub(crate) mod media_bitrate;
 pub mod programme;
 pub mod playurl; // the `plxnative-playurl` dev trigger: a stream and its Load declaration, parsed beside the engine that acts on it
 pub mod preview;
@@ -685,6 +686,14 @@ pub fn is_started() -> bool {
 /// independently of the output canvas for anamorphic glyph/blur scaling.
 pub fn video_raster() -> (i32, i32) {
     SHARED.video_raster()
+}
+
+/// Measured completed main-HLS media bytes per media second, in decimal bits/s.
+/// Unknown routes and a retired/stopped native session return None. This is
+/// neither a manifest declaration nor a measurement of connection capacity.
+pub fn measured_media_bps() -> Option<u64> {
+    let bps = SHARED.measured_media_bps.load(std::sync::atomic::Ordering::Acquire);
+    (bps > 0).then_some(bps)
 }
 
 /// The picture inside the full-screen video window, including non-square pixels.

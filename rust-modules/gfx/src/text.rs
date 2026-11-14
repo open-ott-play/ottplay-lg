@@ -730,9 +730,9 @@ pub fn prewarm_resident_for_test(bytes: &[u8], sz: c_int, bold: c_int) -> bool {
 }
 
 /// Every rung of `theme::size` — the faces a page's layout is measured in.
-const WARM_SIZES: [c_int; 9] = {
+const WARM_SIZES: [c_int; 10] = {
     use crate::gfx::tokens::size::*;
-    [HERO, DISPLAY, TITLE, HEADLINE, BODY, LABEL, CAPTION, MICRO, DIAGNOSTIC]
+    [HERO, DISPLAY, TITLE, OTT_FOOTER, HEADLINE, BODY, LABEL, CAPTION, MICRO, DIAGNOSTIC]
 };
 /// Printable ASCII: the glyphs nearly every string the product measures is made of.
 const WARM_GLYPHS: &[u8] =
@@ -3676,6 +3676,7 @@ mod cache_policy_tests {
         }
         assert!(WARM_SIZES.contains(&crate::gfx::tokens::size::HERO));
         assert!(WARM_SIZES.contains(&crate::gfx::tokens::size::DIAGNOSTIC));
+        assert!(WARM_SIZES.contains(&crate::gfx::tokens::size::OTT_FOOTER));
         reset_font_warm_for_test();
     }
 

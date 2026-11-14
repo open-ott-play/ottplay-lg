@@ -61,6 +61,9 @@ pub struct HudModel {
     pub wall_now_s: Option<i64>,
     /// Actual currently published decoder raster; zero dimensions mean unknown.
     pub video_raster: (i32, i32),
+    /// Completed main-HLS media bytes / media duration, sampled by the app.
+    /// Decimal bits/s; None is unknown, never a manifest/network estimate.
+    pub measured_media_bps: Option<u64>,
     /// `plx_media::player::TX.paused.load(Relaxed)`: the viewer is logically paused. Drives the
     /// title's reveal and the playbar's state mark.
     pub paused: bool,
@@ -117,6 +120,7 @@ impl Default for HudModel {
         Self {
             wall_now_s: None,
             video_raster: (0, 0),
+            measured_media_bps: None,
             osd_opacity: OsdOpacity::default(),
             permanent_clock: PermanentClock::default(),
             paused: false,
