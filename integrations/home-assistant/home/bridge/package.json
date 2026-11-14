@@ -1,0 +1,1 @@
+{"name":"ottplay-home-bridge","version":"1.0.0","private":true,"license":"GPL-3.0-or-later","engines":{"node":">=22.4.0"},"scripts":{"start":"node server.cjs","test":"node --test server.test.cjs"}}

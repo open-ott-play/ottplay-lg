@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OTTPlay LG optional Home Assistant tooling",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$", "description": "Unique TV slug; determines all HA object and secret names."},
+    "name": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[^\\u0000-\\u001f]+$", "default": "OTTPlay LG TV"},
+    "renewal_mode": {"enum": ["external", "manual", "managed"], "default": "external", "description": "External/manual produce no renewal REST commands or automation. Managed still requires enabling its HA toggle."},
+    "daily_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$", "default": "12:00:00"},
+    "minimum_hours": {"type": "integer", "minimum": 168, "maximum": 999, "default": 168}
+  }
+}

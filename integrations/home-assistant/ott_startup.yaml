@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# See NOTICE for pinned source provenance.
+"blueprint":
+  "name": "OTTPlay once after LG TV startup"
+  "description": "Launch an installed OTTPlay source once after a sustained off-to-on transition. No power-on, retries, or app chasing. Network outages may resemble power-off; disable this automation if that is unsuitable."
+  "domain": "automation"
+  "homeassistant":
+    "min_version": "2024.10.0"
+  "input":
+    "tv":
+      "name": "LG television"
+      "selector":
+        "entity":
+          "filter":
+            -
+              "domain": "media_player"
+              "integration": "webostv"
+    "source_name":
+      "name": "Installed OTTPlay source name"
+      "description": "Exact case-sensitive name in this television's source_list; installation is separate."
+      "default": "OTTPlay"
+      "selector":
+        "text": {}
+    "settle_seconds":
+      "name": "Stable on interval"
+      "default": 3
+      "selector":
+        "number":
+          "min": 1
+          "max": 30
+          "unit_of_measurement": "s"
+          "mode": "box"
+    "minimum_off_seconds":
+      "name": "Minimum preceding off interval"
+      "default": 60
+      "selector":
+        "number":
+          "min": 30
+          "max": 600
+          "unit_of_measurement": "s"
+          "mode": "box"
+    "excluded_app_id":
+      "name": "Protected app ID"
+      "description": "Optional app which must not be interrupted, for example a camera overlay."
+      "default": ""
+      "selector":
+        "text": {}
+"variables":
+  "settle": !input settle_seconds
+  "minimum_off": !input minimum_off_seconds
+  "tv_entity": !input tv
+  "source_name": !input source_name
+  "excluded_id": !input excluded_app_id
+"triggers":
+  -
+    "trigger": "state"
+    "entity_id": !input tv
+    "from": "off"
+    "to": "on"
+    "for":
+      "seconds": !input settle_seconds
+"conditions":
+  -
+    "condition": "template"
+    "value_template": "{{ trigger is defined and trigger.from_state is defined\n   and trigger.to_state is defined and trigger.from_state is not none\n   and trigger.to_state is not none\n   and trigger.from_state.state == 'off' and trigger.to_state.state == 'on'\n   and 30 <= (minimum_off | int(0)) <= 600\n   and 1 <= (settle | int(0)) <= 30\n   and source_name is string and (source_name | length) > 0\n   and (as_timestamp(trigger.to_state.last_changed, 0)\n        - as_timestamp(trigger.from_state.last_changed, 0)) >= minimum_off | int(60)\n   and is_state(tv_entity, 'on')\n   and state_attr(tv_entity, 'source') != source_name\n   and source_name in (state_attr(tv_entity, 'source_list') or [])\n   and (not excluded_id or state_attr(tv_entity, 'app_id') != excluded_id) }}"
+"actions":
+  -
+    "action": "media_player.select_source"
+    "target":
+      "entity_id": !input tv
+    "data":
+      "source": !input source_name
+"mode": "single"
+"max_exceeded": "silent"

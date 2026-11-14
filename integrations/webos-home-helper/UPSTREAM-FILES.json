@@ -1,0 +1,41 @@
+{
+  "commit": "204d4ba713645c7714bf6bfdc11552958972c739",
+  "files": [
+    {
+      "path": "helper/native/relay.c",
+      "sha256": "b15ab335622c2f911ef7436e6155741438ea531bf186124956e55db1c74051c5"
+    },
+    {
+      "path": "helper/native/filter.c",
+      "sha256": "ea25692e7e425bbe55a53066cbcd18a2f149c4151d7fbb7eb56b7c72626d24a7"
+    },
+    {
+      "path": "helper/native/filter.h",
+      "sha256": "28de1ea71d74884a9ffa169bfe23769cabccb2c3874769726255945b80d72ef4"
+    },
+    {
+      "path": "helper/native/lock.h",
+      "sha256": "8561c8f6d5036abe925834629a294c59c69c6c8d9b67823d868318a285db16b0"
+    },
+    {
+      "path": "helper/native/detach.c",
+      "sha256": "d991cbb686c7d4c77e988d50f068ecaaeb9318cf65847fc070dc1bc8b42a5386"
+    },
+    {
+      "path": "helper/native/identity.c",
+      "sha256": "ed6445f732d01280c3d88ff14dbfd70711f4f0305864e83501c93fd15aac42a4"
+    },
+    {
+      "path": "helper/native/test_filter.c",
+      "sha256": "c300594a585d5a465e1e696c2e5796b0452845716e302a31c711f1fc8c3ea1d0"
+    },
+    {
+      "path": "helper/app/process-state.js",
+      "sha256": "8beb17c54a12c1bd9111c85157738bbdff5c0b5f9aecec7905ba6915e8bf5e88"
+    },
+    {
+      "path": "helper/UPSTREAM-LICENSE",
+      "sha256": "f7080ed37e14fa85c46912b7e01ad214cccbe66f7f8c2d605ca28a6247f22852"
+    }
+  ]
+}

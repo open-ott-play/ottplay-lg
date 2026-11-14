@@ -1,0 +1,14 @@
+OTTPlay Home Assistant startup and Developer Mode tooling
+SPDX-License-Identifier: GPL-3.0-only
+
+Startup policy and Developer Mode package shape adapted from:
+LG-TV-HA-Home-Launcher by MBS Integrations contributors (2026), GPL-3.0-only
+https://github.com/mbsintegrations/LG-TV-HA-Home-Launcher
+Reference commit: 204d4ba713645c7714bf6bfdc11552958972c739
+blueprints/home-on-startup.yaml
+and docs/examples/lg_developer_mode.yaml
+
+Preserve this notice and provide corresponding source with distributions.
+This directory does not include or adapt the separate MIT native Home-button
+helper, Cloudflare engine, logos or third-party artwork from that project.
+LG and Home Assistant names identify interoperating products; no affiliation.
