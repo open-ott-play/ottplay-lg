@@ -1,0 +1,38 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),cp=require('node:child_process');
+const root=path.resolve(__dirname,'..'),build=require('../build.cjs'),policy=require('../service/policy.js'),commands=require('../commands.cjs');
+const o={developerUid:1001,nativeUid:1002,sharedGid:1001,model:'fixture',firmware:'fixture',target:'arm-linux-musleabi',sourceName:'source',destinationName:'destination',homeKey:773};
+assert.equal(build.validate(o,'helper'),o);
+for(const change of [{nativeUid:0},{target:'aarch64-linux-gnu'},{sourceName:'../event0'},{destinationName:'source'}])assert.throws(()=>build.validate({...o,...change},'helper'));
+assert.throws(()=>build.validate({...o,token:'not-allowed'},'helper'));
+const processState=require('../app/process-state');
+assert.equal(processState.matches({tick:'123',state:'S'},'123'),true);
+for(const state of ['Z','T','t'])assert.equal(processState.matches({tick:'123',state},'123'),false);
+assert.equal(processState.matches({tick:'124',state:'S'},'123'),false);
+assert.equal(processState.gone({unknown:true},'123'),false);
+assert.equal(processState.gone({tick:'124',state:'S'},'123'),true);
+const receipt={uid:1002,gid:1001,compatible:true,inputGrabbed:false,eventsWritten:0,eventBytes:16,pointerBytes:4,sourceName:o.sourceName,destinationName:o.destinationName};
+build.checkProbe(o,receipt);assert.throws(()=>build.checkProbe(o,{...receipt,inputGrabbed:true}));
+assert.equal(policy.identity(o,1002,1001,[]),true);assert.equal(policy.identity(o,0,1001,[]),false);
+const s={session:'a',boot:'b',enabled:true,paused:false,mode:'trial',started:10,deadline:120010};
+assert.equal(policy.allowed(s,{session:'a'},'b',20),true);
+assert.equal(policy.allowed(s,{session:'a'},'b',120010),false);
+assert.equal(policy.allowed(s,{session:'wrong'},'b',20),false);
+assert.equal(policy.allowed(s,{session:'a'},'other-boot',20),false);
+assert.equal(policy.allowed({...s,paused:true},{session:'a'},'b',20),false);
+assert.equal(policy.acceptance({lastTrial:{active:true,session:'a'}},{acceptTestedControls:true,testedTrialSession:'a'}),true);
+assert.equal(policy.acceptance({lastTrial:{active:false,session:'a'}},{acceptTestedControls:true,testedTrialSession:'a'}),false);
+for(const seconds of [0,121,Infinity,'30'])assert.throws(()=>policy.seconds(seconds));
+assert.throws(()=>commands.command('enable',[]));assert.match(commands.command('enable',['--accept-tested-controls','a'.repeat(32)]),/acceptTestedControls/);
+const temp=fs.mkdtempSync(path.join(os.tmpdir(),'ott-home-tests-'));
+try{
+ const out=path.join(temp,'stage');build.stage('helper',o,out,receipt);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(out,'app/appinfo.json'))).id,'com.openottplay.homehelper');
+ assert.equal(JSON.parse(fs.readFileSync(path.join(out,'service/services.json'))).id,'com.openottplay.homehelper.control');
+ assert.throws(()=>build.stage('helper',o,out,receipt));
+ const binary=path.join(temp,'filter-test');
+ const compile=cp.spawnSync(process.env.CC||'cc',['-std=c99','-Wall','-Wextra','-Werror','-I'+path.join(out,'native'),path.join(out,'native/filter.c'),path.join(out,'native/test_filter.c'),'-o',binary],{timeout:15000,encoding:'utf8'});
+ assert.equal(compile.status,0,compile.stderr);
+ const run=cp.spawnSync(binary,[],{timeout:5000,encoding:'utf8'});assert.equal(run.status,0,run.stderr);
+ console.log('PASS: config, identity, leases, explicit acceptance, source staging and native pure event filter. No TV/network actions.');
+}finally{fs.rmSync(temp,{recursive:true,force:true});}

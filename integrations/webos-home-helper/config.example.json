@@ -1,0 +1,11 @@
+{
+  "developerUid": null,
+  "nativeUid": null,
+  "sharedGid": null,
+  "model": "",
+  "firmware": "",
+  "target": "arm-linux-musleabi",
+  "sourceName": "LGE M-RCU - Builtin [0]",
+  "destinationName": "LGE M-RCU - Builtin [1]",
+  "homeKey": 773
+}

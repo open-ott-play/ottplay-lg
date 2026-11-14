@@ -1,0 +1,13 @@
+**
+!LICENSE
+!bridge/
+bridge/**
+!bridge/Dockerfile
+!bridge/server.cjs
+!dashboard/
+dashboard/**
+!dashboard/index.html
+!dashboard/style.css
+!dashboard/core.js
+!dashboard/webos-host.js
+!dashboard/app.js

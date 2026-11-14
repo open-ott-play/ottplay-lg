@@ -49,5 +49,12 @@
   "ott.reminder_soon": "Inizia tra {minutes} min.",
   "ott.favorite_added": "Aggiunto ai preferiti",
   "ott.favorite_removed": "Rimosso dai preferiti",
-  "ott.favorite_update_failed": "Impossibile aggiornare i preferiti"
+  "ott.favorite_update_failed": "Impossibile aggiornare i preferiti",
+  "ott.home_network.title": "Casa e rete",
+  "ott.home_network.detail": "Apri l’app OTT Home installata separatamente",
+  "ott.home_network.busy": "È già in corso una richiesta di avvio di OTT Home",
+  "ott.home_network.opening": "Richiesta di avvio di OTT Home…",
+  "ott.home_network.requested": "Avvio di OTT Home richiesto; cambio di schermata non confermato",
+  "ott.home_network.rejected": "Avvio di OTT Home rifiutato; verifica che l’app complementare sia installata",
+  "ott.home_network.unavailable": "OTT Home non è disponibile nel contesto attuale"
 }

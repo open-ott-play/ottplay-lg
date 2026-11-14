@@ -49,5 +49,12 @@
   "ott.reminder_soon": "Начало через {minutes} мин.",
   "ott.favorite_added": "Добавлено в избранное",
   "ott.favorite_removed": "Удалено из избранного",
-  "ott.favorite_update_failed": "Не удалось обновить избранное"
+  "ott.favorite_update_failed": "Не удалось обновить избранное",
+  "ott.home_network.title": "Дом и сеть",
+  "ott.home_network.detail": "Открыть отдельно установленное приложение OTT Home",
+  "ott.home_network.busy": "Запрос на запуск OTT Home уже выполняется",
+  "ott.home_network.opening": "Запрашивается запуск OTT Home…",
+  "ott.home_network.requested": "Запуск OTT Home запрошен; смена экрана не подтверждена",
+  "ott.home_network.rejected": "Запуск OTT Home отклонён; проверьте, установлено ли дополнительное приложение",
+  "ott.home_network.unavailable": "OTT Home недоступен в текущем контексте"
 }
