@@ -190,6 +190,9 @@ impl ServiceOps for ClientIo {
             deadline,
             cancel,
         )?;
+        if !committed.accepted {
+            return Err(service::ServiceError::RevisionConflict);
+        }
         self.client.status(
             off,
             &committed.context.server_epoch,
@@ -205,6 +208,8 @@ struct Origin {
     client: Arc<Client>,
     capabilities: service::Capabilities,
     io: Arc<dyn ServiceOps>,
+    protected: Option<Value>,
+    installation: Option<String>,
 }
 const RECEIPTS: usize = 128;
 const EFFECTS: usize = 32;
@@ -258,6 +263,12 @@ struct Session {
     fence: Fence,
     lease_deadline: Option<Deadline>,
     admission_deadline: Option<Deadline>,
+    protected: Option<Value>,
+    installation: Option<String>,
+}
+struct StopCompletion {
+    native: service::NativeExpected,
+    coordinator: scene::StopCompletionPreview,
 }
 struct Pending {
     invocation: Option<Invocation>,
@@ -272,6 +283,9 @@ struct Pending {
     origin: Option<Origin>,
     sample: Option<task::time::ClockSample>,
     admission_deadline: Option<Deadline>,
+    output_budget_context: Option<wire::Context>,
+    recovery_context: Option<wire::Context>,
+    stop_completion: Option<StopCompletion>,
 }
 enum Kind {
     Create {
@@ -336,6 +350,61 @@ struct Cleanup {
     fence: Fence,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecoveryEffect {
+    Stop(ResolveTicket),
+    Focus(SceneId, SlotId),
+    Audio(SceneId, u64, Option<SlotId>),
+}
+impl RecoveryEffect {
+    fn capture(effect: &scene::Effect) -> Option<Self> {
+        match effect {
+            scene::Effect::Backend(scene::BackendIntent::Stop { ticket }) => {
+                Some(Self::Stop(*ticket))
+            }
+            scene::Effect::Backend(scene::BackendIntent::Focus { scene, slot }) => {
+                Some(Self::Focus(*scene, *slot))
+            }
+            scene::Effect::Backend(scene::BackendIntent::AudioOwner {
+                scene,
+                audio_revision,
+                owner,
+            }) => Some(Self::Audio(*scene, *audio_revision, *owner)),
+            _ => None,
+        }
+    }
+    fn scene(self) -> SceneId {
+        match self {
+            Self::Stop(ticket) => ticket.scene(),
+            Self::Focus(scene, _) | Self::Audio(scene, _, _) => scene,
+        }
+    }
+}
+enum AcceptedBudgetEffect {
+    Stop(ResolveTicket),
+    Layout,
+}
+struct AcceptedOutputBudget {
+    effect: AcceptedBudgetEffect,
+    expected: wire::Context,
+    deadline: Deadline,
+}
+impl AcceptedOutputBudget {
+    fn matches(&self, effect: &scene::Effect, current: &wire::Context) -> bool {
+        self.expected == *current
+            && match (&self.effect, effect) {
+                (
+                    AcceptedBudgetEffect::Stop(expected),
+                    scene::Effect::Backend(scene::BackendIntent::Stop { ticket }),
+                ) => expected == ticket,
+                (
+                    AcceptedBudgetEffect::Layout,
+                    scene::Effect::Backend(scene::BackendIntent::Layout { .. }),
+                ) => true,
+                _ => false,
+            }
+    }
+}
 pub(super) struct Driver {
     shutting_down: bool,
     retiring: bool,
@@ -358,7 +427,10 @@ pub(super) struct Driver {
     selected: [Option<Box<Joined>>; 9],
     serial: u64,
     output_offered: Option<String>,
+    accepted_output_budgets: VecDeque<AcceptedOutputBudget>,
     uncertain: bool,
+    recovery_only: bool,
+    recovery_effects: VecDeque<RecoveryEffect>,
 }
 impl Default for Driver {
     fn default() -> Self {
@@ -383,15 +455,313 @@ impl Default for Driver {
             selected: std::array::from_fn(|_| None),
             serial: 1,
             output_offered: None,
+            accepted_output_budgets: VecDeque::new(),
             uncertain: false,
+            recovery_only: false,
+            recovery_effects: VecDeque::new(),
         }
     }
 }
 impl Driver {
+    pub fn capability_markers(&self, runtime: &Runtime, app: &App) -> (Value, Value) {
+        let mut admission = json!({"version":1,"operations":["status"],"layouts":[],"max_slots":0,
+            "source_kinds":[],"audio_policies":[],"off_modes":[]});
+        let mut recovery_ops = vec!["status"];
+        let mut recovery_off = Vec::<&str>::new();
+        if self.recovery_available(runtime, app) {
+            let session = self.session.as_ref().unwrap();
+            if self
+                .inputs
+                .iter()
+                .enumerate()
+                .any(|(index, input)| input.is_some() && session.bindings[index].is_some())
+            {
+                recovery_ops.push("stop");
+            }
+            if session.bindings.iter().any(Option::is_some) {
+                recovery_ops.push("off");
+                recovery_off.push("close_only");
+            }
+        }
+        let recovery = json!({"version":1,"runtime":runtime.remote.runtime(),
+            "operations":recovery_ops,"off_modes":recovery_off});
+        let eligible = !self.shutting_down
+            && !self.retiring
+            && !self.recovery_only
+            && !self.uncertain
+            && !self.initial_audio_pending
+            && self.pending.is_none()
+            && self.cleanup.is_empty()
+            && runtime.multiview_effects.is_empty()
+            && app.running
+            && playback_allowed(app)
+            && runtime.loaded
+            && !runtime.persistence_uncertain
+            && runtime.play_work_allowed()
+            && input_policy::navigation(runtime).is_ok()
+            && matches!(
+                runtime.track_selection_kiosk(),
+                Ok(crate::app::ott_kiosk_policy::State::Off)
+            )
+            && runtime.multiview_connection.binding_current(
+                runtime.saved.settings.get("nativeMultiviewService"),
+                runtime.remote.persisted_device_id(),
+            )
+            && self
+                .session
+                .as_ref()
+                .is_none_or(|session| session.fence.current(runtime));
+        if !eligible {
+            return (admission, recovery);
+        }
+        let Some(qualified) = runtime.multiview_connection.qualified() else {
+            return (admission, recovery);
+        };
+        let caps = &qualified.capabilities;
+        let mut layouts = Vec::new();
+        let mut max_slots = 0u8;
+        // Use the SAME first matching profile and pure geometry preparation as
+        // dispatch. A later/larger profile cannot manufacture admission here.
+        let supported = |layout: wire::Layout| {
+            caps.output_profiles
+                .iter()
+                .find(|profile| {
+                    profile.max_inputs > 0
+                        && profile.geometry_modes.contains(
+                            &if matches!(layout, wire::Layout::Pip) {
+                                service::GeometryMode::Pip
+                            } else {
+                                service::GeometryMode::Disjoint
+                            },
+                        )
+                })
+                .is_some_and(|profile| {
+                    layout.slots() <= profile.max_inputs.min(caps.max_inputs).min(9)
+                        && geometry(layout, &profile.canvas).is_ok()
+                })
+        };
+        for layout in [
+            wire::Layout::Single,
+            wire::Layout::Pip,
+            wire::Layout::Grid4,
+            wire::Layout::Grid9,
+        ] {
+            if supported(layout) {
+                layouts.push(layout.name());
+                max_slots = max_slots.max(layout.slots());
+            }
+        }
+        for satellites in 0..9 {
+            let layout = wire::Layout::Perimeter { satellites };
+            if supported(layout) {
+                if !layouts.contains(&"perimeter") {
+                    layouts.push("perimeter");
+                }
+                max_slots = max_slots.max(layout.slots());
+            }
+        }
+        if max_slots == 0 {
+            return (admission, recovery);
+        }
+        let mut operations = vec!["status", "layout"];
+        let mut kinds = Vec::new();
+        for option in runtime.multiview.source_options() {
+            let kind: &str = option.kind.as_ref();
+            if matches!(kind, "live" | "vod" | "file") && !kinds.contains(&kind.to_owned()) {
+                kinds.push(kind.to_owned());
+            }
+        }
+        if !kinds.is_empty() {
+            operations.extend(["sources", "play"]);
+        }
+        let mut audio = Vec::<&str>::new();
+        if self.session.is_some() {
+            operations.extend(["focus", "audio"]);
+            audio.extend(["follows_focus", "muted"]);
+            if self.inputs.iter().any(Option::is_some) {
+                operations.push("stop");
+                audio.push("slot");
+            }
+        }
+        // Legacy promote/restore Off modes are not implemented by this driver.
+        // Only the separately versioned real close-only recovery is advertised.
+        admission = json!({"version":1,"operations":operations,"layouts":layouts,"max_slots":max_slots,
+            "source_kinds":kinds,"audio_policies":audio,"off_modes":[]});
+        (admission, recovery)
+    }
+    fn recovery_custody_current(&self, runtime: &Runtime, app: &App) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let fence = &session.fence;
+        fence.runtime == runtime.remote.runtime()
+            && fence.authority != 0
+            && fence.profiles != 0
+            && fence.authority == runtime.multiview_authority_epoch
+            && fence.profiles == runtime.profile_edit_epoch
+            && session.protected.as_ref() == runtime.saved.settings.get("nativeMultiviewService")
+            && session.installation.as_deref() == runtime.remote.persisted_device_id()
+            && session.installation.is_some()
+            && session.status.server_epoch == session.capabilities.server_epoch
+            && session.status.native_expected.runtime == fence.runtime
+            && runtime
+                .multiview
+                .scene_status(runtime)
+                .is_some_and(|scene| scene.scene == session.status.native_expected.expected.scene)
+            && app.running
+            && playback_allowed(app)
+            && runtime.loaded
+            && !runtime.persistence_uncertain
+            && runtime.play_work_allowed()
+            && input_policy::navigation(runtime).is_ok()
+            && matches!(
+                runtime.track_selection_kiosk(),
+                Ok(crate::app::ott_kiosk_policy::State::Off)
+            )
+            && self
+                .inputs
+                .iter()
+                .flatten()
+                .all(|input| input.current_for(runtime))
+    }
+    fn recovery_available(&self, runtime: &Runtime, app: &App) -> bool {
+        !self.shutting_down
+            && !self.retiring
+            && !self.uncertain
+            && !self.initial_audio_pending
+            && self.pending.is_none()
+            && self.cleanup.is_empty()
+            && self.recovery_effects.is_empty()
+            && runtime.multiview_effects.is_empty()
+            && self.recovery_custody_current(runtime, app)
+    }
+    fn dispatch_recovery(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        invocation: Invocation,
+        request: wire::Request,
+    ) -> Result<(), wire::Reason> {
+        if !self.recovery_available(runtime, app) {
+            return Err(wire::Reason::Unavailable);
+        }
+        match request.operation().clone() {
+            wire::Operation::Stop(slot) => {
+                let target = usize::from(slot.slot_id);
+                if self.inputs[target].is_none()
+                    || self.session.as_ref().unwrap().bindings[target].is_none()
+                {
+                    return Err(wire::Reason::SlotChanged);
+                }
+                let transition = runtime
+                    .multiview
+                    .close_slot(SlotId::new(slot.slot_id).ok_or(wire::Reason::InvalidRequest)?)
+                    .map_err(|_| wire::Reason::Busy)?;
+                self.recovery_only = true;
+                self.receipts.clear();
+                self.accepted_output_budgets.clear();
+                let keys = transition
+                    .effects
+                    .iter()
+                    .map(RecoveryEffect::capture)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(wire::Reason::Unsupported)?;
+                let ticket = keys
+                    .iter()
+                    .find_map(|effect| match effect {
+                        RecoveryEffect::Stop(ticket) if ticket.slot().index() == target => {
+                            Some(*ticket)
+                        }
+                        _ => None,
+                    })
+                    .ok_or(wire::Reason::Unsupported)?;
+                if keys.iter().any(|key| {
+                    key.scene() != ticket.scene()
+                        || match key {
+                            RecoveryEffect::Stop(other) => *other != ticket,
+                            RecoveryEffect::Focus(_, slot)
+                            | RecoveryEffect::Audio(_, _, Some(slot)) => {
+                                self.inputs[slot.index()].is_none()
+                            }
+                            RecoveryEffect::Audio(_, _, None) => false,
+                        }
+                }) {
+                    return Err(wire::Reason::Unsupported);
+                }
+                queue_effects(runtime, transition)?;
+                self.recovery_effects = keys.into();
+                Ok(())
+            }
+            wire::Operation::Off(wire::OffMode::CloseOnly) => {
+                let session = self.session.as_ref().unwrap();
+                let prior = session
+                    .bindings
+                    .iter()
+                    .flatten()
+                    .next()
+                    .cloned()
+                    .ok_or(wire::Reason::Unavailable)?;
+                let io = session.io.clone();
+                let fence = session.fence.clone();
+                self.origin = Some(Origin {
+                    client: session.client.clone(),
+                    protected: session.protected.clone(),
+                    installation: session.installation.clone(),
+                    capabilities: session.capabilities.clone(),
+                    io: io.clone(),
+                });
+                let id = service::RequestId::parse(&self.nonce(runtime)?)
+                    .map_err(|_| wire::Reason::Unavailable)?;
+                let end = Instant::now()
+                    + Duration::from_millis(
+                        invocation.deadline_ms.saturating_sub(runtime.now_ms()),
+                    )
+                    .min(BUDGET);
+                self.spawn(
+                    Some(invocation),
+                    Some(request),
+                    fence,
+                    Kind::Off,
+                    true,
+                    move |off, cancel| {
+                        io.control(
+                            off,
+                            prior,
+                            service::ControlOp::Off {},
+                            None,
+                            id,
+                            deadline(off, end),
+                            cancel,
+                        )
+                        .map(Reply::Status)
+                        .map_err(|_| wire::Reason::Unavailable)
+                    },
+                )?;
+                self.recovery_only = true;
+                self.receipts.clear();
+                self.accepted_output_budgets.clear();
+                self.pending.as_mut().unwrap().recovery_context = Some(context(runtime));
+                Ok(())
+            }
+            _ => Err(wire::Reason::Unsupported),
+        }
+    }
     fn origin_for(&self, runtime: &Runtime) -> Option<Origin> {
+        if !runtime.multiview_connection.binding_current(
+            runtime.saved.settings.get("nativeMultiviewService"),
+            runtime.remote.persisted_device_id(),
+        ) {
+            return None;
+        }
         runtime.multiview_connection.qualified().map(|q| Origin {
             client: q.client.clone(),
             capabilities: q.capabilities.clone(),
+            protected: runtime
+                .saved
+                .settings
+                .get("nativeMultiviewService")
+                .cloned(),
+            installation: runtime.remote.persisted_device_id().map(str::to_owned),
             io: Arc::new(ClientIo {
                 client: q.client.clone(),
                 capabilities: q.capabilities.clone(),
@@ -445,6 +815,31 @@ impl Driver {
             return reject(wire::Reason::RuntimeChanged);
         }
         if matches!(request.operation(), wire::Operation::Status) {
+            // A read may request bounded capability discovery only when no
+            // scene, input or cleanup owns the paired connection. Discovery
+            // does not create a scene or bypass normal source/output admission.
+            if self.session.is_none()
+                && self.pending.is_none()
+                && self.cleanup.is_empty()
+                && self.inputs.iter().all(Option::is_none)
+                && self.selected.iter().all(Option::is_none)
+                && self.admitted_picture.is_none()
+                && runtime.multiview.scene_status(runtime).is_none()
+                && !self.uncertain
+                && runtime.multiview_effects.is_empty()
+                && app.running
+                && playback_allowed(app)
+                && runtime.loaded
+                && !runtime.persistence_uncertain
+                && runtime.play_work_allowed()
+                && input_policy::navigation(runtime).is_ok()
+                && matches!(
+                    runtime.track_selection_kiosk(),
+                    Ok(crate::app::ott_kiosk_policy::State::Off)
+                )
+            {
+                runtime.multiview_connection.reprobe_unavailable();
+            }
             return request
                 .status_response(runtime.remote.runtime(), snapshot(runtime, self.audio_mode))
                 .ok();
@@ -467,6 +862,18 @@ impl Driver {
                 return reject(wire::Reason::SlotChanged);
             }
         }
+        if request.recovery() {
+            return match self.dispatch_recovery(runtime, app, invocation.clone(), request.clone()) {
+                Ok(()) if self.pending.is_some() => None,
+                Ok(()) => request
+                    .accepted(runtime.remote.runtime(), wire::Outcome::Requested)
+                    .ok(),
+                Err(reason) => reject(reason),
+            };
+        }
+        if self.recovery_only {
+            return reject(wire::Reason::Unavailable);
+        }
         match self.dispatch(runtime, app, invocation.clone(), request.clone()) {
             Ok(()) if self.pending.is_none() => request
                 .accepted(runtime.remote.runtime(), wire::Outcome::Requested)
@@ -474,6 +881,37 @@ impl Driver {
             Ok(()) => None,
             Err(reason) => request.rejected(runtime.remote.runtime(), reason).ok(),
         }
+    }
+    fn queue_explicit_output_effect(
+        &mut self,
+        runtime: &mut Runtime,
+        transition: scene::Transition,
+        admission: Option<Deadline>,
+    ) -> Result<(), wire::Reason> {
+        let effect = transition.effects.iter().find_map(|effect| match effect {
+            scene::Effect::Backend(scene::BackendIntent::Stop { ticket }) => {
+                Some(AcceptedBudgetEffect::Stop(*ticket))
+            }
+            scene::Effect::Backend(scene::BackendIntent::Layout { .. }) => {
+                Some(AcceptedBudgetEffect::Layout)
+            }
+            _ => None,
+        });
+        queue_effects(runtime, transition)?;
+        let expected = context(runtime);
+        self.accepted_output_budgets
+            .retain(|budget| budget.expected == expected);
+        if let (Some(effect), Some(deadline)) = (effect, admission) {
+            if self.accepted_output_budgets.len() < EFFECTS {
+                self.accepted_output_budgets
+                    .push_back(AcceptedOutputBudget {
+                        effect,
+                        expected,
+                        deadline,
+                    });
+            }
+        }
+        Ok(())
     }
     fn dispatch(
         &mut self,
@@ -494,6 +932,16 @@ impl Driver {
             Duration::from_millis(invocation.deadline_ms.saturating_sub(runtime.now_ms()))
                 .min(BUDGET);
         let end = Instant::now() + remaining;
+        // Capture this explicit authenticated invocation now. The exact same
+        // deadline travels to its effect ACK; completion never remints a budget.
+        let output_admission = self.clock_sample.map(|sample| {
+            sample.deadline_at_unix_ms(
+                sample
+                    .unix_ms()
+                    .saturating_add(remaining.as_millis().min(u128::from(u64::MAX)) as u64),
+            )
+        });
+
         match request.operation().clone() {
             wire::Operation::Layout(layout) => {
                 if self.session.is_some() {
@@ -505,7 +953,11 @@ impl Driver {
                         .multiview
                         .set_layout(data_layout(layout))
                         .map_err(|_| wire::Reason::Busy)?;
-                    return queue_effects(runtime, transition);
+                    return self.queue_explicit_output_effect(
+                        runtime,
+                        transition,
+                        output_admission,
+                    );
                 }
                 let origin = self.origin.clone().ok_or(wire::Reason::Unavailable)?;
                 let io = origin.io.clone();
@@ -757,7 +1209,7 @@ impl Driver {
                     .multiview
                     .close_slot(SlotId::new(slot.slot_id).ok_or(wire::Reason::InvalidRequest)?)
                     .map_err(|_| wire::Reason::Busy)?;
-                queue_effects(runtime, transition)
+                self.queue_explicit_output_effect(runtime, transition, output_admission)
             }
             wire::Operation::Off(_) => {
                 let session = self.session.as_ref().ok_or(wire::Reason::Unavailable)?;
@@ -837,13 +1289,42 @@ impl Driver {
             origin: self.origin.clone(),
             sample: self.clock_sample,
             admission_deadline,
+            output_budget_context: None,
+            recovery_context: None,
+            stop_completion: None,
         }));
         Ok(())
     }
     /// Called from the actual runtime frame owner. This method never starts a native decoder.
     pub fn tick(&mut self, runtime: &mut Runtime, app: &mut App) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.fence.current(runtime))
+            && !self.shutting_down
+            && !self.retiring
+            && !self.uncertain
+            && !self.initial_audio_pending
+            && self.cleanup.is_empty()
+            && runtime.multiview_effects.is_empty()
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| !pending.mutating && matches!(pending.kind, Kind::Poll))
+            && self.recovery_custody_current(runtime, app)
+        {
+            self.recovery_only = true;
+            self.receipts.clear();
+            self.accepted_output_budgets.clear();
+            if let Some(pending) = self.pending.as_mut() {
+                if pending.recovery_context.is_none() {
+                    pending.recovery_context = Some(context(runtime));
+                }
+            }
+        }
         if !self.shutting_down
             && !self.retiring
+            && !self.recovery_only
             && self.admitted_picture.as_ref().is_some_and(|identity| {
                 !super::multiview_output::admitted_route_current(runtime, app, identity)
             })
@@ -871,12 +1352,17 @@ impl Driver {
         });
         self.receipts
             .retain(|row| row.expires > runtime.now_ms() && row.fence.current(runtime));
-        let policy_revoked = self.session.is_some() && self.authorize_inputs(runtime, app).is_err();
+        let policy_revoked = self.session.is_some()
+            && if self.recovery_only {
+                !self.recovery_custody_current(runtime, app)
+            } else {
+                self.authorize_inputs(runtime, app).is_err()
+            };
         if policy_revoked
             || self
                 .session
                 .as_ref()
-                .is_some_and(|s| !s.fence.current(runtime))
+                .is_some_and(|s| !s.fence.current(runtime) && !self.recovery_only)
             || self
                 .inputs
                 .iter()
@@ -888,22 +1374,31 @@ impl Driver {
             self.tick_shutdown(runtime, app);
             return;
         }
+        if self.recovery_only && self.pending.is_none() && runtime.multiview_effects.is_empty() {
+            return;
+        }
+        let recovery_current = self.recovery_custody_current(runtime, app);
+        let recovery_context = context(runtime);
         let Some(pending) = self.pending.as_mut() else {
             if !self.cleanup.is_empty() {
                 self.cleanup_one();
             } else if self.drain_effect(runtime).is_err() {
                 self.uncertain = true;
-                if self.initial_audio_pending {
+                if self.initial_audio_pending || self.recovery_only {
                     self.retiring = true;
                     self.begin_retirement(runtime, app);
                 }
             }
-            if self.pending.is_none() && self.cleanup.is_empty() {
+            if !self.recovery_only && self.pending.is_none() && self.cleanup.is_empty() {
                 self.poll_service(runtime);
             }
             return;
         };
-        let valid = pending.fence.current(runtime)
+        let valid = (pending.fence.current(runtime) && !self.recovery_only
+            || pending
+                .recovery_context
+                .as_ref()
+                .is_some_and(|expected| recovery_current && *expected == recovery_context))
             && pending.invocation.as_ref().is_none_or(|inv| {
                 runtime.now_ms() < inv.deadline_ms && runtime.remote.invocation_is_current(inv)
             });
@@ -1094,6 +1589,8 @@ impl Driver {
                                 fence: pending.fence.clone(),
                                 lease_deadline,
                                 admission_deadline: pending.admission_deadline,
+                                protected: origin.protected,
+                                installation: origin.installation,
                             }));
                             if let Some(effect) = initial_audio
                                 .filter(|effect| runtime.multiview.effect_current(runtime, effect))
@@ -1121,6 +1618,8 @@ impl Driver {
                             Err(wire::Reason::Busy)
                         } else {
                             self.session = None;
+                            self.recovery_only = false;
+                            self.recovery_effects.clear();
                             self.initial_audio_pending = false;
                             self.inputs = std::array::from_fn(|_| None);
                             self.receipts.clear();
@@ -1177,6 +1676,11 @@ impl Driver {
                         Ok(None)
                     }
                     Kind::Effect(ack) => {
+                        let budget_current = pending
+                            .output_budget_context
+                            .as_ref()
+                            .is_some_and(|expected| expected == &context(runtime));
+                        let mut accepted_explicit = false;
                         match ack {
                             EffectAck::Audio {
                                 scene,
@@ -1206,26 +1710,70 @@ impl Driver {
                                             service::SlotState::Closed | service::SlotState::Empty
                                         )
                                     });
-                                if closed {
-                                    self.inputs[ticket.slot().index()] = None;
-                                    self.selected[ticket.slot().index()] = None;
-                                    let _ = runtime
+                                // A server ACK must echo our checked post-Stop prediction. Re-read
+                                // its pending ticket and whole scene revision before committing it.
+                                let matches_prediction = closed
+                                    && pending.stop_completion.as_ref().is_some_and(|predicted| {
+                                        status.native_expected == predicted.native
+                                            && runtime
+                                                .multiview
+                                                .preview_stop_completion(runtime, ticket)
+                                                .ok()
+                                                .as_ref()
+                                                == Some(&predicted.coordinator)
+                                    });
+                                let committed = matches_prediction
+                                    && runtime
                                         .multiview
-                                        .stop_completed(ticket, scene::StopResult::Stopped);
-                                } else {
-                                    self.uncertain = true;
+                                        .stop_completed(ticket, scene::StopResult::Stopped)
+                                        .is_ok();
+                                accepted_explicit = committed
+                                    && pending.stop_completion.as_ref().is_some_and(|predicted| {
+                                        native_expected(runtime, ticket.slot()).ok().as_ref()
+                                            == Some(&predicted.native)
+                                            && status.native_expected == predicted.native
+                                    });
+                                if !accepted_explicit {
+                                    // Mutation may already have occurred remotely or locally. Retain
+                                    // original source custody until the original client proves cleanup;
+                                    // never rewrite the ACK or roll the scene back to manufacture a match.
+                                    self.retiring = true;
+                                    self.begin_retirement(runtime, app);
+                                    if let Some(origin) = pending.origin.clone() {
+                                        self.enqueue_cleanup(Cleanup {
+                                            origin,
+                                            status,
+                                            fence: pending.fence.clone(),
+                                        });
+                                    } else {
+                                        self.uncertain = true;
+                                    }
+                                    self.finish(
+                                        runtime,
+                                        pending.invocation,
+                                        pending.request,
+                                        Err(wire::Reason::SourceChanged),
+                                    );
+                                    return;
                                 }
+                                self.inputs[ticket.slot().index()] = None;
+                                self.selected[ticket.slot().index()] = None;
                             }
                             EffectAck::Renew => {
                                 self.last_renew = Instant::now();
                                 self.output_offered = None;
                             }
                             EffectAck::Layout => {
+                                accepted_explicit = true;
                                 self.output_offered = None;
                             }
                             EffectAck::Focus => {}
                         }
                         if let Some(session) = self.session.as_mut() {
+                            if accepted_explicit && budget_current && !self.uncertain {
+                                session.admission_deadline =
+                                    pending.admission_deadline.or(session.admission_deadline);
+                            }
                             session.lease_deadline = output_deadline(pending.sample, &status);
                             session.bindings = staged.clone().unwrap();
                             session.status = status;
@@ -1591,6 +2139,9 @@ impl Driver {
             return Ok(());
         };
         self.audio_mode = coordinator_audio_policy(runtime)?;
+        if self.recovery_only && runtime.multiview_effects.is_empty() {
+            return Ok(());
+        }
         let effect = runtime.multiview_effects.pop_front();
         if let Some(scene::Effect::CancelResolve {
             ticket,
@@ -1604,8 +2155,37 @@ impl Driver {
             .as_ref()
             .is_some_and(|effect| !runtime.multiview.effect_current(runtime, effect))
         {
+            if self.recovery_only {
+                return Err(wire::Reason::SlotChanged);
+            }
             return Ok(());
         }
+        let current = context(runtime);
+        self.accepted_output_budgets
+            .retain(|budget| budget.expected == current);
+        let explicit_budget = effect
+            .as_ref()
+            .and_then(|effect| {
+                self.accepted_output_budgets
+                    .iter()
+                    .position(|budget| budget.matches(effect, &current))
+            })
+            .and_then(|index| self.accepted_output_budgets.remove(index));
+        let recovery_effect = if self.recovery_only {
+            let key = effect
+                .as_ref()
+                .and_then(RecoveryEffect::capture)
+                .ok_or(wire::Reason::Unsupported)?;
+            let index = self
+                .recovery_effects
+                .iter()
+                .position(|owned| *owned == key)
+                .ok_or(wire::Reason::Unsupported)?;
+            self.recovery_effects.remove(index);
+            true
+        } else {
+            false
+        };
         let (slot, op, ack) = match effect {
             Some(scene::Effect::Backend(scene::BackendIntent::Focus { slot, .. })) => {
                 (slot, service::ControlOp::Focus {}, EffectAck::Focus)
@@ -1656,11 +2236,37 @@ impl Driver {
             None => return Ok(()),
         };
         let context = binding(runtime, session, slot)?;
+        let stop_completion = if let EffectAck::Stop(ticket) = &ack {
+            let coordinator = runtime
+                .multiview
+                .preview_stop_completion(runtime, *ticket)
+                .map_err(|error| match error {
+                    scene::Error::Scene(plx_data::ott::multiview::Error::RevisionExhausted) => {
+                        wire::Reason::LimitExceeded
+                    }
+                    _ => wire::Reason::SlotChanged,
+                })?;
+            let mut native = native_expected(runtime, slot)?;
+            native.slot_generation = coordinator.slot_generation.clone();
+            native.source_revision = coordinator.source_revision.clone();
+            Some(StopCompletion {
+                native,
+                coordinator,
+            })
+        } else {
+            None
+        };
         let next_native = match op {
+            service::ControlOp::Stop {} => Some(
+                stop_completion
+                    .as_ref()
+                    .ok_or(wire::Reason::SlotChanged)?
+                    .native
+                    .clone(),
+            ),
             service::ControlOp::Focus {}
             | service::ControlOp::Audio { .. }
-            | service::ControlOp::Layout { .. }
-            | service::ControlOp::Stop {} => Some(native_expected(runtime, slot)?),
+            | service::ControlOp::Layout { .. } => Some(native_expected(runtime, slot)?),
             _ => None,
         };
         let io = session.io.clone();
@@ -1669,6 +2275,8 @@ impl Driver {
             client: session.client.clone(),
             capabilities: session.capabilities.clone(),
             io: session.io.clone(),
+            protected: session.protected.clone(),
+            installation: session.installation.clone(),
         });
         let budget = if self.initial_audio_pending {
             session
@@ -1708,9 +2316,27 @@ impl Driver {
                 .map(Reply::Status)
                 .map_err(|_| wire::Reason::Unavailable)
             },
-        )
+        )?;
+        self.pending
+            .as_mut()
+            .ok_or(wire::Reason::Unavailable)?
+            .stop_completion = stop_completion;
+        if let (Some(pending), Some(budget)) = (self.pending.as_mut(), explicit_budget) {
+            pending.admission_deadline = Some(budget.deadline);
+            pending.output_budget_context = Some(budget.expected);
+        }
+        if recovery_effect {
+            let pending = self.pending.as_mut().ok_or(wire::Reason::Unavailable)?;
+            pending.recovery_context = Some(current);
+            pending.admission_deadline = None;
+            pending.output_budget_context = None;
+        }
+        Ok(())
     }
     fn poll_service(&mut self, runtime: &Runtime) {
+        if self.recovery_only {
+            return;
+        }
         if self.last_poll.elapsed() < Duration::from_millis(500) {
             return;
         }
@@ -1733,6 +2359,8 @@ impl Driver {
             client: session.client.clone(),
             capabilities: session.capabilities.clone(),
             io: session.io.clone(),
+            protected: session.protected.clone(),
+            installation: session.installation.clone(),
         });
         self.last_poll = Instant::now();
         let end = Instant::now() + Duration::from_secs(5);
@@ -1860,6 +2488,8 @@ impl Driver {
         self.begin_retirement(runtime, app);
     }
     fn begin_retirement(&mut self, runtime: &mut Runtime, app: &mut App) {
+        self.recovery_effects.clear();
+        self.accepted_output_budgets.clear();
         self.receipts.clear();
         self.output_offered = None;
         runtime.multiview_effects.clear();
@@ -1892,6 +2522,8 @@ impl Driver {
                     client: session.client,
                     capabilities: session.capabilities,
                     io: session.io,
+                    protected: session.protected,
+                    installation: session.installation,
                 },
                 status: session.status,
                 fence: session.fence,
@@ -2015,7 +2647,7 @@ impl Driver {
         &mut self,
         runtime: &Runtime,
     ) -> Option<super::multiview_output::ReadyOutput> {
-        if self.shutting_down || self.retiring || self.initial_audio_pending {
+        if self.shutting_down || self.retiring || self.recovery_only || self.initial_audio_pending {
             return None;
         }
         let session = self.session.as_ref()?;
@@ -2043,6 +2675,9 @@ impl Driver {
         })
     }
     fn authorize_inputs(&self, runtime: &mut Runtime, app: &App) -> Result<(), &'static str> {
+        if self.recovery_only {
+            return Err("Multiview is retained for cleanup only");
+        }
         let session = self
             .session
             .as_ref()
@@ -2167,6 +2802,7 @@ impl Driver {
         };
         !self.shutting_down
             && !self.retiring
+            && !self.recovery_only
             && !self.uncertain
             && session.fence.current(runtime)
             && self.inputs_current(runtime)
@@ -2196,7 +2832,8 @@ impl Driver {
     }
     pub fn admitted_geometry(&self, runtime: &Runtime) -> Option<&service::Geometry> {
         let session = self.session.as_ref()?;
-        (!self.initial_audio_pending
+        (!self.recovery_only
+            && !self.initial_audio_pending
             && session.fence.current(runtime)
             && session.status.state == service::SessionState::Ready
             && self.inputs_current(runtime))
@@ -2212,6 +2849,7 @@ impl Driver {
     ) -> bool {
         !self.shutting_down
             && !self.retiring
+            && !self.recovery_only
             && !self.initial_audio_pending
             && self.session.as_ref().is_some_and(|session| {
                 session.fence.current(runtime)
