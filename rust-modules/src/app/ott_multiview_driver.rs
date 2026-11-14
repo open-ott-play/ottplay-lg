@@ -1622,6 +1622,13 @@ impl Driver {
                             self.recovery_effects.clear();
                             self.initial_audio_pending = false;
                             self.inputs = std::array::from_fn(|_| None);
+                            self.selected = std::array::from_fn(|_| None);
+                            if let Some(identity) = self.admitted_picture.take() {
+                                if runtime.multiview_picture.as_ref() == Some(&identity) {
+                                    runtime.multiview_picture = None;
+                                    app.bridge.publish_multiview_offer(None);
+                                }
+                            }
                             self.receipts.clear();
                             self.output_offered = None;
                             settle_closed_scene(runtime, &status);
@@ -2583,6 +2590,7 @@ impl Driver {
                 self.uncertain = false;
                 self.initial_audio_pending = false;
                 self.retiring = false;
+                self.recovery_only = false;
                 self.admitted_picture = None;
             }
             Ok(Reply::Status(_)) if cleanup => self.uncertain = true,

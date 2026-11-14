@@ -281,7 +281,7 @@ impl service::Transport for FixtureTransport {
         };
         let hold = if body["op"]["name"] == "play" {
             state.hold_play_reply.clone()
-        } else if matches!(body["op"]["name"].as_str(), Some("stop" | "layout")) {
+        } else if matches!(body["op"]["name"].as_str(), Some("stop" | "layout" | "off")) {
             state.accepted_budget_hold_control.clone()
         } else {
             None
@@ -2929,4 +2929,356 @@ fn stop_rejected_ack_never_completes_and_duplicate_retired_ticket_never_sends_io
         .multiview
         .preview_stop_completion(&runtime, ticket)
         .is_err());
+}
+
+// Review regressions cross actual original-service cleanup and the output
+// adapter's native admission gate. Only inspection and service IO are synthetic.
+fn review_qualify(runtime: &mut Runtime) {
+    let protected = runtime
+        .saved
+        .settings
+        .get("nativeMultiviewService")
+        .cloned()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        runtime.multiview_connection.tick(
+            true,
+            true,
+            Some(&protected),
+            runtime.remote.persisted_device_id(),
+        );
+        if runtime.multiview_connection.qualified().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "fresh real capability client must settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+fn review_nonclosed_off(op: &str, status: &mut service::StatusResponse) {
+    if op == "off" {
+        status.state = service::SessionState::Ready;
+    } else {
+        accepted_budget_rotate_control(op, status);
+    }
+}
+#[test]
+fn review_confirmed_recovery_retirement_allows_fresh_layout_but_unconfirmed_stays_fenced() {
+    let _serial = plx_base::testlock::serial();
+    for confirmed in [false, true] {
+        let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+        let old_scene = context(&runtime).scene;
+        if !confirmed {
+            state.lock().unwrap().accepted_budget_post_control = Some(review_nonclosed_off);
+        }
+        app.running = false;
+        driver.tick(&mut runtime, &mut app);
+        drive(&mut driver, &mut runtime, &mut app);
+        app.running = true;
+        review_qualify(&mut runtime);
+        let before = state.lock().unwrap().paths.len();
+        let mut p = parameters(&runtime, "layout");
+        p["layout"] = json!("grid4");
+        let request = invocation(&mut runtime, 6100 + u64::from(confirmed), p);
+        let result = driver.command(&mut runtime, &app, &request);
+        if !confirmed {
+            assert_eq!(result.unwrap()["status"], "rejected");
+            assert!(driver.retiring || driver.uncertain);
+            assert!(!driver.shutdown_confirmed());
+            assert!(driver.inputs.iter().any(Option::is_some));
+            assert_eq!(
+                state.lock().unwrap().paths.len(),
+                before,
+                "unconfirmed cleanup cannot create a new scene"
+            );
+            let generation = runtime.multiview_connection.generation();
+            let status = invocation(&mut runtime, 6110, json!({"version":1,"op":"status"}));
+            let _ = driver.command(&mut runtime, &app, &status);
+            assert_eq!(
+                runtime.multiview_connection.generation(),
+                generation,
+                "unconfirmed custody cannot reprobe"
+            );
+        } else {
+            assert!(
+                result.is_none(),
+                "confirmed original Closed must release the recovery-only admission fence"
+            );
+            drive(&mut driver, &mut runtime, &mut app);
+            assert_eq!(
+                runtime
+                    .remote
+                    .response_for_id_for_test(&request.id)
+                    .unwrap()["status"],
+                "ok"
+            );
+            assert!(driver.session.is_some());
+            assert!(!driver.recovery_only && !driver.retiring);
+            assert_ne!(context(&runtime).scene, old_scene);
+            assert!(state.lock().unwrap().paths[before..]
+                .iter()
+                .any(|p| p.ends_with("/sessions")));
+        }
+    }
+}
+
+type ReviewJobs =
+    Arc<Mutex<std::collections::VecDeque<(Box<dyn FnOnce(&OffFrame) + Send>, Arc<AtomicBool>)>>>;
+struct ReviewDone(Arc<AtomicBool>);
+impl super::super::multiview_connection::Retirement for ReviewDone {
+    fn retired(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+struct ReviewLauncher(ReviewJobs);
+impl super::super::multiview_connection::Launcher for ReviewLauncher {
+    fn spawn_io(
+        &mut self,
+        work: Box<dyn FnOnce(&OffFrame) + Send>,
+    ) -> Option<Box<dyn super::super::multiview_connection::Retirement>> {
+        let done = Arc::new(AtomicBool::new(false));
+        self.0.lock().unwrap().push_back((work, done.clone()));
+        Some(Box::new(ReviewDone(done)))
+    }
+}
+fn review_media() -> plx_media::ff::inspect::MediaInfo {
+    plx_media::ff::inspect::MediaInfo {
+        resolved_source: None,
+        hls_playback: None,
+        tracks: Default::default(),
+        video_codec: "h264".into(),
+        audio_codec: "aac".into(),
+        width: 320,
+        height: 180,
+        fps: 10.0,
+        duration_ns: 0,
+        audio_channels: 2,
+        audio_sample_rate: 48_000,
+        audio_bit_depth: 16,
+        dovi: plx_data::metadata::Dovi::NONE,
+    }
+}
+struct ReviewInspector;
+impl super::super::multiview_output::Inspector for ReviewInspector {
+    fn inspect(
+        &self,
+        worker: &OffFrame,
+        source: &plx_media::ff::ExternalSource,
+        deadline: Deadline,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<plx_media::ff::inspect::MediaInfo, &'static str> {
+        assert!(!cancelled.load(Ordering::Acquire) && !deadline.expired(worker));
+        assert!(matches!(source, plx_media::ff::ExternalSource::Hls(url)
+            if url.starts_with("https://service.invalid/multiview/v1/media/") && !url.contains("fixture-bearer")));
+        Ok(review_media())
+    }
+}
+struct ReviewPictureRig {
+    driver: Driver,
+    app: Box<App>,
+    runtime: Box<Runtime>,
+    state: Arc<Mutex<FixtureState>>,
+}
+impl Drop for ReviewPictureRig {
+    fn drop(&mut self) {
+        plx_media::player::SHARED
+            .duration_ns
+            .store(0, Ordering::Release);
+        plx_media::player::stop_bufferfeed(
+            &mut self.app.player.session,
+            &mut self.app.adapters.player,
+        );
+        plx_media::player::TX.reset();
+        route::reset_player_control_for_test(&self.app.player.session);
+        assert!(!self.app.adapters.player.release_has_queued_start());
+        assert!(!self.app.adapters.player.is_live());
+    }
+}
+fn review_admitted_picture() -> ReviewPictureRig {
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    // Renew the expired fixture budget only through a real explicit Layout ACK.
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 6200, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &request).unwrap()["status"],
+        "ok"
+    );
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    let jobs: ReviewJobs = Default::default();
+    runtime.multiview_output = super::super::multiview_output::State::with_io(
+        Arc::new(ReviewInspector),
+        Box::new(ReviewLauncher(jobs.clone())),
+    );
+    let proof = driver
+        .take_ready_output(&runtime)
+        .expect("actual ready service output");
+    runtime.multiview_driver = driver;
+    super::super::multiview_output::offer(&mut runtime, &mut app, proof).unwrap();
+    super::super::multiview_output::tick(&mut runtime, &mut app);
+    loop {
+        let Some((work, done)) = jobs.lock().unwrap().pop_front() else {
+            break;
+        };
+        work(&OffFrame::for_test());
+        done.store(true, Ordering::Release);
+    }
+    app.adapters.player.begin_release_for_test(Duration::ZERO);
+    super::super::multiview_output::tick(&mut runtime, &mut app);
+    let driver = std::mem::take(&mut runtime.multiview_driver);
+    let identity = route::playback_identity(&app.player.session)
+        .expect("real deferred native admission identity");
+    assert_eq!(runtime.multiview_picture.as_ref(), Some(&identity));
+    assert_eq!(driver.admitted_picture.as_ref(), Some(&identity));
+    assert_eq!(runtime.multiview_output.status, "admitted");
+    ReviewPictureRig {
+        driver,
+        app: Box::new(app),
+        runtime: Box::new(runtime),
+        state,
+    }
+}
+fn review_output_frame(rig: &mut ReviewPictureRig) {
+    rig.runtime.multiview_driver = std::mem::take(&mut rig.driver);
+    super::super::multiview_output::tick(&mut rig.runtime, &mut rig.app);
+    rig.driver = std::mem::take(&mut rig.runtime.multiview_driver);
+}
+#[test]
+fn review_confirmed_recovery_off_retires_only_owned_picture_and_allows_explicit_reprobe() {
+    let _serial = plx_base::testlock::serial();
+    for foreign in [false, true] {
+        let mut rig = review_admitted_picture();
+        let owned = rig.driver.admitted_picture.clone().unwrap();
+        rig.runtime.multiview_connection.refresh();
+        rig.driver.tick(&mut rig.runtime, &mut rig.app);
+        assert!(rig.driver.recovery_only);
+        let hold = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+        rig.state.lock().unwrap().accepted_budget_hold_control = Some(hold.clone());
+        let mut p = parameters(&rig.runtime, "off");
+        p["mode"] = json!("close_only");
+        p["recovery_version"] = json!(1);
+        let request = invocation(&mut rig.runtime, 6210, p);
+        assert!(rig
+            .driver
+            .command(&mut rig.runtime, &rig.app, &request)
+            .is_none());
+        let until = Instant::now() + Duration::from_secs(5);
+        while !hold.0.load(Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            rig.driver.admitted_picture.as_ref(),
+            Some(&owned),
+            "unconfirmed Off cannot retire picture custody"
+        );
+        assert!(rig.driver.selected.iter().any(Option::is_some));
+        let before = rig.runtime.multiview_connection.generation();
+        let status = invocation(&mut rig.runtime, 6211, json!({"version":1,"op":"status"}));
+        assert!(rig
+            .driver
+            .command(&mut rig.runtime, &rig.app, &status)
+            .is_some());
+        assert_eq!(
+            rig.runtime.multiview_connection.generation(),
+            before,
+            "pending Off cannot reprobe"
+        );
+        let foreign_identity = if foreign {
+            crate::app::playback::replace_player_in_place(
+                &mut rig.app.player,
+                &mut rig.app.adapters.player,
+                &mut rig.app.repause_at,
+                &mut rig.app.pages,
+            );
+            route::request_external_source(
+                &mut rig.app.player.session,
+                &review_media(),
+                plx_media::ff::ExternalSource::Hls("https://successor.invalid/new.m3u8".into()),
+                "Ordinary successor",
+                "",
+                crate::app::playback::start_caps(),
+            )
+            .unwrap();
+            let identity = route::playback_identity(&rig.app.player.session).unwrap();
+            assert_ne!(identity, owned);
+            rig.runtime.multiview_picture = Some(identity.clone());
+            Some(identity)
+        } else {
+            None
+        };
+        hold.1.store(true, Ordering::Release);
+        drive(&mut rig.driver, &mut rig.runtime, &mut rig.app);
+        review_output_frame(&mut rig); // Real Runtime order: Driver, then output owner.
+        rig.driver.tick(&mut rig.runtime, &mut rig.app); // Next frame must not enter taskless retirement.
+        assert!(!rig.driver.retiring && !rig.driver.recovery_only);
+        assert!(rig.driver.admitted_picture.is_none());
+        assert!(
+            rig.driver.selected.iter().all(Option::is_none),
+            "closed original scene releases every selected source receipt"
+        );
+        assert!(rig.driver.inputs.iter().all(Option::is_none));
+        if let Some(identity) = foreign_identity {
+            assert_eq!(rig.runtime.multiview_picture.as_ref(), Some(&identity));
+            assert!(route::playback_identity_matches(
+                &rig.app.player.session,
+                &identity
+            ));
+            assert!(
+                route::has_url(&rig.app.player.session),
+                "original close must not stop a foreign successor"
+            );
+            continue;
+        }
+        assert!(rig.runtime.multiview_picture.is_none());
+        let mut zero = capabilities();
+        zero.max_inputs = 0;
+        zero.output_profiles.clear();
+        rig.state.lock().unwrap().capabilities = Some(zero);
+        review_qualify(&mut rig.runtime);
+        assert_eq!(
+            rig.runtime
+                .multiview_connection
+                .qualified()
+                .unwrap()
+                .capabilities
+                .max_inputs,
+            0
+        );
+        let before = rig.runtime.multiview_connection.generation();
+        rig.state.lock().unwrap().capabilities = Some(capabilities());
+        let until = Instant::now() + Duration::from_secs(35);
+        let mut id = 6300;
+        while rig.runtime.multiview_connection.generation() == before {
+            assert!(
+                Instant::now() < until,
+                "eligible Status must trigger the real bounded rediscovery after cooldown"
+            );
+            let status = invocation(&mut rig.runtime, id, json!({"version":1,"op":"status"}));
+            id += 1;
+            assert!(rig
+                .driver
+                .command(&mut rig.runtime, &rig.app, &status)
+                .is_some());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        review_qualify(&mut rig.runtime);
+        let request = layout(
+            &mut rig.driver,
+            &mut rig.runtime,
+            &mut rig.app,
+            9000,
+            "grid4",
+        );
+        assert_eq!(
+            rig.runtime
+                .remote
+                .response_for_id_for_test(&request.id)
+                .unwrap()["status"],
+            "ok"
+        );
+    }
 }
