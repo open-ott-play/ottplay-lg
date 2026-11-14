@@ -675,6 +675,7 @@ fn hud_model(
     plx_appkit::player_hud::model::HudModel {
         wall_now_s,
         video_raster: plx_media::player::video_raster(),
+        measured_media_bps: plx_media::player::measured_media_bps(),
         osd_opacity: Default::default(),
         permanent_clock: Default::default(),
         paused: plx_media::player::TX.paused.load(Relaxed),

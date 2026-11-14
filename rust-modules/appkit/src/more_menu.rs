@@ -236,19 +236,23 @@ impl TrackMenuAvailability {
 
     pub fn for_playback(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::MetadataView<'_>) -> Self {
         use plx_media::{ff::inspect::TrackKind, route::{self, TrackAvailability}};
-        // Match the track panel's owner precedence and available HLS candidates;
-        // ordinary external playback must not borrow retained Plex metadata.
-        if let Some(hls) = route::external_hls(ps) {
-            return Self::from_counts(hls.rows().count(), hls.subtitle_rows().count());
-        }
-        if let Some(external) = route::external_tracks(ps) {
+        let embedded_counts = |external: &route::ExternalTracks| {
             let inventory = external.inventory();
             let audio = inventory.audio.iter().filter(|track|
                 external.availability(TrackKind::Audio, track.ordinal) == TrackAvailability::Supported).count();
             let subtitles = inventory.subtitles.iter().filter(|track|
-                external.availability(TrackKind::Subtitle, track.ordinal) == TrackAvailability::Supported).count()
-                + external.local_subtitles().len();
-            return Self::from_counts(audio, subtitles);
+                external.availability(TrackKind::Subtitle, track.ordinal) == TrackAvailability::Supported).count();
+            (audio, subtitles)
+        };
+        // Match the track panel's owner precedence and available HLS candidates;
+        // ordinary external playback must not borrow retained Plex metadata.
+        if let Some(hls) = route::hls_track_catalog(ps) {
+            let (audio, subtitles) = hls.embedded_tracks().map_or((0, 0), embedded_counts);
+            return Self::from_counts(hls.rows().len() + audio, hls.subtitle_rows().len() + subtitles);
+        }
+        if let Some(external) = route::external_tracks(ps) {
+            let (audio, subtitles) = embedded_counts(external);
+            return Self::from_counts(audio, subtitles + external.local_subtitles().len());
         }
         let Some(item) = meta.playing().filter(|item|
             route::playback_request_identity(ps) == Some((item.sid, item.rk.as_str()))) else {

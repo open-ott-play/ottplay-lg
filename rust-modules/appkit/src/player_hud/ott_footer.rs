@@ -4,7 +4,6 @@ use super::{Busy, TransportMark};
 use plx_data::metadata::{NowPlaying, OttNowPlaying};
 use plx_machine::machine::Measure;
 use plx_ui::text_view::TextView;
-use plx_ui::hstack::{Align, HStack, Item};
 use plx_ui::label::HAlign;
 use plx_ui::{theme, Painter, Rect};
 
@@ -32,6 +31,8 @@ pub(super) struct ClockLabels {
     wall: String,
     raster: String,
     raster_key: (i32, i32),
+    measured_media_bps: Option<u64>,
+    media_rate: String,
     technical: String,
     end_key: Option<(Option<i64>, Option<i64>)>,
     remaining: String,
@@ -80,8 +81,25 @@ impl ClockLabels {
         self.raster = if raster == (0, 0) { String::new() } else { format!("{}×{}", raster.0, raster.1) };
         self.refresh_technical();
     }
+    /// Only the owner's observed media sample is admitted here. No manifest or
+    /// network estimate is substituted when that sample is unknown/reset.
+    pub(super) fn refresh_media_rate(&mut self, measured_media_bps: Option<u64>) {
+        let measured_media_bps = measured_media_bps.filter(|bps| *bps > 0);
+        if self.measured_media_bps == measured_media_bps { return; }
+        self.measured_media_bps = measured_media_bps;
+        self.media_rate = measured_media_bps.map(|bps| {
+            // Tauri updateCoreVideoInfo: Math.round(mbps * 100) / 100,
+            // then JavaScript's decimal string (without trailing zeroes).
+            let hundredths = (u128::from(bps) + 5_000) / 10_000;
+            let (whole, fraction) = (hundredths / 100, hundredths % 100);
+            if fraction == 0 { format!("{whole} Mbps") }
+            else if fraction % 10 == 0 { format!("{whole}.{} Mbps", fraction / 10) }
+            else { format!("{whole}.{fraction:02} Mbps") }
+        }).unwrap_or_default();
+        self.refresh_technical();
+    }
     fn refresh_technical(&mut self) {
-        self.technical = [&self.wall, &self.raster].into_iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join(" · ");
+        self.technical = [&self.wall, &self.raster, &self.media_rate].into_iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join(" · ");
     }
     pub(super) fn technical(&self) -> &str { &self.technical }
     /// Match Classic's minute columns, using only the admitted guide or the
@@ -211,8 +229,8 @@ struct ClassicInfo<'a> {
 fn classic_info<'a>(playing: &'a NowPlaying, info: &'a OttNowPlaying,
     clocks: &'a ClockLabels, wall_now_s: Option<i64>) -> ClassicInfo<'a> {
     let mut rows = lines(playing, info, clocks);
-    rows[0].size = theme::size::HEADLINE; rows[0].bold = true;
-    rows[1].bold = false; rows[2].size = theme::size::BODY;
+    for row in &mut rows { row.size = super::classic::CLASSIC_FOOTER_SIZE; }
+    rows[0].bold = true; rows[1].bold = false;
     let Some(live) = &info.live else { return ClassicInfo { lines: rows, ordinal: None }; };
     let (current, next) = live.guide.as_ref().map(|guide|
         guide.at(wall_now_s.unwrap_or(guide.now_s))).unwrap_or((None, None));
@@ -230,32 +248,33 @@ struct ClassicBand {
     ordinal: Rect,
     ground: Rect,
 }
-fn classic_band(info: &ClassicInfo<'_>, clocks: &ClockLabels,
+fn classic_band(info: &ClassicInfo<'_>, _clocks: &ClockLabels,
     layout: &super::classic::OttClassicLayout, measure: &dyn Measure) -> ClassicBand {
-    let gap = theme::space::MD;
-    let heading_size = info.lines[0].size;
-    let ordinal_width = info.ordinal.map(|ordinal| measure.width_str(&ordinal.to_string(), heading_size, true)).unwrap_or(0.0);
+    let digit = super::classic::classic_digit_width(measure);
+    let ordinal_width = digit * 8.0;
     let ordinal_x = layout.heading.x;
-    let x = ordinal_x + if ordinal_width > 0.0 { ordinal_width + gap } else { 0.0 };
-    let width = (layout.heading.x + layout.heading.w - x).max(0.0);
-    let wall_w = measure.width_str(&clocks.technical, theme::size::BODY, false).min(width * 0.4);
-    let mut heading = layout.heading; heading.x = x; heading.w = width;
-    let wall = Rect::new(x + width - wall_w, heading.y, wall_w, heading.h);
-    heading.w = (width - if wall_w > 0.0 { wall_w + gap } else { 0.0 }).max(0.0);
+    let mut heading = layout.heading;
+    // Keep the channel-name origin fixed when loading suppresses its ordinal.
+    heading.x += ordinal_width;
+    heading.w = (heading.w - ordinal_width).max(0.0);
+    let wall = layout.technical;
     let rows = [heading, layout.programme_rows[0], layout.programme_rows[1]];
-    let clock_width = info.lines.iter().skip(1).map(|line| measure.width_str(line.clock, line.size, false))
-        .fold(0.0, f32::max).min(layout.programme_rows[0].w * 0.4);
-    let end_width = info.lines.iter().skip(1).map(|line| measure.width_str(line.end, line.size, false))
-        .fold(0.0, f32::max).min(layout.programme_rows[0].w * 0.4);
+    let natural_clock = super::classic::classic_clock_width(measure);
+    let clock_padding = measure.font_scale().points(super::classic::CLASSIC_FOOTER_SIZE as f32 * 0.5);
+    let actual_clock = info.lines.iter().skip(1)
+        .map(|line| measure.width_str(line.clock, line.size, false) + clock_padding)
+        .fold(natural_clock, f32::max);
+    let actual_end = info.lines.iter().skip(1)
+        .map(|line| measure.width_str(line.end, line.size, false))
+        .fold(natural_clock, f32::max);
     let programmes = layout.programme_rows.map(|frame| {
-        let mut items = [if clock_width > 0.0 { Item::new(clock_width) } else { Item::absent() },
-            Item::new(0.0), if end_width > 0.0 { Item::new(end_width) } else { Item::absent() }];
-        let budget = HStack::new(&items, gap, Align::Leading(frame.x)).width();
-        items[1] = Item::new((frame.w - budget).max(0.0));
-        let stack = HStack::new(&items, gap, Align::Leading(frame.x));
-        let mut cells = [Rect::new(frame.x, frame.y, 0.0, frame.h); 3];
-        for span in stack.placed() { cells[span.i] = Rect::new(span.x, frame.y, span.w, frame.h); }
-        cells
+        let gap = digit.max(8.0);
+        let clock = actual_clock.min(frame.w * 0.4);
+        let end = actual_end.min(frame.w * 0.4);
+        let padding = clock_padding;
+        [Rect::new(frame.x, frame.y, (clock - padding).max(0.0), frame.h),
+            Rect::new(frame.x + clock, frame.y, (frame.w - clock - end - gap).max(0.0), frame.h),
+            Rect::new(frame.x + frame.w - end, frame.y, end, frame.h)]
     });
     let ordinal = Rect::new(ordinal_x, heading.y, ordinal_width, heading.h);
     ClassicBand { rows, programmes, wall, art: layout.art, ordinal, ground: layout.panel }
@@ -291,10 +310,10 @@ pub(super) fn draw_classic(
         Some(info) => classic_info(playing, info, clocks, wall_now_s),
         None => ClassicInfo {
             lines: [
-                Line { title: "", clock: "", end: "", size: theme::size::HEADLINE, bold: true },
+                Line { title: "", clock: "", end: "", size: super::classic::CLASSIC_FOOTER_SIZE, bold: true },
                 Line { title: playing.programme_title(), clock: "", end: &clocks.remaining,
-                    size: theme::size::BODY, bold: false },
-                Line { title: "", clock: "", end: "", size: theme::size::BODY, bold: false },
+                    size: super::classic::CLASSIC_FOOTER_SIZE, bold: false },
+                Line { title: "", clock: "", end: "", size: super::classic::CLASSIC_FOOTER_SIZE, bold: false },
             ],
             ordinal: None,
         },
@@ -314,8 +333,21 @@ pub(super) fn draw_classic(
         TextView::new(&ordinal.to_string(), content.lines[0].size, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
             .bold().max_lines(1).with_measure(measure).draw(painter, band.ordinal);
     }
-    TextView::new(&clocks.technical, theme::size::BODY, plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
-        .max_lines(1).with_measure(measure).draw(painter, band.wall);
+    let clock_h = TextView::new("", super::classic::CLASSIC_FOOTER_SIZE, theme::TEXT_SECONDARY)
+        .with_measure(measure).line_h();
+    TextView::new(&clocks.wall, super::classic::CLASSIC_FOOTER_SIZE,
+        plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
+        .max_lines(1).h(HAlign::Right).with_measure(measure)
+        .draw(painter, Rect::new(band.wall.x, band.wall.y, band.wall.w, clock_h));
+    let technical_h = TextView::new("", super::classic::CLASSIC_TECHNICAL_SIZE, theme::TEXT_SECONDARY)
+        .with_measure(measure).line_h();
+    for (index, text) in [&clocks.raster, &clocks.media_rate].into_iter().enumerate() {
+        TextView::new(text, super::classic::CLASSIC_TECHNICAL_SIZE,
+            plx_ui::palette::color(plx_ui::palette::Role::EpgTime, theme::TEXT_SECONDARY))
+            .max_lines(1).h(HAlign::Right).with_measure(measure)
+            .draw(painter, Rect::new(band.wall.x, band.wall.y + clock_h + index as f32 * technical_h,
+                band.wall.w, technical_h));
+    }
     for (i, line) in content.lines.iter().enumerate() {
         if line.title.is_empty() { continue; }
         if i == 0 {
@@ -365,6 +397,27 @@ mod tests {
             thumb: String::new(),
             detail_rk: String::new(),
         }
+    }
+
+    #[test]
+    fn observed_media_rate_matches_tauri_decimal_rounding_and_clears_on_reset() {
+        let mut labels = ClockLabels::default();
+        labels.refresh_raster((1920, 1080));
+        for (sample, expected) in [(1, "0 Mbps"), (1_000_000, "1 Mbps"),
+            (1_234_999, "1.23 Mbps"), (1_235_000, "1.24 Mbps"),
+            (12_100_000, "12.1 Mbps"), (12_010_000, "12.01 Mbps")] {
+            labels.refresh_media_rate(Some(sample));
+            assert_eq!(labels.media_rate, expected);
+            assert!(labels.technical().ends_with(expected));
+            let allocation = labels.media_rate.as_ptr();
+            labels.refresh_media_rate(Some(sample));
+            assert_eq!(labels.media_rate.as_ptr(), allocation, "unchanged sample reuses cached text");
+        }
+        labels.refresh_media_rate(None);
+        assert!(labels.media_rate.is_empty());
+        assert_eq!(labels.technical(), "1920×1080");
+        labels.refresh_media_rate(Some(0));
+        assert!(labels.media_rate.is_empty());
     }
 
     #[test]
@@ -741,8 +794,8 @@ mod tests {
                 assert!(cells[0].x + cells[0].w <= cells[1].x);
                 assert!(cells[1].x + cells[1].w <= cells[2].x);
                 assert!(cells[2].x + cells[2].w <= layout.programme_rows[row].x + layout.programme_rows[row].w + 0.01);
-                assert!(cells[0].w >= measure.width_str(if row == 0 { &clocks.current } else { &clocks.next }, theme::size::BODY, false));
-                assert!(cells[2].w >= measure.width_str(if row == 0 { &clocks.remaining } else { &clocks.next_duration }, theme::size::BODY, false));
+                assert!(cells[0].w >= measure.width_str(if row == 0 { &clocks.current } else { &clocks.next }, super::super::classic::CLASSIC_FOOTER_SIZE, false));
+                assert!(cells[2].w >= measure.width_str(if row == 0 { &clocks.remaining } else { &clocks.next_duration }, super::super::classic::CLASSIC_FOOTER_SIZE, false));
             }
         }
     }
@@ -769,6 +822,33 @@ mod tests {
         assert!(next.at.x + next.at.w <= duration.at.x - duration.at.w);
         assert!(current.at.y < next.at.y && remaining.at.y < duration.at.y);
         assert!(!runs.iter().any(|run| run.text.starts_with('-')));
+    }
+
+    #[test]
+    fn observed_media_rate_fits_separate_technical_line_without_growing_footer() {
+        use plx_machine::machine::{FontScale, TypographyMeasure};
+        let playing = live_playing();
+        for scale in [20, 100, 200] {
+            let mut measure = TypographyMeasure::new(plx_ui::fixture::FixtureMeasure);
+            measure.set_font_scale(FontScale::from_percent(scale).unwrap());
+            let frame = layout(&playing, &measure);
+            let mut labels = ClockLabels::default();
+            labels.refresh_raster((1920, 1080));
+            labels.refresh_media_rate(Some(12_010_000));
+            let runs = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(), &playing,
+                playing.ott.as_ref(), &mut labels, &frame, &measure, Some(150), None, Busy::None, TransportMark::None));
+            let raster = runs.iter().find(|run| run.text == "1920×1080").unwrap();
+            let rate = runs.iter().find(|run| run.text == "12.01 Mbps").unwrap();
+            assert_eq!(rate.align, 2);
+            assert!(rate.at.y > raster.at.y);
+            assert!(rate.at.y < frame.technical.y + frame.technical.h);
+            assert!(rate.at.x - rate.at.w >= frame.technical.x);
+            assert_eq!(layout(&playing, &measure).panel, frame.panel);
+            labels.refresh_media_rate(None);
+            let cleared = plx_ui::draw_census::capture_runs(|| draw_classic(Painter::recording(), &playing,
+                playing.ott.as_ref(), &mut labels, &frame, &measure, Some(150), None, Busy::None, TransportMark::None));
+            assert!(!cleared.iter().any(|run| run.text.ends_with(" Mbps")));
+        }
     }
 
     #[test]

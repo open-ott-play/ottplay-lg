@@ -246,11 +246,20 @@ fn favorite_channel_step_records_favorite_identity_without_changing_source_selec
         let mut app = live_m3u_remote_app(mode, false);
         let runtime = app.ott.as_mut().unwrap();
         let profile = runtime.effective_profile().unwrap().clone();
+        // The inherited synthetic entries all have provider_id "1". For M3U
+        // that is the portable tvg-id, so they would toggle one Favorite three
+        // times rather than create three independently selectable channels.
+        for entry in &mut runtime.catalog.entries {
+            entry.provider_id = Some(entry.id.clone());
+        }
+        runtime.playing.as_mut().unwrap().entry = runtime.catalog.entries[0].clone();
         let favorites: Vec<_> = runtime.catalog.entries.iter()
             .map(|entry| selection::capture(&profile, entry).unwrap()).collect();
         let current = format!("favorite:{}", favorites[0].identity());
         let wanted = format!("favorite:{}", favorites[1].identity());
+        assert_ne!(current, wanted, "the fixture needs distinct portable channel identities");
         for favorite in favorites { runtime.saved.favorites.toggle(favorite).unwrap(); }
+        assert_eq!(runtime.saved.favorites.entries().len(), 3);
         runtime.saved.favorites_selected = true;
         runtime.page = "favorites";
         runtime.playing.as_mut().unwrap().selection_id = current.clone();

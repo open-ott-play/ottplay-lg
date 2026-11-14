@@ -178,3 +178,96 @@ fn local_sidecar_discovery_adds_subtitles_without_borrowing_plex() {
     let offered = TrackMenuAvailability::for_playback(&ps, meta.view());
     assert!(!offered.audio); assert!(offered.subtitles);
 }
+
+fn live_embedded_audio(count: usize) -> route::PlaybackSession {
+    use plx_media::ff::{hls_observed::{Scope, Snapshot}, hls_presentation::HlsPlayback};
+    let playback = HlsPlayback::fixture_live_with_subtitles_for_test();
+    let scope = Scope::new("https://example.invalid/master.m3u8",
+        "https://example.invalid/video.m3u8", 1, 0).unwrap();
+    let observed = Snapshot::fixture_for_test(scope);
+    let mut info = playback.media_info_for_test();
+    info.tracks = observed.inventory().clone();
+    info.tracks.audio.truncate(count);
+    for (row, language) in info.tracks.audio.iter_mut().zip(["eng", "fra"]) {
+        row.language = language.into();
+    }
+    let mut ps = route::PlaybackSession::IDLE;
+    route::reset_player_control_for_test(&ps);
+    route::request_external_source(&mut ps, &info,
+        plx_media::ff::ExternalSource::Hls("https://example.invalid/master.m3u8".into()),
+        "Fixture", "M3U", plx_platform::devcaps::assumed_shared()).unwrap();
+    route::reset_player_control_for_test(&ps);
+    ps
+}
+
+#[test]
+fn more_live_hls_uses_embedded_audio_and_manifest_subtitle_choices_from_the_actual_picker() {
+    use crate::{player_hud::command::TrackTab, track_menu::{TrackCommit, TrackMenuState, TrackOk, TrackRow}};
+    let _lock = plx_base::testlock::serial();
+    let _globals = route::HlsTrackRequest::test_globals_guard();
+    let mut ps = live_embedded_audio(2);
+    let meta = store(5, 5); // Unrelated retained Plex metadata must not supply these choices.
+    let catalog = route::hls_track_catalog(&ps).unwrap();
+    assert!(catalog.rows().is_empty(), "live fixture has no separate manifest audio renditions");
+    assert_eq!(catalog.embedded_tracks().unwrap().inventory().audio.len(), 2);
+    let available = TrackMenuAvailability::for_playback(&ps, meta.view());
+    assert!(available.audio && available.subtitles);
+    let mut more = MoreMenuState::new(&ps).with_track_availability(&ps, available);
+    let audio = Action::OpenTracks(TrackTab::Audio);
+    assert!(more.focus_key(audio.key().0));
+    assert_eq!(more.on_ok(&ps), MoreOk::Action(audio));
+    let mut tracks = TrackMenuState::new(&ps, meta.view(), TrackTab::Audio.index(), Vec::new());
+    assert_eq!(tracks.active_audio(), 0);
+    assert!(tracks.focus_id(TrackRow::Audio(1)));
+    let TrackOk::Commit { commit: TrackCommit::External(choice), .. } = tracks.on_ok_addressed(meta.view())
+        else { panic!("the offered Audio menu must produce an actual embedded-track choice") };
+    assert_eq!(route::apply_external_track(&mut ps, &choice), Ok(true));
+    let selected = route::external_tracks(&ps).unwrap();
+    assert_eq!(selected.selected_audio(), Some(1));
+    assert_eq!(selected.inventory().audio[1].language, "fra");
+    assert_eq!(TrackMenuState::new(&ps, meta.view(), 0, Vec::new()).active_audio(), 1);
+    // Settle the inert native audio-reload request before selecting subtitles;
+    // this fixture does not run an engine or consume its control queue.
+    route::reset_player_control_for_test(&ps);
+
+    let subtitles = Action::OpenTracks(TrackTab::Subtitles);
+    assert!(more.focus_key(subtitles.key().0));
+    assert_eq!(more.on_ok(&ps), MoreOk::Action(subtitles));
+    tracks = TrackMenuState::new(&ps, meta.view(), TrackTab::Subtitles.index(), Vec::new());
+    assert!(tracks.focus_id(TrackRow::HlsSubtitle(1)));
+    let TrackOk::Commit { commit: TrackCommit::Hls(choice), .. } = tracks.on_ok_addressed(meta.view())
+        else { panic!("the offered subtitle menu must produce a real manifest choice") };
+    let request = route::begin_hls_track_request(&mut ps, &choice).unwrap();
+    let prepared = request.prepared_for_test();
+    assert_eq!(route::complete_hls_track_request(&mut ps, &request, prepared), Ok(true));
+    let catalog = route::hls_track_catalog(&ps).unwrap();
+    assert!(catalog.subtitle_rows()[1].selected);
+    assert_eq!(catalog.subtitle_rows()[1].language, "es");
+}
+
+#[test]
+fn more_refreshes_live_embedded_inventory_without_borrowing_retired_track_addresses() {
+    use crate::{player_hud::command::TrackTab, track_menu::{TrackCommit, TrackMenuState, TrackOk, TrackRow}};
+    let _lock = plx_base::testlock::serial();
+    let _globals = route::HlsTrackRequest::test_globals_guard();
+    let meta = store(5, 5);
+    let initial = live_embedded_audio(1);
+    let mut more = MoreMenuState::new(&initial)
+        .with_track_availability(&initial, TrackMenuAvailability::for_playback(&initial, meta.view()));
+    let audio = Action::OpenTracks(TrackTab::Audio);
+    assert!(!more.focus_key(audio.key().0), "one embedded audio track offers no alternative language");
+    let updated = live_embedded_audio(2);
+    assert!(more.set_track_availability(&updated, TrackMenuAvailability::for_playback(&updated, meta.view())));
+    assert!(more.focus_key(audio.key().0));
+    let mut tracks = TrackMenuState::new(&updated, meta.view(), 0, Vec::new());
+    assert!(tracks.focus_id(TrackRow::Audio(1)));
+    let TrackOk::Commit { commit: TrackCommit::External(stale), .. } = tracks.on_ok_addressed(meta.view())
+        else { panic!("actual addressed audio choice") };
+    let mut replacement = live_embedded_audio(0);
+    assert!(route::apply_external_track(&mut replacement, &stale).is_err(),
+        "same URL cannot transfer an old track choice to replacement playback");
+    assert!(more.set_track_availability(&replacement,
+        TrackMenuAvailability::for_playback(&replacement, meta.view())));
+    assert!(!more.focus_key(audio.key().0));
+    assert_eq!(route::external_tracks(&replacement).unwrap().selected_audio(), None);
+}

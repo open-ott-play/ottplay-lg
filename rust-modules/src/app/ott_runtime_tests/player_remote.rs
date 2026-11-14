@@ -3,13 +3,14 @@
 use super::*;
 use plx_machine::machine::UiMode;
 
-fn forty_channels(mode: UiMode) -> App {
+pub(super) fn forty_channels(mode: UiMode) -> App {
     let mut app = live_m3u_remote_app(mode, false);
     let runtime = app.ott.as_mut().unwrap();
     let template = runtime.catalog.entries[0].clone();
     runtime.catalog.entries = (1..=40).map(|number| {
         let mut entry = template.clone();
         entry.id = number.to_string();
+        entry.provider_id = Some(number.to_string());
         entry.title = format!("Channel {number}");
         entry.media = MediaLocator::Http {
             url: format!("https://media.invalid/{number}.m3u8"),
@@ -29,7 +30,7 @@ fn forty_channels(mode: UiMode) -> App {
     app
 }
 
-fn open_fullscreen_catalog(app: &mut App) -> plx_machine::machine::InstanceId {
+pub(super) fn open_fullscreen_catalog(app: &mut App) -> plx_machine::machine::InstanceId {
     bridge::player_mut(&mut app.pages).unwrap().hud.hide(false);
     native_edge(app, consts::SDLK_RETURN, 40, Edge::Down);
     native_edge(app, consts::SDLK_RETURN, 40, Edge::Up);
@@ -49,7 +50,9 @@ fn admit_latest_channel(app: &mut App, wanted: &str) {
     info.audio_sample_rate = 48_000;
     info.audio_bit_depth = 16;
     info.duration_ns = 0;
-    let source = ReadySource::External(plx_media::ff::ExternalSource::Http(
+    // A resolved .m3u8 is an HLS source. Passing it as ordinary HTTP is
+    // correctly rejected by native route admission before resource preparation.
+    let source = ReadySource::External(plx_media::ff::ExternalSource::Hls(
         format!("https://media.invalid/{wanted}.m3u8")), info, None);
     app.ott.as_ref().unwrap().tx.send(Job::Play(queued.generation, queued.profile,
         Ok((queued.entry.unwrap(), source))))
@@ -61,7 +64,7 @@ fn admit_latest_channel(app: &mut App, wanted: &str) {
             |runtime, app, profile, entry, source|
                 start_resolved_with(runtime, app, profile, entry, source, &mut resources))
     });
-    assert_eq!(resources.starts, 1);
+    assert_eq!(resources.starts, 1, "native admission: {}", app.ott.as_ref().unwrap().status);
     let runtime = app.ott.as_mut().unwrap();
     assert_eq!(runtime.playing.as_ref().unwrap().selection_id, wanted);
     assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());

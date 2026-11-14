@@ -651,7 +651,23 @@ pub(super) fn demux(
 
 /// The inspected video codec is frozen for this native Load; segment discovery
 /// may validate it but must never silently change the sink declaration.
+#[cfg(test)]
 pub(super) fn demux_video(
+    url: &str,
+    video_codec: &str,
+    acodec: &str,
+    audio: Option<&hls_audio::Selection>,
+    aq: *mut AuQueue,
+    aqa: *mut AuQueue,
+    hs: *mut HttpStream,
+    presentation: Option<&super::hls_presentation::HlsPlayback>,
+) -> Result<(), HlsExit> {
+    demux_video_for_epoch(0, url, video_codec, acodec, audio, aq, aqa, hs, presentation)
+}
+
+/// `native_epoch` is the Load owned by this worker, never a late-read global.
+pub(super) fn demux_video_for_epoch(
+    native_epoch: u32,
     url: &str,
     video_codec: &str,
     acodec: &str,
@@ -673,6 +689,7 @@ pub(super) fn demux_video(
     let cold_display_base = SHARED.disp_base.load(Ordering::Acquire);
     let mut mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
     let mut timeline = crate::hls::SegmentTimeline::default();
+    let mut media_bitrate = crate::player::media_bitrate::MediaBitrate::default();
     let mut last_progress = Instant::now();
     let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
     'refresh: loop {
@@ -690,6 +707,8 @@ pub(super) fn demux_video(
         };
         let target = SHARED.seek_to_ns.swap(-1, Ordering::Acquire);
         if target >= 0 {
+            media_bitrate.reset();
+            SHARED.publish_measured_media_bps(native_epoch, None);
             cold_entry = None; // A seek keeps its existing strict target-entry contract.
             video_continuation = None;
             mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
@@ -751,6 +770,8 @@ pub(super) fn demux_video(
                     || previous.discontinuity_sequence != segment.discontinuity_sequence)
             {
                 mp2 = (acodec == "mp2").then(hls_mp2::Decoder::default);
+                media_bitrate.reset();
+                SHARED.publish_measured_media_bps(native_epoch, None);
             }
             let search_limit = if !media.independent {
                 cold_entry.as_mut().map(|search|
@@ -843,6 +864,11 @@ pub(super) fn demux_video(
                 clock: transport_clock,
             });
             timeline.commit(clock);
+            // Only a whole main-media interval which this worker actually fed
+            // enters the footer. Playlists, captions, probes and partial feeds do not.
+            let bps = media_bitrate.observe(segment.inner.sequence, output.transfer.bytes,
+                segment.inner.duration);
+            SHARED.publish_measured_media_bps(native_epoch, bps);
             if let Some(scope) = super::hls_observed_worker::scope(url, &landed, segment.discontinuity_sequence) {
                 if let Some(candidate) = output.observed.take() {
                     // Observation is scoped to the worker that actually fed this whole segment.

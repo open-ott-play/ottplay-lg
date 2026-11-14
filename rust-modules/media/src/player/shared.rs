@@ -941,6 +941,9 @@ pub struct Shared {
     /// a different failure from a connection that answered 401.
     pub dg_http_status: AtomicI32,
     pub dg_net_rx: AtomicI64,
+    /// Completed main-HLS media bytes / media duration (decimal bits/s).
+    /// Zero is unknown; only the owning native epoch may publish this mirror.
+    pub measured_media_bps: AtomicU64,
     /// WHY the media transfer died, when it was a curl transfer dying mid-body (issue #504): the
     /// libcurl code (0 = none recorded), the transfer's age in ms (-1 = unknown) and whether the
     /// reopen that follows a failed read was refused as well. Written by the demux thread beside
@@ -1198,6 +1201,7 @@ impl Shared {
             dg_demux_exit: AtomicU8::new(0),
             io_failure: Mutex::new(None),
             dg_net_rx: AtomicI64::new(0),
+            measured_media_bps: AtomicU64::new(0),
             side_anchor: Mutex::new(None),
             side_subs_owner: AtomicBool::new(false),
             dg_load_at: AtomicU32::new(0),
@@ -1315,6 +1319,7 @@ impl Shared {
             return None;
         }
         let epoch = state.next();
+        self.measured_media_bps.store(0, Ordering::Release);
         *self.io_failure.lock().unwrap_or_else(|e| e.into_inner()) = None;
         state.phase = NativeSessionPhase::Active {
             epoch,
@@ -1538,6 +1543,7 @@ impl Shared {
             return false;
         }
         state.phase = NativeSessionPhase::Idle;
+        self.measured_media_bps.store(0, Ordering::Release);
         true
     }
 
@@ -1566,6 +1572,7 @@ impl Shared {
             return false;
         }
         state.phase = to;
+        self.measured_media_bps.store(0, Ordering::Release);
         true
     }
 
@@ -1742,6 +1749,14 @@ impl Shared {
         event: impl FnOnce() -> R,
     ) -> Option<R> {
         self.with_native_session_scoped(epoch, class, num, |_| event())
+    }
+
+    /// Publish only for the Load which actually acquired and fed these bytes.
+    /// The existing epoch lock also orders this against reset and retirement.
+    pub(crate) fn publish_measured_media_bps(&self, epoch: u32, bps: Option<u64>) -> bool {
+        self.with_native_session(epoch, NativeEventClass::Other, 0, || {
+            self.measured_media_bps.store(bps.unwrap_or(0), Ordering::Release);
+        }).is_some()
     }
 
     /// [`with_native_session`](Self::with_native_session), telling the event whose state it may
@@ -1930,6 +1945,7 @@ impl Shared {
         self.dg_demux_exit.store(0, Ordering::Relaxed);
         *self.io_failure.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.dg_net_rx.store(0, Ordering::Relaxed);
+        self.measured_media_bps.store(0, Ordering::Release);
         self.dg_load_at.store(0, Ordering::Relaxed);
         self.dg_frame_at.store(0, Ordering::Relaxed);
         self.dg_vpres_ct.store(0, Ordering::Relaxed);
@@ -4330,6 +4346,52 @@ mod external_retained_interval_tests {
     }
 }
 
+
+#[cfg(test)]
+mod measured_media_bitrate_tests {
+    use super::*;
+
+    #[test]
+    fn media_bitrate_is_unknown_until_observed_and_clears_at_release() {
+        let shared = Shared::new();
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(!shared.publish_measured_media_bps(0, Some(8_000_000)));
+        let first = shared.begin_native_session().unwrap();
+        assert!(shared.publish_measured_media_bps(first, Some(8_000_000)));
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 8_000_000);
+        assert!(shared.begin_native_release(first));
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(!shared.publish_measured_media_bps(first, Some(99_000_000)));
+        assert!(shared.retire_native_session(first));
+        let second = shared.begin_native_session().unwrap();
+        assert_ne!(first, second);
+        assert!(!shared.publish_measured_media_bps(first, Some(99_000_000)));
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(shared.publish_measured_media_bps(second, Some(2_500_000)));
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 2_500_000);
+        assert!(shared.retire_native_session(second));
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn reset_and_unknown_sample_cannot_borrow_the_previous_sources_rate() {
+        let shared = Shared::new();
+        let first = shared.begin_native_session().unwrap();
+        assert!(shared.publish_measured_media_bps(first, Some(4_000_000)));
+        assert!(shared.publish_measured_media_bps(first, None));
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(shared.publish_measured_media_bps(first, Some(4_000_000)));
+        shared.reset_session_for_reload();
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(!shared.publish_measured_media_bps(first, Some(99_000_000)));
+        let second = shared.begin_native_session().unwrap();
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(shared.publish_measured_media_bps(second, Some(7_000_000)));
+        shared.reset_session();
+        assert_eq!(shared.measured_media_bps.load(Ordering::Acquire), 0);
+        assert!(!shared.publish_measured_media_bps(second, Some(99_000_000)));
+    }
+}
 
 #[cfg(test)]
 mod terminal_producer_epoch_tests {

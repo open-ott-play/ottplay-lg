@@ -230,6 +230,6 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
         page.begin_channel_change(clock::now());
     }
     runtime.cancel_setup();
-    if matches!(app.route(), AppArg::Ott) { classic_play_handoff::begin(runtime, app); }
+    classic_play_handoff::begin(runtime, app);
     Ok(())
 }
