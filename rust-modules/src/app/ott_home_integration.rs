@@ -388,20 +388,32 @@ mod tests {
     #[cfg(feature = "hostsim")]
     #[test]
     fn actual_boot_resume_early_back_cancels_home_before_return_and_drops_late_ack() {
-        use plx_machine::machine::Tick;
+        use plx_machine::machine::{MachineId, NavOp, Tick};
         use plx_screens::registry::AppArg;
+        use plx_ui::containers::modal::Style;
         let _serial = plx_base::testlock::serial();
         let mut app = crate::app::run::lifecycle_regression_tests::app();
-        app.running = true;
-        bridge::show_page(&mut app.pages, AppArg::Ott);
-        for _ in 0..24 {
-            app.loop_t = app.loop_t.wrapping_add(16);
-            let tick = Tick {
-                ms: app.loop_t,
-                dt_us: 16_000,
-            };
-            bridge::frame(&mut app.pages, &mut app.bridge, tick, Vec::new());
+        fn settle(app: &mut App) {
+            for _ in 0..24 {
+                app.loop_t = app.loop_t.wrapping_add(16);
+                let tick = Tick {
+                    ms: app.loop_t,
+                    dt_us: 16_000,
+                };
+                bridge::frame(&mut app.pages, &mut app.bridge, tick, Vec::new());
+            }
         }
+        // A running .26 session starts on Player. Mount the actual Settings
+        // panel over it instead of asking the root route to become a catalogue.
+        bridge::show_page(&mut app.pages, AppArg::Player);
+        settle(&mut app);
+        app.pages.nav.next_style = Style::PlayerPanel {
+            survives_failure: true,
+        };
+        app.pages
+            .request(MachineId::Nav, NavOp::Present(AppArg::Ott));
+        settle(&mut app);
+        app.running = true;
         assert!(bridge::ott_catalog_surface(&app.pages).is_some());
         assert!(!app.pages.has_pending_navigation());
         let mut runtime =
