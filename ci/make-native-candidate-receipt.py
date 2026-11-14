@@ -130,7 +130,9 @@ def create_receipt(source_sha: str, run_id: str, run_attempt: str,
         },
         "link_evidence_sha256": evidence,
         "checks": ["ci/deps.py check", "ci/check-package.py --selftest",
-                   "make FLAVOR=stable RELEASE=1 ipk (includes check-link-evidence.py, "
+                   "make FLAVOR=stable RELEASE=1 "
+                   "OTT_PRODUCT_CONFIG=ci/ottplay-integration/release/product.json "
+                   "ipk-stage and ipk-pack (includes check-link-evidence.py, "
                    "check-package.py and check-packaged-elf.py)"],
     }
     if companion_sources is not None:
