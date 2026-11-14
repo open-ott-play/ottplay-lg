@@ -3,6 +3,7 @@
 use plx_base::task::{time::Deadline, OffFrame};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::os::raw::c_long;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -234,6 +235,22 @@ pub(super) trait Transport {
     ) -> Result<Vec<u8>, ServiceError>;
 }
 
+// libcurl uses C long: 32 bits on webOS ARMv7 and 64 bits on desktop hosts.
+// Saturate before conversion so an oversized duration cannot disable the timeout.
+fn service_timeouts(remaining: Duration) -> plx_net::net::Timeouts {
+    plx_net::net::Timeouts {
+        connect_s: c_long::try_from(remaining.as_secs().saturating_add(1))
+            .unwrap_or(4)
+            .clamp(1, 4),
+        total_s: 0,
+        total_ms: c_long::try_from(remaining.as_millis())
+            .unwrap_or(c_long::MAX)
+            .max(1),
+        low_speed_bps: 0,
+        low_speed_s: 0,
+    }
+}
+
 pub(super) struct VerifiedHttpsTransport;
 impl Transport for VerifiedHttpsTransport {
     fn send(
@@ -251,13 +268,6 @@ impl Transport for VerifiedHttpsTransport {
         if remaining.is_zero() {
             return Err(ServiceError::Deadline);
         }
-        let remaining_ms = i64::try_from(remaining.as_millis())
-            .unwrap_or(i64::MAX)
-            .max(1);
-        let connect_s = i64::try_from(remaining.as_secs().saturating_add(1))
-            .unwrap_or(4)
-            .min(4)
-            .max(1);
         let mut headers = vec![format!("Authorization: Bearer {}", binding.bearer)];
         if request.body.is_some() {
             headers.push("Content-Type: application/json".into());
@@ -282,13 +292,7 @@ impl Transport for VerifiedHttpsTransport {
             request.body(),
             plx_net::net::Tls::Ca,
             None,
-            plx_net::net::Timeouts {
-                connect_s,
-                total_s: 0,
-                total_ms: remaining_ms,
-                low_speed_bps: 0,
-                low_speed_s: 0,
-            },
+            service_timeouts(remaining),
             Duration::from_secs(3),
             cancelled,
             &mut on_bytes,
@@ -1513,6 +1517,24 @@ mod service_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_timeouts_preserve_deadlines_in_the_target_c_long_range() {
+        for (remaining, connect_s, total_ms) in [
+            (Duration::ZERO, 1, 1),
+            (Duration::from_nanos(1), 1, 1),
+            (Duration::from_millis(1500), 2, 1500),
+            (Duration::from_secs(30), 4, 30_000),
+            (Duration::MAX, 4, c_long::MAX),
+        ] {
+            let timeouts = service_timeouts(remaining);
+            assert_eq!(timeouts.connect_s, connect_s);
+            assert_eq!(timeouts.total_ms, total_ms);
+            assert_eq!(timeouts.total_s, 0);
+            assert_eq!(timeouts.low_speed_bps, 0);
+            assert_eq!(timeouts.low_speed_s, 0);
+        }
+    }
+
     #[test]
     fn operation_variants_reject_unrecognized_authority_fields() {
         for raw in [
