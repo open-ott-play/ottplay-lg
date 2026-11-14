@@ -148,10 +148,10 @@ jobs:
           CARGO_INCREMENTAL: '0'
         run: |
           set -euo pipefail
-          make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk-stage
+          make FLAVOR=stable RELEASE=1 OTT_PRODUCT_CONFIG=ci/ottplay-integration/release/product.json WEBOS_SDK="$WEBOS_SDK" ipk-stage
           python3 ci/native_companion.py stage --sdk "$WEBOS_SDK" \
             --source "$RUNNER_TEMP/companion-source" --bundle "$RUNNER_TEMP/companion-bundle"
-          make FLAVOR=stable RELEASE=1 WEBOS_SDK="$WEBOS_SDK" ipk-pack
+          make FLAVOR=stable RELEASE=1 OTT_PRODUCT_CONFIG=ci/ottplay-integration/release/product.json WEBOS_SDK="$WEBOS_SDK" ipk-pack
 
       - name: Bind complete companion sources to the final package and pinned SDK
         env:
