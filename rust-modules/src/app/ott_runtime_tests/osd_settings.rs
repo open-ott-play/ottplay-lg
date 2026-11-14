@@ -91,9 +91,10 @@ fn osd_schema_and_get_append_typed_defaults_without_reordering_existing_fields()
         cursor = response["data"]["next_cursor"].clone();
         if cursor.is_null() { break; }
     }
-    assert_eq!(ids.len(),45);
+    assert_eq!(ids.len(),46);
     assert_eq!(ids[43], "nativeEpgApiV1");
     assert_eq!(ids[44], "nativeInputProbeV1");
+    assert_eq!(ids[45], "nativeMultiviewService");
     assert_eq!(ids[40], "uiColorConfig");
     assert_eq!(&ids[41..43], &["nativeSubtitleMode", "nativeSubtitleLanguage"]);
     assert_eq!(&ids[23..40],&["nativeSubtitleSize","nativeSubtitlePosition","nativeSubtitleTone","volumeStep","sleepTimeout","infoTimeout","osdOpacity","permanentTime","pageSize","listPosition","seek13Duration","arrowFun", "showNumber", "showName", "showProgram", "showDescription", "showProgress"]);
