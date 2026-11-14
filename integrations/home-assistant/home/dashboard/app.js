@@ -1,7 +1,7 @@
 /* Original portable TV dashboard. No Home Assistant credentials or direct HA API. */
 (function () {
     "use strict";
-    var api = window.OTTHome, activeTab = "home", latest = null, connected = false, tcpHandle = null, tcpTimer = null, tcpGeneration = 0, rememberedFocus = null, lastProbe = null;
+    var api = window.OTTHome, activeTab = "home", latest = null, connected = false, tcpHandle = null, tcpTimer = null, tcpGeneration = 0, rememberedFocus = null, lastProbe = null, closeFeedback = "";
     var platform = window.OTTHomeWebOS.create(window);
     platform.installClose();
     function byId(id) { return document.getElementById(id); }
@@ -22,7 +22,7 @@
         connected = ready; latest = ready ? model : null;
         if (focused) rememberedFocus = focused;
         text("connection", ready ? "Home connected" : state.status === "loading" ? "Connecting…" : state.status === "acting" ? "Sending action…" : state.status === "unconfigured" ? "Connection required" : state.status === "cancelled" ? "Disconnected" : "Home unavailable");
-        text("home-message", ready ? (model.entities.length ? "Status from your configured home devices." : "No status devices configured on your gateway.") : state.status === "loading" ? "Loading home status…" : state.status === "acting" ? "Waiting for the gateway…" : "Home status unavailable. Check the Connection tab.");
+        text("home-message", closeFeedback || (ready ? (model.entities.length ? "Status from your configured home devices." : "No status devices configured on your gateway.") : state.status === "loading" ? "Loading home status…" : state.status === "acting" ? "Waiting for the gateway…" : "Home status unavailable. Check the Connection tab."));
         clear(elements); clear(actions); clear(apps);
         if (!ready) return;
         for (i = 0; i < model.entities.length; i++) {
@@ -66,6 +66,7 @@
     }
     function cancelWork() { if (network.running()) network.cancel(); serviceProbe.cancel(); if (tcpHandle || tcpTimer !== null) text("tcp-state", "TCP probe cancelled; status unknown."); cancelTCP(); }
     function visible() { return !document.hidden && navigator.onLine !== false; }
+    function closeUnavailable() { closeFeedback = "Return to OTT is unavailable. Open OTT from the TV launcher."; text("home-message", closeFeedback); syncVisibility(); }
     function syncVisibility() { if (!visible()) cancelWork(); client.visible(visible() && (activeTab === "home" || activeTab === "apps")); }
     function tab(name) {
         var panels = document.querySelectorAll(".panel"), buttons = document.querySelectorAll("[data-tab]"), i;
@@ -131,7 +132,7 @@
             }
             if (activeTab === "home" && window.OTTHomeHost && typeof window.OTTHomeHost.close === "function") {
                 client.visible(false);
-                try { window.OTTHomeHost.close(function (ok) { if (ok === false) { text("home-message", "Return to OTT is unavailable. Open OTT from the TV launcher."); syncVisibility(); } }); } catch (ignored) { syncVisibility(); }
+                try { window.OTTHomeHost.close(function (ok) { if (ok === false) { closeUnavailable(); } }); } catch (ignored) { closeUnavailable(); }
                 return;
             }
             tab("home"); nav[0].focus(); return;
