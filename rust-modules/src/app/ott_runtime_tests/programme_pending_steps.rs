@@ -13,6 +13,7 @@ fn rapid_pending_rocker_advances_latest_target_cancels_old_and_ignores_late_resu
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
         let mut app = live_m3u_remote_app(mode, false);
+        browse_focus::record(app.ott.as_mut().unwrap(), "c");
         let installed = route::playback_identity(&app.player.session);
         rocker(&mut app, 480);
         assert_eq!(queued(&app), Some("a"));
@@ -20,6 +21,7 @@ fn rapid_pending_rocker_advances_latest_target_cancels_old_and_ignores_late_resu
         let cancelled = old.cancel.clone();
         rocker(&mut app, 480);
         assert_eq!(queued(&app), Some("b"));
+        assert_eq!(app.ott.as_ref().unwrap().raw_view().selected_row.as_deref(), Some("b"));
         assert!(cancelled.load(Ordering::Acquire));
         assert_eq!(app.ott.as_ref().unwrap().resolver_next.as_ref().unwrap().entry.as_ref().unwrap().id, "b");
         let current_generation = app.ott.as_ref().unwrap().play_generation;
@@ -28,6 +30,8 @@ fn rapid_pending_rocker_advances_latest_target_cancels_old_and_ignores_late_resu
         runtime_tick(&mut app);
         assert_eq!(queued(&app), Some("b"));
         assert_eq!(app.ott.as_ref().unwrap().play_generation, current_generation);
+        assert_eq!(app.ott.as_ref().unwrap().raw_view().selected_row.as_deref(), Some("b"),
+            "a superseded completion cannot restore the old browse highlight");
         assert_eq!(route::playback_identity(&app.player.session), installed);
         assert!(app.ott.as_ref().unwrap().resolver_busy, "one old worker owns the busy slot until it retires");
     }
@@ -39,6 +43,7 @@ fn same_frame_rocker_burst_coalesces_and_reverse_cancels_pending_outgoing_return
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for reverse in [false, true] {
         let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Classic, false);
+        browse_focus::record(app.ott.as_mut().unwrap(), "c");
         let installed = route::playback_identity(&app.player.session);
         let before = app.ott.as_ref().unwrap().play_generation;
         let down = crate::app::events::encode_key(0, 480, true);
@@ -52,8 +57,10 @@ fn same_frame_rocker_burst_coalesces_and_reverse_cancels_pending_outgoing_return
             assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none(),
                 "returning to the installed outgoing channel cancels the incoming request");
             assert_eq!(runtime.selected.as_deref(), Some("c"));
+            assert_eq!(runtime.raw_view().selected_row.as_deref(), Some("c"));
         } else {
             assert_eq!(queued(&app), Some("b"), "two fresh presses in one dispatch batch are both admitted");
+            assert_eq!(runtime.raw_view().selected_row.as_deref(), Some("b"));
             assert_eq!(runtime.resolver_next.as_ref().unwrap().entry.as_ref().unwrap().id, "b");
         }
         assert_eq!(route::playback_identity(&app.player.session), installed);
@@ -172,4 +179,117 @@ fn replay_namespace_cannot_spend_initial_pending_step_offer() {
     finish_input(&mut app, &fr);
     assert_eq!(app.ott.as_ref().unwrap().play_generation, before);
     assert_eq!(queued(&app), Some("a"));
+}
+
+#[test]
+fn thirty_two_pending_channel_steps_keep_filtered_browse_focus_on_latest_intent() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        let mut app = live_m3u_remote_app(mode, false);
+        let runtime = app.ott.as_mut().unwrap();
+        let mut first = runtime.catalog.entries[0].clone();
+        first.id = "c".into();
+        first.category = "Selected".into();
+        runtime.catalog.entries = vec![first.clone()];
+        for index in 1..=32 {
+            let mut row = first.clone();
+            row.id = format!("channel-{index:02}");
+            row.title = format!("Channel {}", index + 1);
+            row.media = MediaLocator::Http { url: format!("https://media.invalid/{}.m3u8", row.id) };
+            runtime.catalog.entries.push(row.clone());
+            row.id = format!("hidden-{index:02}");
+            row.category = "Other".into();
+            runtime.catalog.entries.push(row);
+        }
+        runtime.saved.category = "Selected".into();
+        runtime.catalog_revision += 1;
+        browse_focus::record(runtime, "c");
+        let saved = serde_json::to_value(&runtime.saved).unwrap();
+        let installed = route::playback_identity(&app.player.session);
+        for index in 1..=32 {
+            rocker(&mut app, 480);
+            let wanted = format!("channel-{index:02}");
+            let runtime = app.ott.as_ref().unwrap();
+            assert_eq!(queued(&app), Some(wanted.as_str()), "{mode:?}, step {index}");
+            assert_eq!(runtime.raw_view().selected_row.as_deref(), Some(wanted.as_str()));
+            assert_eq!(runtime.effective_category(), "Selected");
+        }
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved,
+            "rocker focus stays in RAM until an existing persistence boundary");
+        assert_eq!(route::playback_identity(&app.player.session), installed);
+    }
+}
+
+#[test]
+fn refused_channel_step_keeps_existing_browse_focus() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        let mut app = live_m3u_remote_app(mode, false);
+        let mut runtime = app.ott.take().unwrap();
+        browse_focus::record(&mut runtime, "b");
+        runtime.catalog.entries.retain(|entry| entry.id != "c");
+        assert!(playback_step::perform(&mut runtime, &mut app, 1).is_err(),
+            "an installed source outside this list cannot admit a destination");
+        assert_eq!(runtime.raw_view().selected_row.as_deref(), Some("b"));
+        assert!(runtime.play_target.is_none());
+    }
+}
+
+#[test]
+fn favorite_channel_step_records_favorite_identity_without_changing_source_selection() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        let mut app = live_m3u_remote_app(mode, false);
+        let runtime = app.ott.as_mut().unwrap();
+        let profile = runtime.effective_profile().unwrap().clone();
+        // The inherited synthetic entries all have provider_id "1". For M3U
+        // that is the portable tvg-id, so they would toggle one Favorite three
+        // times rather than create three independently selectable channels.
+        for entry in &mut runtime.catalog.entries {
+            entry.provider_id = Some(entry.id.clone());
+        }
+        runtime.playing.as_mut().unwrap().entry = runtime.catalog.entries[0].clone();
+        let favorites: Vec<_> = runtime.catalog.entries.iter()
+            .map(|entry| selection::capture(&profile, entry).unwrap()).collect();
+        let current = format!("favorite:{}", favorites[0].identity());
+        let wanted = format!("favorite:{}", favorites[1].identity());
+        assert_ne!(current, wanted, "the fixture needs distinct portable channel identities");
+        for favorite in favorites { runtime.saved.favorites.toggle(favorite).unwrap(); }
+        assert_eq!(runtime.saved.favorites.entries().len(), 3);
+        runtime.saved.favorites_selected = true;
+        runtime.page = "favorites";
+        runtime.playing.as_mut().unwrap().selection_id = current.clone();
+        browse_focus::record(runtime, &current);
+        let active = runtime.saved.profiles.active_profile.clone();
+        rocker(&mut app, 480);
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(queued(&app), Some(wanted.as_str()));
+        assert_eq!(runtime.raw_view().selected_row.as_deref(), Some(wanted.as_str()));
+        assert!(runtime.saved.favorites_selected);
+        assert_eq!(runtime.saved.profiles.active_profile, active);
+    }
+}
+
+#[test]
+fn failed_channel_resolver_retains_admitted_browse_destination() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        let mut app = live_m3u_remote_app(mode, false);
+        browse_focus::record(app.ott.as_mut().unwrap(), "c");
+        rocker(&mut app, 480);
+        let failed = app.ott.as_mut().unwrap().resolver_next.take().unwrap();
+        app.ott.as_ref().unwrap().tx.send(Job::Play(failed.generation, failed.profile,
+            Err("fixture channel resolution refused"))).unwrap();
+        runtime_tick(&mut app);
+        let runtime = app.ott.as_ref().unwrap();
+        assert!(runtime.play_target.is_none());
+        assert_eq!(runtime.raw_view().selected_row.as_deref(), Some("a"));
+        assert_eq!(runtime.playing.as_ref().unwrap().selection_id, "c",
+            "failed navigation is not installed playback");
+    }
 }

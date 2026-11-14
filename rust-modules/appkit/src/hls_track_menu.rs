@@ -122,8 +122,15 @@ impl TrackMenuState {
                 controls = controls.item(TrackRow::Timing, RowKind::Button, (),
                     Row::new(msg::widgets_tracks_timing()).value(format_offset(self.offset_ms)));
             }
-            return Form::new().section(section).section(controls
-                .item(TrackRow::Style, RowKind::Nav(TrackPage::Style), (), Row::new(msg::widgets_tracks_style())));
+            let style_available = !rows.is_empty() || embedded.is_some_and(|catalog|
+                catalog.inventory().subtitles.iter().any(|track|
+                    catalog.availability(plx_media::ff::inspect::TrackKind::Subtitle, track.ordinal)
+                        == plx_media::route::TrackAvailability::Supported));
+            if style_available {
+                controls = controls.item(TrackRow::Style, RowKind::Nav(TrackPage::Style), (),
+                    Row::new(msg::widgets_tracks_style()));
+            }
+            return Form::new().section(section).section(controls);
         }
         for (index, row) in catalog.rows().iter().enumerate() {
             let name = row.name.trim();

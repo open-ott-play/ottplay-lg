@@ -849,24 +849,39 @@ pub(crate) struct OttClassicLayout {
     pub heading: Rect,
     pub programme_rows: [Rect; 2],
     pub art: Rect,
+    pub technical: Rect,
     pub transport_offset: (f32, f32),
 }
 
+const CLASSIC_FOOTER_PAD: f32 = 30.0;
+const CLASSIC_RAIL_H: f32 = 12.0;
+
 fn classic_row_heights(measure: &dyn Measure, contextual_controls: bool) -> [f32; 4] {
-    use plx_ui::text_view::TextView;
-    let line_h = |size| TextView::new("", size, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT)).with_measure(measure).line_h();
-    let heading = line_h(theme::size::HEADLINE);
-    [if contextual_controls { heading.max(BTN_S * plx_ui::widgets::CTRL_FOCUS_SCALE) } else { heading },
-        SB_H, line_h(theme::size::BODY), line_h(theme::size::BODY)]
+    let line_h = plx_ui::text_view::TextView::new("", theme::size::OTT_FOOTER, theme::CLASSIC_TEXT)
+        .with_measure(measure).line_h();
+    [if contextual_controls { line_h.max(BTN_S * plx_ui::widgets::CTRL_FOCUS_SCALE) } else { line_h },
+        CLASSIC_RAIL_H, line_h, line_h]
 }
 
-fn classic_panel_height(playing: Option<&plx_data::metadata::NowPlaying>, measure: &dyn Measure,
+fn classic_panel_height(_playing: Option<&plx_data::metadata::NowPlaying>, measure: &dyn Measure,
     contextual_controls: bool) -> f32 {
     let heights = classic_row_heights(measure, contextual_controls);
-    let content = plx_ui::vstack::VStack::heights(&heights, theme::space::XS,
-        plx_ui::vstack::Anchor::Top(0.0)).height();
-    let art = if playing.and_then(|p| p.ott.as_ref()).is_some_and(|p| p.art.is_some()) { 120.0 } else { 0.0 };
-    (content.max(art) + 24.0).max(180.0)
+    // Channel heading, 6/4px rail margins at 1.5×, then adjacent programme rows.
+    (heights.iter().sum::<f32>() + 15.0).max(120.0) + CLASSIC_FOOTER_PAD * 2.0
+}
+
+/// Shared measured digit columns from Tauri's setFontSize, rather than widths
+/// of whichever channel number or programme start happens to be displayed.
+pub(super) fn classic_digit_width(measure: &dyn Measure) -> f32 {
+    measure.width_str("9", theme::size::OTT_FOOTER, false)
+}
+pub(super) fn classic_clock_width(measure: &dyn Measure) -> f32 {
+    let clock = (0..10).map(|digit| {
+        let pair = format!("{digit}{digit}");
+        measure.width_str(&format!("{pair}:{pair}:{pair}"), theme::size::OTT_FOOTER, false)
+    }).fold(0.0, f32::max);
+    (clock.max(classic_digit_width(measure) * 8.0)
+        + measure.font_scale().points(theme::size::OTT_FOOTER as f32 * 0.5)).ceil()
 }
 
 /// The expanded Classic description ends at this same measured footer edge.
@@ -881,20 +896,25 @@ pub(crate) fn ott_classic_layout(slot: ControlSlot, motion: &HudMotion, _tabs: u
     // Only actual contextual Skip/Up Next offers reserve an action row; ordinary
     // transport actions belong to Menu, never invisible discs or tab stops.
     let contextual = !matches!(slot, ControlSlot::Discs(_));
-    let inset = 32.0;
-    let pad = 12.0;
+    let inset = CLASSIC_FOOTER_PAD;
+    let pad = CLASSIC_FOOTER_PAD;
     let gap = theme::space::XS;
-    let right = SCR_W - inset;
-    let art_size = if playing.and_then(|p| p.ott.as_ref()).is_some_and(|p| p.art.is_some()) { 120.0 } else { 0.0 };
-    let content_x = inset + if art_size > 0.0 { art_size + theme::space::MD } else { 0.0 };
+    let digit = classic_digit_width(measure);
+    // The picon slot remains present before artwork arrives, just as #picon.
+    let art_width = digit * 7.0;
+    let art_size = 120.0;
+    let technical_width = classic_clock_width(measure)
+        + measure.font_scale().points(theme::size::OTT_FOOTER as f32 * 2.0);
+    let right = SCR_W - inset - technical_width - inset;
+    let content_x = inset + art_width + inset;
     let heights = classic_row_heights(measure, contextual);
     let height = classic_panel_height(playing, measure, contextual);
     let top = SCR_H - height;
-    let stack = plx_ui::vstack::VStack::heights(&heights, gap, plx_ui::vstack::Anchor::Top(top + pad));
-    let frames: [Rect; 4] = std::array::from_fn(|index| {
-        let (y, h) = stack.span(index).expect("four present Classic footer rows");
-        Rect::new(content_x, y, right - content_x, h)
-    });
+    let starts = [top + pad, top + pad + heights[0] + 9.0,
+        top + pad + heights[0] + 9.0 + heights[1] + 6.0,
+        top + pad + heights[0] + 9.0 + heights[1] + 6.0 + heights[2]];
+    let frames: [Rect; 4] = std::array::from_fn(|index|
+        Rect::new(content_x, starts[index], (right - content_x).max(0.0), heights[index]));
     let row_top = frames[0].y + (frames[0].h - BTN_S) * 0.5;
     let offset = (right - CTRL_RIGHT, row_top - CTRL_Y);
     let shifted = |mut rect: Rect| { rect.x += offset.0; rect.y += offset.1; rect };
@@ -908,7 +928,12 @@ pub(crate) fn ott_classic_layout(slot: ControlSlot, motion: &HudMotion, _tabs: u
     geometry.row = Rect::new(control_left, frames[0].y, right - control_left,
         if contextual { frames[0].h } else { 0.0 });
     geometry.playbar = frames[1];
-    geometry.grab = Rect::new(content_x, frames[1].y - gap, right - content_x, SB_H + gap * 2.0);
+    // The reference rail has 9px above and only 6px below it. Its hit
+    // surface must stop before the programme row rather than reusing the
+    // symmetric 8px transport margin and covering that row's first pixels.
+    let grab_below = gap.min((frames[2].y - frames[1].y - frames[1].h).max(0.0));
+    geometry.grab = Rect::new(content_x, frames[1].y - gap, right - content_x,
+        frames[1].h + gap + grab_below);
     geometry.tabs = [None; HUD_TABS];
     geometry.tab_row = Rect::new(right, frames[3].y, 0.0, 0.0);
     let heading = Rect::new(content_x, frames[0].y,
@@ -925,7 +950,8 @@ pub(crate) fn ott_classic_layout(slot: ControlSlot, motion: &HudMotion, _tabs: u
         panel: Rect::new(0.0, panel_top, SCR_W, SCR_H - panel_top),
         heading,
         programme_rows: [frames[2], frames[3]],
-        art: Rect::new(inset, top + (height - art_size) * 0.5, art_size, art_size),
+        art: Rect::new(inset, top + pad, art_width, art_size),
+        technical: Rect::new(SCR_W - inset - technical_width, top + pad, technical_width, height - pad * 2.0),
         transport_offset: offset,
     }
 }
@@ -1029,6 +1055,7 @@ pub fn draw_hud_for_display(
     // place. Contextual offers stay on the actual transport surface only.
     let visible_slot = if transport && !failure_row_drawn(busy) { slot } else { ControlSlot::Discs(Controls::NONE) };
     row.ott_clock_labels.refresh_raster(model.video_raster);
+    row.ott_clock_labels.refresh_media_rate(model.measured_media_bps);
     let layout = ott_classic_layout(visible_slot, row, 0, playing, measure);
     let p = Painter::root();
     let color = theme::with_a(plx_ui::palette::color(plx_ui::palette::Role::Background, theme::CLASSIC_BACKGROUND), model.osd_opacity.background_alpha(0.78));
@@ -1070,11 +1097,11 @@ fn draw_route_title(painter: Painter, title: *const std::os::raw::c_char,
     use plx_ui::label::{HAlign, Label};
     {
         let _clip = plx_ui::screen::ClipScope::open_in(painter, layout.heading);
-        Label::new(title, theme::size::BODY, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
+        Label::new(title, theme::size::OTT_FOOTER, plx_ui::palette::color(plx_ui::palette::Role::Text, theme::CLASSIC_TEXT))
             .h(HAlign::Start).draw(painter, layout.heading);
     }
     let _clip = plx_ui::screen::ClipScope::open_in(painter, layout.programme_rows[0]);
-    Label::new(context, theme::size::CAPTION, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::CLASSIC_SECONDARY))
+    Label::new(context, theme::size::OTT_FOOTER, plx_ui::palette::color(plx_ui::palette::Role::Muted, theme::CLASSIC_SECONDARY))
         .h(HAlign::Start).draw(painter, layout.programme_rows[0]);
 }
 
@@ -1090,6 +1117,7 @@ fn draw_modern(
 ) {
     let p = Painter::root();
     row.ott_clock_labels.refresh_raster(model.video_raster);
+    row.ott_clock_labels.refresh_media_rate(model.measured_media_bps);
     let focused = (focus == GROUP_ROW).then_some(btn);
     let label = super::modern::focused_label(slot, focused);
     let tabs = if crate::chapters_panel::has_chapters(meta) { 2 } else { 1 };
@@ -1305,6 +1333,28 @@ mod ott_classic_geometry_tests {
             assert_eq!(new.scrub_frac(new.playbar.x + new.playbar.w), 1.0);
             assert!(new.band().ceil_y < layout.heading.y);
             if scale == 100 { assert!((180.0..=220.0).contains(&layout.panel.h), "{}", layout.panel.h); }
+        }
+    }
+
+    #[test]
+    fn classic_footer_uses_reference_padding_picon_and_rail_margins_at_every_text_scale() {
+        let motion = HudMotion::new();
+        for percent in [20, 100, 200] {
+            let mut measure = TypographyMeasure::new(plx_ui::fixture::FixtureMeasure);
+            measure.set_font_scale(FontScale::from_percent(percent).unwrap());
+            let layout = ott_classic_layout(ControlSlot::Discs(Controls::NONE), &motion, 0, None, &measure);
+            let rail = layout.geometry.playbar;
+            assert_eq!(layout.art.x, 30.0);
+            assert_eq!(layout.art.h, 120.0);
+            assert_eq!(layout.art.y, layout.panel.y + 30.0);
+            assert_eq!(layout.heading.x, layout.art.x + layout.art.w + 30.0);
+            assert!((rail.y - layout.heading.y - layout.heading.h - 9.0).abs() < 0.01);
+            assert_eq!(rail.h, 12.0);
+            assert!((layout.programme_rows[0].y - rail.y - rail.h - 6.0).abs() < 0.01);
+            assert!((layout.programme_rows[1].y + layout.programme_rows[1].h - (SCR_H - 30.0)).abs() < 0.01
+                || percent == 20); // The fixed picon sets the minimum footer height.
+            assert_eq!(layout.technical.x + layout.technical.w, SCR_W - 30.0);
+            assert!(layout.heading.x + layout.heading.w < layout.technical.x);
         }
     }
 

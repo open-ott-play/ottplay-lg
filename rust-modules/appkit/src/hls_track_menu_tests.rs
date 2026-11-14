@@ -222,3 +222,39 @@
         assert!(menu.ids().contains(&TrackRow::Sub(0)), "unsupported observed teletext remains visible without becoming selectable");
         assert!(matches!(menu.pick_external_track(plx_media::ff::inspect::TrackKind::Subtitle, Some(0)), TrackOk::Inert));
     }
+
+    #[test]
+    fn unsupported_only_hls_subtitles_show_language_codec_and_reason_without_style_or_commit() {
+        let _serial = plx_base::testlock::serial();
+        let _globals = route::HlsTrackRequest::test_globals_guard();
+        let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let [without_clock, _] = HlsPlayback::unavailable_subtitle_fixtures_for_test();
+        let scope = plx_media::ff::hls_observed::Scope::new("https://example.invalid/master.m3u8",
+            "https://example.invalid/video.m3u8", 1, 0).unwrap();
+        let observed = plx_media::ff::hls_observed::Snapshot::fixture_for_test(scope);
+        let mut info = without_clock.media_info_for_test();
+        info.tracks = observed.inventory().clone();
+        let mut ps = route::PlaybackSession::IDLE;
+        route::reset_player_control_for_test(&ps);
+        route::request_external_source(&mut ps, &info,
+            plx_media::ff::ExternalSource::Hls("https://example.invalid/master.m3u8".into()),
+            "Fixture", "M3U", plx_platform::devcaps::assumed_shared()).unwrap();
+        route::reset_player_control_for_test(&ps);
+        let meta = plx_data::stores::metadata::MetadataStore::default();
+        let mut menu = TrackMenuState::new(&ps, meta.view(), 1, Vec::new());
+        assert_eq!(menu.ids(), vec![TrackRow::SubOff, TrackRow::Sub(0)]);
+        let index = menu.form.index_of(&TrackRow::Sub(0)).unwrap();
+        let row = menu.form.table.sections.iter().flat_map(|section| &section.rows).nth(index).unwrap();
+        assert_eq!(row.label, "English");
+        assert!(row.detail.contains(friendly_codec("dvb_teletext").as_str()));
+        assert!(row.detail.contains(plx_platform::i18n::msg::widgets_tracks_unavailable()));
+        assert!(row.dim);
+        assert!(menu.focus_id(TrackRow::Sub(0)), "a directly addressed disabled row remains inert");
+        assert_eq!(menu.on_ok_addressed(meta.view()), TrackOk::Inert);
+        assert!(!menu.focus_id(TrackRow::Style));
+        assert!(!menu.focus_id(TrackRow::Timing));
+        assert!(menu.focus_id(TrackRow::SubOff));
+        assert!(matches!(menu.on_ok_addressed(meta.view()),
+            TrackOk::Commit { commit: TrackCommit::External(_), .. }));
+        assert_eq!(route::external_tracks(&ps).unwrap().selected_subtitle(), None);
+    }

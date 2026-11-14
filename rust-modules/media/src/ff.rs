@@ -5491,6 +5491,11 @@ unsafe fn hls_demux_segment_path(
     // AVStream objects remain owned by the format context. Retain this object,
     // not the streams array: a late PMT can grow/reallocate the array during reads.
     let ast = if ai >= 0 { *streams.add(ai as usize) } else { std::ptr::null_mut() };
+    if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+        if let Ok(inventory) = hls_bound_inventory(&input, vi) {
+            hls_observed_worker::prepare_subtitle_segment(input.fmt, &inventory);
+        } else { hls_observed_worker::abort_subtitle_segment(); }
+    }
     let mut ac3_shape = None;
     let aac_adts = if ai >= 0 {
         let acp = stream_codecpar(ast);
@@ -5566,6 +5571,9 @@ unsafe fn hls_demux_segment_path(
             break;
         }
         let si = (*input.pkt).stream_index;
+        if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+            hls_observed_worker::subtitle_packet(input.fmt, input.pkt);
+        }
         if vi >= 0 && si == vi {
             if let Some(capture) = rendition.as_mut() {
                 capture.packet(input.pkt, vst).map_err(HlsExit::Failed)?;
@@ -5890,6 +5898,11 @@ unsafe fn hls_demux_segment_path(
         let selected_audio_pid = (ai >= 0 && audio_packets > 0).then(|| stream_transport_pid(*streams.add(ai as usize))).flatten();
         hls_observed::Candidate::new(&table, &inventory, &pids, video_pid, selected_audio_pid).ok()
     });
+    if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+        if let Some(candidate) = &observed {
+            hls_observed_worker::finish_subtitle_segment(input.fmt, candidate.inventory());
+        } else { hls_observed_worker::abort_subtitle_segment(); }
+    }
     Ok(HlsSegmentOutput {
         resident,
         transport_timing,
@@ -7487,6 +7500,7 @@ unsafe fn hls_prefetch_same_encoder(
 
 fn hls_demux(
     off: &plx_base::task::OffFrame,
+    native_epoch: u32,
     origin: &plx_plex::plex::Origin,
     path: &str,
     acodec: &str,
@@ -7519,6 +7533,7 @@ fn hls_demux(
     }
     let mut net = HlsNet { hs, curl: None };
     let mut cursor = hls_cursor_open(origin, path, aq, &mut net, true, None)?;
+    let mut media_bitrate = crate::player::media_bitrate::MediaBitrate::default();
     if abr.is_some() {
         SHARED.dg_abr_declared_kbps.store(
             i64::try_from(cursor.declared_bps / 1_000).unwrap_or(i64::MAX),
@@ -7719,6 +7734,11 @@ fn hls_demux(
         // tails stay off SHARED until `hls_feed_segment`.
         if delivered {
             hls_feed_segment(&output, aq, aqa)?;
+            if !fetch_abandoned {
+                let bps = media_bitrate.observe(segment.sequence, output.transfer.bytes,
+                    segment.duration);
+                SHARED.publish_measured_media_bps(native_epoch, bps);
+            }
             // A recovery epoch accepts only complete media from the stream that owns playback.
             // Candidate acquisitions are deliberately excluded below: until commit they are not
             // the process that will have to sustain the resumed clock.
@@ -9055,6 +9075,9 @@ fn hls_demux(
         candidate.publishes_duration = true;
         prefetched = None;
         cursor = candidate;
+        // A new encoder has its own segment sequence namespace.
+        media_bitrate.reset();
+        SHARED.publish_measured_media_bps(native_epoch, None);
         // Any terminal source-mode verdict was computed against the previous HLS operating point.
         // Invalidate it explicitly: an Up keeps the completed source evidence for re-scoring on the
         // next ordinary segment, while a safety Down retires evidence from the failed service
@@ -9768,21 +9791,21 @@ fn demux_inner(
             if let Some(ExternalSource::Hls(url))=&external {
                 match audio.as_ref() {
                     Some(HlsTrackSelection::Live { playback, audio }) if playback.matches_source(url) && playback.is_live_subtitles() =>
-                        external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback)),
+                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback)),
                     Some(HlsTrackSelection::Live { .. }) => Err(HlsExit::Failed("HLS live presentation source changed")),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_renditions() =>
                         hls_presentation::live_audio::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_subtitles() =>
-                        external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, Some(playback)),
+                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, Some(playback)),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) =>
                         hls_vod::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(_)) => Err(HlsExit::Failed("HLS presentation source changed")),
                     Some(HlsTrackSelection::Embedded(selection)) =>
-                        external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, Some(selection), aq_p, aqa_p, hs_p, None),
-                    None => external_hls::demux_video(url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, None),
+                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, Some(selection), aq_p, aqa_p, hs_p, None),
+                    None => external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, None),
                 }
             } else {
-                hls_demux(off, origin.as_ref().expect("HTTP HLS origin"), &path, &acodec, abr, aq_p, aqa_p, hs_p)
+                hls_demux(off, native_epoch, origin.as_ref().expect("HTTP HLS origin"), &path, &acodec, abr, aq_p, aqa_p, hs_p)
             }
         }));
         settle_hls_demux(native_epoch, outcome);

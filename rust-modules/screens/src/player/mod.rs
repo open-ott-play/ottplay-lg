@@ -642,6 +642,13 @@ impl PlayerScreen {
         // Paused/stalled decoder time cannot drive the visible wall clock or
         // guide interval rollover. Fold only the supplied whole-second sample,
         // and only while the Classic information band or typed Modern live programme is actually drawn.
+        let technical_drawn = self.hud_drawn(ps, now) && self.transport
+            && !player_hud::readout_owns_frame(self.busy) && self.row.chrome_visible(now);
+        if technical_drawn {
+            let rate = self.model.measured_media_bps.filter(|rate| *rate > 0);
+            mix(u64::from(rate.is_some()));
+            mix(rate.unwrap_or_default());
+        }
         if (mode == plx_machine::machine::UiMode::Classic
             || playing.and_then(|now| now.ott.as_ref()).is_some_and(|ott| ott.live.is_some()))
             && self.hud_drawn(ps, now)
@@ -3028,6 +3035,36 @@ mod step_ladder_tests {
         let covered = page.clock_fingerprint_in_mode(ps, 1_000, UiMode::Classic, None);
         page.model.wall_now_s = Some(103);
         assert_eq!(covered, page.clock_fingerprint_in_mode(ps, 1_000, UiMode::Classic, None));
+    }
+
+    #[test]
+    fn observed_media_rate_invalidates_only_the_visible_technical_footer() {
+        use plx_machine::machine::UiMode;
+        let _g = plx_base::testlock::serial();
+        for mode in [UiMode::Classic, UiMode::Modern] {
+            let mut page = PlayerScreen::new(ENTRY); let cx = cx(); let ps = TestHost::session(&cx);
+            page.transport = true; page.hud.until = 10_000; page.hud.dismissed = false;
+            page.model.paused = true;
+            let empty = page.clock_fingerprint_in_mode(ps, 1_000, mode, None);
+            page.model.measured_media_bps = Some(12_000_000);
+            let first = page.clock_fingerprint_in_mode(ps, 1_000, mode, None);
+            assert_ne!(empty, first);
+            assert_eq!(first, page.clock_fingerprint_in_mode(ps, 1_000, mode, None));
+            page.model.measured_media_bps = Some(24_000_000);
+            assert_ne!(first, page.clock_fingerprint_in_mode(ps, 1_000, mode, None));
+            page.model.measured_media_bps = None;
+            assert_eq!(empty, page.clock_fingerprint_in_mode(ps, 1_000, mode, None));
+            page.model.measured_media_bps = Some(0);
+            assert_eq!(empty, page.clock_fingerprint_in_mode(ps, 1_000, mode, None));
+            for (hidden, covered) in [(true, false), (false, true)] {
+                page.hud.until = if hidden { 0 } else { 10_000 };
+                page.hud.dismissed = hidden; page.transport = !covered;
+                let before = page.clock_fingerprint_in_mode(ps, 1_000, mode, None);
+                page.model.measured_media_bps = Some(48_000_000);
+                assert_eq!(before, page.clock_fingerprint_in_mode(ps, 1_000, mode, None));
+                page.model.measured_media_bps = None;
+            }
+        }
     }
 
     #[test]
