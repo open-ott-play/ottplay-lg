@@ -1398,7 +1398,7 @@ impl<H: AppLike<Memory = PageMemory>> Machine<H> for OttScreen {
         }
         let viewport = self.viewport_event(ev, fx);
         self.sync_viewport(fx);
-        if was_covered && !self.loading_cover() && self.classic_visible {
+        if was_covered && !self.loading_cover() && self.classic_visible && cx.focus.current.is_none() {
             // Initial Enter has no focusable groups while the cover is up.
             // Reconcile cannot seat an empty engine cursor when a ready
             // snapshot arrives. Resolve the selection when this Enter is
