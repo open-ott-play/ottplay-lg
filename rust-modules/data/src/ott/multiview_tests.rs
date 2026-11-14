@@ -352,3 +352,107 @@ fn opaque_refs_and_tickets_do_not_expose_source_values_in_debug() {
     assert!(!debug.contains("987654321"));
     assert!(!debug.contains("123456789"));
 }
+
+#[test]
+fn pipeline_stop_preview_is_readonly_and_commit_uses_the_same_checked_plan() {
+    let (mut scene, ticket) = loaded_scene(SlotId::SLOT_1, source(2), media(20));
+    scene
+        .complete_admission(ticket, AdmissionOutcome::Admitted)
+        .unwrap();
+    scene.bind_source(SlotId::SLOT_0, source(1)).unwrap();
+    let sibling = scene
+        .begin_resolution(SlotId::SLOT_0, source(1), media(10))
+        .unwrap();
+    scene
+        .complete_resolution(sibling, ResolveOutcome::Resolved)
+        .unwrap();
+    scene
+        .complete_admission(sibling, AdmissionOutcome::Admitted)
+        .unwrap();
+    let before = (scene.slots, scene.revisions());
+    let preview = scene.preview_pipeline_stopped(ticket).unwrap();
+    assert_eq!((scene.slots, scene.revisions()), before);
+    assert_eq!(scene.preview_pipeline_stopped(ticket), Ok(preview));
+    assert_eq!(preview.scene, ticket.scene());
+    assert_eq!(preview.slot, SlotId::SLOT_1);
+    assert_eq!(preview.source, source(2));
+    scene.report_pipeline_stopped(ticket).unwrap();
+    assert_eq!(
+        scene.slot_revisions(ticket.slot()).unwrap(),
+        (preview.source_generation, preview.request_generation)
+    );
+    assert_eq!(scene.revisions(), preview.revisions);
+    assert_eq!(scene.slot_status(ticket.slot()), Ok(SlotStatus::Empty));
+    assert_eq!(scene.slots[0], before.0[0]);
+    assert_eq!(
+        scene.preview_pipeline_stopped(ticket),
+        Err(Error::StaleCompletion)
+    );
+    assert_eq!(
+        scene.report_pipeline_stopped(ticket),
+        Err(Error::StaleCompletion)
+    );
+}
+
+#[test]
+fn pipeline_stop_preview_rejects_wrong_scene_slot_source_and_retired_ticket() {
+    let (mut scene, ticket) = loaded_scene(SlotId::SLOT_1, source(2), media(20));
+    let before = (scene.slots, scene.revisions());
+    for invalid in [
+        ResolveTicket {
+            scene: scene_id(99),
+            ..ticket
+        },
+        ResolveTicket {
+            slot: SlotId::SLOT_0,
+            ..ticket
+        },
+        ResolveTicket {
+            source: source(99),
+            ..ticket
+        },
+        ResolveTicket {
+            request_generation: ticket.request_generation + 1,
+            ..ticket
+        },
+    ] {
+        assert_eq!(
+            scene.preview_pipeline_stopped(invalid),
+            Err(Error::StaleCompletion)
+        );
+        assert_eq!((scene.slots, scene.revisions()), before);
+    }
+    scene.report_pipeline_stopped(ticket).unwrap();
+    scene.bind_source(SlotId::SLOT_1, source(3)).unwrap();
+    let replacement = scene
+        .begin_resolution(SlotId::SLOT_1, source(3), media(30))
+        .unwrap();
+    assert_eq!(
+        scene.preview_pipeline_stopped(ticket),
+        Err(Error::StaleCompletion)
+    );
+    assert!(scene.preview_pipeline_stopped(replacement).is_ok());
+}
+
+#[test]
+fn pipeline_stop_preview_checks_both_overflows_before_any_retirement() {
+    for overflow_request in [false, true] {
+        let (mut scene, mut ticket) = loaded_scene(SlotId::SLOT_1, source(2), media(20));
+        if overflow_request {
+            scene.slots[1].request_generation = u64::MAX;
+            ticket.request_generation = u64::MAX;
+        } else {
+            scene.revisions.scene = u64::MAX;
+        }
+        let before = (scene.slots, scene.revisions());
+        assert_eq!(
+            scene.preview_pipeline_stopped(ticket),
+            Err(Error::RevisionExhausted)
+        );
+        assert_eq!(
+            scene.report_pipeline_stopped(ticket),
+            Err(Error::RevisionExhausted)
+        );
+        assert_eq!((scene.slots, scene.revisions()), before);
+    }
+}
