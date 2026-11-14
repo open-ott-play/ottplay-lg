@@ -895,6 +895,8 @@ unsafe fn drain_sdl(app: &mut App, fr: &mut Frame) {
 }
 
 unsafe fn ingress_token(app: &mut App, fr: &mut Frame, token: &str) -> bool {
+    if super::ott_runtime::home_boot_pending(app)
+        && !matches!(token, "shot" | "diag" | "diagnostics") { return false; }
     #[cfg(feature = "devtriggers")]
     if let Some(probe) = crate::remote::HangProbe::parse(token) {
         // FIFO, LAB and replay all enter here on the frame thread inside FrameScope.
@@ -943,7 +945,7 @@ pub(crate) fn pin_headless_hud(app: &mut App, now: u32, tab: Option<i32>) {
 }
 
 fn ingest_text(app: &mut App, text: &str, panel: bool, source: plx_machine::machine::Source) {
-    if text.is_empty() { return; }
+    if text.is_empty() || super::ott_runtime::home_boot_pending(app) { return; }
     let at = plx_machine::machine::Tick { ms: clock::now(), dt_us: 0 };
     if !super::bridge::ott_visible(&app.pages) {
         app.rec.input(super::recorder::enc_text(text, panel, at, source));
@@ -986,6 +988,10 @@ unsafe fn ingest_sdl_event(app: &mut App, fr: &mut Frame) {
 pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
     restore_window: impl FnOnce(*mut c_void)) {
     let et = rd_u32(&app.ev, 0);
+    // Before activity stamps, focus, text or pointer bookkeeping: the initial
+    // authorized Home is not visible while the saved OTT owner is loading.
+    // Lifecycle and quit events still reach their existing owners below.
+    if is_input_event(et) && super::ott_runtime::home_boot_pending(app) { return; }
     let desktop_release = super::ott_runtime::desktop_key_boundary(app);
     app.window_activity.event(et);
     if app.ott_wake_release && is_input_event(et) {
@@ -3153,6 +3159,18 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                     if app.ott_standby {
                         plx_gfx::gfx::frame_clear(0.0,0.0,0.0);
                         plx_screens::ott::draw_standby(plx_ui::Painter::root());
+                        return;
+                    }
+                    if super::ott_runtime::home_boot_pending(app) {
+                        use plx_ui::View;
+                        let ground = plx_ui::theme::SURFACE_APP;
+                        plx_gfx::gfx::frame_clear(ground[0], ground[1], ground[2]);
+                        plx_ui::placeholder::note(plx_ui::Painter::root(),
+                            plx_ui::placeholder::Reason::WorkingReadout,
+                            plx_platform::i18n::msg::browse_library_loading());
+                        plx_ui::widgets::Spinner::ott_orbit(plx_ui::Rect::FULL.w * 0.5,
+                            plx_ui::Rect::FULL.h * 0.5).phase(fr.now)
+                            .draw(&plx_ui::Env::inert(), plx_ui::Painter::root());
                         return;
                     }
                     if fr.player {

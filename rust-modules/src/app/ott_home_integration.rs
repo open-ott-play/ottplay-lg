@@ -1,7 +1,9 @@
 //! Optional Home app handoff through the shared OTT Settings catalogue.
 //! The UI only admits and polls; one bounded platform request runs off-thread.
 use super::*;
-use plx_platform::tv::home_integration::{self as tv_home_integration, Launch as HomeIntegrationLaunch};
+use plx_platform::tv::home_integration::{
+    self as tv_home_integration, Launch as HomeIntegrationLaunch,
+};
 
 const KEY: &str = "home.integration.open";
 static LAUNCH_PENDING: AtomicBool = AtomicBool::new(false);
@@ -382,5 +384,77 @@ mod tests {
         assert!(runtime.home_integration.flight.is_some());
         send.try_send(HomeIntegrationLaunch::Requested).unwrap();
         assert_eq!(runtime.home_integration.poll(Some(original)), None);
+    }
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn actual_boot_resume_early_back_cancels_home_before_return_and_drops_late_ack() {
+        use plx_machine::machine::Tick;
+        use plx_screens::registry::AppArg;
+        let _serial = plx_base::testlock::serial();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        app.running = true;
+        bridge::show_page(&mut app.pages, AppArg::Ott);
+        for _ in 0..24 {
+            app.loop_t = app.loop_t.wrapping_add(16);
+            let tick = Tick {
+                ms: app.loop_t,
+                dt_us: 16_000,
+            };
+            bridge::frame(&mut app.pages, &mut app.bridge, tick, Vec::new());
+        }
+        assert!(bridge::ott_catalog_surface(&app.pages).is_some());
+        assert!(!app.pages.has_pending_navigation());
+        let mut runtime =
+            Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        runtime.remote = Remote::disabled_for_test("dev_home_boot_fixture", "fixture");
+        runtime.loaded = true;
+        runtime.page = "settings";
+        runtime.reply = current_ui_owner(&app);
+        let original = address(&runtime, &app).expect("current mounted Settings owner");
+        boot_resume::arm(&mut runtime);
+        assert!(runtime.view().startup_pending);
+        let play_generation = runtime.play_generation;
+        // Keep the existing worker boundary pending without spawning a thread or
+        // making a platform request. Only its eventual acknowledgement is injected.
+        let (send, cancelled) = runtime.home_integration.prepare(original).unwrap();
+        assert!(!cancelled.load(Ordering::Acquire));
+
+        handle_action(&mut runtime, &mut app, OttAction::Back).unwrap();
+
+        // The .26 boot handler consumed Back, rather than the later Settings or
+        // Player handlers. Home must already be cancelled before any OTT tick.
+        assert!(!runtime.view().startup_pending);
+        assert_eq!(runtime.page, "settings");
+        assert_ne!(runtime.play_generation, play_generation);
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(runtime.home_integration.epoch, original.epoch + 1);
+        assert!(runtime.home_integration.flight.is_some());
+        let revision = runtime.revision;
+        let status = runtime.status.clone();
+        assert!(address(&runtime, &app).is_some());
+        assert!(!app.pages.has_pending_navigation());
+        assert!(!LAUNCH_PENDING.load(Ordering::Acquire));
+
+        send.try_send(HomeIntegrationLaunch::Requested).unwrap();
+        tick(&mut runtime, &app);
+        assert!(runtime.home_integration.flight.is_none());
+        assert_eq!(
+            runtime.revision, revision,
+            "late ack must not invalidate paint"
+        );
+        assert_eq!(
+            runtime.status, status,
+            "late ack must not replace boot Back status"
+        );
+        assert_eq!(runtime.page, "settings");
+        assert!(!runtime.view().startup_pending);
+        assert!(
+            !app.pages.has_pending_navigation(),
+            "late ack cannot navigate"
+        );
+        assert!(
+            !LAUNCH_PENDING.load(Ordering::Acquire),
+            "late ack cannot retry launch"
+        );
     }
 }

@@ -2899,7 +2899,12 @@ pub const SCREEN_SHAPES: &[&str] = &[
 /// The all-screen census order is unchanged; this value is the actual census
 /// emitted by `the_screen_shape_inventory_is_pinned`. Existing recording headers
 /// remain incompatible and must be rejected; no fixture headers are migrated.
-const SCREEN_SHAPES_PIN: u64 = 0x2908_609b_2b56_bf74;
+/// **OTT startup/footer display parity**: the OTT census now includes typed
+/// startup/pending display facts and opacity, in canonical writer order. This
+/// pin is the actual host inventory result. Only the three reviewed controlled
+/// anchors that cannot mount OTT migrate their census headers; OTT recordings
+/// and arbitrary predecessor headers remain incompatible.
+const SCREEN_SHAPES_PIN: u64 = 10036921293367296087;
 
 #[cfg(test)]
 mod arg_tests {

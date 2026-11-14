@@ -158,3 +158,20 @@ fn one_based_number_is_checked_at_wire_width() {
     assert_eq!(one_based(u32::MAX as usize - 1), Some(u32::MAX));
     assert_eq!(one_based(u32::MAX as usize), None);
 }
+
+#[test]
+fn pending_target_uses_its_proven_source_number_not_outgoing_number() {
+    let outgoing = playing();
+    let entries = vec![entry("a"), entry("b"), entry("c")];
+    let target = entry("b");
+    assert_eq!(project(&outgoing, Some(source(&outgoing.profile, &entries))).ordinal, Some(3));
+    assert_eq!(captured_ordinal(&target, &outgoing.profile, None,
+        source(&outgoing.profile, &entries)), Some(2));
+    let mut stale = outgoing.profile.clone(); stale.source.push_str("?changed");
+    assert_eq!(captured_ordinal(&target, &stale, None,
+        source(&outgoing.profile, &entries)), None);
+    assert_eq!(captured_ordinal(&target, &outgoing.profile, Some(OwnerToken(8)),
+        source(&outgoing.profile, &entries)), None);
+    assert_eq!(captured_ordinal(&entry("missing"), &outgoing.profile, None,
+        source(&outgoing.profile, &entries)), None);
+}

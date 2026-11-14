@@ -98,6 +98,33 @@ pub(super) fn display_stamp(app: &App) -> Option<(u64, u64, u64, bool)> {
     Some((runtime.generation, runtime.play_generation, runtime.revision, runtime.wall_now_s().is_some()))
 }
 
+/// Proven underlying catalogue number for a pending live target, never a row rank.
+pub(super) fn pending_ordinal(runtime: &Runtime) -> Option<u32> {
+    if !runtime.loaded || runtime.persistence_uncertain || !runtime.play_work_allowed()
+        || runtime.cancel.load(Ordering::Acquire) || runtime.play_cancel.load(Ordering::Acquire)
+        || !runtime.play_ticket.is_some_and(plx_media::route::play_request_is_current)
+        || !runtime.pending_attachment_current() || !transient::target_current(runtime) {
+        return None;
+    }
+    let request = runtime.play_target.as_ref()?;
+    if request.archive.is_some() { return None; }
+    let (_, profile, entry, _) = runtime.prepare_play_request(request.clone()).ok()?;
+    if runtime.pending_play_profile() != Some(&profile)
+        || !profile_current(runtime, &profile, Some(request)) { return None; }
+    if runtime.pending_play.as_ref().is_some_and(|invocation|
+        invocation.deadline_ms <= runtime.now_ms()
+            || !runtime.remote.invocation_is_current(invocation)
+            || !commands::pending_catalog_current(runtime)) { return None; }
+    let entry = entry?;
+    if !guide_ui::is_live(&profile, &entry) { return None; }
+    live_label::captured_ordinal(&entry, &profile, request.transient_owner,
+        live_label::CatalogSource {
+            profile: runtime.effective_profile()?, entries: &runtime.catalog.entries,
+            transient_owner: runtime.transient.accepted.as_ref().map(transient::TransientMedia::owner),
+            source_current: true,
+        })
+}
+
 pub(super) fn display(app: &App) -> Option<plx_data::metadata::NowPlaying> {
     display_stamp(app)?;
     let runtime = app.ott.as_ref()?;
@@ -121,7 +148,7 @@ pub(super) fn display(app: &App) -> Option<plx_data::metadata::NowPlaying> {
     let title = entry.title.clone();
     Some(plx_data::metadata::NowPlaying {
         ott: Some(plx_data::metadata::OttNowPlaying {
-            live: Some(plx_data::metadata::OttLivePlaying { channel_title: title.clone(), ordinal: None, guide }),
+            live: Some(plx_data::metadata::OttLivePlaying { channel_title: title.clone(), ordinal: pending_ordinal(runtime), guide }),
             archive: None, collection_label: title.clone(), confirmed_start_unix_ms: None,
             next: None, art: entry_poster(&entry),
         }), title, summary, is_episode: false, is_real_episode: false,
