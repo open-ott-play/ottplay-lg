@@ -575,3 +575,39 @@ fn maximum_source_page_fits_the_complete_delivery_envelope() {
     assert_eq!(response["data"]["items"].as_array().unwrap().len(), 128);
     assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_RESPONSE_BYTES);
 }
+
+#[test]
+fn recovery_version_is_exact_and_only_stop_or_close_only_off_are_accepted() {
+    let mut stop = fixture_request("stop");
+    stop["params"]["recovery_version"] = json!(1);
+    assert!(decode(&stop).recovery());
+    assert_eq!(decode(&stop).binding["recovery_version"], json!(1));
+    for version in [
+        json!(0),
+        json!(2),
+        json!(true),
+        json!("1"),
+        Value::Null,
+        json!(1.0),
+    ] {
+        let mut bad = stop.clone();
+        bad["params"]["recovery_version"] = version;
+        refused(&bad);
+    }
+    for name in ["status", "focus", "audio", "play", "layout"] {
+        let mut bad = fixture_request(name);
+        assert!(bad.is_object(), "shared request {name}");
+        bad["params"]["recovery_version"] = json!(1);
+        refused(&bad);
+    }
+    let mut off = fixture_request("off_restore");
+    assert!(off.is_object());
+    off["params"]["mode"] = json!("close_only");
+    refused(&off);
+    off["params"]["recovery_version"] = json!(1);
+    assert!(decode(&off).recovery());
+    for mode in ["restore_previous", "promote_active", "unknown"] {
+        off["params"]["mode"] = json!(mode);
+        refused(&off);
+    }
+}
