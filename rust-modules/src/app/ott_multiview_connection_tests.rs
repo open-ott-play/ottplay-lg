@@ -367,3 +367,112 @@ fn terminal_shutdown_retains_cancelled_reply_until_retirement_and_never_rediscov
     assert!(s.qualified().is_none());
     assert_eq!(*s.transport.calls.lock().unwrap(), 1);
 }
+
+#[test]
+fn unavailable_reprobe_is_explicit_rate_limited_and_preserves_zero_capacity_truth() {
+    let mut s = state();
+    reply(&s, "epoch_A");
+    tick(&mut s);
+    finish(&mut s);
+    tick(&mut s);
+    let generation = s.generation();
+    let client = Arc::clone(&s.qualified().unwrap().client);
+    let due = s.reprobe_after.unwrap();
+    assert!(!s.reprobe_unavailable_at(due - Duration::from_millis(1)));
+    for _ in 0..20 {
+        tick(&mut s);
+    }
+    assert_eq!(*s.transport.calls.lock().unwrap(), 1);
+    assert!(s.reprobe_unavailable_at(due));
+    assert!(!s.is_current(generation, "epoch_A", &client));
+    assert!(s.qualified().is_none());
+    assert!(
+        s.pending.is_none(),
+        "an explicit request queues no inline network work"
+    );
+    assert!(!s.reprobe_unavailable_at(due));
+    reply(&s, "epoch_B");
+    tick(&mut s);
+    assert!(
+        !s.reprobe_unavailable_at(due + REPROBE_INTERVAL),
+        "a worker must retire before a new discovery attempt"
+    );
+    finish(&mut s);
+    tick(&mut s);
+    assert_eq!(*s.transport.calls.lock().unwrap(), 2);
+    assert_eq!(s.status, "backend_unavailable");
+    assert_eq!(s.qualified().unwrap().capabilities.max_inputs, 0);
+    assert_eq!(s.qualified().unwrap().capabilities.server_epoch, "epoch_B");
+}
+
+#[test]
+fn unavailable_transport_can_recover_only_through_a_fresh_validated_capability_reply() {
+    let mut s = state();
+    tick(&mut s);
+    finish(&mut s); // Empty transport queue returns the real closed transport error.
+    tick(&mut s);
+    assert!(s.qualified().is_none());
+    assert_eq!(s.error, Some("service_unavailable"));
+    let due = s.reprobe_after.unwrap();
+    assert!(s.reprobe_unavailable_at(due));
+    // A fabricated positive count without an admitted output profile remains invalid.
+    let malformed = serde_json::json!({"version":1,"server_id":"server_A","server_epoch":"epoch_B",
+        "max_inputs":4,"qualified_input_adapters":[],"output_profiles":[],
+        "output_auth":"hmac_path_v1","catalog_revision":"catalog_A"});
+    s.transport
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Ok(serde_json::to_vec(&malformed).unwrap()));
+    tick(&mut s);
+    finish(&mut s);
+    tick(&mut s);
+    assert!(
+        s.qualified().is_none(),
+        "retry cannot fabricate positive qualification"
+    );
+    let due = s.reprobe_after.unwrap();
+    assert!(s.reprobe_unavailable_at(due));
+    let qualified = serde_json::json!({"version":1,"server_id":"server_A","server_epoch":"epoch_C",
+        "max_inputs":4,"qualified_input_adapters":["http_checked"],
+        "output_profiles":[{"profile_id":"grid4","canvas":{"width":960,"height":540,"fps":15},
+            "max_inputs":4,"geometry_modes":["disjoint"]}],
+        "output_auth":"hmac_path_v1","catalog_revision":"catalog_B"});
+    s.transport
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Ok(serde_json::to_vec(&qualified).unwrap()));
+    tick(&mut s);
+    finish(&mut s);
+    tick(&mut s);
+    assert_eq!(s.qualified().unwrap().capabilities.max_inputs, 4);
+    let due = s.reprobe_after.unwrap() + REPROBE_INTERVAL;
+    assert!(
+        !s.reprobe_unavailable_at(due),
+        "the unavailable-only door cannot invalidate positive qualification"
+    );
+}
+
+#[test]
+fn unavailable_reprobe_never_borrows_background_invalid_or_shutdown_authority() {
+    let mut s = state();
+    assert!(!s.reprobe_unavailable_at(Instant::now()));
+    s.tick(
+        true,
+        true,
+        Some(&Value::String("invalid protected configuration".into())),
+        Some("native_A"),
+    );
+    assert!(!s.reprobe_unavailable_at(Instant::now() + REPROBE_INTERVAL));
+    s.tick(true, true, Some(&config()), Some("other_installation"));
+    assert!(!s.reprobe_unavailable_at(Instant::now() + REPROBE_INTERVAL));
+    s.tick(true, false, Some(&config()), Some("native_A"));
+    assert!(!s.reprobe_unavailable_at(Instant::now() + REPROBE_INTERVAL));
+    tick(&mut s);
+    let due = s.reprobe_after.unwrap();
+    s.shutdown();
+    assert!(!s.reprobe_unavailable_at(due + REPROBE_INTERVAL));
+    assert!(s.queue.lock().unwrap().queued.len() <= 1);
+    assert_eq!(*s.transport.calls.lock().unwrap(), 0);
+}

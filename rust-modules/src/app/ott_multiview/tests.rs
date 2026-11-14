@@ -618,3 +618,118 @@ fn a_new_attempt_changes_slot_receipt_generation_without_changing_source_revisio
         "a source rebind must also rotate the slot receipt"
     );
 }
+
+fn stop_preview_fixture() -> (Coordinator, App, Runtime, ResolveTicket) {
+    let (app, mut runtime) = fixture();
+    let mut coordinator = Coordinator::new();
+    coordinator.activate(&runtime, &app, Layout::Grid4).unwrap();
+    let handle = source(&coordinator, 1);
+    coordinator.bind_source(slot(1), handle).unwrap();
+    let started = coordinator.begin_play(&mut runtime, &app, slot(1)).unwrap();
+    let ticket = authorize_fixture(&mut coordinator, &mut runtime, &app, started, "Channel 2");
+    coordinator
+        .backend_start_completed(ticket, AdmissionOutcome::Admitted)
+        .unwrap();
+    (coordinator, app, runtime, ticket)
+}
+
+#[test]
+fn stop_preview_requires_pending_ticket_and_matches_exact_completion() {
+    let _serial = plx_base::testlock::serial();
+    let (mut coordinator, _app, runtime, ticket) = stop_preview_fixture();
+    assert!(coordinator
+        .preview_stop_completion(&runtime, ticket)
+        .is_err());
+    coordinator.close_slot(slot(1)).unwrap();
+    let preview = coordinator
+        .preview_stop_completion(&runtime, ticket)
+        .unwrap();
+    assert_eq!(
+        coordinator.slot_status(slot(1)),
+        Ok(SlotStatus::Playing {
+            media: ticket.media()
+        })
+    );
+    assert_eq!(coordinator.stopping[1], Some(ticket));
+    assert_eq!(
+        coordinator.preview_stop_completion(&runtime, ticket),
+        Ok(preview.clone())
+    );
+    coordinator
+        .stop_completed(ticket, StopResult::Failed)
+        .unwrap();
+    assert_eq!(
+        coordinator.preview_stop_completion(&runtime, ticket),
+        Ok(preview.clone())
+    );
+    coordinator
+        .stop_completed(ticket, StopResult::Stopped)
+        .unwrap();
+    let status = coordinator.scene_status(&runtime).unwrap();
+    let row = status.slots.iter().find(|row| row.slot == slot(1)).unwrap();
+    assert_eq!(row.slot_generation, preview.slot_generation);
+    assert_eq!(row.source_revision, preview.source_revision);
+    assert_eq!(
+        coordinator.scene.as_ref().unwrap().revisions(),
+        preview.retirement.revisions
+    );
+    assert_eq!(coordinator.slot_status(slot(1)), Ok(SlotStatus::Empty));
+    assert!(coordinator
+        .preview_stop_completion(&runtime, ticket)
+        .is_err());
+    assert!(coordinator
+        .stop_completed(ticket, StopResult::Stopped)
+        .is_err());
+}
+
+#[test]
+fn stop_preview_refuses_wrong_pending_scene_closing_and_retired_source_owner() {
+    let _serial = plx_base::testlock::serial();
+    for invalidation in 0..5 {
+        let (mut coordinator, _app, mut runtime, ticket) = stop_preview_fixture();
+        coordinator.close_slot(slot(1)).unwrap();
+        match invalidation {
+            0 => coordinator.stopping[1] = None,
+            1 => coordinator.scene_id = Some(mint_scene_id().unwrap().0),
+            2 => coordinator.lifecycle = Lifecycle::Closing,
+            3 => coordinator.sources[1] = Some(source(&coordinator, 0)),
+            _ => runtime.retire_profile_edits(),
+        }
+        assert!(
+            coordinator
+                .preview_stop_completion(&runtime, ticket)
+                .is_err(),
+            "case {invalidation}"
+        );
+        assert_eq!(
+            coordinator.slot_status(slot(1)),
+            Ok(SlotStatus::Playing {
+                media: ticket.media()
+            })
+        );
+    }
+}
+
+#[test]
+fn stop_preview_captures_sibling_revision_changes_without_mutating_either_slot() {
+    let _serial = plx_base::testlock::serial();
+    let (mut coordinator, _app, runtime, ticket) = stop_preview_fixture();
+    coordinator.close_slot(slot(1)).unwrap();
+    let before = coordinator
+        .preview_stop_completion(&runtime, ticket)
+        .unwrap();
+    let sibling = source(&coordinator, 0);
+    coordinator.bind_source(slot(0), sibling).unwrap();
+    let after = coordinator
+        .preview_stop_completion(&runtime, ticket)
+        .unwrap();
+    assert_ne!(before, after);
+    assert_eq!(before.slot_generation, after.slot_generation);
+    assert_eq!(coordinator.stopping[1], Some(ticket));
+    assert_eq!(
+        coordinator.slot_status(slot(1)),
+        Ok(SlotStatus::Playing {
+            media: ticket.media()
+        })
+    );
+}

@@ -60,13 +60,24 @@ mod provider_adapters;
 #[path = "ott_provider_config.rs"]
 mod provider_config;
 
-pub(super) fn provider_settings_before_saved(runtime: &mut Runtime, inv: Option<&Invocation>) -> bool {
+pub(super) fn provider_settings_before_saved(
+    runtime: &mut Runtime,
+    inv: Option<&Invocation>,
+) -> bool {
     provider_config::before_saved(runtime, inv)
 }
-pub(super) fn provider_settings_settled(runtime: &mut Runtime, inv: &Invocation, durable: bool, applied: bool) -> Option<Value> {
+pub(super) fn provider_settings_settled(
+    runtime: &mut Runtime,
+    inv: &Invocation,
+    durable: bool,
+    applied: bool,
+) -> Option<Value> {
     provider_config::settled(runtime, inv, durable, applied)
 }
-pub(super) fn provider_settings_uncertain(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
+pub(super) fn provider_settings_uncertain(
+    runtime: &mut Runtime,
+    inv: &Invocation,
+) -> Option<Value> {
     provider_config::uncertain(runtime, inv)
 }
 
@@ -250,53 +261,95 @@ fn provider_context(runtime: &Runtime) -> Value {
     })
 }
 
-fn provider_kind(value: &str) -> Option<ProviderKind> { ProviderKind::from_id(value) }
-fn kinds() -> Vec<ProviderKind> { ProviderKind::all() }
+fn provider_kind(value: &str) -> Option<ProviderKind> {
+    ProviderKind::from_id(value)
+}
+fn kinds() -> Vec<ProviderKind> {
+    ProviderKind::all()
+}
 
 /// Explicit IDs/indices outrank labels; complete labels outrank partial names.
 /// A provider name containing another provider's ID must not make that ID ambiguous.
 fn provider_matches(query: &str) -> Vec<ProviderKind> {
-    let candidates: Vec<_> = kinds().into_iter().enumerate().filter_map(|(i, kind)| {
-        let label = provider_name(kind).to_lowercase();
-        let rank = if query == wire_provider(kind) || query == kind.canonical_id()
-            || query == i.to_string() { 2 }
-            else if !query.is_empty() && query == label { 1 }
-            else if !query.is_empty() && label.contains(query) { 0 }
-            else { return None; };
-        Some((rank, kind))
-    }).collect();
+    let candidates: Vec<_> = kinds()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, kind)| {
+            let label = provider_name(kind).to_lowercase();
+            let rank = if query == wire_provider(kind)
+                || query == kind.canonical_id()
+                || query == i.to_string()
+            {
+                2
+            } else if !query.is_empty() && query == label {
+                1
+            } else if !query.is_empty() && label.contains(query) {
+                0
+            } else {
+                return None;
+            };
+            Some((rank, kind))
+        })
+        .collect();
     let best = candidates.iter().map(|(rank, _)| *rank).max();
-    candidates.into_iter().filter(|(rank, _)| Some(*rank) == best)
-        .map(|(_, kind)| kind).collect()
+    candidates
+        .into_iter()
+        .filter(|(rank, _)| Some(*rank) == best)
+        .map(|(_, kind)| kind)
+        .collect()
 }
 
-fn provider_candidate(runtime: &Runtime, kind: ProviderKind,
-    servers: &[super::ott_plex_setup::PlexSetupServer]) -> Result<Saved, &'static str>
-{
+fn provider_candidate(
+    runtime: &Runtime,
+    kind: ProviderKind,
+    servers: &[super::ott_plex_setup::PlexSetupServer],
+) -> Result<Saved, &'static str> {
     let mut saved = runtime.saved.clone();
-    let usable = |profile: &&ProviderProfile| profile.enabled && profile.kind == kind
-        && !profile.source.is_empty();
-    let mut active = saved.profiles.profiles.iter().find(usable).map(|p| p.id.clone());
-    if kind == ProviderKind::Plex && !servers.is_empty()
-        && !saved.profiles.profiles.iter().any(|p| p.enabled && p.kind == kind
-            && servers.iter().any(|server| server.machine_id == p.source))
+    let usable = |profile: &&ProviderProfile| {
+        profile.enabled && profile.kind == kind && !profile.source.is_empty()
+    };
+    let mut active = saved
+        .profiles
+        .profiles
+        .iter()
+        .find(usable)
+        .map(|p| p.id.clone());
+    if kind == ProviderKind::Plex
+        && !servers.is_empty()
+        && !saved.profiles.profiles.iter().any(|p| {
+            p.enabled
+                && p.kind == kind
+                && servers.iter().any(|server| server.machine_id == p.source)
+        })
     {
-        if let super::ott_plex_setup::PlexSetupPlan::Profiles { updated, first_profile_id, .. } =
-            super::ott_plex_setup::plan(&saved.profiles, servers)?
+        if let super::ott_plex_setup::PlexSetupPlan::Profiles {
+            updated,
+            first_profile_id,
+            ..
+        } = super::ott_plex_setup::plan(&saved.profiles, servers)?
         {
             saved.profiles = updated;
             active = Some(first_profile_id);
         }
     } else if kind == ProviderKind::Plex && !servers.is_empty() {
         // Do not let an older stale row precede a currently authorized source.
-        active = saved.profiles.profiles.iter().find(|p| p.enabled && p.kind == kind
-            && servers.iter().any(|server| server.machine_id == p.source)).map(|p| p.id.clone());
+        active = saved
+            .profiles
+            .profiles
+            .iter()
+            .find(|p| {
+                p.enabled
+                    && p.kind == kind
+                    && servers.iter().any(|server| server.machine_id == p.source)
+            })
+            .map(|p| p.id.clone());
     }
     saved.profiles.active_profile = active;
-    saved.settings.insert("selectedProvider".into(), json!(kind.canonical_id()));
+    saved
+        .settings
+        .insert("selectedProvider".into(), json!(kind.canonical_id()));
     Ok(saved)
 }
-
 
 pub(super) fn provider_name(kind: ProviderKind) -> &'static str {
     match kind {
@@ -310,8 +363,12 @@ pub(super) fn provider_name(kind: ProviderKind) -> &'static str {
         ProviderKind::Stalker => "Stalker",
     }
 }
-pub(super) fn default_profile_name(kind:ProviderKind,number:usize)->String {
-    if number==1 && matches!(kind,ProviderKind::Edem|ProviderKind::Operator(_)){provider_name(kind).into()}else{format!("{} {number}",provider_name(kind))}
+pub(super) fn default_profile_name(kind: ProviderKind, number: usize) -> String {
+    if number == 1 && matches!(kind, ProviderKind::Edem | ProviderKind::Operator(_)) {
+        provider_name(kind).into()
+    } else {
+        format!("{} {number}", provider_name(kind))
+    }
 }
 
 fn fields(value: &Value, keys: &[&str]) -> bool {
@@ -440,7 +497,7 @@ fn insert_profile(
         }
         ProviderProfile {
             id,
-            name: default_profile_name(kind,number),
+            name: default_profile_name(kind, number),
             kind,
             source: String::new(),
             source_alias: String::new(),
@@ -450,7 +507,7 @@ fn insert_profile(
     profile.source = source;
     if let Some(name) = name {
         profile.name = if name.trim().is_empty() {
-            default_profile_name(kind,number)
+            default_profile_name(kind, number)
         } else {
             name
         };
@@ -489,7 +546,10 @@ fn profiles(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
     if inv.action == "profile_settings"
         && matches!(
             runtime.provider,
-            ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)
+            ProviderKind::Xtream
+                | ProviderKind::Stalker
+                | ProviderKind::Edem
+                | ProviderKind::Operator(_)
         )
     {
         return provider_adapters::command(runtime, inv);
@@ -600,13 +660,21 @@ fn profiles(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
     defer(runtime, inv, saved, reload && changed, response)
 }
 fn provider_settings(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
-    if provider_config::handles(inv) { return provider_config::command(runtime, inv); }
+    if provider_config::handles(inv) {
+        return provider_config::command(runtime, inv);
+    }
     let now = runtime.now_ms();
     let p = &inv.params;
     let Some(kind) = p["provider"].as_str().and_then(provider_kind) else {
         return Some(rejected("Unknown provider"));
     };
-    if matches!(kind, ProviderKind::Xtream | ProviderKind::Stalker | ProviderKind::Edem | ProviderKind::Operator(_)) {
+    if matches!(
+        kind,
+        ProviderKind::Xtream
+            | ProviderKind::Stalker
+            | ProviderKind::Edem
+            | ProviderKind::Operator(_)
+    ) {
         return provider_adapters::command(runtime, inv);
     }
     if kind == ProviderKind::Plex {
@@ -981,7 +1049,9 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
     {
         runtime.status = "Per-window transport is unavailable for this source".into();
         runtime.changed();
-        return Some(unsupported("Per-window transport is unavailable for multiview output"));
+        return Some(unsupported(
+            "Per-window transport is unavailable for multiview output",
+        ));
     }
     if matches!(
         operation,
@@ -1122,8 +1192,16 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
 }
 
 fn multiview_owns_decoder_operation(operation: &str) -> bool {
-    matches!(operation,
-        "previous_channel" | "next_channel" | "step_channel" | "pause" | "resume" | "seek" | "seek_relative")
+    matches!(
+        operation,
+        "previous_channel"
+            | "next_channel"
+            | "step_channel"
+            | "pause"
+            | "resume"
+            | "seek"
+            | "seek_relative"
+    )
 }
 
 #[cfg(all(test, feature = "hostsim"))]
@@ -1132,10 +1210,25 @@ mod multiview_transport_guard_tests {
 
     #[test]
     fn remote_decoder_transport_is_separated_from_read_and_lifecycle_commands() {
-        for operation in ["previous_channel", "next_channel", "step_channel", "pause", "resume", "seek", "seek_relative"] {
+        for operation in [
+            "previous_channel",
+            "next_channel",
+            "step_channel",
+            "pause",
+            "resume",
+            "seek",
+            "seek_relative",
+        ] {
             assert!(multiview_owns_decoder_operation(operation), "{operation}");
         }
-        for operation in ["status", "volume", "mute", "notifications", "exit_app", "unknown"] {
+        for operation in [
+            "status",
+            "volume",
+            "mute",
+            "notifications",
+            "exit_app",
+            "unknown",
+        ] {
             assert!(!multiview_owns_decoder_operation(operation), "{operation}");
         }
     }
@@ -1148,8 +1241,9 @@ pub(super) fn settings_public_saved(runtime: &mut Runtime, inv: &Invocation, res
 }
 
 pub(super) fn settings_failure(inv: &Invocation, reason: &str) -> Option<Value> {
-    provider_config::failure(inv, reason)
-        .or_else(|| (inv.action == "player_settings").then(|| settings::failure(&inv.params, reason)))
+    provider_config::failure(inv, reason).or_else(|| {
+        (inv.action == "player_settings").then(|| settings::failure(&inv.params, reason))
+    })
 }
 
 /// Early fences use the same strict raw request as the track handler. A lossy
@@ -1192,6 +1286,21 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
     settings_failure(inv, "policy_restricted").unwrap_or_else(|| rejected(error))
 }
 
+fn valid_capability_probe(value: &Value) -> bool {
+    let allowed = [
+        "local_media_session",
+        "local_media_progressive",
+        "local_media_handles",
+        "multiview",
+        "multiview_recovery_v1",
+    ];
+    (fields(value, &[]) || subset(value, &allowed))
+        && value
+            .as_object()
+            .is_some_and(|fields| fields.values().all(|value| value.as_bool() == Some(true)))
+        && (!value.get("multiview_recovery_v1").is_some()
+            || value.get("multiview").and_then(Value::as_bool) == Some(true))
+}
 pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
     runtime.remote.note_command(inv, runtime.now_ms());
     if inv.action == "multiview" {
@@ -1300,20 +1409,36 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             value["row_guide"] = runtime.row_guide_diagnostics();
             if let Some(guide) = value["row_guide"].as_object_mut() {
                 guide.insert("app_ui_mode".into(), json!(app.bridge.ui_mode().index()));
-                guide.insert("reply_current".into(), json!(runtime.reply.is_some()
-                    && runtime.reply == bridge::ott_ui_target(&app.pages)));
-                guide.insert("ui".into(), bridge::ott_guide_presentation(&app.pages).unwrap_or(Value::Null));
+                guide.insert(
+                    "reply_current".into(),
+                    json!(
+                        runtime.reply.is_some()
+                            && runtime.reply == bridge::ott_ui_target(&app.pages)
+                    ),
+                );
+                guide.insert(
+                    "ui".into(),
+                    bridge::ott_guide_presentation(&app.pages).unwrap_or(Value::Null),
+                );
                 let metadata = app.bridge.metadata_view();
                 let now = metadata.now_playing();
                 let ott = now.and_then(|now| now.ott.as_ref());
                 let live = ott.and_then(|ott| ott.live.as_ref());
-                let programme = live.and_then(|live| live.guide.as_ref())
+                let programme = live
+                    .and_then(|live| live.guide.as_ref())
                     .and_then(|guide| guide.at((runtime.wall_clock_ms / 1000) as i64).0);
                 let offer = app.bridge.ott_player_offer();
                 let resume_key = runtime.resume_key();
-                let saved_resume = resume_key.as_ref().and_then(|key| runtime.saved.resume.get(key));
-                let checkpoint = resume_key.as_ref().and_then(|key| runtime.checkpoints.get(key));
-                let selection = runtime.playing.as_ref().map(|playing| &playing.selection_id);
+                let saved_resume = resume_key
+                    .as_ref()
+                    .and_then(|key| runtime.saved.resume.get(key));
+                let checkpoint = resume_key
+                    .as_ref()
+                    .and_then(|key| runtime.checkpoints.get(key));
+                let selection = runtime
+                    .playing
+                    .as_ref()
+                    .map(|playing| &playing.selection_id);
                 // Presence and sizes only: diagnose a real information-panel
                 // gate without exporting programme text, sources or credentials.
                 guide.insert("player".into(), json!({
@@ -1366,27 +1491,8 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             Some(ok(value))
         }
         "capabilities" => {
-            if !(fields(p, &[])
-                || subset(
-                    p,
-                    &[
-                        "local_media_session",
-                        "local_media_progressive",
-                        "local_media_handles",
-                    ],
-                ))
-                || [
-                    "local_media_session",
-                    "local_media_progressive",
-                    "local_media_handles",
-                ]
-                .iter()
-                .any(|key| {
-                    p.get(*key)
-                        .is_some_and(|value| value.as_bool() != Some(true))
-                })
-            {
-                return Some(rejected("Capability probe flags must be true"));
+            if !valid_capability_probe(p) {
+                return Some(rejected("Capability probe flags must be known and true"));
             }
             let mut playback = vec!["previous_channel", "next_channel", "step_channel"];
             if !super::playback_allowed(app) || selected_ids(runtime).is_empty() {
@@ -1403,6 +1509,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 "vportal_settings":{"version":1},"player_settings":{"version":1,"operations":["schema","get","set"],"max_page_size":20},
                 "favorites_global":plx_data::ott::favorites_wire::Protocol::capability(),
                 "favorites_global_items":{"version":1}});
+            let (admission, recovery) = runtime.multiview_driver.capability_markers(runtime, app);
+            data["multiview"] = admission;
+            data["multiview_recovery"] = recovery;
             data["native_playback_capture"] = json!({"version":1,"operations":["start","status","read","stop"],
                 "default_duration_s":30,"min_duration_s":5,"max_duration_s":60,
                 "sample_interval_ms":1000,"max_records":64});
@@ -1427,7 +1536,8 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 data["media_tracks"] = json!({"version":1});
             }
             if catalog_remote::capability(runtime) {
-                data["catalog_random"] = json!({"version":2,"scope":"receipt","request_field":"receipt_random"});
+                data["catalog_random"] =
+                    json!({"version":2,"scope":"receipt","request_field":"receipt_random"});
                 data["categories"] =
                     json!({"version":1,"operations":["list","select"],"maxPageSize":200});
             }
@@ -1487,8 +1597,11 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 return Some(rejected("Choose one provider by ID or index"));
             }
             let kind = matches[0];
-            let servers = if kind == ProviderKind::Plex { runtime.native_plex_setup_servers() }
-                else { Vec::new() };
+            let servers = if kind == ProviderKind::Plex {
+                runtime.native_plex_setup_servers()
+            } else {
+                Vec::new()
+            };
             let saved = match provider_candidate(runtime, kind, &servers) {
                 Ok(saved) => saved,
                 Err(error) => return Some(rejected(error)),
@@ -1798,18 +1911,41 @@ mod tests {
     #[test]
     fn remote_plex_candidate_uses_authorized_metadata_without_copying_credentials() {
         use super::super::ott_plex_setup::PlexSetupServer;
-        let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
-        let servers = [PlexSetupServer { machine_id: "native-nas".into(), name: "Native NAS".into(), id_hint: 7 }];
+        let mut runtime =
+            Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        let servers = [PlexSetupServer {
+            machine_id: "native-nas".into(),
+            name: "Native NAS".into(),
+            id_hint: 7,
+        }];
         let candidate = provider_candidate(&runtime, ProviderKind::Plex, &servers).unwrap();
-        let selected = candidate.profiles.profiles.iter().find(|p| Some(&p.id) == candidate.profiles.active_profile.as_ref()).unwrap();
+        let selected = candidate
+            .profiles
+            .profiles
+            .iter()
+            .find(|p| Some(&p.id) == candidate.profiles.active_profile.as_ref())
+            .unwrap();
         assert_eq!(selected.kind, ProviderKind::Plex);
         assert_eq!(selected.source, "native-nas");
         assert_eq!(candidate.settings["selectedProvider"], "plex");
-        assert_eq!(candidate.plex_sources().unwrap().len(), 0, "metadata cannot copy account credentials");
-        assert!(runtime.saved.profiles.profiles.is_empty(), "planning does not write or change runtime");
+        assert_eq!(
+            candidate.plex_sources().unwrap().len(),
+            0,
+            "metadata cannot copy account credentials"
+        );
+        assert!(
+            runtime.saved.profiles.profiles.is_empty(),
+            "planning does not write or change runtime"
+        );
         runtime.saved = candidate;
         let original_id = runtime.saved.profiles.active_profile.clone();
-        let current = runtime.saved.profiles.profiles.iter_mut().find(|p| p.kind == ProviderKind::Plex).unwrap();
+        let current = runtime
+            .saved
+            .profiles
+            .profiles
+            .iter_mut()
+            .find(|p| p.kind == ProviderKind::Plex)
+            .unwrap();
         current.enabled = false;
         runtime.saved.profiles.active_profile = None;
         let again = provider_candidate(&runtime, ProviderKind::Plex, &servers).unwrap();
@@ -1818,15 +1954,23 @@ mod tests {
         assert!(again.profiles.profiles[0].enabled);
         runtime.saved = again;
         let mut stale = runtime.saved.profiles.profiles[0].clone();
-        stale.id = "stale-first".into(); stale.source = "retired-machine".into();
+        stale.id = "stale-first".into();
+        stale.source = "retired-machine".into();
         runtime.saved.profiles.profiles.insert(0, stale);
         let current = provider_candidate(&runtime, ProviderKind::Plex, &servers).unwrap();
-        assert_eq!(current.profiles.active_profile, original_id, "a stale first row cannot capture remote selection");
-        let absent = provider_candidate(&Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test()), ProviderKind::Plex, &[]).unwrap();
+        assert_eq!(
+            current.profiles.active_profile, original_id,
+            "a stale first row cannot capture remote selection"
+        );
+        let absent = provider_candidate(
+            &Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test()),
+            ProviderKind::Plex,
+            &[],
+        )
+        .unwrap();
         assert!(absent.profiles.profiles.is_empty());
         assert!(absent.profiles.active_profile.is_none());
     }
-
 
     #[test]
     fn provider_ids_and_indices_outrank_partial_labels() {
@@ -2242,3 +2386,31 @@ pub(super) fn category_select_settled(
 #[cfg(all(test, feature = "hostsim"))]
 #[path = "ott_commands_name_tests.rs"]
 mod name_tests;
+
+#[cfg(test)]
+mod multiview_capability_probe_tests {
+    use super::*;
+    #[test]
+    fn negotiated_native_probe_is_closed_and_go_empty_projection_stays_supported() {
+        for value in [
+            json!({}),
+            json!({"multiview":true}),
+            json!({"multiview":true,"multiview_recovery_v1":true}),
+            json!({"local_media_session":true,"multiview":true,"multiview_recovery_v1":true}),
+        ] {
+            assert!(valid_capability_probe(&value));
+        }
+        for value in [
+            json!(null),
+            json!([]),
+            json!({"multiview":false}),
+            json!({"multiview_recovery_v1":true}),
+            json!({"multiview":true,"multiview_recovery_v1":1}),
+            json!({"multiview":true,"multiview_recovery_v1":null}),
+            json!({"multiview":true,"multiview_recovery_v2":true}),
+            json!({"local_media_session":false}),
+        ] {
+            assert!(!valid_capability_probe(&value));
+        }
+    }
+}

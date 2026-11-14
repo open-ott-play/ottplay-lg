@@ -155,6 +155,23 @@ pub struct Revisions {
     pub audio: u64,
 }
 
+/// Read-only prediction of retiring one exact pipeline. This metadata grants no source work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipelineStoppedPreview {
+    pub scene: SceneId,
+    pub slot: SlotId,
+    pub source: SourceRef,
+    pub source_generation: u64,
+    pub request_generation: u64,
+    pub revisions: Revisions,
+}
+
+#[derive(Clone, Copy)]
+struct RetirementPlan {
+    request_generation: u64,
+    revisions: Revisions,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioPolicy {
     /// Exactly the focused slot owns audio. An empty or failed focused slot means silence.
@@ -694,6 +711,26 @@ impl Scene {
         self.retire_slot(ticket.slot)
     }
 
+    /// Predict the same checked transition used by report_pipeline_stopped, without mutation.
+    /// An empty/stale request cannot obtain another retirement prediction.
+    pub fn preview_pipeline_stopped(
+        &self,
+        ticket: ResolveTicket,
+    ) -> Result<PipelineStoppedPreview, Error> {
+        let slot = self.current_slot_for(ticket)?;
+        let plan = self
+            .retirement_plan(ticket.slot)?
+            .ok_or(Error::InvalidTransition)?;
+        Ok(PipelineStoppedPreview {
+            scene: self.id,
+            slot: ticket.slot,
+            source: ticket.source,
+            source_generation: slot.source_generation,
+            request_generation: plan.request_generation,
+            revisions: plan.revisions,
+        })
+    }
+
     pub fn enable_strict_kiosk(&mut self, pin: StrictKioskPin) -> Result<(), Error> {
         self.ensure_visible(pin.slot)?;
         for (index, slot) in self.slots.iter().enumerate() {
@@ -765,20 +802,31 @@ impl Scene {
         Ok(())
     }
 
-    fn retire_slot(&mut self, slot_id: SlotId) -> Result<(), Error> {
+    fn retirement_plan(&self, slot_id: SlotId) -> Result<Option<RetirementPlan>, Error> {
         let slot = self.slots.get(slot_id.index()).ok_or(Error::InvalidSlot)?;
         if slot.status.is_idle() {
-            return Ok(());
+            return Ok(None);
         }
         let request_generation = slot
             .request_generation
             .checked_add(1)
             .ok_or(Error::RevisionExhausted)?;
-        let scene_revision = self.next_scene_revision()?;
+        let mut revisions = self.revisions;
+        revisions.scene = self.next_scene_revision()?;
+        Ok(Some(RetirementPlan {
+            request_generation,
+            revisions,
+        }))
+    }
+
+    fn retire_slot(&mut self, slot_id: SlotId) -> Result<(), Error> {
+        let Some(plan) = self.retirement_plan(slot_id)? else {
+            return Ok(());
+        };
         let slot = &mut self.slots[slot_id.index()];
-        slot.request_generation = request_generation;
+        slot.request_generation = plan.request_generation;
         slot.status = SlotStatus::Empty;
-        self.revisions.scene = scene_revision;
+        self.revisions = plan.revisions;
         Ok(())
     }
 

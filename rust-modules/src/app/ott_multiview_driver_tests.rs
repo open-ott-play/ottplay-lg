@@ -16,6 +16,10 @@ struct FixtureState {
     hold_play_reply: Option<Arc<(AtomicBool, AtomicBool)>>,
     post_play_status: Option<fn(&mut service::StatusResponse)>,
     reject_play: bool,
+    accepted_budget_post_control: Option<fn(&str, &mut service::StatusResponse)>,
+    accepted_budget_reject_control: bool,
+    recovery_reject_all_control: bool,
+    accepted_budget_hold_control: Option<Arc<(AtomicBool, AtomicBool)>>,
     focus_slot: u8,
 }
 #[derive(Clone)]
@@ -131,6 +135,13 @@ impl service::Transport for FixtureTransport {
                 context.native_expected =
                     serde_json::from_value(body["next_native"].clone()).unwrap();
             }
+            if state.recovery_reject_all_control
+                || (state.accepted_budget_reject_control
+                    && matches!(body["op"]["name"].as_str(), Some("stop" | "layout")))
+            {
+                return Ok(serde_json::to_vec(&json!({"version":1,"context":body["context"],"accepted":false,
+                    "operation_id":"operation_fixture","state":state.status.as_ref().unwrap().state})).unwrap());
+            }
             if body["op"]["name"] == "play" && state.reject_play {
                 return Ok(serde_json::to_vec(&json!({"version":1,"context":context,"accepted":false,"operation_id":"operation_fixture","state":state.status.as_ref().unwrap().state})).unwrap());
             }
@@ -213,7 +224,28 @@ impl service::Transport for FixtureTransport {
                 slot.source_ref = Some(item.source_ref);
                 slot.item_ref = Some(item.item_ref);
             }
+            if body["op"]["name"] == "stop" {
+                let slot = state
+                    .status
+                    .as_mut()
+                    .unwrap()
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.slot_id == context.native_expected.slot_id)
+                    .unwrap();
+                slot.state = service::SlotState::Closed;
+                slot.source_revision += 1;
+                slot.source_ref = None;
+                slot.item_ref = None;
+                context.backend_slot_revision = slot.source_revision;
+            }
             fixture_commit(&mut state, context.clone());
+            if let Some(mutate) = state.accepted_budget_post_control {
+                mutate(
+                    body["op"]["name"].as_str().unwrap(),
+                    state.status.as_mut().unwrap(),
+                );
+            }
             if body["op"]["name"] == "play" && state.lose_play_reply {
                 return Err(service::ServiceError::Transport);
             }
@@ -249,6 +281,8 @@ impl service::Transport for FixtureTransport {
         };
         let hold = if body["op"]["name"] == "play" {
             state.hold_play_reply.clone()
+        } else if matches!(body["op"]["name"].as_str(), Some("stop" | "layout" | "off")) {
+            state.accepted_budget_hold_control.clone()
         } else {
             None
         };
@@ -503,6 +537,9 @@ fn occupy_driver_worker_slot(driver: &mut Driver, runtime: &Runtime) {
         origin: None,
         sample: None,
         admission_deadline: None,
+        output_budget_context: None,
+        recovery_context: None,
+        stop_completion: None,
     }));
 }
 
@@ -1995,4 +2032,1253 @@ fn fresh_layout_bootstraps_follow_focus_before_immediate_controls_or_ui_output()
         .iter()
         .all(|slot| slot.state == service::SlotState::Empty && slot.frames == 0));
     assert!(state.requests.iter().all(|r| r["op"]["name"] != "play"));
+}
+
+// Admission-budget regressions exercise the actual Driver, service client,
+// coordinator transitions and output queue. No native inspector/load is ticked.
+fn accepted_budget_output(status: &mut service::StatusResponse, generation: &str, nonce: char) {
+    status.state = service::SessionState::Ready;
+    status.output = Some(service::Output {
+        session_id: status.session_id.clone(),
+        server_epoch: status.server_epoch.clone(),
+        output_generation: generation.into(),
+        playlist_path: format!(
+            "/multiview/v1/media/{}.{}/index.m3u8",
+            nonce.to_string().repeat(32),
+            "b".repeat(64)
+        ),
+        lease_expires_in_ms: 60_000,
+    });
+}
+fn accepted_budget_rotate_control(op: &str, status: &mut service::StatusResponse) {
+    if matches!(op, "stop" | "layout" | "renew" | "focus" | "audio") {
+        let ids = status
+            .geometry
+            .rects
+            .iter()
+            .map(|rect| rect.slot_id)
+            .collect::<Vec<_>>();
+        status.slots.retain(|slot| ids.contains(&slot.slot_id));
+        for slot_id in ids {
+            if !status.slots.iter().any(|slot| slot.slot_id == slot_id) {
+                status.slots.push(service::SlotSnapshot {
+                    slot_id,
+                    source_revision: 0,
+                    state: service::SlotState::Empty,
+                    error: None,
+                    frames: 0,
+                    position_ms: None,
+                    duration_ms: None,
+                    source_ref: None,
+                    item_ref: None,
+                });
+            }
+        }
+        accepted_budget_output(status, "accepted_budget_next", 'c');
+    }
+}
+fn accepted_budget_slot_parameters(runtime: &Runtime, operation: &str, slot: usize) -> Value {
+    let row = runtime
+        .multiview
+        .scene_status(runtime)
+        .unwrap()
+        .slots
+        .remove(slot);
+    let mut p = parameters(runtime, operation);
+    p["slot_id"] = json!(slot);
+    p["slot_generation"] = json!(row.slot_generation);
+    p["source_revision"] = json!(row.source_revision);
+    p
+}
+fn accepted_budget_play_slot(
+    driver: &mut Driver,
+    runtime: &mut Runtime,
+    app: &mut App,
+    slot: usize,
+    id: u64,
+) {
+    let p = accepted_budget_slot_parameters(runtime, "sources", slot);
+    let request = invocation(runtime, id, p);
+    assert!(driver.command(runtime, app, &request).is_none());
+    drive(driver, runtime, app);
+    let ticket = runtime
+        .remote
+        .response_for_id_for_test(&request.id)
+        .unwrap()["data"]["items"][0]["ticket"]
+        .clone();
+    assert!(ticket.is_string());
+    let mut p = accepted_budget_slot_parameters(runtime, "play", slot);
+    p["source_ticket"] = ticket;
+    let play = invocation(runtime, id + 1, p);
+    assert!(driver.command(runtime, app, &play).is_none());
+    drive(driver, runtime, app);
+    assert!(driver.inputs[slot].is_some());
+}
+fn accepted_budget_setup() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+    let (mut driver, mut app, mut runtime, state) = setup();
+    driver.metadata_fixture = Some(metadata_fixture);
+    layout(&mut driver, &mut runtime, &mut app, 900, "pip");
+    accepted_budget_play_slot(&mut driver, &mut runtime, &mut app, 0, 901);
+    accepted_budget_play_slot(&mut driver, &mut runtime, &mut app, 1, 903);
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    accepted_budget_output(
+        &mut driver.session.as_mut().unwrap().status,
+        "accepted_budget_original",
+        'a',
+    );
+    driver.session.as_mut().unwrap().lease_deadline = Some(Deadline::after(
+        &OffFrame::for_test(),
+        Duration::from_secs(60),
+    ));
+    state.lock().unwrap().status = Some(driver.session.as_ref().unwrap().status.clone());
+    assert!(driver.take_ready_output(&runtime).is_some());
+    driver.session.as_mut().unwrap().admission_deadline =
+        Some(Deadline::after(&OffFrame::for_test(), Duration::ZERO));
+    state.lock().unwrap().accepted_budget_post_control = Some(accepted_budget_rotate_control);
+    (driver, app, runtime, state)
+}
+fn accepted_budget_expired(driver: &Driver, _runtime: &Runtime) -> bool {
+    driver
+        .session
+        .as_ref()
+        .unwrap()
+        .admission_deadline
+        .unwrap()
+        .remaining(&OffFrame::for_test())
+        .is_zero()
+}
+fn accepted_budget_drain(driver: &mut Driver, runtime: &mut Runtime, app: &mut App) {
+    let end = Instant::now() + Duration::from_secs(5);
+    while driver.pending.is_some()
+        || (!driver.retiring && !runtime.multiview_effects.is_empty())
+        || !driver.cleanup.is_empty()
+    {
+        assert!(Instant::now() < end, "accepted budget effect drain");
+        driver.tick(runtime, app);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+fn accepted_budget_offer(
+    driver: &mut Driver,
+    runtime: &mut Runtime,
+    app: &mut App,
+) -> Result<(), &'static str> {
+    // Match the real frame owner before output admission. A setup-time sample
+    // must not make a deliberately expired deadline appear unexpired.
+    runtime.clock_sample =
+        Some(task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap());
+    let proof = driver
+        .take_ready_output(runtime)
+        .expect("actual Ready output receipt");
+    runtime.multiview_driver = std::mem::take(driver);
+    let offered = super::super::multiview_output::offer(runtime, app, proof);
+    *driver = std::mem::take(&mut runtime.multiview_driver);
+    offered
+}
+#[test]
+fn accepted_budget_late_stop_publishes_only_after_ack_and_preserves_playing_sibling() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    let sibling = driver.session.as_ref().unwrap().status.slots[0].clone();
+    let p = accepted_budget_slot_parameters(&runtime, "stop", 1);
+    let mut request = invocation(&mut runtime, 910, p);
+    request.deadline_ms = runtime.now_ms().saturating_add(60_000);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &request).unwrap()["status"],
+        "ok"
+    );
+    assert!(
+        accepted_budget_expired(&driver, &runtime),
+        "queue acceptance cannot publish"
+    );
+    let captured = driver.accepted_output_budgets.front().unwrap().deadline;
+    assert!(captured.remaining_at_sample(runtime.clock_sample.unwrap()) <= BUDGET);
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    assert!(!accepted_budget_expired(&driver, &runtime));
+    assert_eq!(
+        driver
+            .session
+            .as_ref()
+            .unwrap()
+            .admission_deadline
+            .unwrap()
+            .remaining_at_sample(runtime.clock_sample.unwrap()),
+        captured.remaining_at_sample(runtime.clock_sample.unwrap())
+    );
+    assert!(driver.accepted_output_budgets.is_empty());
+    let status = &driver.session.as_ref().unwrap().status;
+    assert_eq!(status.slots[0].source_revision, sibling.source_revision);
+    assert_eq!(status.slots[0].state, service::SlotState::Playing);
+    assert_eq!(status.slots[1].state, service::SlotState::Closed);
+    assert!(driver.inputs[0].is_some() && driver.inputs[1].is_none());
+    assert_eq!(
+        status.output.as_ref().unwrap().output_generation,
+        "accepted_budget_next"
+    );
+    let offered = accepted_budget_offer(&mut driver, &mut runtime, &mut app);
+    assert!(offered.is_ok(), "post-Stop output offer: {offered:?}");
+    assert!(state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .any(|body| body["op"]["name"] == "stop"));
+}
+#[test]
+fn accepted_budget_late_existing_layout_refreshes_new_epoch_without_replacing_inputs() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, _) = accepted_budget_setup();
+    let revisions = driver
+        .session
+        .as_ref()
+        .unwrap()
+        .status
+        .slots
+        .iter()
+        .take(2)
+        .map(|slot| slot.source_revision)
+        .collect::<Vec<_>>();
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 920, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &request).unwrap()["status"],
+        "ok"
+    );
+    assert!(accepted_budget_expired(&driver, &runtime));
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    assert!(!accepted_budget_expired(&driver, &runtime));
+    for (slot, revision) in driver
+        .session
+        .as_ref()
+        .unwrap()
+        .status
+        .slots
+        .iter()
+        .take(2)
+        .zip(revisions)
+    {
+        assert_eq!(slot.source_revision, revision);
+        assert_eq!(slot.state, service::SlotState::Playing);
+    }
+    assert!(driver.inputs[0].is_some() && driver.inputs[1].is_some());
+    assert!(accepted_budget_offer(&mut driver, &mut runtime, &mut app).is_ok());
+}
+#[test]
+fn accepted_budget_status_poll_and_renew_never_admit_a_reported_new_generation() {
+    let _serial = plx_base::testlock::serial();
+    for renew in [false, true] {
+        let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+        let p = json!({"version":1,"op":"status","runtime":runtime.remote.runtime()});
+        let encoded = serde_json::to_vec(&json!({"action":"multiview","params":p})).unwrap();
+        assert!(wire::Request::decode(&encoded).is_ok());
+        let status = invocation(&mut runtime, 930, p);
+        let reply = driver
+            .command(&mut runtime, &app, &status)
+            .expect("valid status has a synchronous response");
+        assert_eq!(reply["status"], "ok");
+        assert!(accepted_budget_expired(&driver, &runtime));
+        accepted_budget_output(
+            state.lock().unwrap().status.as_mut().unwrap(),
+            "accepted_budget_unrequested",
+            'd',
+        );
+        if renew {
+            driver.last_renew = Instant::now() - Duration::from_secs(21);
+        } else {
+            driver.last_poll = Instant::now() - Duration::from_secs(1);
+        }
+        driver.tick(&mut runtime, &mut app);
+        drive(&mut driver, &mut runtime, &mut app);
+        assert!(accepted_budget_expired(&driver, &runtime));
+        assert!(driver.accepted_output_budgets.is_empty());
+        assert_eq!(
+            accepted_budget_offer(&mut driver, &mut runtime, &mut app),
+            Err("Composite output admission expired")
+        );
+    }
+}
+#[test]
+fn accepted_budget_rejected_control_ack_cannot_publish_or_offer_output() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    state.lock().unwrap().accepted_budget_reject_control = true;
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 940, p);
+    assert!(driver.command(&mut runtime, &app, &request).is_some());
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    assert!(driver.retiring || driver.uncertain || driver.session.is_none());
+    assert!(driver.take_ready_output(&runtime).is_none());
+}
+#[test]
+fn accepted_budget_delayed_ack_keeps_the_original_expired_deadline() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    let hold = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+    state.lock().unwrap().accepted_budget_hold_control = Some(hold.clone());
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 950, p);
+    assert!(driver.command(&mut runtime, &app, &request).is_some());
+    driver.tick(&mut runtime, &mut app);
+    let until = Instant::now() + Duration::from_secs(5);
+    while !hold.0.load(Ordering::Acquire) {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(accepted_budget_expired(&driver, &runtime));
+    // Deterministically model the captured request deadline expiring while its
+    // real service worker is held. Completion must use this stored deadline,
+    // never a newly computed now+BUDGET.
+    driver.pending.as_mut().unwrap().admission_deadline =
+        Some(Deadline::after(&OffFrame::for_test(), Duration::ZERO));
+    hold.1.store(true, Ordering::Release);
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    assert!(accepted_budget_expired(&driver, &runtime));
+    assert_eq!(
+        accepted_budget_offer(&mut driver, &mut runtime, &mut app),
+        Err("Composite output admission expired")
+    );
+}
+#[test]
+fn accepted_budget_old_scene_and_replay_cannot_refresh_the_budget() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, _) = accepted_budget_setup();
+    let mut stale = parameters(&runtime, "layout");
+    stale["layout"] = json!("grid4");
+    stale["expected"]["scene"] = json!("retired_scene");
+    let rejected = invocation(&mut runtime, 960, stale);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &rejected).unwrap()["status"],
+        "rejected"
+    );
+    assert!(
+        accepted_budget_expired(&driver, &runtime) && driver.accepted_output_budgets.is_empty()
+    );
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 961, p);
+    assert!(driver.command(&mut runtime, &app, &request).is_some());
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    driver.session.as_mut().unwrap().admission_deadline =
+        Some(Deadline::after(&OffFrame::for_test(), Duration::ZERO));
+    assert_eq!(
+        driver.command(&mut runtime, &app, &request).unwrap()["status"],
+        "rejected"
+    );
+    assert!(
+        accepted_budget_expired(&driver, &runtime) && driver.accepted_output_budgets.is_empty()
+    );
+}
+#[test]
+fn accepted_budget_focus_audio_and_expired_invocation_never_refresh() {
+    let _serial = plx_base::testlock::serial();
+    for focus in [false, true] {
+        let (mut driver, mut app, mut runtime, _) = accepted_budget_setup();
+        let p = if focus {
+            accepted_budget_slot_parameters(&runtime, "focus", 1)
+        } else {
+            let mut p = parameters(&runtime, "audio");
+            p["policy"] = json!("muted");
+            p
+        };
+        let request = invocation(&mut runtime, 970, p);
+        assert_eq!(
+            driver.command(&mut runtime, &app, &request).unwrap()["status"],
+            "ok"
+        );
+        accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+        assert!(
+            accepted_budget_expired(&driver, &runtime) && driver.accepted_output_budgets.is_empty()
+        );
+        assert_eq!(
+            accepted_budget_offer(&mut driver, &mut runtime, &mut app),
+            Err("Composite output admission expired")
+        );
+        let mut p = parameters(&runtime, "layout");
+        p["layout"] = json!("grid4");
+        let mut expired = invocation(&mut runtime, 971, p);
+        expired.deadline_ms = 0;
+        assert_eq!(
+            driver.command(&mut runtime, &app, &expired).unwrap()["status"],
+            "rejected"
+        );
+        assert!(
+            accepted_budget_expired(&driver, &runtime) && driver.accepted_output_budgets.is_empty()
+        );
+    }
+}
+#[test]
+fn accepted_budget_changed_scene_while_ack_pending_cannot_publish() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    let hold = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+    state.lock().unwrap().accepted_budget_hold_control = Some(hold.clone());
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 980, p);
+    assert!(driver.command(&mut runtime, &app, &request).is_some());
+    driver.tick(&mut runtime, &mut app);
+    let until = Instant::now() + Duration::from_secs(5);
+    while !hold.0.load(Ordering::Acquire) {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    runtime.multiview_authority_epoch += 1;
+    hold.1.store(true, Ordering::Release);
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    assert!(driver.retiring || driver.session.is_none());
+    assert!(driver.take_ready_output(&runtime).is_none());
+}
+
+#[test]
+fn recovery_rejected_control_ack_never_becomes_successful_status_for_any_operation() {
+    let _serial = plx_base::testlock::serial();
+    let (driver, _app, runtime, state) = accepted_budget_setup();
+    let session = driver.session.as_ref().unwrap();
+    let prior = binding(&runtime, session, SlotId::SLOT_0).unwrap();
+    let worker = OffFrame::for_test();
+    state.lock().unwrap().recovery_reject_all_control = true;
+    for (i, operation) in [
+        service::ControlOp::Focus {},
+        service::ControlOp::Audio {
+            policy: service::AudioPolicy::Muted,
+        },
+        service::ControlOp::Renew {},
+        service::ControlOp::Off {},
+        service::ControlOp::Stop {},
+        service::ControlOp::Layout {
+            geometry: session.status.geometry.clone(),
+        },
+        service::ControlOp::Play {
+            input_grant: "grant_fixture".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = state.lock().unwrap().paths.len();
+        let next = if matches!(&operation, service::ControlOp::Focus {}) {
+            let mut next = prior.native_expected.clone();
+            next.expected.focus_revision = "not_committed".into();
+            Some(next)
+        } else {
+            None
+        };
+        let result = session.io.control(
+            &worker,
+            prior.clone(),
+            operation,
+            next,
+            service::RequestId::parse(&format!("{:032x}", 4000 + i)).unwrap(),
+            Deadline::after(&worker, Duration::from_secs(1)),
+            &AtomicBool::new(false),
+        );
+        assert!(
+            matches!(result, Err(service::ServiceError::RevisionConflict)),
+            "operation {i}"
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.paths.len(),
+            before + 1,
+            "rejected ACK must not trigger a status read"
+        );
+        assert!(state.paths.last().unwrap().ends_with("/control"));
+        assert_eq!(
+            state.requests.last().unwrap()["context"],
+            serde_json::to_value(&prior).unwrap()
+        );
+        assert_ne!(
+            state.requests.last().unwrap()["next_native"],
+            serde_json::to_value(&prior.native_expected).unwrap()
+        );
+    }
+}
+
+fn recovery_fixture() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    runtime.multiview_connection.refresh();
+    driver.tick(&mut runtime, &mut app);
+    assert!(driver.recovery_only);
+    assert!(driver.session.is_some());
+    assert!(driver.accepted_output_budgets.is_empty());
+    (driver, app, runtime, state)
+}
+
+#[test]
+fn recovery_retains_original_client_but_offers_no_output_or_admission() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+    let original = driver.session.as_ref().unwrap().client.clone();
+    let paths = state.lock().unwrap().paths.len();
+    let (admission, recovery) = driver.capability_markers(&runtime, &app);
+    assert_eq!(
+        admission,
+        json!({"version":1,"operations":["status"],"layouts":[],"max_slots":0,
+        "source_kinds":[],"audio_policies":[],"off_modes":[]})
+    );
+    assert_eq!(
+        recovery,
+        json!({"version":1,"runtime":runtime.remote.runtime(),
+        "operations":["status","stop","off"],"off_modes":["close_only"]})
+    );
+    for _ in 0..3 {
+        driver.tick(&mut runtime, &mut app);
+    }
+    assert_eq!(state.lock().unwrap().paths.len(), paths);
+    assert!(Arc::ptr_eq(
+        &original,
+        &driver.session.as_ref().unwrap().client
+    ));
+    assert!(driver.take_ready_output(&runtime).is_none());
+    assert!(driver.accepted_output_budgets.is_empty());
+    assert!(accepted_budget_expired(&driver, &runtime));
+}
+
+#[test]
+fn recovery_stop_exact_ticket_preserves_sibling_and_does_not_mint_output_budget() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+    let sibling = driver.inputs[1].as_ref().unwrap().ticket;
+    let before = state.lock().unwrap().requests.len();
+    let mut p = accepted_budget_slot_parameters(&runtime, "stop", 0);
+    p["recovery_version"] = json!(1);
+    let inv = invocation(&mut runtime, 4100, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &inv).unwrap()["status"],
+        "ok"
+    );
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    assert!(driver.inputs[0].is_none());
+    assert!(driver.inputs[1].as_ref().unwrap().ticket == sibling);
+    assert!(driver.recovery_effects.is_empty());
+    assert!(driver.accepted_output_budgets.is_empty());
+    assert!(accepted_budget_expired(&driver, &runtime));
+    assert!(driver.take_ready_output(&runtime).is_none());
+    let state = state.lock().unwrap();
+    let operations: Vec<_> = state.requests[before..]
+        .iter()
+        .filter_map(|v| v["op"]["name"].as_str())
+        .collect();
+    assert_eq!(operations, ["stop"]);
+}
+
+#[test]
+fn recovery_rejects_changed_origin_foreground_and_authority_without_new_io() {
+    let _serial = plx_base::testlock::serial();
+    for variant in 0..6 {
+        let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+        let before = state.lock().unwrap().paths.len();
+        let mut p = accepted_budget_slot_parameters(&runtime, "stop", 0);
+        p["recovery_version"] = json!(1);
+        let inv = invocation(&mut runtime, 4200 + variant, p);
+        match variant {
+            0 => {
+                runtime
+                    .saved
+                    .settings
+                    .insert("nativeMultiviewService".into(), json!("different-origin"));
+            }
+            1 => app.running = false,
+            2 => runtime.multiview_authority_epoch += 1,
+            3 => runtime.profile_edit_epoch += 1,
+            4 => {
+                let origin = runtime.saved.favorites.entries()[0].origin.clone();
+                let kiosk = crate::app::ott_kiosk_stored::Stored::armed(origin, true).unwrap();
+                runtime
+                    .saved
+                    .settings
+                    .insert("nativeKiosk".into(), kiosk.encode().unwrap());
+            }
+            _ => runtime.persistence_uncertain = true,
+        }
+        let reply = driver.command(&mut runtime, &app, &inv).unwrap();
+        assert_ne!(reply["status"], "ok");
+        assert_eq!(state.lock().unwrap().paths.len(), before);
+        assert_eq!(
+            driver.capability_markers(&runtime, &app).1["operations"],
+            json!(["status"])
+        );
+        assert!(driver.accepted_output_budgets.is_empty());
+    }
+}
+
+#[test]
+fn recovery_close_only_off_closes_original_backend_and_native_scene() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+    let before = state.lock().unwrap().requests.len();
+    let mut p = parameters(&runtime, "off");
+    p["mode"] = json!("close_only");
+    p["recovery_version"] = json!(1);
+    let inv = invocation(&mut runtime, 4300, p);
+    assert!(driver.command(&mut runtime, &app, &inv).is_none());
+    drive(&mut driver, &mut runtime, &mut app);
+    assert!(driver.session.is_none());
+    assert!(driver.inputs.iter().all(Option::is_none));
+    assert!(runtime.multiview.scene_status(&runtime).is_none());
+    assert!(driver.accepted_output_budgets.is_empty());
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.status.as_ref().unwrap().state,
+        service::SessionState::Closed
+    );
+    let operations: Vec<_> = state.requests[before..]
+        .iter()
+        .filter_map(|v| v["op"]["name"].as_str())
+        .collect();
+    assert_eq!(operations, ["off"]);
+}
+
+#[test]
+fn recovery_wire_focus_audio_and_stale_stop_never_dispatch_or_offer_budget() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, app, mut runtime, state) = recovery_fixture();
+    let before = state.lock().unwrap().paths.len();
+    for (i, op) in ["focus", "audio"].into_iter().enumerate() {
+        let mut p = accepted_budget_slot_parameters(&runtime, op, 0);
+        p["recovery_version"] = json!(1);
+        if op == "audio" {
+            p["policy"] = json!("muted");
+        }
+        let encoded = serde_json::to_vec(&json!({"action":"multiview","params":p})).unwrap();
+        // Recovery focus/audio are outside the closed wire grammar, so they
+        // never reach Driver dispatch or produce a structured accepted reply.
+        assert!(wire::Request::decode(&encoded).is_err());
+        let inv = invocation(&mut runtime, 4400 + i as u64, p);
+        assert!(driver.command(&mut runtime, &app, &inv).is_none());
+    }
+    let mut p = accepted_budget_slot_parameters(&runtime, "stop", 0);
+    p["recovery_version"] = json!(1);
+    p["slot_generation"] = json!("old_generation");
+    let encoded = serde_json::to_vec(&json!({"action":"multiview","params":p})).unwrap();
+    assert!(wire::Request::decode(&encoded).is_ok());
+    let inv = invocation(&mut runtime, 4402, p);
+    let rejected = driver
+        .command(&mut runtime, &app, &inv)
+        .expect("valid stale Stop must receive its exact CAS rejection");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["data"]["reason"], "slot_changed");
+    assert_eq!(state.lock().unwrap().paths.len(), before);
+    assert!(runtime.multiview_effects.is_empty());
+    assert!(driver.recovery_effects.is_empty());
+    assert!(driver.accepted_output_budgets.is_empty());
+}
+
+#[test]
+fn recovery_uncaptured_focus_cannot_borrow_stop_custody() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, _app, mut runtime, state) = recovery_fixture();
+    let before = state.lock().unwrap().paths.len();
+    let scene = runtime
+        .multiview
+        .active_playback()
+        .expect("active fixture playback")
+        .1
+        .scene();
+    runtime
+        .multiview_effects
+        .push_back(scene::Effect::Backend(scene::BackendIntent::Focus {
+            scene,
+            slot: SlotId::SLOT_0,
+        }));
+    assert!(driver.drain_effect(&mut runtime).is_err());
+    assert_eq!(state.lock().unwrap().paths.len(), before);
+    assert!(driver.pending.is_none());
+    assert!(driver.accepted_output_budgets.is_empty());
+}
+
+#[test]
+fn recovery_pending_stop_ack_cannot_survive_changed_protected_origin() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+    let hold = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+    state.lock().unwrap().accepted_budget_hold_control = Some(hold.clone());
+    let mut p = accepted_budget_slot_parameters(&runtime, "stop", 0);
+    p["recovery_version"] = json!(1);
+    let inv = invocation(&mut runtime, 4500, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &inv).unwrap()["status"],
+        "ok"
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    while !hold.0.load(Ordering::Acquire) {
+        assert!(Instant::now() < until);
+        driver.tick(&mut runtime, &mut app);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    runtime
+        .saved
+        .settings
+        .insert("nativeMultiviewService".into(), json!("different-origin"));
+    hold.1.store(true, Ordering::Release);
+    driver.tick(&mut runtime, &mut app);
+    drive(&mut driver, &mut runtime, &mut app);
+    assert!(driver.retiring || driver.session.is_none());
+    assert!(driver.accepted_output_budgets.is_empty());
+    assert!(driver.take_ready_output(&runtime).is_none());
+    assert!(state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|request| !matches!(request["op"]["name"].as_str(), Some("renew"))));
+}
+
+#[test]
+fn recovery_capability_projection_is_closed_zero_without_current_qualification() {
+    let _serial = plx_base::testlock::serial();
+    let (driver, app, mut runtime, _) = setup();
+    let (positive, _) = driver.capability_markers(&runtime, &app);
+    assert!(positive["max_slots"].as_u64().unwrap() <= 4);
+    assert!(positive["max_slots"].as_u64().unwrap() > 0);
+    assert_eq!(positive.as_object().unwrap().len(), 7);
+    assert_eq!(positive["off_modes"], json!([]));
+    assert!(!positive["operations"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("off")));
+    runtime.multiview_connection.refresh();
+    let (zero, recovery) = driver.capability_markers(&runtime, &app);
+    assert_eq!(
+        zero,
+        json!({"version":1,"operations":["status"],"layouts":[],"max_slots":0,
+        "source_kinds":[],"audio_policies":[],"off_modes":[]})
+    );
+    assert_eq!(recovery.as_object().unwrap().len(), 4);
+    assert_eq!(recovery["operations"], json!(["status"]));
+    assert_eq!(recovery["off_modes"], json!([]));
+}
+
+// Observe the actual worker result before the main-thread completion reducer. All
+// negative mutations below are explicit test faults, never substitute successful ACKs.
+fn stop_completion_reply(driver: &mut Driver) -> (Pending, Result<Reply, wire::Reason>) {
+    let until = Instant::now() + Duration::from_secs(5);
+    while driver
+        .pending
+        .as_ref()
+        .unwrap()
+        .thread
+        .as_ref()
+        .is_some_and(|t| !t.is_finished())
+    {
+        assert!(Instant::now() < until, "Stop worker completion bound");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut pending = *driver.pending.take().unwrap();
+    pending.thread.take().unwrap().join().unwrap();
+    let reply = pending
+        .receiver
+        .try_recv()
+        .expect("finished Stop worker reply");
+    (pending, reply)
+}
+
+fn queue_stop_fixture(
+    driver: &mut Driver,
+    runtime: &mut Runtime,
+    app: &App,
+    id: u64,
+) -> ResolveTicket {
+    let ticket = driver.inputs[1].as_ref().unwrap().ticket;
+    let p = accepted_budget_slot_parameters(runtime, "stop", 1);
+    let request = invocation(runtime, id, p);
+    assert_eq!(
+        driver.command(runtime, app, &request).unwrap()["status"],
+        "ok"
+    );
+    ticket
+}
+
+#[test]
+fn stop_ack_prediction_and_actual_commit_must_both_match_before_publication() {
+    let _serial = plx_base::testlock::serial();
+    for corrupt_prediction in [false, true] {
+        let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+        let original_client = driver.session.as_ref().unwrap().client.clone();
+        let ticket = queue_stop_fixture(&mut driver, &mut runtime, &app, 1200);
+        driver.drain_effect(&mut runtime).unwrap();
+        let (mut pending, reply) = stop_completion_reply(&mut driver);
+        let Ok(Reply::Status(mut status)) = reply else {
+            panic!("actual successful Stop reply required");
+        };
+        let actual_before = native_expected(&runtime, ticket.slot()).unwrap();
+        assert_ne!(
+            status.native_expected.slot_generation,
+            actual_before.slot_generation
+        );
+        assert_eq!(
+            status.native_expected,
+            pending.stop_completion.as_ref().unwrap().native
+        );
+        let bad = "slot-1-generation-invalid".to_owned();
+        status.native_expected.slot_generation = bad.clone();
+        if corrupt_prediction {
+            // Server and pending prediction agree, but the real Scene commit cannot.
+            // The coordinator preview is left intact so this reaches the post-commit check.
+            pending
+                .stop_completion
+                .as_mut()
+                .unwrap()
+                .native
+                .slot_generation = bad;
+        }
+        driver.complete(&mut runtime, &mut app, pending, Ok(Reply::Status(status)));
+        assert!(driver.retiring);
+        assert!(
+            driver.session.is_none(),
+            "no status/deadline publication on mismatch"
+        );
+        assert!(driver.take_ready_output(&runtime).is_none());
+        assert!(driver.accepted_output_budgets.is_empty());
+        assert!(
+            driver.inputs[0].is_some() && driver.inputs[1].is_some(),
+            "retain original cleanup custody"
+        );
+        assert!(!driver.cleanup.is_empty());
+        assert!(driver
+            .cleanup
+            .iter()
+            .all(|cleanup| Arc::ptr_eq(&cleanup.origin.client, &original_client)));
+        assert_eq!(
+            runtime.multiview.slot_status(ticket.slot()).unwrap()
+                == plx_data::ott::multiview::SlotStatus::Empty,
+            corrupt_prediction,
+            "only the post-commit fault may have retired the local slot"
+        );
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .filter(|body| body["op"]["name"] == "stop")
+                .count(),
+            1
+        );
+        // Failure never retries the write. Owned original-client cleanup is allowed to run.
+        accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    }
+}
+
+#[test]
+fn stop_pending_scene_or_sibling_change_refuses_completion_without_new_budget() {
+    let _serial = plx_base::testlock::serial();
+    for change_sibling in [false, true] {
+        let (mut driver, mut app, mut runtime, _) = accepted_budget_setup();
+        let stopped = queue_stop_fixture(&mut driver, &mut runtime, &app, 1210);
+        driver.drain_effect(&mut runtime).unwrap();
+        let (pending, reply) = stop_completion_reply(&mut driver);
+        if change_sibling {
+            // A real sibling completion changes the whole Scene revision while
+            // leaving this Stop's target generation and global wire revisions alone.
+            let sibling = driver.inputs[0].as_ref().unwrap().ticket;
+            runtime.multiview.close_slot(sibling.slot()).unwrap();
+            runtime
+                .multiview
+                .stop_completed(sibling, scene::StopResult::Stopped)
+                .unwrap();
+        } else {
+            runtime.multiview.close_scene().unwrap();
+        }
+        driver.complete(&mut runtime, &mut app, pending, reply);
+        assert!(driver.retiring && driver.session.is_none());
+        assert!(driver.inputs[1].is_some());
+        assert!(driver.take_ready_output(&runtime).is_none());
+        assert!(
+            runtime.multiview.slot_status(stopped.slot()).unwrap()
+                != plx_data::ott::multiview::SlotStatus::Empty,
+            "changed pending context must not consume Stop completion"
+        );
+        accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    }
+}
+
+#[test]
+fn stop_rejected_ack_never_completes_and_duplicate_retired_ticket_never_sends_io() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    state.lock().unwrap().accepted_budget_reject_control = true;
+    let ticket = queue_stop_fixture(&mut driver, &mut runtime, &app, 1220);
+    driver.drain_effect(&mut runtime).unwrap();
+    let (pending, reply) = stop_completion_reply(&mut driver);
+    assert!(reply.is_err());
+    driver.complete(&mut runtime, &mut app, pending, reply);
+    assert!(driver.retiring && driver.session.is_none());
+    assert!(driver.inputs[1].is_some());
+    assert!(
+        runtime.multiview.slot_status(ticket.slot()).unwrap()
+            != plx_data::ott::multiview::SlotStatus::Empty
+    );
+    assert!(driver.take_ready_output(&runtime).is_none());
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+
+    let (mut driver, app, mut runtime, state) = accepted_budget_setup();
+    let ticket = queue_stop_fixture(&mut driver, &mut runtime, &app, 1221);
+    runtime
+        .multiview
+        .stop_completed(ticket, scene::StopResult::Stopped)
+        .unwrap();
+    let before = state.lock().unwrap().paths.len();
+    driver.drain_effect(&mut runtime).unwrap();
+    assert!(driver.pending.is_none());
+    assert_eq!(state.lock().unwrap().paths.len(), before);
+    assert!(runtime
+        .multiview
+        .preview_stop_completion(&runtime, ticket)
+        .is_err());
+}
+
+// Review regressions cross actual original-service cleanup and the output
+// adapter's native admission gate. Only inspection and service IO are synthetic.
+fn review_qualify(runtime: &mut Runtime) {
+    let protected = runtime
+        .saved
+        .settings
+        .get("nativeMultiviewService")
+        .cloned()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        runtime.multiview_connection.tick(
+            true,
+            true,
+            Some(&protected),
+            runtime.remote.persisted_device_id(),
+        );
+        if runtime.multiview_connection.qualified().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "fresh real capability client must settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+fn review_nonclosed_off(op: &str, status: &mut service::StatusResponse) {
+    if op == "off" {
+        status.state = service::SessionState::Ready;
+    } else {
+        accepted_budget_rotate_control(op, status);
+    }
+}
+#[test]
+fn review_confirmed_recovery_retirement_allows_fresh_layout_but_unconfirmed_stays_fenced() {
+    let _serial = plx_base::testlock::serial();
+    for confirmed in [false, true] {
+        let (mut driver, mut app, mut runtime, state) = recovery_fixture();
+        let old_scene = context(&runtime).scene;
+        if !confirmed {
+            state.lock().unwrap().accepted_budget_post_control = Some(review_nonclosed_off);
+        }
+        app.running = false;
+        driver.tick(&mut runtime, &mut app);
+        drive(&mut driver, &mut runtime, &mut app);
+        app.running = true;
+        review_qualify(&mut runtime);
+        let before = state.lock().unwrap().paths.len();
+        let mut p = parameters(&runtime, "layout");
+        p["layout"] = json!("grid4");
+        let request = invocation(&mut runtime, 6100 + u64::from(confirmed), p);
+        let result = driver.command(&mut runtime, &app, &request);
+        if !confirmed {
+            assert_eq!(result.unwrap()["status"], "rejected");
+            assert!(driver.retiring || driver.uncertain);
+            assert!(!driver.shutdown_confirmed());
+            assert!(driver.inputs.iter().any(Option::is_some));
+            assert_eq!(
+                state.lock().unwrap().paths.len(),
+                before,
+                "unconfirmed cleanup cannot create a new scene"
+            );
+            let generation = runtime.multiview_connection.generation();
+            let status = invocation(&mut runtime, 6110, json!({"version":1,"op":"status"}));
+            let _ = driver.command(&mut runtime, &app, &status);
+            assert_eq!(
+                runtime.multiview_connection.generation(),
+                generation,
+                "unconfirmed custody cannot reprobe"
+            );
+        } else {
+            assert!(
+                result.is_none(),
+                "confirmed original Closed must release the recovery-only admission fence"
+            );
+            drive(&mut driver, &mut runtime, &mut app);
+            assert_eq!(
+                runtime
+                    .remote
+                    .response_for_id_for_test(&request.id)
+                    .unwrap()["status"],
+                "ok"
+            );
+            assert!(driver.session.is_some());
+            assert!(!driver.recovery_only && !driver.retiring);
+            assert_ne!(context(&runtime).scene, old_scene);
+            assert!(state.lock().unwrap().paths[before..]
+                .iter()
+                .any(|p| p.ends_with("/sessions")));
+        }
+    }
+}
+
+type ReviewJobs =
+    Arc<Mutex<std::collections::VecDeque<(Box<dyn FnOnce(&OffFrame) + Send>, Arc<AtomicBool>)>>>;
+struct ReviewDone(Arc<AtomicBool>);
+impl super::super::multiview_connection::Retirement for ReviewDone {
+    fn retired(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+struct ReviewLauncher(ReviewJobs);
+impl super::super::multiview_connection::Launcher for ReviewLauncher {
+    fn spawn_io(
+        &mut self,
+        work: Box<dyn FnOnce(&OffFrame) + Send>,
+    ) -> Option<Box<dyn super::super::multiview_connection::Retirement>> {
+        let done = Arc::new(AtomicBool::new(false));
+        self.0.lock().unwrap().push_back((work, done.clone()));
+        Some(Box::new(ReviewDone(done)))
+    }
+}
+fn review_media() -> plx_media::ff::inspect::MediaInfo {
+    plx_media::ff::inspect::MediaInfo {
+        resolved_source: None,
+        hls_playback: None,
+        tracks: Default::default(),
+        video_codec: "h264".into(),
+        audio_codec: "aac".into(),
+        width: 320,
+        height: 180,
+        fps: 10.0,
+        duration_ns: 0,
+        audio_channels: 2,
+        audio_sample_rate: 48_000,
+        audio_bit_depth: 16,
+        dovi: plx_data::metadata::Dovi::NONE,
+    }
+}
+struct ReviewInspector;
+impl super::super::multiview_output::Inspector for ReviewInspector {
+    fn inspect(
+        &self,
+        worker: &OffFrame,
+        source: &plx_media::ff::ExternalSource,
+        deadline: Deadline,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<plx_media::ff::inspect::MediaInfo, &'static str> {
+        assert!(!cancelled.load(Ordering::Acquire) && !deadline.expired(worker));
+        assert!(matches!(source, plx_media::ff::ExternalSource::Hls(url)
+            if url.starts_with("https://service.invalid/multiview/v1/media/") && !url.contains("fixture-bearer")));
+        Ok(review_media())
+    }
+}
+struct ReviewPictureRig {
+    driver: Driver,
+    app: Box<App>,
+    runtime: Box<Runtime>,
+    state: Arc<Mutex<FixtureState>>,
+}
+impl Drop for ReviewPictureRig {
+    fn drop(&mut self) {
+        plx_media::player::SHARED
+            .duration_ns
+            .store(0, Ordering::Release);
+        plx_media::player::stop_bufferfeed(
+            &mut self.app.player.session,
+            &mut self.app.adapters.player,
+        );
+        plx_media::player::TX.reset();
+        route::reset_player_control_for_test(&self.app.player.session);
+        assert!(!self.app.adapters.player.release_has_queued_start());
+        assert!(!self.app.adapters.player.is_live());
+    }
+}
+fn review_admitted_picture() -> ReviewPictureRig {
+    let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
+    // Renew the expired fixture budget only through a real explicit Layout ACK.
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let request = invocation(&mut runtime, 6200, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &request).unwrap()["status"],
+        "ok"
+    );
+    accepted_budget_drain(&mut driver, &mut runtime, &mut app);
+    let jobs: ReviewJobs = Default::default();
+    runtime.multiview_output = super::super::multiview_output::State::with_io(
+        Arc::new(ReviewInspector),
+        Box::new(ReviewLauncher(jobs.clone())),
+    );
+    let proof = driver
+        .take_ready_output(&runtime)
+        .expect("actual ready service output");
+    runtime.multiview_driver = driver;
+    super::super::multiview_output::offer(&mut runtime, &mut app, proof).unwrap();
+    super::super::multiview_output::tick(&mut runtime, &mut app);
+    loop {
+        let Some((work, done)) = jobs.lock().unwrap().pop_front() else {
+            break;
+        };
+        work(&OffFrame::for_test());
+        done.store(true, Ordering::Release);
+    }
+    app.adapters.player.begin_release_for_test(Duration::ZERO);
+    super::super::multiview_output::tick(&mut runtime, &mut app);
+    let driver = std::mem::take(&mut runtime.multiview_driver);
+    let identity = route::playback_identity(&app.player.session)
+        .expect("real deferred native admission identity");
+    assert_eq!(runtime.multiview_picture.as_ref(), Some(&identity));
+    assert_eq!(driver.admitted_picture.as_ref(), Some(&identity));
+    assert_eq!(runtime.multiview_output.status, "admitted");
+    ReviewPictureRig {
+        driver,
+        app: Box::new(app),
+        runtime: Box::new(runtime),
+        state,
+    }
+}
+fn review_output_frame(rig: &mut ReviewPictureRig) {
+    rig.runtime.multiview_driver = std::mem::take(&mut rig.driver);
+    super::super::multiview_output::tick(&mut rig.runtime, &mut rig.app);
+    rig.driver = std::mem::take(&mut rig.runtime.multiview_driver);
+}
+#[test]
+fn review_confirmed_recovery_off_retires_only_owned_picture_and_allows_explicit_reprobe() {
+    let _serial = plx_base::testlock::serial();
+    for foreign in [false, true] {
+        let mut rig = review_admitted_picture();
+        let owned = rig.driver.admitted_picture.clone().unwrap();
+        rig.runtime.multiview_connection.refresh();
+        rig.driver.tick(&mut rig.runtime, &mut rig.app);
+        assert!(rig.driver.recovery_only);
+        let hold = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+        rig.state.lock().unwrap().accepted_budget_hold_control = Some(hold.clone());
+        let mut p = parameters(&rig.runtime, "off");
+        p["mode"] = json!("close_only");
+        p["recovery_version"] = json!(1);
+        let request = invocation(&mut rig.runtime, 6210, p);
+        assert!(rig
+            .driver
+            .command(&mut rig.runtime, &rig.app, &request)
+            .is_none());
+        let until = Instant::now() + Duration::from_secs(5);
+        while !hold.0.load(Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            rig.driver.admitted_picture.as_ref(),
+            Some(&owned),
+            "unconfirmed Off cannot retire picture custody"
+        );
+        assert!(rig.driver.selected.iter().any(Option::is_some));
+        let before = rig.runtime.multiview_connection.generation();
+        let status = invocation(&mut rig.runtime, 6211, json!({"version":1,"op":"status"}));
+        assert!(rig
+            .driver
+            .command(&mut rig.runtime, &rig.app, &status)
+            .is_some());
+        assert_eq!(
+            rig.runtime.multiview_connection.generation(),
+            before,
+            "pending Off cannot reprobe"
+        );
+        let foreign_identity = if foreign {
+            crate::app::playback::replace_player_in_place(
+                &mut rig.app.player,
+                &mut rig.app.adapters.player,
+                &mut rig.app.repause_at,
+                &mut rig.app.pages,
+            );
+            route::request_external_source(
+                &mut rig.app.player.session,
+                &review_media(),
+                plx_media::ff::ExternalSource::Hls("https://successor.invalid/new.m3u8".into()),
+                "Ordinary successor",
+                "",
+                crate::app::playback::start_caps(),
+            )
+            .unwrap();
+            let identity = route::playback_identity(&rig.app.player.session).unwrap();
+            assert_ne!(identity, owned);
+            rig.runtime.multiview_picture = Some(identity.clone());
+            Some(identity)
+        } else {
+            None
+        };
+        hold.1.store(true, Ordering::Release);
+        drive(&mut rig.driver, &mut rig.runtime, &mut rig.app);
+        review_output_frame(&mut rig); // Real Runtime order: Driver, then output owner.
+        rig.driver.tick(&mut rig.runtime, &mut rig.app); // Next frame must not enter taskless retirement.
+        assert!(!rig.driver.retiring && !rig.driver.recovery_only);
+        assert!(rig.driver.admitted_picture.is_none());
+        assert!(
+            rig.driver.selected.iter().all(Option::is_none),
+            "closed original scene releases every selected source receipt"
+        );
+        assert!(rig.driver.inputs.iter().all(Option::is_none));
+        if let Some(identity) = foreign_identity {
+            assert_eq!(rig.runtime.multiview_picture.as_ref(), Some(&identity));
+            assert!(route::playback_identity_matches(
+                &rig.app.player.session,
+                &identity
+            ));
+            assert!(
+                route::has_url(&rig.app.player.session),
+                "original close must not stop a foreign successor"
+            );
+            continue;
+        }
+        assert!(rig.runtime.multiview_picture.is_none());
+        let mut zero = capabilities();
+        zero.max_inputs = 0;
+        zero.output_profiles.clear();
+        rig.state.lock().unwrap().capabilities = Some(zero);
+        review_qualify(&mut rig.runtime);
+        assert_eq!(
+            rig.runtime
+                .multiview_connection
+                .qualified()
+                .unwrap()
+                .capabilities
+                .max_inputs,
+            0
+        );
+        let before = rig.runtime.multiview_connection.generation();
+        rig.state.lock().unwrap().capabilities = Some(capabilities());
+        let until = Instant::now() + Duration::from_secs(35);
+        let mut id = 6300;
+        while rig.runtime.multiview_connection.generation() == before {
+            assert!(
+                Instant::now() < until,
+                "eligible Status must trigger the real bounded rediscovery after cooldown"
+            );
+            let status = invocation(&mut rig.runtime, id, json!({"version":1,"op":"status"}));
+            id += 1;
+            assert!(rig
+                .driver
+                .command(&mut rig.runtime, &rig.app, &status)
+                .is_some());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        review_qualify(&mut rig.runtime);
+        let request = layout(
+            &mut rig.driver,
+            &mut rig.runtime,
+            &mut rig.app,
+            9000,
+            "grid4",
+        );
+        assert_eq!(
+            rig.runtime
+                .remote
+                .response_for_id_for_test(&request.id)
+                .unwrap()["status"],
+            "ok"
+        );
+    }
 }
