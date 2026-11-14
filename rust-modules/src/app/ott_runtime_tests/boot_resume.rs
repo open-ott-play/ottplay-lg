@@ -328,7 +328,7 @@ fn home_cover_shares_coordinator_refusal_gates_instead_of_trapping_home() {
                     "version":1,"strict":true,"origin":origin,
                     "target":{"kind":"item","entry":{"title":"Fixture","origin":origin,
                         "locator":{"kind":"channel","channelId":"fixture-1"}}}}));
-                assert!(input_policy::navigation(app.ott.as_ref().unwrap()).is_err());
+                assert!(super::super::input_policy::navigation(app.ott.as_ref().unwrap()).is_err());
             },
             _ => unreachable!(),
         }
