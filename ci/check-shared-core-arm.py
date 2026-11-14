@@ -57,6 +57,8 @@ def main(argv=None):
     parser.add_argument("--target-dir", type=Path, required=True)
     parser.add_argument("--libclang", type=Path)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--check-application", action="store_true",
+                        help="also type-check the production application for the television target")
     args = parser.parse_args(argv)
     args.sdk = args.sdk.expanduser().resolve(strict=True)
     args.target_dir = args.target_dir.expanduser().resolve()
@@ -125,6 +127,20 @@ def main(argv=None):
         # The pinned webOS SDK and existing companion use glibc 2.12 as the ceiling.
         if not versions or any(tuple(map(int, value.split("."))) > (2, 12) for value in versions):
             raise ValueError("QuickJS needs a newer libc than the supported webOS SDK")
+        if args.check_application:
+            # Check the actual production crate with ARM32 C types before merge.
+            # A shared-core-only ABI probe cannot catch application FFI type drift.
+            app_env = dict(env, PLX_RELEASE="1")
+            app_command = [cargo, "+" + config["RUST_TOOLCHAIN"], "check", "--locked",
+                           "--release", "--lib", "--target", target,
+                           "--target-dir", args.target_dir, "-p", "plxnative-modules",
+                           "--no-default-features", "--jobs", "2",
+                           "--message-format=json-render-diagnostics"]
+            if args.offline:
+                app_command.append("--offline")
+            print("Checking production application for " + target, flush=True)
+            app_output = run(app_command, app_env, ROOT / "rust-modules")
+            (args.target_dir / "application-arm-check.jsonl").write_text(app_output)
         if builder.sha256(libclang) != libclang_digest:
             raise ValueError("libclang changed during binding generation")
         (args.target_dir / "shared-core-arm-readelf.txt").write_text(attrs + report)
@@ -137,9 +153,15 @@ def main(argv=None):
                    "libclang_sha256": libclang_digest, "header_sha256": builder.sha256(header),
                    "bindings_sha256": builder.sha256(bindings), "archive_sha256": builder.sha256(archive),
                    "probe_sha256": builder.sha256(binary), "glibc_versions": versions,
-                   "device_executed": False, "scope": "shared-core-arm-compile-and-c-link"}
+                   "device_executed": False,
+                   "application_checked": args.check_application,
+                   "scope": "shared-core-arm-compile-and-c-link"}
+        if args.check_application:
+            receipt["application_check_sha256"] = builder.sha256(args.target_dir / "application-arm-check.jsonl")
         builder.write_json(args.target_dir / "shared-core-arm-evidence.json", receipt)
         print("PASS shared-core ARM compile, generated bindings, C ABI and legacy-libc link (not executed)")
+        if args.check_application:
+            print("PASS production application ARM type-check (not linked or executed)")
 
 
 if __name__ == "__main__":

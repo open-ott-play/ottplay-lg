@@ -65,7 +65,7 @@ jobs:
       - uses: ./.github/actions/rust-toolchain
       - uses: ./.github/actions/webos-ndk
         id: sdk
-      - name: Compile and link with the television ABI
+      - name: Check production application and link shared core with the television ABI
         env:
           WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
         run: >-
@@ -73,6 +73,7 @@ jobs:
           --sdk "$WEBOS_SDK"
           --target-dir "$RUNNER_TEMP/shared-core-arm"
           --libclang /usr/lib/llvm-18/lib
+          --check-application
 
   release-contracts:
     name: Release contracts
