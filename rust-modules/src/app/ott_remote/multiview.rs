@@ -186,6 +186,7 @@ pub(crate) enum AudioPolicy {
 pub(crate) enum OffMode {
     PromoteActive,
     RestorePrevious,
+    CloseOnly,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Operation {
@@ -215,6 +216,7 @@ pub(crate) struct Request {
     runtime: Option<String>,
     expected: Option<Context>,
     operation: Operation,
+    recovery: bool,
     binding: Map<String, Value>,
 }
 
@@ -257,6 +259,14 @@ impl Request {
             .get("op")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?;
+        let recovery = if let Some(version) = raw.params.get("recovery_version") {
+            if version.get() != "1" || !matches!(op, "stop" | "off") {
+                return Err(invalid());
+            }
+            true
+        } else {
+            false
+        };
         let runtime = optional_text(fields, "runtime", token)?;
         let expected = if op == "status" {
             None
@@ -268,6 +278,9 @@ impl Request {
         };
         let mut required = vec!["version", "op"];
         let mut optional = Vec::new();
+        if recovery {
+            required.push("recovery_version");
+        }
         if op == "status" {
             optional.push("runtime");
         } else {
@@ -345,8 +358,9 @@ impl Request {
             "off" => {
                 required.push("mode");
                 Operation::Off(match fields.get("mode").and_then(Value::as_str) {
-                    Some("promote_active") => OffMode::PromoteActive,
-                    Some("restore_previous") => OffMode::RestorePrevious,
+                    Some("promote_active") if !recovery => OffMode::PromoteActive,
+                    Some("restore_previous") if !recovery => OffMode::RestorePrevious,
+                    Some("close_only") if recovery => OffMode::CloseOnly,
                     _ => return Err(invalid()),
                 })
             }
@@ -363,8 +377,12 @@ impl Request {
             runtime,
             expected,
             operation,
+            recovery,
             binding,
         })
+    }
+    pub(crate) fn recovery(&self) -> bool {
+        self.recovery
     }
     pub(crate) fn runtime(&self) -> Option<&str> {
         self.runtime.as_deref()

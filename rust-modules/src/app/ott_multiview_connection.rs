@@ -12,10 +12,11 @@ use std::{
         Arc,
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const BUDGET: Duration = Duration::from_secs(30);
+const REPROBE_INTERVAL: Duration = Duration::from_secs(30);
 type Work = Box<dyn FnOnce(&OffFrame) + Send>;
 
 pub(super) struct SharedTransport(Arc<dyn Transport + Send + Sync>);
@@ -117,6 +118,7 @@ pub(super) struct State {
     pending: Option<Pending>,
     qualified: Option<Qualified>,
     attempted: bool,
+    reprobe_after: Option<Instant>,
     shutdown: bool,
     transport: Arc<dyn Transport + Send + Sync>,
     launcher: Box<dyn Launcher>,
@@ -141,6 +143,7 @@ impl State {
             pending: None,
             qualified: None,
             attempted: false,
+            reprobe_after: None,
             shutdown: false,
             transport,
             launcher,
@@ -148,6 +151,16 @@ impl State {
     }
     pub fn qualified(&self) -> Option<&Qualified> {
         self.qualified.as_ref()
+    }
+    pub fn binding_current(&self, protected: Option<&Value>, installation: Option<&str>) -> bool {
+        let current = Observation::capture(true, true, protected, installation);
+        !self.shutdown
+            && self.observation.as_ref().is_some_and(|observed| {
+                observed.ready
+                    && observed.foreground
+                    && observed.config == current.config
+                    && observed.installation == current.installation
+            })
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -193,6 +206,7 @@ impl State {
             self.invalidate();
             self.observation = Some(observation);
             self.attempted = false;
+            self.reprobe_after = None;
         }
         self.poll();
         if self.generation == 0 {
@@ -227,6 +241,7 @@ impl State {
             return;
         }
         self.attempted = true;
+        self.reprobe_after = Some(Instant::now() + REPROBE_INTERVAL);
         let client = (|| {
             let binding =
                 ServiceBinding::from_protected_json(raw)?.ok_or(ServiceError::InvalidConfig)?;
@@ -278,6 +293,39 @@ impl State {
             }
             None => self.fail(ServiceError::ResourceLimit),
         }
+    }
+    /// An admitted foreground status request may retry unavailable discovery.
+    /// No timer or background tick retries automatically, and positive metadata
+    /// or a still-retiring worker is never replaced by this read-side door.
+    pub fn reprobe_unavailable(&mut self) -> bool {
+        self.reprobe_unavailable_at(Instant::now())
+    }
+    fn reprobe_unavailable_at(&mut self, now: Instant) -> bool {
+        if self.shutdown
+            || self.generation == 0
+            || !self.attempted
+            || self.pending.is_some()
+            || self.observation.as_ref().is_none_or(|observation| {
+                !observation.ready
+                    || !observation.foreground
+                    || !matches!(&observation.config, Config::Raw(_))
+            })
+            || self
+                .qualified
+                .as_ref()
+                .is_some_and(|qualified| qualified.capabilities.max_inputs > 0)
+            || (self.qualified.is_none()
+                && !matches!(
+                    self.error,
+                    Some("service_unavailable" | "deadline" | "authentication_failed")
+                ))
+            || self.reprobe_after.is_some_and(|after| now < after)
+        {
+            return false;
+        }
+        self.refresh();
+        self.reprobe_after = Some(now + REPROBE_INTERVAL);
+        true
     }
     /// Explicit capability refresh invalidates the old epoch/client immediately.
     /// An epoch change can therefore never retain a future scene driver binding.
