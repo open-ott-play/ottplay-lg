@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import re
+import shlex
 import unittest
 
 
@@ -54,6 +55,18 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertIn("persist-credentials: false", body)
         self.assertIn("native-release-plan.json", body)
         self.assertIn("webos-native-candidate-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}", body)
+
+    def test_candidate_packaging_routes_the_committed_product_configuration(self):
+        config = "ci/ottplay-integration/release/product.json"
+        commands = [shlex.split(line.strip())
+                    for line in workflow("native-candidate.yml").splitlines()
+                    if line.strip().startswith("make ")]
+        self.assertEqual({tokens[-1] for tokens in commands}, {"ipk-stage", "ipk-pack"})
+        for tokens in commands:
+            self.assertIn("OTT_PRODUCT_CONFIG=" + config, tokens,
+                          "candidate packaging must not fall back to upstream release documents")
+        source = workflow("ci.yml").split("  source:", 1)[1].split("\n  native:", 1)[0]
+        self.assertIn("python3 ci/check-package.py --tracked --product-config " + config, source)
 
     def test_beta_and_rc_publish_only_verified_artifact_bytes_as_prereleases(self):
         body = workflow("native-release-pipeline.yml")

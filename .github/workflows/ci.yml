@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: '22'
       - run: python3 ci/check-public-source.py
+      - run: python3 ci/check-package.py --tracked --product-config ci/ottplay-integration/release/product.json
       - run: python3 ci/gen-third-party-notices.py --check
       - run: python3 -m unittest ci.test_gen_notices -v
       - run: python3 -m unittest discover -s scripts -p 'test_lg_*.py' -v
