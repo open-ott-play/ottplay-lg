@@ -314,7 +314,7 @@ fn setup() -> Rig {
         Box::new(ManualLauncher(output_jobs.clone())),
     );
     let saved_before = serde_json::to_value(&runtime.saved).unwrap();
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     Rig {
         app,
         server,

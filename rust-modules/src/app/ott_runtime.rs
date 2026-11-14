@@ -1017,8 +1017,8 @@ impl Runtime {
         }
     }
 
-    pub(super) fn new() -> Self {
-        let mut runtime = Self::unloaded(companion_adapter::init());
+    pub(super) fn new() -> Box<Self> {
+        let mut runtime = Box::new(Self::unloaded(companion_adapter::init()));
         runtime.start_state_load();
         runtime
     }
@@ -5342,7 +5342,7 @@ pub(super) fn commit_track(app: &mut App, commit: plx_appkit::track_menu::TrackC
 pub(super) fn before_playback_tick(app: &mut App) {
     if !app
         .ott
-        .as_ref()
+        .as_deref()
         .is_some_and(commands::track_request_pending)
     {
         return;
@@ -8979,5 +8979,5 @@ pub(super) fn install_legacy_lifecycle_test_runtime(app: &mut App, sid: plx_plex
     runtime.metadata_done.store(false, Ordering::Release);
     runtime.resolver_busy = true;
     app.running = true;
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
 }

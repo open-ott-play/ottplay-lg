@@ -478,7 +478,7 @@ fn bridge_setup() -> BridgeRig {
         Box::new(jobs.clone()),
     );
     let saved = serde_json::to_value(&runtime.saved).unwrap();
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     BridgeRig {
         app,
         jobs,

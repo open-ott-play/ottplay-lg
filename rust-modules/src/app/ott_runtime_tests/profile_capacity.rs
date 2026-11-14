@@ -26,7 +26,7 @@ fn profile(kind: ProviderKind, slot: usize) -> ProviderProfile {
     }
 }
 
-fn full_runtime(kind: ProviderKind) -> Runtime {
+fn full_runtime(kind: ProviderKind) -> Box<Runtime> {
     // Use the normal decoded-state boundary so settings identities are ready,
     // then observe the same synthetic profile image without loading a source.
     let mut app = Box::new(ready_app_fixture());

@@ -13,7 +13,7 @@ fn fixture() -> App {
         .saved
         .settings
         .insert("parentPin".into(), json!(RECORD));
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     crate::app::bridge::show_page(&mut app.pages, plx_screens::registry::AppArg::Ott);
     for n in 1..=24 {
         crate::app::bridge::frame(

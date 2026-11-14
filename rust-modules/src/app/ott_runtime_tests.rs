@@ -35,7 +35,7 @@ fn runtime_fixture() -> Runtime {
 
 fn app_fixture() -> App {
     let mut app = run::lifecycle_regression_tests::app();
-    app.ott = Some(runtime_fixture());
+    app.ott = Some(Box::new(runtime_fixture()));
     // Sample time at the real application input boundary before an Exit can
     // checkpoint; the disabled remote and empty provider prevent IO.
     runtime_tick(&mut app);

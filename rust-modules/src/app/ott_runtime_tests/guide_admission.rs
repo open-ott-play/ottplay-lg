@@ -8,7 +8,7 @@ use plx_data::ott::{
     guide::{ChannelMetadata, Context, Coverage, Request, ResultSet},
 };
 
-fn fixture() -> (Box<App>, Runtime) {
+fn fixture() -> (Box<App>, Box<Runtime>) {
     let mut app = Box::new(app_fixture());
     let mut runtime = app.ott.take().unwrap();
     let profile = ProviderProfile {

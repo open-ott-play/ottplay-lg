@@ -368,9 +368,9 @@ fn publish_info_presentation(app: &mut App) {
         if arg.kind == plx_screens::player::overlay::OverlayKind::Info) { return; }
     let Some(recipient) = entry.inst.as_ref().map(|instance| instance.id) else { return; };
     let sample = plx_appkit::info_panel::InfoPresentation {
-        opacity: app.ott.as_ref().map(super::ott_runtime::Runtime::osd_preferences)
+        opacity: app.ott.as_deref().map(super::ott_runtime::Runtime::osd_preferences)
             .unwrap_or_default().0,
-        wall_now_s: app.ott.as_ref().and_then(super::ott_runtime::Runtime::wall_now_s),
+        wall_now_s: app.ott.as_deref().and_then(super::ott_runtime::Runtime::wall_now_s),
     };
     let Some(effect) = info_presentation_delivery(
         matches!(&app.rec, super::recorder::Recplay::Off), app.bridge.is_controlled_replay(), recipient, sample,
@@ -504,8 +504,8 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
     // target by seconds a frame, and the clock prewarm warms only the displayed second and the next).
     if fr.player {
         let mut model = hud_model(&app.player.session, app.bridge.metadata_view(),
-            app.ott.as_ref().and_then(super::ott_runtime::Runtime::wall_now_s));
-        let (opacity, clock) = app.ott.as_ref()
+            app.ott.as_deref().and_then(super::ott_runtime::Runtime::wall_now_s));
+        let (opacity, clock) = app.ott.as_deref()
             .map(super::ott_runtime::Runtime::osd_preferences).unwrap_or_default();
         model.osd_opacity = opacity;
         model.permanent_clock = clock;

@@ -341,8 +341,8 @@ pub(super) struct Driver {
     retiring: bool,
     admitted_picture: Option<route::PlaybackIdentity>,
     initial_audio_pending: bool,
-    pending: Option<Pending>,
-    session: Option<Session>,
+    pending: Option<Box<Pending>>,
+    session: Option<Box<Session>>,
     receipts: VecDeque<Joined>,
     cleanup: VecDeque<Cleanup>,
     inputs: [Option<Box<sources::AuthorizedInput>>; 9],
@@ -355,7 +355,7 @@ pub(super) struct Driver {
     last_poll: Instant,
     last_renew: Instant,
     audio_mode: service::AudioPolicy,
-    selected: [Option<Joined>; 9],
+    selected: [Option<Box<Joined>>; 9],
     serial: u64,
     output_offered: Option<String>,
     uncertain: bool,
@@ -796,7 +796,7 @@ impl Driver {
                         .saturating_add(inv.deadline_ms.saturating_sub(self.clock_now_ms)),
                 )
             });
-        self.pending = Some(Pending {
+        self.pending = Some(Box::new(Pending {
             invocation,
             request,
             fence,
@@ -809,7 +809,7 @@ impl Driver {
             origin: self.origin.clone(),
             sample: self.clock_sample,
             admission_deadline,
-        });
+        }));
         Ok(())
     }
     /// Called from the actual runtime frame owner. This method never starts a native decoder.
@@ -919,7 +919,7 @@ impl Driver {
             } = pending.kind
             {
                 self.inputs[ticket.slot().index()] = Some(input);
-                self.selected[ticket.slot().index()] = Some(joined);
+                self.selected[ticket.slot().index()] = Some(Box::new(joined));
             }
             self.retiring = true;
             self.begin_retirement(runtime, app);
@@ -942,7 +942,7 @@ impl Driver {
             );
             return;
         }
-        self.complete(runtime, app, pending, reply);
+        self.complete(runtime, app, *pending, reply);
     }
     fn complete(
         &mut self,
@@ -969,7 +969,7 @@ impl Driver {
                 } = pending.kind
                 {
                     self.inputs[ticket.slot().index()] = Some(input);
-                    self.selected[ticket.slot().index()] = Some(joined);
+                    self.selected[ticket.slot().index()] = Some(Box::new(joined));
                 }
                 if pending.mutating {
                     self.uncertain = true;
@@ -1050,7 +1050,7 @@ impl Driver {
                             let initial = binding_from_status(&status);
                             let initial_slot = usize::from(initial.native_expected.slot_id);
                             bindings[initial_slot] = Some(initial);
-                            self.session = Some(Session {
+                            self.session = Some(Box::new(Session {
                                 bindings,
                                 capacity,
                                 status,
@@ -1060,7 +1060,7 @@ impl Driver {
                                 fence: pending.fence.clone(),
                                 lease_deadline,
                                 admission_deadline: pending.admission_deadline,
-                            });
+                            }));
                             if let Some(effect) = initial_audio
                                 .filter(|effect| runtime.multiview.effect_current(runtime, effect))
                             {
@@ -1346,7 +1346,7 @@ impl Driver {
             // The service may have attached; keep the original source proof in custody
             // until exact original-session closure, without publishing it as admitted.
             self.inputs[ticket.slot().index()] = Some(input);
-            self.selected[ticket.slot().index()] = Some(joined);
+            self.selected[ticket.slot().index()] = Some(Box::new(joined));
             self.retiring = true;
             self.begin_retirement(runtime, app);
             if let Some(origin) = pending.origin {
@@ -1367,7 +1367,7 @@ impl Driver {
             return;
         }
         self.inputs[ticket.slot().index()] = Some(input);
-        self.selected[ticket.slot().index()] = Some(joined);
+        self.selected[ticket.slot().index()] = Some(Box::new(joined));
         self.output_offered = None;
         if let Some(session) = self.session.as_mut() {
             session.bindings = staged.unwrap();
@@ -1907,7 +1907,7 @@ impl Driver {
         } = pending.kind
         {
             self.inputs[ticket.slot().index()] = Some(input);
-            self.selected[ticket.slot().index()] = Some(joined);
+            self.selected[ticket.slot().index()] = Some(Box::new(joined));
         }
         match reply {
             Ok(Reply::Status(status)) if status.state == service::SessionState::Closed => {
@@ -2077,7 +2077,9 @@ impl Driver {
                                 .and_then(|session| session.bindings.get(index))
                                 .and_then(Option::as_ref),
                         )
-                        .map(|((input, joined), witness)| (input.as_ref(), joined, witness))
+                        .map(|((input, joined), witness)| {
+                            (input.as_ref(), joined.as_ref(), witness)
+                        })
                 });
             let Some((input, joined, witness)) = owned else {
                 return false;

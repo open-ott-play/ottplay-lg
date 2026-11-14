@@ -2,7 +2,7 @@
 use super::*;
 use plx_data::ott::reminders::{Context, Fx as ReminderFx, PromptToken, Record};
 
-fn configured() -> (App, Runtime) {
+fn configured() -> (App, Box<Runtime>) {
     let mut app = app_fixture();
     mount_player(&mut app);
     let mut runtime = app.ott.take().unwrap();

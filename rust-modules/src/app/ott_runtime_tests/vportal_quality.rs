@@ -29,7 +29,7 @@ fn fixture() -> App {
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
     runtime.remote = Remote::disabled_for_test("dev_quality", "quality");
     // First lifecycle sample has no source, so source rearming cannot start IO.
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     tick(&mut app);
     let r = app.ott.as_mut().unwrap();
     r.loaded = true;

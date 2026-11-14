@@ -6,7 +6,7 @@ use plx_data::ott::guide::Query;
 const NOW: i64 = 1_700_000_000;
 const DEPTH: u64 = 3 * 86400;
 
-fn records_fixture() -> (Box<App>, Runtime) {
+fn records_fixture() -> (Box<App>, Box<Runtime>) {
     let (app, mut runtime) = fixture();
     runtime.catalog.entries[0].live.as_mut().unwrap().catchup.as_mut().unwrap()
         .retention_seconds = DEPTH;

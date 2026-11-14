@@ -5,7 +5,7 @@ use super::*;
 fn notifications_before_first_runtime_clock_sample_do_not_draw_or_request_frames() {
     let _serial = plx_base::testlock::serial();
     let mut app = run::lifecycle_regression_tests::app();
-    app.ott = Some(runtime_fixture());
+    app.ott = Some(Box::new(runtime_fixture()));
     assert!(app.ott.as_ref().unwrap().clock_sample.is_none());
     assert!(!super::super::notifications_need_frame(&app));
     super::super::draw_notifications(&mut app);

@@ -17,7 +17,7 @@ fn stage_failed_writer(r: &mut Runtime, a: &App, directory: &Directory, fingerpr
     r.save_navigation = SaveNavigation::Preserve;
 }
 
-fn fail_writer(mut a: App, r: Runtime) -> App {
+fn fail_writer(mut a: App, r: Box<Runtime>) -> App {
     r.tx.send(Job::Saved(Err("Synthetic protected writer failure"), None, false,
         ok(json!({"persisted":false}))))
         .unwrap_or_else(|_| panic!("writer completion receiver"));

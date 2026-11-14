@@ -3,7 +3,7 @@ use super::*;
 use crate::app::ott_kiosk_stored::{self as stored, Stored, TargetRef};
 use plx_data::ott::favorites::Origin;
 
-fn kiosk_runtime() -> (Runtime, String) {
+fn kiosk_runtime() -> (Box<Runtime>, String) {
     let mut r = runtime();
     let old = BoundSource {
         id: "root".into(), name: "Videos".into(), kind: SourceKind::Folder,
