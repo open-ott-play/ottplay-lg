@@ -60,8 +60,8 @@ mod tests {
             ott: Some(OttNowPlaying {
                 live: Some(OttLivePlaying { channel_title: "Target channel".into(), ordinal,
                     guide: Some(OttNowNext { now_s: 150,
-                        current: Some(programme("Target programme", 100, 200)),
-                        next: Some(programme("Target next", 200, 300)) }) }),
+                        current: Some(programme("Now", 100, 200)),
+                        next: Some(programme("Next", 200, 300)) }) }),
                 archive: None, collection_label: String::new(), confirmed_start_unix_ms: None,
                 next: None, art: None,
             }),
@@ -85,7 +85,7 @@ mod tests {
                 footer.motion.ott_clock_labels.refresh_media_rate(Some(9_000_000));
                 let runs = plx_ui::draw_census::capture_runs(|| footer.draw(Painter::recording(),
                     &target(Some(32)), Some(150), OsdOpacity::default(), mode, &measure));
-                for expected in ["32", "Target channel", "Target programme", "Target next"] {
+                for expected in ["32", "Target channel", "Now", "Next"] {
                     assert!(runs.iter().any(|run| run.text == expected),
                         "{mode:?} {scale}% missing {expected}: {runs:?}");
                 }
