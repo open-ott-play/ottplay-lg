@@ -1,4 +1,4 @@
-//! Actual selected MPEG-TS PGS packets through the bundled decoder and segment feeder.
+//! Actual selected MPEG-TS DVB subtitle packets through the bundled decoder and segment feeder.
 use super::*;
 
 #[test]
@@ -15,7 +15,7 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
     entry_fixture_command("ffmpeg", &["-v", "error", "-nostdin", "-y",
         "-i", subtitles.to_str().unwrap(), "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25",
         "-map", "1:v:0", "-map", "0:s:1", "-t", "2", "-c:v", "libx264",
-        "-preset", "ultrafast", "-g", "25", "-bf", "0", "-c:s", "copy",
+        "-preset", "ultrafast", "-g", "25", "-bf", "0", "-c:s", "dvbsub",
         "-streamid", "0:256", "-streamid", "1:288", "-mpegts_service_id", "1",
         "-mpegts_transport_stream_id", "1", "-f", "mpegts", ts.to_str().unwrap()], true);
     std::fs::write(dir.0.join("master.m3u8"),
@@ -62,7 +62,10 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
                 &mut clock, &mut *video, &mut net, "", SegmentAcquisition::for_cursor(None)) }.unwrap();
             let inventory = output.observed.as_ref().expect("actual complete PAT/PMT observation").inventory();
             assert_eq!(inventory.subtitles.len(), 1);
-            assert_eq!(inventory.subtitles[0].codec, "hdmv_pgs_subtitle");
+            assert_eq!(inventory.subtitles[0].codec, "dvb_subtitle");
+            let transport = inventory.transport_identity(inventory.subtitles[0].stream_index).unwrap();
+            assert_eq!((transport.transport_stream_id, transport.program_id, transport.pid, transport.stream_type),
+                (1, 1, 0x120, 0x06), "the real PMT DVB descriptor binds this subtitle PID");
             let before_count = SHARED.sub_bitmaps.lock().unwrap().len();
             if sequence == 1 { assert_eq!(before_count, 0, "demux success alone cannot publish captions"); }
             let local_shift = output.transport_timing.and_then(|(raw, local, _, _)| local.checked_sub(raw));
@@ -93,13 +96,13 @@ fn observed_ts_subtitle_packets_publish_only_after_full_feed_and_caption_failure
                 crate::player::request_subtitle(0);
             } else if sequence == 1 {
                 let cues = SHARED.sub_bitmaps.lock().unwrap();
-                assert!(!cues.is_empty(), "the real selected PGS decoder must publish pixels after feeding");
+                assert!(!cues.is_empty(), "the real selected DVB decoder must publish pixels after feeding");
                 assert!(cues.iter().all(|cue| cue.start_ns >= 0 && !cue.rects.is_empty()));
                 let sink_pts = first_video + SHARED.pts_shift.load(Ordering::Acquire);
                 let callback_position = sink_pts - SHARED.pts_shift.load(Ordering::Acquire)
                     + SHARED.disp_base.load(Ordering::Acquire);
                 assert!((cues[0].start_ns - callback_position).abs() <= 40_000_000,
-                    "the first authored PGS cue and first picture share content time: caption={} callback={callback_position}",
+                    "the first authored DVB cue and first picture share content time: caption={} callback={callback_position}",
                     cues[0].start_ns);
                 drop(cues);
                 assert!(crate::player::active_bitmap_key(callback_position + 40_000_000).is_some(),
