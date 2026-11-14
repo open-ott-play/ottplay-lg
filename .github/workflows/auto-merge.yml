@@ -31,7 +31,7 @@ jobs:
        contains(fromJSON('["4alvit","californiantiramisu","renovate[bot]"]'), github.event.pull_request.user.login)) ||
       (contains(fromJSON('["workflow_run","status","check_run","schedule","workflow_dispatch"]'), github.event_name) &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
-    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/auto-merge.yml@82461bf9c723748d2956e6b80ed7e031fb661796 # main
+    uses: victron-venus/venus-os-ci-toolkit/.github/workflows/auto-merge.yml@4c0b1565d4437315d1a8aadb4b2ab3e3fa350526 # main
     with:
       runner-labels: '["ubuntu-24.04"]'
       merge-method: squash
