@@ -556,7 +556,7 @@ fn incompatible_output_profile_rolls_back_and_a_supported_layout_can_retry() {
 #[test]
 fn exhausted_layout_nonce_leaves_no_scene_or_pending_audio() {
     let _serial = plx_base::testlock::serial();
-    let (mut driver, mut app, mut runtime, state) = setup();
+    let (mut driver, app, mut runtime, state) = setup();
     driver.serial = u64::MAX;
     let mut p = parameters(&runtime, "layout");
     p["layout"] = json!("grid4");
@@ -656,7 +656,7 @@ fn metadata_worker_spawn_busy_clears_attempt_and_allows_play_retry() {
 #[test]
 fn failed_initial_activation_does_not_close_a_preexisting_scene() {
     let _serial = plx_base::testlock::serial();
-    let (mut driver, mut app, mut runtime, _) = setup();
+    let (mut driver, app, mut runtime, _) = setup();
     let mut coordinator = std::mem::take(&mut runtime.multiview);
     coordinator.activate(&runtime, &app, Layout::Grid4).unwrap();
     runtime.multiview = coordinator;
