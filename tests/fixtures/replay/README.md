@@ -131,6 +131,21 @@ reviewed exception for a census-only change in an unused type is documented belo
 every recorded payload and still requires full replay validation. The D1 results below describe
 that earlier build, not current all-domain acceptance.
 
+**Unused OTT startup/footer census migration (2026-11-14, source-only).**
+The OTT declaration gains startup and pending-target presentation facts,
+canonical channel ordinal, and OSD opacity. The host-observed screen census is
+`10036921293367296087`; the product census changes from
+`12606294384504129118` to `3202398292000993197`.
+Only the same three reviewed non-OTT controlled anchors listed below migrate
+manifest `state_fp`: Home, root Settings, and Filmography/Detail return. Their
+controlled bootstrap cannot instantiate an OTT runtime and the navigation codec
+rejects OTT. Initial state, initial hashes, every segment byte, measurements,
+frame hashes and grades remain unchanged. This is not migration of an OTT
+recording. `pre_ott_startup_footer_recording_headers_remain_refused` explicitly
+checks the old product census is still rejected before malformed segment parsing.
+Full controlled replay validation remains required; this source migration does
+not itself claim a fresh visual replay.
+
 **Unused OTT pending-step census migration (2026-11-11, source-only).**
 `Ott::SHAPE` and its canonical writer now include the source-bound pending-step
 publication and its native SDL eligibility flag. The ordered screen census moves

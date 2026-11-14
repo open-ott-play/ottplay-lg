@@ -2338,11 +2338,11 @@ fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
             "the actual pending cover draws its loading spinner in {mode:?}");
         assert!(!runs.iter().any(|run| run.text == "Opening video…"), "center loading caption must be absent in {mode:?}");
         let expected_title = source_title.unwrap_or(display_label);
-        assert!(expected_title.is_empty() || runs.iter().any(|run| run.text == expected_title && run.at.y > Rect::FULL.h * 0.65),
+        assert!(expected_title.is_empty() || runs.iter().any(|run| run.text == expected_title && run.at.y > Rect::FULL.h * 0.5 + plx_ui::widgets::Spinner::OTT_BOX * 0.5),
             "missing original channel title {expected_title:?} in {mode:?}");
         assert!(!runs.iter().any(|run| run.text.starts_with("18  ")),
             "the numbered catalogue label must not replace the source title in {mode:?}");
-        assert!(runs.iter().any(|run| run.text == "18" && run.at.y > Rect::FULL.h * 0.65),
+        assert!(runs.iter().any(|run| run.text == "18" && run.at.y > Rect::FULL.h * 0.5 + plx_ui::widgets::Spinner::OTT_BOX * 0.5),
             "the known channel ordinal belongs in the footer in {mode:?}");
         assert!(draw.into_stops().is_empty(), "pending cover exposes no hidden list controls");
         frame(&mut d, &mut rig, 2216, vec![key(Key::Back, tick(2216)), key_up(Key::Back, tick(2216))]);
