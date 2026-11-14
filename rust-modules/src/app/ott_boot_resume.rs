@@ -81,6 +81,7 @@ pub(super) fn home_pending(app: &App) -> bool {
     let Some(runtime) = app.ott.as_ref() else { return false; };
     if !pending(runtime) || !app.running || app.ott_standby
         || !app.bridge.session_ready_current() || app.bridge.is_controlled_replay()
+        || matches!(&app.rec, super::super::recorder::Recplay::Replaying(_))
         || app.last_input != app.t0 || !matches!(app.route(), AppArg::Home)
         || app.pages.nav.tabs.stack.depth() != 1 || app.pages.nav.suspended
         || app.pages.surface_up() || app.pages.has_pending_surface_navigation()
