@@ -145,7 +145,7 @@ fn frame(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32, inputs: Vec<I
 }
 
 fn boot(favorite: bool) -> (Dispatcher<TestHost>, TestRig) {
-    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: if favorite { "favorites" } else { "channels" }.into(),
         revision: 1, title: "Fixture videos".into(), description: String::new(),
         status: String::new(), selected_row: Some("video-one".into()),
@@ -191,7 +191,7 @@ fn navigation_row(id: &str, action: OttAction) -> OttRow {
 }
 
 fn navigation_view(page_id: &str, revision: u64, rows: Vec<OttRow>, selected: Option<&str>) -> Arc<OttView> {
-    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None, page_id: page_id.into(), revision, title: page_id.into(),
+    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None, page_id: page_id.into(), revision, title: page_id.into(),
         description: String::new(), status: String::new(), rows,
         selected_row: selected.map(str::to_owned) })
 }
@@ -202,6 +202,90 @@ fn publish_snapshot(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, snapshot: A
     d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
         Delivery::Screen(ScreenEvent::App(AppMsg::OttSnapshot(snapshot)))));
     frame(d, rig, ms, vec![]);
+}
+
+#[test]
+fn loading_cover_first_ready_snapshot_seats_requested_row_without_input_and_refresh_keeps_browse_focus() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(OttView::default()), mode);
+        assert!(d.focus().is_none(), "the initial cover must expose no hidden focus stop");
+        let ready = navigation_view("channels", 1,
+            vec![navigation_row("one", OttAction::Play("one".into())),
+                navigation_row("two", OttAction::Play("two".into()))], Some("two"));
+        publish_snapshot(&mut d, &mut rig, ready.clone(), 256);
+        frame(&mut d, &mut rig, 272, vec![]);
+        assert_focus(&d, "item:two");
+        assert!(!rig.actions.iter().any(|action| matches!(action, OttAction::Play(_))),
+            "restoring a focus cursor cannot admit playback");
+        frame(&mut d, &mut rig, 288, vec![key(Key::Up, tick(288)), key_up(Key::Up, tick(288))]);
+        assert_focus(&d, "item:one");
+        let mut updated = (*ready).clone();
+        updated.revision += 1;
+        updated.status = "Metadata updated".into();
+        publish_snapshot(&mut d, &mut rig, Arc::new(updated), 320);
+        frame(&mut d, &mut rig, 336, vec![]);
+        assert_focus(&d, "item:one");
+    }
+}
+
+#[test]
+fn loading_cover_ready_snapshot_then_memory_restore_keeps_newer_selection_on_queued_enter() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let rows = vec![
+            navigation_row("settings.open:interface", OttAction::EditSetting("settings.open:interface".into())),
+            navigation_row("settings.open:lists", OttAction::EditSetting("settings.open:lists".into())),
+        ];
+        let (previous, _) = mount_snapshot_in_mode(
+            navigation_view("settings", 1, rows.clone(), Some("settings.open:lists")), mode);
+        assert_focus(&previous, "item:settings.open:lists");
+        let memory = previous.return_state().memory;
+
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(OttView::default()), mode);
+        assert!(d.focus().is_none(), "the initial cover must keep its rows unfocusable");
+        let ready = navigation_view("settings", 2, rows, Some("settings.open:interface"));
+        rig.snapshot = ready.clone();
+        let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
+        // App publication precedes menu memory restoration. The ready snapshot
+        // queues Enter behind this RestoreMemory in the same delivery batch.
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
+            Delivery::Screen(ScreenEvent::App(AppMsg::OttSnapshot(ready)))));
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
+            Delivery::Screen(ScreenEvent::RestoreMemory(memory))));
+        frame(&mut d, &mut rig, 256, vec![]);
+        frame(&mut d, &mut rig, 272, vec![]);
+        assert_focus(&d, "item:settings.open:lists");
+        assert!(rig.actions.is_empty(), "focus restoration cannot activate a settings group");
+        press_navigation_ok(&mut d, &mut rig, 304, true);
+        assert_eq!(rig.actions, vec![OttAction::EditSetting("settings.open:lists".into())]);
+    }
+}
+
+#[test]
+fn configured_startup_cover_never_seats_hidden_rows_and_release_restores_actual_requested_focus() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut covered = (*navigation_view("channels", 1,
+            vec![navigation_row("one", OttAction::Play("one".into())),
+                navigation_row("two", OttAction::Play("two".into()))], Some("two"))).clone();
+        covered.startup_pending = true;
+        covered.startup_target = Some("two".into());
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(covered.clone()), mode);
+        assert!(d.focus().is_none());
+        frame(&mut d, &mut rig, 256, vec![key(Key::Ok, tick(256)), key_up(Key::Ok, tick(256))]);
+        assert!(rig.actions.is_empty(), "hidden startup rows cannot activate");
+        frame(&mut d, &mut rig, 272, vec![key(Key::Back, tick(272)), key_up(Key::Back, tick(272))]);
+        assert_eq!(rig.actions, vec![OttAction::Back]);
+        assert!(d.focus().is_none(), "Back alone does not invent a ready snapshot");
+        covered.startup_pending = false;
+        covered.startup_target = None;
+        covered.revision += 1;
+        publish_snapshot(&mut d, &mut rig, Arc::new(covered), 304);
+        frame(&mut d, &mut rig, 320, vec![]);
+        assert_focus(&d, "item:two");
+        assert_eq!(rig.actions, vec![OttAction::Back], "ready focus restoration cannot play the row");
+    }
 }
 
 fn press_navigation_ok(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32, same_batch: bool) {
@@ -489,7 +573,7 @@ fn dispatcher_description_follows_selected_row_and_async_metadata() {
             id: id.into(), title: id.into(), detail: String::new(), description: description.into(),
             poster: None, action: OttAction::Play(id.into()), enabled: true, favorite: false,
         }).collect();
-    let (mut d, mut rig) = boot_snapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let (mut d, mut rig) = boot_snapshot(Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: "channels".into(), revision: 1, title: "Fixture videos".into(),
         description: String::new(), status: String::new(), rows,
         selected_row: Some("empty-first".into()),
@@ -548,7 +632,7 @@ fn dispatcher_editor_save_keeps_draft_until_the_host_confirms_it() {
 #[test]
 fn dispatcher_editor_cancel_returns_to_add_profile_and_can_reopen_it() {
     let _guard = plx_base::testlock::serial();
-    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
+    let snapshot = Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false, classic_preferences: Default::default(), volume_available: false, category_label: None, order_context: None, preview_context: Some("source-fixture".into()), random_context: None, catalog_progress: None, search: None,
         page_id: "profiles:m3u".into(), revision: 1, title: "Profiles".into(),
         description: String::new(), status: String::new(), selected_row: Some("profile.add".into()),
         rows: vec![OttRow { current_programme: None, content_title: None, guide: None, guide_available: false, records_available: false, media: None, id: "profile.add".into(), title: "Add profile".into(),
@@ -1228,7 +1312,7 @@ fn restored_or_reconciled_focus_is_not_new_persistent_user_intent() {
 }
 
 fn quality_view(context: &str, revision: u64, variants: &[&str], selected: &str) -> Arc<OttView> {
-    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, pending_play: None, pending_step: None, pending_step_sdl: false,
+    Arc::new(OttView { shelf_context: None, shelves: Vec::new(), status_working: false, startup_pending: false, startup_target: None, pending_display: None, osd_opacity: Default::default(), pending_play_ordinal: None, pending_play: None, pending_step: None, pending_step_sdl: false,
         classic_preferences: Default::default(), volume_available: false,
         page_id: format!("vportal-quality:{context}"), revision,
         title: msg::settings_playback_quality().into(),
@@ -2254,6 +2338,7 @@ fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
         let selected = d.focus();
         view.revision += 1;
         view.pending_play = Some("channel-17".into());
+        view.pending_play_ordinal = Some(18);
         view.status = "Opening video…".into();
         publish_snapshot(&mut d, &mut rig, Arc::new(view.clone()), 256);
         rig.actions.clear();
@@ -2284,12 +2369,14 @@ fn pending_play_cover_blocks_hidden_list_and_back_restores_exact_selection() {
                 })));
         assert_eq!(waiting.of(plx_ui::placeholder::Reason::WorkingReadout), 1,
             "the actual pending cover draws its loading spinner in {mode:?}");
-        assert!(runs.iter().any(|run| run.text == "Opening video…"), "missing loading caption in {mode:?}");
+        assert!(!runs.iter().any(|run| run.text == "Opening video…"), "center loading caption must be absent in {mode:?}");
         let expected_title = source_title.unwrap_or(display_label);
-        assert!(expected_title.is_empty() || runs.iter().any(|run| run.text == expected_title),
+        assert!(expected_title.is_empty() || runs.iter().any(|run| run.text == expected_title && run.at.y > Rect::FULL.h * 0.5 + plx_ui::widgets::Spinner::OTT_BOX * 0.5),
             "missing original channel title {expected_title:?} in {mode:?}");
-        assert!(!runs.iter().any(|run| run.text.starts_with("18  ") || run.text == "18"),
-            "the catalogue ordinal must not enter the loading readout in {mode:?}");
+        assert!(!runs.iter().any(|run| run.text.starts_with("18  ")),
+            "the numbered catalogue label must not replace the source title in {mode:?}");
+        assert!(runs.iter().any(|run| run.text == "18" && run.at.y > Rect::FULL.h * 0.5 + plx_ui::widgets::Spinner::OTT_BOX * 0.5),
+            "the known channel ordinal belongs in the footer in {mode:?}");
         assert!(draw.into_stops().is_empty(), "pending cover exposes no hidden list controls");
         frame(&mut d, &mut rig, 2216, vec![key(Key::Back, tick(2216)), key_up(Key::Back, tick(2216))]);
         assert_eq!(rig.actions, vec![OttAction::Back]);

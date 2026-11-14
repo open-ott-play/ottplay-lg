@@ -23,26 +23,29 @@ pub(super) struct CatalogSource<'a> {
 pub(super) fn project<'a>(playing: &'a Playing, catalog: Option<CatalogSource<'_>>) -> Label<'a> {
     Label {
         label: &playing.entry.title,
-        ordinal: catalog.and_then(|catalog| ordinal(playing, catalog)),
+        ordinal: catalog.and_then(|catalog| captured_ordinal(&playing.entry, &playing.profile, playing.transient_owner, catalog)),
     }
 }
 
-fn ordinal(playing: &Playing, catalog: CatalogSource<'_>) -> Option<u32> {
+/// Number an accepted target using the same source proof as presented playback.
+/// This is display-only: it neither admits a request nor chooses a source.
+pub(super) fn captured_ordinal(target: &CatalogEntry, profile: &ProviderProfile,
+    transient_owner: Option<OwnerToken>, catalog: CatalogSource<'_>) -> Option<u32> {
     if !catalog.source_current
         || !catalog.profile.enabled
-        || catalog.profile != &playing.profile
-        || catalog.transient_owner != playing.transient_owner
+        || catalog.profile != profile
+        || catalog.transient_owner != transient_owner
     {
         return None;
     }
     let mut matching = catalog.entries.iter().enumerate()
-        .filter(|(_, entry)| entry.id == playing.entry.id);
+        .filter(|(_, entry)| entry.id == target.id);
     let (index, entry) = matching.next()?;
     // Reused or ambiguous IDs cannot become a channel identity merely because one
     // of their rows happens to have the same title or source URL.
     if matching.next().is_some()
-        || entry.media != playing.entry.media
-        || entry.live != playing.entry.live
+        || entry.media != target.media
+        || entry.live != target.live
     {
         return None;
     }

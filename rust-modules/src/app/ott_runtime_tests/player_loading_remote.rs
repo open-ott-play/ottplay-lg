@@ -47,9 +47,19 @@ fn loading_catalog_modal_rocker_replaces_latest_target_and_rejects_late_completi
     native_edge(&mut app, 0, 480, Edge::Down);
     native_edge(&mut app, 0, 480, Edge::Up);
     assert_eq!(queued(&app), Some("4"));
+    // A completed resolver frees its worker slot even when its result is
+    // superseded. Keep the latest request out of that slot while draining the
+    // old result, so this input/ownership fixture cannot launch network IO.
+    let latest = app.ott.as_mut().unwrap().resolver_next.take()
+        .expect("the latest destination remains queued behind the held resolver");
     app.ott.as_ref().unwrap().tx.send(Job::Play(old.generation, old.profile,
         Err("superseded modal resolver"))).unwrap();
     runtime_tick(&mut app);
+    let runtime = app.ott.as_mut().unwrap();
+    assert!(!runtime.resolver_busy && runtime.resolver_next.is_none(),
+        "the stale completion frees only its worker slot");
+    runtime.resolver_busy = true;
+    runtime.resolver_next = Some(latest);
     assert_eq!(queued(&app), Some("4"));
     assert_eq!(app.ott.as_ref().unwrap().view().selected_row.as_deref(), Some("4"));
     assert_eq!(ott_surface(&app), Some(panel));

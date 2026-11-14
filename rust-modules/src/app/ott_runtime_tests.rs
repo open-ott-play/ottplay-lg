@@ -2,6 +2,9 @@
 //! No boot loader, protected state, network, renderer or decoder is started.
 #![cfg(feature = "hostsim")]
 
+#[path = "ott_runtime_tests/boot_resume.rs"]
+mod boot_resume;
+
 #[path = "ott_runtime_tests/notifications.rs"]
 mod notifications;
 #[path = "ott_runtime_tests/modern_shelves.rs"]
