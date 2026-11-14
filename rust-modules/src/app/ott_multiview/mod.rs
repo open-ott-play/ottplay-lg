@@ -733,6 +733,37 @@ impl Coordinator {
         Ok(transition)
     }
 
+    /// Retire a failed metadata-only attempt after its worker has retired or failed to start.
+    /// No backend pipeline has been granted, so the exact attempt can become retryable locally.
+    pub fn metadata_failed(
+        &mut self,
+        ticket: ResolveTicket,
+        error: SourceError,
+    ) -> Result<Transition, Error> {
+        self.require_current_ticket(ticket)?;
+        let scene = self.scene.as_mut().ok_or(Error::SceneInactive)?;
+        if !matches!(
+            scene.slot_status(ticket.slot())?,
+            SlotStatus::Resolving { .. }
+        ) {
+            return Err(Error::InvalidTransition);
+        }
+        let issue = issue_for_source_error(error);
+        scene.complete_resolution(ticket, ResolveOutcome::Failed(slot_failure(issue)))?;
+        scene.report_pipeline_stopped(ticket)?;
+        // Keep the cleanup witness until both model transitions succeeded.
+        if let Some(cancellation) = self.cancellations[ticket.slot().index()].take() {
+            cancellation.store(true, Ordering::Release);
+        }
+        self.clear_slot_attempt(ticket.slot());
+        let mut transition = Transition::new(self.scene.as_ref().ok_or(Error::SceneInactive)?);
+        transition.issues.push(SlotIssue {
+            slot: ticket.slot(),
+            issue,
+        });
+        Ok(transition)
+    }
+
     /// The broker repeats source and parental admission before returning metadata. The
     /// coordinator fences it against the exact scene, slot, source and item ticket.
     pub fn metadata_succeeded(

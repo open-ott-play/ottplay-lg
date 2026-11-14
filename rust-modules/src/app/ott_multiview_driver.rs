@@ -530,47 +530,71 @@ impl Driver {
                 if capabilities.max_inputs == 0 {
                     return Err(wire::Reason::Unsupported);
                 }
+                // Reject fallible pure preparation before installing a local scene.
+                let geometry = geometry(layout, &profile.canvas)?;
+                let id = service::RequestId::parse(&self.nonce(runtime)?)
+                    .map_err(|_| wire::Reason::Unavailable)?;
                 let mut coordinator = std::mem::take(&mut runtime.multiview);
                 let activation = coordinator
                     .activate(runtime, app, data_layout)
                     .map_err(|_| wire::Reason::PolicyRestricted);
                 runtime.multiview = coordinator;
                 let activation = activation?;
+                let activation_layout = activation.effects.iter().find_map(|effect| match effect {
+                    scene::Effect::Backend(scene::BackendIntent::Layout { scene, layout }) => {
+                        Some(scene::Effect::Backend(scene::BackendIntent::Layout {
+                            scene: *scene,
+                            layout: *layout,
+                        }))
+                    }
+                    _ => None,
+                });
                 let initial_audio = activation.effects.into_iter().find(|effect| {
                     matches!(
                         effect,
                         scene::Effect::Backend(scene::BackendIntent::AudioOwner { .. })
                     )
                 });
-                self.initial_audio_pending = true;
-                self.audio_mode = coordinator_audio_policy(runtime)?;
-                let native = native_expected(runtime, SlotId::SLOT_0)?;
-                let geometry = geometry(layout, &profile.canvas)?;
-                let id = service::RequestId::parse(&self.nonce(runtime)?)
-                    .map_err(|_| wire::Reason::Unavailable)?;
-                self.spawn(
-                    Some(invocation),
-                    Some(request),
-                    fence,
-                    Kind::Create {
-                        capacity: profile.max_inputs.min(capabilities.max_inputs),
-                        initial_audio,
-                    },
-                    true,
-                    move |off, cancel| {
-                        io.create(
-                            off,
-                            native,
-                            &profile.profile_id,
-                            geometry,
-                            id,
-                            deadline(off, end),
-                            cancel,
-                        )
-                        .map(Reply::Status)
-                        .map_err(|_| wire::Reason::Unavailable)
-                    },
-                )
+                let result = (|| {
+                    let audio_mode = coordinator_audio_policy(runtime)?;
+                    let native = native_expected(runtime, SlotId::SLOT_0)?;
+                    self.spawn(
+                        Some(invocation),
+                        Some(request),
+                        fence,
+                        Kind::Create {
+                            capacity: profile.max_inputs.min(capabilities.max_inputs),
+                            initial_audio,
+                        },
+                        true,
+                        move |off, cancel| {
+                            io.create(
+                                off,
+                                native,
+                                &profile.profile_id,
+                                geometry,
+                                id,
+                                deadline(off, end),
+                                cancel,
+                            )
+                            .map(Reply::Status)
+                            .map_err(|_| wire::Reason::Unavailable)
+                        },
+                    )?;
+                    self.audio_mode = audio_mode;
+                    self.initial_audio_pending = true;
+                    Ok(())
+                })();
+                if result.is_err()
+                    && activation_layout
+                        .as_ref()
+                        .is_some_and(|effect| runtime.multiview.effect_current(runtime, effect))
+                {
+                    // No worker was admitted and this exact new scene has no inputs.
+                    // Its empty close completes locally; never close a successor scene.
+                    let _ = runtime.multiview.close_scene();
+                }
+                result
             }
             wire::Operation::Sources { slot, filters } => {
                 let session = self.session.as_ref().ok_or(wire::Reason::Unavailable)?;
@@ -679,6 +703,10 @@ impl Driver {
                     if let Some(pending) = self.pending.as_mut() {
                         pending.cancel = work_cancel;
                     }
+                } else {
+                    let _ = runtime
+                        .multiview
+                        .metadata_failed(ticket, sources::Error::Resolve);
                 }
                 started
             }
@@ -960,6 +988,12 @@ impl Driver {
         };
         let result = match reply {
             Err(reason) => {
+                if let Kind::Metadata { ticket, .. } = &pending.kind {
+                    // The coordinator's exact-ticket guard ignores retired attempts.
+                    let _ = runtime
+                        .multiview
+                        .metadata_failed(*ticket, sources::Error::Resolve);
+                }
                 // A lost Play reply cannot release the native authorization while the
                 // originating service may already be composing this exact input.
                 if let Kind::Play {

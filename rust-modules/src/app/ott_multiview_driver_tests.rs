@@ -1,9 +1,10 @@
 use super::*;
 use plx_data::ott::favorites::{Favorite, Locator, Origin as FavoriteOrigin};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Default)]
 struct FixtureState {
+    capabilities: Option<service::Capabilities>,
     requests: Vec<Value>,
     paths: Vec<String>,
     status: Option<service::StatusResponse>,
@@ -51,7 +52,7 @@ impl service::Transport for FixtureTransport {
         state.paths.push(path.clone());
         state.requests.push(body.clone());
         let value = if path.ends_with("/capabilities") {
-            serde_json::to_value(capabilities()).unwrap()
+            serde_json::to_value(state.capabilities.clone().unwrap_or_else(capabilities)).unwrap()
         } else if path.ends_with("/sessions") {
             let native: service::NativeExpected =
                 serde_json::from_value(body["native_expected"].clone()).unwrap();
@@ -338,6 +339,11 @@ fn binding_fixture() -> service::ServiceBinding {
         "audience":service::AUDIENCE,"installation_id":"dev_driver","control_bearer":"fixture-bearer-abcdefghijklmnopqrstuvwxyz"}).to_string()).unwrap().unwrap()
 }
 fn setup() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+    setup_with_capabilities(capabilities())
+}
+fn setup_with_capabilities(
+    advertised_capabilities: service::Capabilities,
+) -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
     let mut app = crate::app::run::lifecycle_regression_tests::app();
     app.running = true;
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
@@ -373,7 +379,10 @@ fn setup() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
     runtime.saved.profiles.active_profile = Some("m3u-fixture".into());
     runtime.provider = ProviderKind::M3u;
     runtime.saved.favorites.toggle(favorite.clone()).unwrap();
-    let state = Arc::new(Mutex::new(FixtureState::default()));
+    let state = Arc::new(Mutex::new(FixtureState {
+        capabilities: Some(advertised_capabilities),
+        ..FixtureState::default()
+    }));
     state.lock().unwrap().items.push(service::CatalogItem {
         source_ref: "server_source".into(),
         item_ref: "server_item".into(),
@@ -463,6 +472,208 @@ fn layout(
     }
     inv
 }
+fn turn_off(driver: &mut Driver, runtime: &mut Runtime, app: &mut App, id: u64) {
+    let mut p = parameters(runtime, "off");
+    p["mode"] = json!("restore_previous");
+    let inv = invocation(runtime, id, p);
+    assert!(driver.command(runtime, app, &inv).is_none());
+    drive(driver, runtime, app);
+    assert!(runtime.multiview.scene_status(runtime).is_none());
+    assert!(driver.session.is_none());
+}
+fn assert_no_uncommitted_scene(driver: &Driver, runtime: &Runtime) {
+    assert!(runtime.multiview.scene_status(runtime).is_none());
+    assert!(driver.session.is_none());
+    assert!(!driver.initial_audio_pending);
+    assert_eq!(runtime.multiview.audio_policy(), None);
+    assert_eq!(runtime.multiview.audio_route_state().pending_revision, None);
+}
+fn occupy_driver_worker_slot(driver: &mut Driver, runtime: &Runtime) {
+    let (_sender, receiver) = mpsc::sync_channel(1);
+    driver.pending = Some(Box::new(Pending {
+        invocation: None,
+        request: None,
+        fence: driver.fence(runtime),
+        receiver,
+        thread: None,
+        cancel: Arc::new(AtomicBool::new(false)),
+        mutating: false,
+        kind: Kind::Poll,
+        reply: None,
+        origin: None,
+        sample: None,
+        admission_deadline: None,
+    }));
+}
+
+#[test]
+fn invalid_odd_geometry_rolls_back_before_scene_or_audio_then_valid_layout_and_off_work() {
+    let _serial = plx_base::testlock::serial();
+    let mut advertised = capabilities();
+    advertised.output_profiles[0].canvas.width = 321;
+    let (mut driver, mut app, mut runtime, state) = setup_with_capabilities(advertised);
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let rejected = invocation(&mut runtime, 250, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &rejected).unwrap()["data"]["reason"],
+        "unsupported"
+    );
+    assert_no_uncommitted_scene(&driver, &runtime);
+    assert!(state
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .all(|path| !path.ends_with("/sessions")));
+
+    // Single uses the same advertised output profile and is raster-valid for this canvas.
+    layout(&mut driver, &mut runtime, &mut app, 251, "single");
+    assert!(driver.session.is_some());
+    turn_off(&mut driver, &mut runtime, &mut app, 252);
+}
+
+#[test]
+fn incompatible_output_profile_rolls_back_and_a_supported_layout_can_retry() {
+    let _serial = plx_base::testlock::serial();
+    let mut advertised = capabilities();
+    advertised.output_profiles[0].geometry_modes = vec![service::GeometryMode::Pip];
+    let (mut driver, mut app, mut runtime, _) = setup_with_capabilities(advertised);
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let rejected = invocation(&mut runtime, 253, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &rejected).unwrap()["data"]["reason"],
+        "unsupported"
+    );
+    assert_no_uncommitted_scene(&driver, &runtime);
+
+    layout(&mut driver, &mut runtime, &mut app, 254, "pip");
+    assert!(driver.session.is_some());
+    turn_off(&mut driver, &mut runtime, &mut app, 255);
+}
+
+#[test]
+fn exhausted_layout_nonce_leaves_no_scene_or_pending_audio() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, state) = setup();
+    driver.serial = u64::MAX;
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let rejected = invocation(&mut runtime, 256, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &rejected).unwrap()["data"]["reason"],
+        "limit_exceeded"
+    );
+    assert_no_uncommitted_scene(&driver, &runtime);
+    assert!(state
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .all(|path| !path.ends_with("/sessions")));
+
+    // Exhaustion is terminal for this instance; do not reset the serial and risk nonce reuse.
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let again = invocation(&mut runtime, 257, p);
+    assert_eq!(
+        driver.command(&mut runtime, &app, &again).unwrap()["data"]["reason"],
+        "limit_exceeded"
+    );
+    assert_no_uncommitted_scene(&driver, &runtime);
+}
+
+#[test]
+fn layout_spawn_busy_rolls_back_its_new_scene_and_audio_bootstrap() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, _) = setup();
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("grid4");
+    let inv = invocation(&mut runtime, 258, p);
+    let request = wire::Request::decode(inv.multiview_projection().unwrap()).unwrap();
+
+    // Exercise the same production `spawn` refusal reached when an existing off-frame
+    // operation occupies the one-worker slot. Direct dispatch keeps this otherwise-guarded
+    // branch deterministic without exhausting OS resources or adding a test-only prod switch.
+    occupy_driver_worker_slot(&mut driver, &runtime);
+    assert!(matches!(
+        driver.dispatch(&mut runtime, &app, inv, request),
+        Err(wire::Reason::Busy)
+    ));
+    driver.pending.take();
+    assert_no_uncommitted_scene(&driver, &runtime);
+
+    layout(&mut driver, &mut runtime, &mut app, 259, "grid4");
+    turn_off(&mut driver, &mut runtime, &mut app, 260);
+}
+
+#[test]
+fn metadata_worker_spawn_busy_clears_attempt_and_allows_play_retry() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, _) = setup();
+    driver.metadata_fixture = Some(metadata_fixture);
+    layout(&mut driver, &mut runtime, &mut app, 262, "grid4");
+
+    let mut p = source_parameters(&runtime, "sources");
+    let sources_request = invocation(&mut runtime, 263, p.clone());
+    assert!(driver
+        .command(&mut runtime, &app, &sources_request)
+        .is_none());
+    drive(&mut driver, &mut runtime, &mut app);
+    let token = runtime
+        .remote
+        .response_for_id_for_test(&sources_request.id)
+        .unwrap()["data"]["items"][0]["ticket"]
+        .clone();
+    p = source_parameters(&runtime, "play");
+    p["source_ticket"] = token;
+    let play_request = invocation(&mut runtime, 264, p);
+    let request = wire::Request::decode(play_request.multiview_projection().unwrap()).unwrap();
+    occupy_driver_worker_slot(&mut driver, &runtime);
+
+    // Match the real error branch in Driver::spawn after begin_play has made its exact ticket.
+    // The externally guarded command path reports Busy before dispatch; direct private dispatch
+    // proves that any later worker-admission refusal still settles the metadata-only attempt.
+    assert!(matches!(
+        driver.dispatch(&mut runtime, &app, play_request, request),
+        Err(wire::Reason::Busy)
+    ));
+    driver.pending.take();
+    assert_eq!(
+        runtime.multiview.scene_status(&runtime).unwrap().slots[0].status,
+        "empty"
+    );
+    assert!(driver.inputs[0].is_none());
+
+    let retry = play_fixture(&mut driver, &mut runtime, &mut app, 265);
+    assert_eq!(
+        runtime.remote.response_for_id_for_test(&retry.id).unwrap()["status"],
+        "ok"
+    );
+}
+
+#[test]
+fn failed_initial_activation_does_not_close_a_preexisting_scene() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, _) = setup();
+    let mut coordinator = std::mem::take(&mut runtime.multiview);
+    coordinator.activate(&runtime, &app, Layout::Grid4).unwrap();
+    runtime.multiview = coordinator;
+    let before = runtime.multiview.scene_status(&runtime).unwrap();
+
+    let mut p = parameters(&runtime, "layout");
+    p["layout"] = json!("pip");
+    let inv = invocation(&mut runtime, 261, p);
+    assert!(driver.command(&mut runtime, &app, &inv).is_some());
+    assert_eq!(
+        runtime.multiview.scene_status(&runtime).as_ref(),
+        Some(&before)
+    );
+    assert!(driver.session.is_none());
+    assert!(!driver.initial_audio_pending);
+}
+
 #[test]
 fn actual_raw_command_and_tick_create_validated_service_scene_without_native_admission() {
     let _serial = plx_base::testlock::serial();
@@ -625,6 +836,32 @@ fn metadata_fixture(
         },
     )
 }
+fn metadata_error_fixture(
+    _work: sources::SourceWork,
+) -> Result<sources::PreparedMetadata, sources::Error> {
+    Err(sources::Error::Resolve)
+}
+
+type MetadataErrorGate = Arc<(AtomicBool, AtomicBool)>;
+static METADATA_ERROR_GATE: OnceLock<Mutex<Option<MetadataErrorGate>>> = OnceLock::new();
+fn gated_metadata_error_fixture(
+    _work: sources::SourceWork,
+) -> Result<sources::PreparedMetadata, sources::Error> {
+    let gate = METADATA_ERROR_GATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("test installs the metadata error gate before starting the worker");
+    gate.0.store(true, Ordering::Release);
+    let end = Instant::now() + Duration::from_secs(5);
+    while !gate.1.load(Ordering::Acquire) {
+        assert!(Instant::now() < end, "metadata error gate release deadline");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Err(sources::Error::Resolve)
+}
+
 fn source_parameters(runtime: &Runtime, operation: &str) -> Value {
     let row = runtime
         .multiview
@@ -637,6 +874,118 @@ fn source_parameters(runtime: &Runtime, operation: &str) -> Value {
     p["slot_generation"] = json!(row.slot_generation);
     p["source_revision"] = json!(row.source_revision);
     p
+}
+
+#[test]
+fn metadata_failure_clears_only_its_attempt_and_allows_a_real_retry() {
+    let _serial = plx_base::testlock::serial();
+    let (mut driver, mut app, mut runtime, _) = setup();
+    driver.metadata_fixture = Some(metadata_error_fixture);
+    layout(&mut driver, &mut runtime, &mut app, 230, "grid4");
+
+    let failed = start_play_fixture(&mut driver, &mut runtime, &mut app, 231);
+    drive(&mut driver, &mut runtime, &mut app);
+    assert_eq!(
+        runtime.remote.response_for_id_for_test(&failed.id).unwrap()["status"],
+        "rejected"
+    );
+    assert_eq!(
+        runtime.multiview.scene_status(&runtime).unwrap().slots[0].status,
+        "empty",
+        "metadata failure must retire the exact resolver attempt, not strand Failed"
+    );
+    assert_eq!(runtime.multiview.admitted_pipeline_slots(), 0);
+    assert!(driver.inputs[0].is_none());
+
+    driver.metadata_fixture = Some(metadata_fixture);
+    let retry = play_fixture(&mut driver, &mut runtime, &mut app, 233);
+    assert_eq!(
+        runtime.remote.response_for_id_for_test(&retry.id).unwrap()["status"],
+        "ok",
+        "the same source remains eligible for a fresh, independently ticketed attempt"
+    );
+    assert_eq!(
+        runtime.multiview.scene_status(&runtime).unwrap().slots[0].status,
+        "playing"
+    );
+    assert!(driver.inputs[0].is_some());
+}
+
+#[test]
+fn late_metadata_failure_cannot_clear_a_successor_ticket() {
+    let _serial = plx_base::testlock::serial();
+    let gate: MetadataErrorGate = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+    *METADATA_ERROR_GATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(gate.clone());
+    let (mut driver, mut app, mut runtime, _) = setup();
+    driver.metadata_fixture = Some(gated_metadata_error_fixture);
+    layout(&mut driver, &mut runtime, &mut app, 240, "grid4");
+
+    let failed = start_play_fixture(&mut driver, &mut runtime, &mut app, 241);
+    let old_ticket = match &driver.pending.as_ref().unwrap().kind {
+        Kind::Metadata { ticket, .. } => *ticket,
+        _ => panic!("expected metadata worker"),
+    };
+    let end = Instant::now() + Duration::from_secs(5);
+    while !gate.0.load(Ordering::Acquire) {
+        assert!(Instant::now() < end, "metadata worker entry deadline");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // Retire A and create B through the real coordinator while A's worker is still in flight.
+    let source = runtime.multiview.source_rows()[0].handle;
+    let mut coordinator = std::mem::take(&mut runtime.multiview);
+    coordinator.close_slot(SlotId::SLOT_0).unwrap();
+    coordinator.bind_source(SlotId::SLOT_0, source).unwrap();
+    let successor = coordinator
+        .begin_play(&mut runtime, &app, SlotId::SLOT_0)
+        .unwrap();
+    let successor_ticket = successor
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            scene::Effect::PrepareMetadata { ticket, .. } => Some(*ticket),
+            _ => None,
+        })
+        .expect("successor play creates a fresh resolver ticket");
+    runtime.multiview = coordinator;
+    assert_ne!(old_ticket, successor_ticket);
+    assert_eq!(
+        runtime.multiview.scene_status(&runtime).unwrap().slots[0].status,
+        "starting"
+    );
+
+    gate.1.store(true, Ordering::Release);
+    drive(&mut driver, &mut runtime, &mut app);
+    *METADATA_ERROR_GATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = None;
+    assert_eq!(
+        runtime.remote.response_for_id_for_test(&failed.id).unwrap()["status"],
+        "rejected"
+    );
+    assert_eq!(
+        runtime.multiview.active_playback(),
+        Some((SlotId::SLOT_0, successor_ticket)),
+        "the stale failure must not erase the successor's exact live ticket"
+    );
+    assert_eq!(
+        runtime.multiview.scene_status(&runtime).unwrap().slots[0].status,
+        "starting"
+    );
+
+    // The synthetic successor was intentionally not launched by the driver. Retire it, then
+    // prove the public path still admits a new real retry after the stale completion was ignored.
+    runtime.multiview.close_slot(SlotId::SLOT_0).unwrap();
+    driver.metadata_fixture = Some(metadata_fixture);
+    let retry = play_fixture(&mut driver, &mut runtime, &mut app, 243);
+    assert_eq!(
+        runtime.remote.response_for_id_for_test(&retry.id).unwrap()["status"],
+        "ok"
+    );
 }
 fn start_play_fixture(
     driver: &mut Driver,
