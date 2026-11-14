@@ -27,8 +27,8 @@ impl Directory {
 impl Drop for Directory {
     fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
 }
-fn runtime() -> Runtime {
-    let mut r = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+fn runtime() -> Box<Runtime> {
+    let mut r = Box::new(Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test()));
     r.remote = Remote::disabled_for_test("dev_usb_install_fixture", "usb");
     r.loaded = true;
     r.resume_source_work();
@@ -97,11 +97,11 @@ fn arm_writer(r: &mut Runtime) {
     r.save_playback_epoch = r.playback_epoch;
     r.save_ui_owner = None;
 }
-fn deliver(mut app: App, r: Runtime, result: Result<Saved, &'static str>) -> App {
+fn deliver(mut app: App, r: Box<Runtime>, result: Result<Saved, &'static str>) -> App {
     deliver_into(&mut app, r, result);
     app
 }
-fn deliver_into(app: &mut App, r: Runtime, result: Result<Saved, &'static str>) {
+fn deliver_into(app: &mut App, r: Box<Runtime>, result: Result<Saved, &'static str>) {
     r.tx.send(Job::Saved(result, None, true, ok(json!({"persisted":true}))))
         .unwrap_or_else(|_| panic!("writer completion receiver"));
     app.ott = Some(r);

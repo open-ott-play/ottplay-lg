@@ -2438,7 +2438,7 @@ fn install_synthetic_playurl(
 /// time. Call BEFORE start_bufferfeed (resume) or via reload_at (mid-play seek).
 pub fn arm_seek(target_ns: i64) {
     let t = target_ns.max(0);
-    SHARED.seek_to_ns.store(t, Ordering::Release);
+    SHARED.publish_seek_target(t);
     SHARED.disp_base.store(0, Ordering::Relaxed);
     SHARED.playpos_ns.store(t, Ordering::Relaxed); // instant HUD feedback until frames land
 }
@@ -3945,9 +3945,14 @@ fn finite_tail_fully_fed(eng: &mut Engine, audio_expected: bool) -> bool {
 /// so the in-loop call is kept for the case it already served: a direct-play stream that reaches
 /// the threshold mid-lane should start on that AU, not a tick later.
 pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::VolumeState) {
-    if !eng.prime_play {
-        return;
-    }
+    SHARED.dg_prime_pending.store(eng.prime_play, Ordering::Relaxed);
+    SHARED.dg_prime_kind.store(0, Ordering::Relaxed);
+    if !eng.prime_play { return; }
+    // Queue abort is source retirement, never usable startup evidence. The
+    // checks release AQ locks before entering the clock state machine.
+    if eng.aq_video.as_mut().is_some_and(|q| unsafe { crate::aq::aq_is_aborted(&mut **q) })
+        || eng.aq_audio.as_mut().is_some_and(|q| unsafe { crate::aq::aq_is_aborted(&mut **q) })
+    { return; }
     let Some(prime_kind) = SHARED.hls_prime_kind() else {
         return;
     };
@@ -3979,9 +3984,16 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::
     //
     // Decoder prime remains an accepted-data condition. Only a continuation boundary (automatic
     // rebuffer or ResumePrime) reads the full pipeline high-water. Initial Load/seek remains
-    // accepted-only because it is a fresh clock boundary whose old queued tail is not proof about
-    // the newly loaded/landed timeline.
-    let queued_runway = matches!(prime_kind, HlsPrimeKind::Rebuffer | HlsPrimeKind::Resume);
+    // accepted-only unless a current external producer owns the freshly validated
+    // interval. A source/seek-fenced lease, not an old queued tail alone, admits that case.
+    // Fresh external HLS owns validated, source-fenced data too. Its queue
+    // prefix and actual overlapping resident AUs can cover acquisition runway
+    // while the paused native decoder is full; declared future tails cannot.
+    let active_external = SHARED.active_external_hls_interval(candidate_generation);
+    let external_proof = SHARED.external_hls_fresh_proof(candidate_generation);
+    let external_fresh = prime_kind == HlsPrimeKind::Fresh && external_proof;
+    let queued_runway = external_fresh
+        || matches!(prime_kind, HlsPrimeKind::Rebuffer | HlsPrimeKind::Resume);
     let shift = SHARED.pts_shift.load(Ordering::Relaxed);
     let queued_video = SHARED.hls_video_tail_ns.load(Ordering::Acquire);
     let queued_audio = SHARED.hls_audio_tail_ns.load(Ordering::Acquire);
@@ -3997,12 +4009,38 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::
     } else {
         eng.max_fed_audio_pts
     };
-    let playable_vbuf = playable_video_high - eng.seek_base_pts;
-    let playable_abuf = playable_audio_high - eng.seek_base_pts;
+    let mut playable_vbuf = playable_video_high - eng.seek_base_pts;
+    let mut playable_abuf = playable_audio_high - eng.seek_base_pts;
     // An A/V stream requires both lanes even while audio is temporarily empty. Only a segment the
     // demuxer proved audioless may use the video-only escape; `abuf <= 0` alone is starvation, not
     // evidence that no audio exists.
     let audio_expected = SHARED.hls_audio_expected.load(Ordering::Acquire) || playable_abuf > 0;
+    let mut resident_token = None;
+    if active_external {
+        if let Some((token, resident)) = SHARED.external_hls_resident(candidate_generation) {
+            let remaining = |ranges: &[(i64, i64)], high: i64| {
+                // Source-duration-backed ranges are already sorted/merged.
+                // Extend only the contiguous interval covering this real
+                // queued prefix: neither leading nor internal holes are data.
+                ranges.iter().find(|(first, last)| *first <= high && high < *last)
+                    .map_or(0, |(_, last)| last.saturating_sub(high))
+            };
+            let video = remaining(&resident.video, playable_video_high.saturating_sub(shift));
+            let audio = remaining(&resident.audio, playable_audio_high.saturating_sub(shift));
+            if video > 0 || (audio_expected && audio > 0) { resident_token = Some(token); }
+            playable_vbuf = playable_vbuf.saturating_add(video);
+            playable_abuf = playable_abuf.saturating_add(audio);
+        }
+    }
+    let diag_ms = |ns: i64| (ns / 1_000_000).clamp(0, 86_400_000);
+    SHARED.dg_prime_kind.store(match prime_kind { HlsPrimeKind::Fresh => 1, HlsPrimeKind::Rebuffer => 2, HlsPrimeKind::Resume => 3 }, Ordering::Relaxed);
+    SHARED.dg_prime_required_runway_ms.store(diag_ms(observed_runway_ns), Ordering::Relaxed);
+    SHARED.dg_prime_accepted_video_ms.store(diag_ms(accepted_vbuf), Ordering::Relaxed);
+    SHARED.dg_prime_accepted_audio_ms.store(diag_ms(accepted_abuf), Ordering::Relaxed);
+    SHARED.dg_prime_queued_video_ms.store(diag_ms(queued_video.saturating_add(shift).saturating_sub(eng.seek_base_pts)), Ordering::Relaxed);
+    SHARED.dg_prime_queued_audio_ms.store(diag_ms(queued_audio.saturating_add(shift).saturating_sub(eng.seek_base_pts)), Ordering::Relaxed);
+    SHARED.dg_prime_external_lease.store(active_external || external_proof, Ordering::Relaxed);
+    SHARED.dg_prime_audio_expected.store(audio_expected, Ordering::Relaxed);
     let decoder_ready = if audio_expected {
         accepted_vbuf >= PRIME_NS && accepted_abuf >= PRIME_AUDIO_NS
     } else {
@@ -4049,8 +4087,11 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::
     };
     let finite_tail_ready = finite_tail_fully_fed(eng, audio_expected);
     if ((decoder_ready && boundary_ready) || exact_seek_ready || finite_tail_ready) && TX.feed_allowed() {
-        let Some((play_token, recovery)) =
-            SHARED.reserve_hls_prime_play(prime_kind, candidate_generation, recovery)
+        let reservation = match resident_token {
+            Some(token) => SHARED.reserve_hls_prime_play_resident(prime_kind, candidate_generation, recovery, token),
+            None => SHARED.reserve_hls_prime_play_guarded(prime_kind, candidate_generation, recovery, external_fresh),
+        };
+        let Some((play_token, recovery)) = reservation
         else {
             return;
         };
@@ -4065,6 +4106,7 @@ pub fn try_prime(mt: &MainThread, eng: &mut Engine, volume: &mut super::volume::
                     super::acb_mirror_playstate_at(mt, eng.stage, true);
                 }
                 eng.prime_play = false;
+                SHARED.dg_prime_pending.store(false, Ordering::Relaxed);
                 SHARED.seeking.store(false, Ordering::Relaxed); // playback resumed at the new position → HUD spinner off
                 if prime_kind == HlsPrimeKind::Rebuffer {
                     log(&format!(

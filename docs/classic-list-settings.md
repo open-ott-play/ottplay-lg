@@ -4,7 +4,7 @@
 
 Open **Settings → Interface mode → Classic**. This choice has its own save
 flow: it takes effect after a successful save and is restored on reopening.
-The native default when no mode is saved is **Modern**; an update should retain
+The native default when no mode is saved is **Classic**; an update retains
 the installation's saved choice. The list settings below are separate from
 this mode selection.
 

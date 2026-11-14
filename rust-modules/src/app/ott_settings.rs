@@ -15,10 +15,16 @@ use super::super::subtitle_settings::selection;
 mod osd;
 #[path = "ott_settings_classic.rs"]
 mod classic;
+#[path = "ott_settings_multiview.rs"]
+mod multiview;
+#[cfg(test)]
+#[path = "ott_settings_multiview_tests.rs"]
+mod multiview_tests;
 
 #[derive(Clone, Copy)]
 enum Setting {
     NativeInputProbe,
+    MultiviewService,
     HostedEpg,
     InfoTimeout,
     FontScale,
@@ -37,7 +43,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Self; 45] = [Self::FontScale, Self::Player, Self::Interface,
+    const ALL: [Self; 46] = [Self::FontScale, Self::Player, Self::Interface,
         Self::Appearance(appearance::Field::ALL[0]), Self::Appearance(appearance::Field::ALL[1]),
         Self::Appearance(appearance::Field::ALL[2]), Self::Appearance(appearance::Field::ALL[3]),
         Self::Menu(MenuItem::Providers), Self::Menu(MenuItem::Profiles), Self::Menu(MenuItem::Catalog),
@@ -53,7 +59,7 @@ impl Setting {
         Self::Classic(classic::Field::ALL[4]), Self::Classic(classic::Field::ALL[5]),
         Self::Classic(classic::Field::ALL[6]), Self::Classic(classic::Field::ALL[7]),
         Self::Classic(classic::Field::ALL[8]), Self::UiColors,
-        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe];
+        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe, Self::MultiviewService];
 
     fn find(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|setting| setting.id() == if id == "sUiColorConfig" { "uiColorConfig" } else { id })
@@ -67,6 +73,7 @@ impl Setting {
     fn id(self) -> &'static str {
         match self {
             Self::NativeInputProbe => "nativeInputProbeV1",
+            Self::MultiviewService => multiview::KEY,
             Self::HostedEpg => "nativeEpgApiV1",
             Self::InfoTimeout => "infoTimeout",
             Self::FontScale => "uiFontScale",
@@ -87,9 +94,9 @@ impl Setting {
 
     fn default(self) -> Value {
         match self {
-            Self::NativeInputProbe | Self::HostedEpg | Self::UiColors => json!(""),
+            Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::MultiviewService => json!(""),
             Self::InfoTimeout => json!(plx_screens::player::input::InfoTimeout::DEFAULT.seconds()),
-            Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(1),
+            Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(0),
             Self::Appearance(field) => field.default_value(),
             Self::Geometry(field) => field.default_value(),
             Self::SubtitleSelection(field) => field.default_value(),
@@ -104,6 +111,7 @@ impl Setting {
     }
     fn valid(self, value: &Value) -> bool {
         match self {
+            Self::MultiviewService => multiview::valid(value),
             Self::NativeInputProbe => value.as_str().is_some_and(|text|text.len()<=4096),
             Self::HostedEpg => hosted_epg_settings::parse(value).is_ok(),
             Self::UiColors => value.as_str().is_some_and(|text| plx_ui::palette::Config::parse(text).is_ok()),
@@ -123,24 +131,25 @@ impl Setting {
                 Self::Player => number == 0,
                 Self::Interface => plx_machine::machine::UiMode::from_index(number).is_some(),
                 Self::Sleep => super::super::sleep_timer::Choice::from_index(number).is_some(),
-                Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
+                Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::MultiviewService | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
             }),
         }
     }
 
     fn writable(self) -> bool {
-        matches!(self, Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
+        matches!(self, Self::MultiviewService | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
     }
 
     fn reason(self) -> &'static str {
         match self {
-            Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
+            Self::MultiviewService | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
             Self::NativeInputProbe => "unsupported",
             Self::Player => "device_forced_auto",
         }
     }
 
     fn descriptor(self) -> Value {
+        if matches!(self, Self::MultiviewService) { return multiview::descriptor(); }
         if matches!(self, Self::NativeInputProbe) {
             return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
                 "access":{"read":true,"write":false,"reason":"unsupported"},"default_value":"","apply":"immediate",
@@ -213,7 +222,7 @@ impl Setting {
                     .map(|choice| json!({"value":choice.index(),"label":choice.label(),"aliases":[]})).collect::<Vec<_>>());
                 result["description"] = json!("Standby after no input. Disabled by kiosk; a new session starts a fresh interval.");
             }
-            Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
+            Self::NativeInputProbe | Self::MultiviewService | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
         }
         result
     }
@@ -273,6 +282,7 @@ fn media_scope(context: &mut Value, revision: u64, navigation_epoch: u64) {
 }
 
 fn stored(saved: &Saved, setting: Setting) -> Value {
+    if matches!(setting, Setting::MultiviewService) { return multiview::snapshot(saved); }
     if matches!(setting, Setting::NativeInputProbe) {
         return json!({"id":setting.id(),"storage":"default","value":""});
     }
@@ -582,6 +592,13 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
     if !setting.writable() {
         return fail("unsupported");
     }
+    // Syntax alone grants no authority: a nonempty binding must address this
+    // installation before consuming CAS or admitting the durable transaction.
+    let multiview_candidate = if matches!(setting, Setting::MultiviewService) {
+        match multiview::candidate(&runtime.saved, &params["value"], runtime.remote.persisted_device_id()) {
+            Ok(candidate) => Some(candidate), Err(_) => return fail("invalid_value"),
+        }
+    } else { None };
     if !runtime.command_receipts.consume(
         params["revision"].as_str().unwrap_or_default(),
         &signature_for(&runtime.saved, setting, wire_provider(runtime.provider)),
@@ -593,7 +610,10 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
     }
     let before = stored_for(&runtime.saved, setting, wire_provider(runtime.provider));
     result["changed"] = json!(before["storage"] != "stored" || before["value"] != params["value"]);
-    let mut candidate = if matches!(setting,Setting::M3uMedia) {
+    let mut candidate = if let Some(candidate) = multiview_candidate {
+        result["changed"] = json!(runtime.saved.settings.get(multiview::KEY) != Some(&params["value"]));
+        candidate
+    } else if matches!(setting,Setting::M3uMedia) {
         let parent=runtime.active().cloned().expect("captured M3U parent checked above");
         let value=params["value"].as_str().expect("media link validated above");
         let new_id=if !value.trim().is_empty() && media_attachment(&runtime.saved).is_none() {
@@ -799,7 +819,7 @@ impl Runtime {
     }
 
     pub(in crate::app::ott_runtime) fn interface_mode(&self) -> plx_machine::machine::UiMode {
-        let index = stored(&self.saved, Setting::Interface)["value"].as_u64().unwrap_or(1);
+        let index = stored(&self.saved, Setting::Interface)["value"].as_u64().unwrap_or(0);
         plx_machine::machine::UiMode::from_index(index).unwrap_or_default()
     }
 
@@ -1173,7 +1193,8 @@ mod menu_tests {
     }
     #[test]
     fn menu_fields_extend_existing_paginated_schema_without_reordering_it() {
-        assert_eq!(Setting::ALL.len(), 30 + MenuItem::ALL.len());
+        assert_eq!(Setting::ALL.len(), 31 + MenuItem::ALL.len());
+        assert_eq!(Setting::ALL[45].id(), "nativeMultiviewService");
         assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
         assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");
         assert_eq!(Setting::ALL[41..43].iter().map(|setting| setting.id()).collect::<Vec<_>>(),

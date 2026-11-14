@@ -5,9 +5,9 @@
 use super::*;
 use std::collections::BTreeSet;
 
-// Existing descriptor order is the receiver contract; selection policy only
-// appends two fields so saved pagination and established aliases stay stable.
-const EXPECTED_IDS: [&str; 45] = [
+// Existing descriptor order is the receiver contract; additions append fields
+// so saved pagination and established aliases stay stable.
+const EXPECTED_IDS: [&str; 46] = [
     "uiFontScale", "players", "interfaceMode", "nativeSubtitleFont", "nativeSubtitleColor",
     "nativeSubtitleOutline", "nativeSubtitleBackground", "menuShowProviders", "menuShowProfiles",
     "menuShowCatalog", "menuShowCategories", "menuShowFavorites", "menuShowSearch",
@@ -17,6 +17,7 @@ const EXPECTED_IDS: [&str; 45] = [
     "infoTimeout", "osdOpacity", "permanentTime", "pageSize", "listPosition", "seek13Duration",
     "arrowFun", "showNumber", "showName", "showProgram", "showDescription", "showProgress", "uiColorConfig",
     "nativeSubtitleMode", "nativeSubtitleLanguage", "nativeEpgApiV1", "nativeInputProbeV1",
+    "nativeMultiviewService",
 ];
 
 fn keys(value: &Value, required: &[&str], optional: &[&str]) -> bool {

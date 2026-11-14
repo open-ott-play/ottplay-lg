@@ -13,6 +13,7 @@ pub(super) struct Poll {
     pub(super) media_tracks_raw: Option<String>,
     pub(super) plex_servers_raw: Option<String>,
     pub(super) provider_settings_raw: Option<String>,
+    pub(super) multiview_raw: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -43,18 +44,22 @@ pub(super) fn decode_poll(bytes: &[u8]) -> Result<Poll, serde_json::Error> {
     let mut media_tracks_raw = None;
     let mut plex_servers_raw = None;
     let mut provider_settings_raw = None;
+    let mut multiview_raw = None;
     // Preserve existing envelope validation in Delivery. In particular, absent,
     // null or wrongly typed requests retain their existing admission semantics.
     if let Some(requests) = value.get("requests").and_then(Value::as_array).filter(|items| {
-        items.iter().any(|request| matches!(request.get("action").and_then(Value::as_str), Some("media_tracks" | "plex_servers" | "settings_compare" | "provider_settings")))
+        items.iter().any(|request| matches!(request.get("action").and_then(Value::as_str), Some("media_tracks" | "plex_servers" | "settings_compare" | "provider_settings" | "multiview")))
     }) {
         let raw: RawRequests<'_> = serde_json::from_slice(bytes)?;
         for (index, request) in requests.iter().enumerate() {
             // Decode the action before recognition: escapes cannot bypass validation.
             let action = request.get("action").and_then(Value::as_str);
-            if !matches!(action, Some("media_tracks" | "plex_servers" | "settings_compare" | "provider_settings")) { continue; }
+            if !matches!(action, Some("media_tracks" | "plex_servers" | "settings_compare" | "provider_settings" | "multiview")) { continue; }
             let received = raw.requests.get(index)
                 .ok_or_else(|| <serde_json::Error as de::Error>::custom("invalid raw request index"))?;
+            if action == Some("multiview") && received.get().len() > 16 * 1024 {
+                return Err(de::Error::custom("multiview envelope exceeds the limit"));
+            }
             if matches!(action, Some("settings_compare" | "provider_settings")) {
                 if request.get("params").and_then(|p|p.get("version")).is_some() {
                     if received.get().len() > 16 * 1024 {
@@ -77,6 +82,11 @@ pub(super) fn decode_poll(bytes: &[u8]) -> Result<Poll, serde_json::Error> {
                 super::media_tracks::Request::decode(projection.as_bytes())
                     .map_err(|_| <serde_json::Error as de::Error>::custom("invalid media_tracks request projection"))?;
                 if index == 0 { media_tracks_raw = Some(projection); }
+            } else if action == Some("multiview") {
+                // Retain the original number spellings and correlated semantic
+                // failures for the closed action codec. Value-only admission
+                // cannot supply this raw proof.
+                if index == 0 { multiview_raw = Some(projection); }
             } else {
                 // This is a bound on the received action/params projection only.
                 // The controller must enforce its original whole-HTTP-request bound.
@@ -86,11 +96,49 @@ pub(super) fn decode_poll(bytes: &[u8]) -> Result<Poll, serde_json::Error> {
             }
         }
     }
-    Ok(Poll { value, media_tracks_raw, plex_servers_raw, provider_settings_raw })
+    Ok(Poll { value, media_tracks_raw, plex_servers_raw, provider_settings_raw, multiview_raw })
 }
 
 pub(super) fn decode_unique(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     serde_json::from_slice::<Unique>(bytes).map(|unique| unique.0)
+}
+
+#[cfg(test)]
+mod multiview_tests {
+    use super::*;
+
+    fn request(params: &str) -> String {
+        format!(r#"{{"id":"0123456789abcdef0123456789abcdef","expires_at":1020,"action":"multiview","params":{params}}}"#)
+    }
+    fn poll(requests: &str) -> String {
+        format!(r#"{{"commands":[],"server_time":1000,"requests":[{requests}]}}"#)
+    }
+    #[test]
+    fn original_integer_spelling_reaches_the_action_codec() {
+        let params = r#"{"version":1,"op":"focus","slot_id":-0}"#;
+        let raw = request(params);
+        let parsed = decode_poll(poll(&raw).as_bytes()).unwrap();
+        assert_eq!(parsed.multiview_raw.as_deref(),
+            Some(format!(r#"{{"action":"multiview","params":{params}}}"#).as_str()));
+        let mut delivery = crate::app::ott_remote::protocol::Delivery::default();
+        let actions = delivery.poll(&parsed.value, 0, 0).unwrap();
+        assert_eq!(actions.len(), 1);
+        // The legacy Value-only path must not manufacture original raw bytes.
+        assert!(actions[0].multiview_projection().is_none());
+    }
+    #[test]
+    fn an_oversized_later_request_rejects_the_whole_poll() {
+        let first = request(r#"{"version":1,"op":"status"}"#);
+        let second = request(&format!(r#"{{"version":1,"op":"status","padding":"{}"}}"#, "x".repeat(16 * 1024)));
+        assert!(decode_poll(poll(&format!("{first},{second}")).as_bytes()).is_err());
+    }
+    #[test]
+    fn decoded_duplicate_keys_are_rejected_before_request_admission() {
+        for params in [r#"{"version":1,"\u0076ersion":1,"op":"status"}"#,
+            r#"{"version":1,"op":"focus","expected":{"scene":"a","scene":"b"}}"#] {
+            assert!(decode_poll(poll(&request(params)).as_bytes()).is_err());
+        }
+    }
 }
 
 struct Unique(Value);

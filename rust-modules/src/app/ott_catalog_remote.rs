@@ -141,7 +141,8 @@ fn media_binding(entry: &CatalogEntry) -> Result<[u8; 32], &'static str> {
 
 fn available(runtime: &Runtime) -> Result<(), &'static str> {
     if !supported(runtime) { return Err("unavailable"); }
-    if !runtime.view_selection().1 && !runtime.catalog_loading && !runtime.catalog_complete {
+    if !runtime.view_selection().1 && !runtime.catalog_loading && !runtime.catalog_complete
+        && !runtime.returned_catalog_complete() {
         return Err("catalog_incomplete");
     }
     Ok(())
@@ -795,7 +796,8 @@ pub(super) fn play(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Op
         let item = if receipt_random.is_some() {
             // A complete immutable receipt is the entire population. Classification,
             // legacy weighting and title inference are deliberately absent in v2.
-            if snapshot.loading || runtime.catalog_loading || !runtime.catalog_complete {
+            if snapshot.loading || runtime.catalog_loading
+                || !(runtime.catalog_complete || runtime.returned_catalog_complete()) {
                 return Err("The complete random-selection catalog is unavailable");
             }
             let entropy = runtime.entropy.ok_or("Random entropy is unavailable")?;

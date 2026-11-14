@@ -120,6 +120,36 @@ impl Drop for FeedRefusalForTest {
     }
 }
 
+// A bounded paused decoder for startup regressions: Feed accepts a real
+// prefix, then returns BufferFull until the production Play releases its clock.
+#[cfg(all(test, feature = "hostsim"))]
+static HELD_FEED_CAP_NS: AtomicI64 = AtomicI64::new(-1);
+#[cfg(all(test, feature = "hostsim"))]
+static HELD_FEED_FULL: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(test, feature = "hostsim"))]
+static HELD_AUDIO_CAP_NS: AtomicI64 = AtomicI64::new(-1);
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) struct HeldFeedCapacityForTest;
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) fn held_feed_capacity_for_test(cap_ns: i64) -> HeldFeedCapacityForTest {
+    held_feed_capacity_for_lanes_for_test(cap_ns, cap_ns)
+}
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) fn held_feed_capacity_for_lanes_for_test(video_ns: i64, audio_ns: i64) -> HeldFeedCapacityForTest {
+    assert!(video_ns > 0 && audio_ns > 0);
+    assert_eq!(HELD_FEED_CAP_NS.swap(video_ns, Relaxed), -1);
+    HELD_AUDIO_CAP_NS.store(audio_ns, Relaxed);
+    HELD_FEED_FULL.store(0, Relaxed);
+    Clock::rewind();
+    HeldFeedCapacityForTest
+}
+#[cfg(all(test, feature = "hostsim"))]
+pub(crate) fn held_feed_full_for_test() -> u64 { HELD_FEED_FULL.load(Relaxed) }
+#[cfg(all(test, feature = "hostsim"))]
+impl Drop for HeldFeedCapacityForTest {
+    fn drop(&mut self) { HELD_FEED_CAP_NS.store(-1, Relaxed); HELD_AUDIO_CAP_NS.store(-1, Relaxed); }
+}
+
 /// Force the next host `Play` calls to report a seam result. `i32::MIN` means normal clocksink
 /// behaviour. This makes the state-machine invariant testable without teaching production code a
 /// failure-injection branch.
@@ -1073,6 +1103,14 @@ unsafe fn sf_feed(p: *const u8, size: c_uint, pts: i64, es_data: c_int) -> c_cha
     #[cfg(all(test, feature = "hostsim"))]
     if let Some(reply) = *FEED_REFUSAL.lock().unwrap_or_else(|e| e.into_inner()) {
         return reply;
+    }
+    #[cfg(all(test, feature = "hostsim"))]
+    {
+        let cap = if es_data == 2 { HELD_AUDIO_CAP_NS.load(Relaxed) } else { HELD_FEED_CAP_NS.load(Relaxed) };
+        if cap >= 0 && !PLAYING.load(Relaxed) && pts > cap {
+            HELD_FEED_FULL.fetch_add(1, Relaxed);
+            return b'B' as c_char;
+        }
     }
     #[cfg(any(test, feature = "test-support"))]
     {

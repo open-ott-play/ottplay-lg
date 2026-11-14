@@ -151,11 +151,37 @@ enum HlsClockPhase {
     Stopping,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalHlsRetentionError {
+    SeekPending,
+    Retired,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExternalHlsResident {
+    pub video: std::sync::Arc<[(i64, i64)]>,
+    pub audio: std::sync::Arc<[(i64, i64)]>,
+}
+
+#[derive(Clone, Debug)]
+struct RetainedHlsInterval {
+    token: u64,
+    generation: u64,
+    acquisition_us: u64,
+    media: Duration,
+    resident: Option<ExternalHlsResident>,
+}
+
+#[derive(Clone, Debug)]
 struct HlsClockState {
     phase: HlsClockPhase,
     next_token: u64,
     recovery: HlsRecoveryEpoch,
+    retained: Option<RetainedHlsInterval>,
+    fresh_completed: Option<(u64, u64)>,
+    // Initial source authority survives the paused first-picture preroll's
+    // Initial -> Seek hold change; actual seek acceptance revokes it.
+    initial_cold_offset: bool,
     /// Accepted user Pause ownership. This is intentionally inside the actuator mutex: the
     /// transport atomic is a hot-path mirror, not a second authority over whether Play may issue.
     user_held: bool,
@@ -179,6 +205,9 @@ impl HlsClockState {
             phase: HlsClockPhase::Running,
             next_token: 0,
             recovery: HlsRecoveryEpoch::idle(),
+            retained: None,
+            fresh_completed: None,
+            initial_cold_offset: true,
             user_held: false,
             user_sequence: 0,
             resume_acb_pending: false,
@@ -877,6 +906,16 @@ pub struct Shared {
     /// `Feed()` call at all. `queue empty` vs `BufferFull` is what splits a dead PRODUCER from a
     /// dead SINK.
     pub dg_feed_state: AtomicU8,
+    pub dg_prime_pending: AtomicBool,
+    pub dg_prime_kind: AtomicU8,
+    pub dg_prime_required_runway_ms: AtomicI64,
+    pub dg_prime_accepted_video_ms: AtomicI64,
+    pub dg_prime_accepted_audio_ms: AtomicI64,
+    pub dg_prime_queued_video_ms: AtomicI64,
+    pub dg_prime_queued_audio_ms: AtomicI64,
+    pub dg_prime_external_lease: AtomicBool,
+    pub dg_prime_audio_expected: AtomicBool,
+
     /// The first Starfish error callback (`ty == 18`) of this session, and the callback INDEX it
     /// arrived at. Sticky: a later healthy callback must not erase the error that explains the
     /// session, and the index says whether it was immediate or after a long healthy run.
@@ -1058,6 +1097,25 @@ impl Shared {
         }).unwrap_or(false)
     }
 
+    /// Settle one unrecovered source read while it still owns the native
+    /// epoch. Reset/retirement uses this same lock, including through publish.
+    pub(crate) fn fail_source_io_for(&self, epoch: u32,
+        transport: Option<(i32, i64, bool)>) -> bool
+    {
+        self.with_native_session(epoch, NativeEventClass::Other, 0, || {
+            let (rc, reopen_failed) = if let Some((rc, age_ms, reopen_failed)) = transport {
+                self.dg_transport_rc.store(rc, Ordering::Release);
+                self.dg_transport_age_ms.store(age_ms, Ordering::Release);
+                self.dg_transport_reopen_failed.store(reopen_failed, Ordering::Release);
+                (rc, reopen_failed)
+            } else { (0, false) };
+            let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
+            first.get_or_insert(super::report::IoFailureDetails::source_io(rc, reopen_failed));
+            self.demux_io_failed.store(true, Ordering::Release);
+            true
+        }).unwrap_or(false)
+    }
+
     /// Attribute a typed HLS open failure and its terminal flags under one
     /// native-owner fence. A previous detail still wins, but cannot suppress
     /// this owner's failure flag. Never nest `note_io_failure_for` here.
@@ -1065,10 +1123,23 @@ impl Shared {
         exit: plx_telemetry::telemetry::classes::DemuxExitClass,
         outcome: plx_telemetry::telemetry::classes::TraceOutcome, pushed: bool) -> bool
     {
+        self.fail_hls_terminal_for(epoch, exit, Some(outcome), pushed)
+    }
+
+    /// Publish the producer's details AND terminal flag in one native-epoch
+    /// transaction. `io_failed` preserves the existing pre/post-feed signal.
+    /// No callback may validate A, release the epoch lock, then fail B.
+    pub(crate) fn fail_hls_terminal_for(&self, epoch: u32,
+        exit: plx_telemetry::telemetry::classes::DemuxExitClass,
+        outcome: Option<plx_telemetry::telemetry::classes::TraceOutcome>,
+        io_failed: bool) -> bool
+    {
         self.with_native_session(epoch, NativeEventClass::Other, 0, || {
-            let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
-            first.get_or_insert(super::report::IoFailureDetails::Hls { exit, outcome: Some(outcome) });
-            if pushed { self.demux_io_failed.store(true, Ordering::Release); }
+            if io_failed || outcome.is_some() {
+                let mut first = self.io_failure.lock().unwrap_or_else(|e| e.into_inner());
+                first.get_or_insert(super::report::IoFailureDetails::Hls { exit, outcome });
+            }
+            if io_failed { self.demux_io_failed.store(true, Ordering::Release); }
             else { self.fail_demux(exit); }
             true
         }).unwrap_or(false)
@@ -1106,6 +1177,16 @@ impl Shared {
             dg_sink_report_major: AtomicU32::new(0),
             dg_sink_other_cb: AtomicU32::new(0),
             dg_feed_state: AtomicU8::new(0),
+            dg_prime_pending: AtomicBool::new(false),
+            dg_prime_kind: AtomicU8::new(0),
+            dg_prime_required_runway_ms: AtomicI64::new(0),
+            dg_prime_accepted_video_ms: AtomicI64::new(0),
+            dg_prime_accepted_audio_ms: AtomicI64::new(0),
+            dg_prime_queued_video_ms: AtomicI64::new(0),
+            dg_prime_queued_audio_ms: AtomicI64::new(0),
+            dg_prime_external_lease: AtomicBool::new(false),
+            dg_prime_audio_expected: AtomicBool::new(false),
+
             dg_cb_err: AtomicI32::new(0),
             dg_cb_err_at: AtomicU32::new(0),
             dg_cb_err_num: AtomicI32::new(0),
@@ -1826,6 +1907,16 @@ impl Shared {
         self.dg_sink_report_major.store(0, Ordering::Relaxed);
         self.dg_sink_other_cb.store(0, Ordering::Relaxed);
         self.dg_feed_state.store(0, Ordering::Relaxed);
+        self.dg_prime_pending.store(false, Ordering::Relaxed);
+        self.dg_prime_kind.store(0, Ordering::Relaxed);
+        self.dg_prime_required_runway_ms.store(0, Ordering::Relaxed);
+        self.dg_prime_accepted_video_ms.store(0, Ordering::Relaxed);
+        self.dg_prime_accepted_audio_ms.store(0, Ordering::Relaxed);
+        self.dg_prime_queued_video_ms.store(0, Ordering::Relaxed);
+        self.dg_prime_queued_audio_ms.store(0, Ordering::Relaxed);
+        self.dg_prime_external_lease.store(false, Ordering::Relaxed);
+        self.dg_prime_audio_expected.store(false, Ordering::Relaxed);
+
         // A latched error MUST be cleared here, or one bad session paints every later healthy
         // playback red for the life of the process.
         self.dg_cb_err.store(0, Ordering::Relaxed);
@@ -1986,6 +2077,129 @@ impl Shared {
             .observe(acquisition_us, media);
     }
 
+    /// Preserve finite source position when cold decoder entry omits a whole
+    /// source prefix. This runs before the first safe AU is published, and can
+    /// never retime an accepted seek or another native clock/source.
+    pub(crate) fn publish_external_cold_offset(
+        &self, generation: u64, expected_base: i64, offset_ns: i64,
+    ) -> bool {
+        let clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if expected_base < 0 || offset_ns < 0 || generation & 1 != 0
+            || self.hls_candidate_generation.load(Ordering::Acquire) != generation
+            || self.seek_to_ns.load(Ordering::Acquire) >= 0
+            || !clock.initial_cold_offset
+            || !matches!(clock.phase, HlsClockPhase::Held { hold: ClockHold::Initial | ClockHold::Seek })
+        { return false; }
+        self.disp_base.compare_exchange(expected_base, offset_ns, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// Publish the new demux timeline atomically with revoking retained old output.
+    pub(crate) fn publish_seek_target(&self, target_ns: i64) {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        clock.retained = None;
+        clock.fresh_completed = None;
+        clock.initial_cold_offset = false;
+        self.seek_to_ns.store(target_ns, Ordering::Release);
+    }
+
+    /// Own one complete, validated external interval until its feeder returns.
+    /// Its immutable output remains behind the bounded queues while a push parks.
+    /// A later Pause can therefore seed its proof from that still-active owner;
+    /// completed historical intervals disappear when the matching lease drops.
+    #[cfg(test)]
+    pub(crate) fn retain_external_hls_interval(
+        &self, generation: u64, acquisition_us: u64, media: Duration,
+    ) -> Result<u64, ExternalHlsRetentionError> {
+        self.retain_external_hls_interval_with_resident(generation, acquisition_us, media, None)
+    }
+
+    pub(crate) fn retain_external_hls_interval_with_resident(
+        &self, generation: u64, acquisition_us: u64, media: Duration,
+        resident: Option<ExternalHlsResident>,
+    ) -> Result<u64, ExternalHlsRetentionError> {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.seek_to_ns.load(Ordering::Acquire) >= 0 {
+            return Err(ExternalHlsRetentionError::SeekPending);
+        }
+        if generation & 1 != 0 || self.hls_candidate_generation.load(Ordering::Acquire) != generation
+            || clock.phase == HlsClockPhase::Stopping
+        { return Err(ExternalHlsRetentionError::Retired); }
+        if clock.retained.as_ref().is_some_and(|p| p.generation != generation) {
+            clock.retained = None;
+        }
+        if clock.retained.is_some() { return Err(ExternalHlsRetentionError::Retired); }
+        let token = clock.token();
+        clock.retained = Some(RetainedHlsInterval { token, generation, acquisition_us, media, resident });
+        if matches!(clock.phase,
+            HlsClockPhase::PauseIssuing { hold: ClockHold::Rebuffer, .. }
+            | HlsClockPhase::Held { hold: ClockHold::Rebuffer })
+        { clock.recovery.observe(acquisition_us, media); }
+        Ok(token)
+    }
+
+    pub(crate) fn active_external_hls_interval(&self, generation: u64) -> bool {
+        let clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        Self::external_interval_matches(&clock, self, generation)
+    }
+
+    fn external_interval_matches(clock: &HlsClockState, shared: &Self, generation: u64) -> bool {
+        generation & 1 == 0
+            && shared.hls_candidate_generation.load(Ordering::Acquire) == generation
+            && shared.seek_to_ns.load(Ordering::Acquire) < 0
+            && clock.retained.as_ref().is_some_and(|p| p.generation == generation)
+            && clock.phase != HlsClockPhase::Stopping
+    }
+
+    /// A successful whole push transfers validated Fresh evidence from the
+    /// producer to the real native/application queues. Drop/failure never does.
+    pub(crate) fn complete_external_hls_interval(&self, token: u64) {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(retained) = clock.retained.clone().filter(|p| p.token == token) else { return };
+        let fresh = match clock.phase {
+            HlsClockPhase::Held { hold } | HlsClockPhase::PlayIssuing { hold, .. } =>
+                hold.prime_kind() == Some(HlsPrimeKind::Fresh),
+            _ => false,
+        };
+        if fresh && Self::external_interval_matches(&clock, self, retained.generation) {
+            clock.fresh_completed = Some((retained.generation, token));
+        }
+    }
+
+    pub(crate) fn external_hls_resident(&self, generation: u64) -> Option<(u64, ExternalHlsResident)> {
+        let clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if !Self::external_interval_matches(&clock, self, generation) { return None; }
+        let retained = clock.retained.as_ref()?;
+        Some((retained.token, retained.resident.clone()?))
+    }
+
+    pub(crate) fn external_hls_fresh_proof(&self, generation: u64) -> bool {
+        let clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        Self::external_fresh_matches(&clock, self, generation)
+    }
+
+    fn external_fresh_matches(clock: &HlsClockState, shared: &Self, generation: u64) -> bool {
+        let fresh = match clock.phase {
+            HlsClockPhase::Held { hold } | HlsClockPhase::PlayIssuing { hold, .. } =>
+                hold.prime_kind() == Some(HlsPrimeKind::Fresh),
+            _ => false,
+        };
+        fresh && generation & 1 == 0
+            && shared.hls_candidate_generation.load(Ordering::Acquire) == generation
+            && shared.seek_to_ns.load(Ordering::Acquire) < 0
+            && (clock.fresh_completed.is_some_and(|(source, _)| source == generation)
+                || Self::external_interval_matches(clock, shared, generation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_retained_external_hls_interval_for_test(&self) -> bool {
+        self.hls_clock.lock().unwrap_or_else(|e| e.into_inner()).retained.is_some()
+    }
+
+    pub(crate) fn release_external_hls_interval(&self, token: u64) {
+        let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if clock.retained.as_ref().is_some_and(|p| p.token == token) { clock.retained = None; }
+    }
+
     pub fn hls_recovery(&self) -> HlsRecoveryEpoch {
         self.hls_clock
             .lock()
@@ -2074,6 +2288,10 @@ impl Shared {
         }
         let token = clock.token();
         clock.recovery.begin();
+        let generation = self.hls_candidate_generation.load(Ordering::Acquire);
+        if let Some(retained) = clock.retained.clone().filter(|p| generation & 1 == 0
+            && p.generation == generation)
+        { clock.recovery.observe(retained.acquisition_us, retained.media); }
         clock.phase = HlsClockPhase::PauseIssuing {
             token,
             hold: ClockHold::Rebuffer,
@@ -2176,6 +2394,9 @@ impl Shared {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         match clock.phase {
             HlsClockPhase::Running => {
+                clock.retained = None;
+                clock.fresh_completed = None;
+                clock.initial_cold_offset = false;
                 let token = clock.token();
                 clock.phase = HlsClockPhase::PauseIssuing {
                     token,
@@ -2187,6 +2408,9 @@ impl Shared {
                 hold:
                     ClockHold::User | ClockHold::Initial | ClockHold::Seek | ClockHold::ResumePrime,
             } => {
+                clock.retained = None;
+                clock.fresh_completed = None;
+                clock.initial_cold_offset = false;
                 if clock.user_held {
                     clock.user_held = false;
                     clock.resume_acb_pending = true;
@@ -2307,7 +2531,38 @@ impl Shared {
         expected_candidate: u64,
         expected_recovery: HlsRecoveryEpoch,
     ) -> Option<(u64, HlsRecoveryEpoch)> {
+        self.reserve_hls_prime_play_guarded(expected_kind, expected_candidate, expected_recovery, false)
+    }
+
+    pub(crate) fn reserve_hls_prime_play_guarded(
+        &self, expected_kind: HlsPrimeKind, expected_candidate: u64,
+        expected_recovery: HlsRecoveryEpoch, require_external: bool,
+    ) -> Option<(u64, HlsRecoveryEpoch)> {
+        self.reserve_hls_prime_play_inner(expected_kind, expected_candidate, expected_recovery, require_external, None)
+    }
+
+    pub(crate) fn reserve_hls_prime_play_resident(
+        &self, expected_kind: HlsPrimeKind, expected_candidate: u64,
+        expected_recovery: HlsRecoveryEpoch, resident_token: u64,
+    ) -> Option<(u64, HlsRecoveryEpoch)> {
+        self.reserve_hls_prime_play_inner(expected_kind, expected_candidate, expected_recovery, true, Some(resident_token))
+    }
+
+    fn reserve_hls_prime_play_inner(
+        &self, expected_kind: HlsPrimeKind, expected_candidate: u64,
+        expected_recovery: HlsRecoveryEpoch, require_external: bool, resident_token: Option<u64>,
+    ) -> Option<(u64, HlsRecoveryEpoch)> {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
+        if resident_token.is_some_and(|token| {
+            !clock.retained.as_ref().is_some_and(|p| p.token == token)
+                && clock.fresh_completed != Some((expected_candidate, token))
+        }) { return None; }
+        let external_current = if expected_kind == HlsPrimeKind::Fresh {
+            Self::external_fresh_matches(&clock, self, expected_candidate)
+        } else {
+            Self::external_interval_matches(&clock, self, expected_candidate)
+        };
+        if require_external && !external_current { return None; }
         if self.hls_trial_reserve_ms.load(Ordering::Acquire) >= 0
             || clock.automatic.is_some()
             || self.hls_candidate_generation.load(Ordering::Acquire) != expected_candidate
@@ -2349,6 +2604,8 @@ impl Shared {
         }
         if accepted {
             clock.phase = HlsClockPhase::Running;
+            clock.fresh_completed = None;
+            clock.initial_cold_offset = false;
             clock.recovery = HlsRecoveryEpoch::idle();
             clock.user_held = false;
             clock.resume_acb_pending = false;
@@ -2637,6 +2894,9 @@ impl Shared {
         let mut clock = self.hls_clock.lock().unwrap_or_else(|e| e.into_inner());
         clock.phase = HlsClockPhase::Stopping;
         clock.recovery = HlsRecoveryEpoch::idle();
+        clock.retained = None;
+        clock.fresh_completed = None;
+        clock.initial_cold_offset = false;
         clock.user_held = false;
         clock.resume_acb_pending = false;
         clock.automatic = None;
@@ -3695,10 +3955,20 @@ mod tests {
     #[test]
     fn every_diagnostics_mirror_field_has_a_writer() {
         const SHARED_SRC: &str = include_str!("shared.rs");
+        // The native-epoch fenced source helper stamps transport facts in Shared. Include only
+        // this production method, not reset_session_inner or the test fixtures below: a reset
+        // must never satisfy the writer contract.
+        let transport_writer = SHARED_SRC
+            .split_once("pub(crate) fn fail_source_io_for(")
+            .expect("transport publisher exists").1
+            .split_once("pub(crate) fn fail_hls_open_for(")
+            .expect("transport publisher has a bounded production scope").0;
+        assert!(!transport_writer.contains("fn reset_session"));
         // ff.rs stamps HTTP status and received bytes; viewport.rs stamps exported placement.
         // A writer file missing from this list reads exactly like a field with no writer, so
         // adding one here is part of adding one there.
-        const WRITERS: [&str; 5] = [
+        let writers_src: [&str; 6] = [
+            transport_writer,
             include_str!("pump.rs"),
             include_str!("engine.rs"),
             include_str!("mod.rs"),
@@ -3718,7 +3988,7 @@ mod tests {
         );
         // rustfmt may wrap `SHARED.dg_field.store(...)` between either dot.  Whitespace carries no
         // source-level meaning here, so remove it before looking for the writer expression.
-        let writers: Vec<String> = WRITERS
+        let writers: Vec<String> = writers_src
             .iter()
             .map(|src| src.chars().filter(|c| !c.is_whitespace()).collect())
             .collect();
@@ -3877,5 +4147,234 @@ mod tests {
         assert_eq!(s.dg_abr_action.load(Ordering::Relaxed), 0);
         assert_eq!(s.dg_abr_target_kbps.load(Ordering::Relaxed), 0);
         assert_eq!(s.dg_abr_unsafe_deficit_ms.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod external_retained_interval_tests {
+    use super::*;
+    #[test]
+    fn retained_interval_survives_viewer_pause_but_never_plays_through_it() {
+        let s = Shared::new();
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let retained = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        let Some(HlsUserPause::Issue(pause)) = s.prepare_hls_user_pause() else { panic!("viewer pause"); };
+        assert_eq!(s.complete_hls_user_pause(pause, true), HlsPauseCompletion::Accepted);
+        assert!(s.reserve_hls_prime_play(HlsPrimeKind::Resume, generation, s.hls_recovery()).is_none());
+        assert_eq!(s.prepare_hls_user_resume(true), Some(HlsUserResume::Prime));
+        let (play, _) = s.reserve_hls_prime_play(HlsPrimeKind::Resume, generation, s.hls_recovery()).unwrap();
+        assert!(matches!(s.complete_hls_prime_play(play, true), HlsPlayCompletion::Accepted { .. }));
+        let pause = s.prepare_hls_rebuffer_pause().unwrap();
+        assert_eq!(s.complete_hls_rebuffer_pause(pause, true), HlsPauseCompletion::Accepted);
+        assert_eq!(s.hls_recovery().completed, 1, "the same parked producer still owns validated bytes");
+        s.release_external_hls_interval(retained);
+        assert!(!s.has_retained_external_hls_interval_for_test());
+    }
+    #[test]
+    fn cold_source_offset_survives_the_real_paused_start_preroll_handoff() {
+        for preroll in [false, true] {
+            let s = Shared::new(); assert!(s.arm_initial_clock_hold(false, false));
+            let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+            assert!(s.prepare_hls_user_pause().is_some());
+            assert!(s.clock_user_held_for_test());
+            if preroll { assert!(s.hand_hold_to_seek_prime(), "pump opens the paused initial picture's preroll"); }
+            assert!(s.publish_external_cold_offset(generation, 0, 1_000_000_000),
+                "preroll changes clock hold, not source/timeline ownership");
+            if !preroll { assert!(s.clock_user_held_for_test(), "metadata never releases the viewer pause"); }
+        }
+    }
+
+    #[test]
+    fn cold_source_offset_is_fenced_before_first_feed() {
+        let s = Shared::new(); assert!(s.arm_initial_clock_hold(false, false));
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        assert!(s.publish_external_cold_offset(generation, 0, 1_000_000_000));
+        assert_eq!(s.disp_base.load(Ordering::Acquire), 1_000_000_000);
+        assert!(!s.publish_external_cold_offset(generation, 0, 2_000_000_000), "changed base is not overwritten");
+        for case in ["stale", "pending-seek", "accepted-seek", "playing", "stop", "negative"] {
+            let s = Shared::new(); assert!(s.arm_initial_clock_hold(false, false));
+            let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+            match case {
+                "stale" => { s.hls_candidate_generation.fetch_add(2, Ordering::AcqRel); },
+                "pending-seek" => s.publish_seek_target(2_000_000_000),
+                "accepted-seek" => { let _ = s.prepare_seek_pause(); },
+                "playing" => {
+                    let (play, _) = s.reserve_hls_prime_play(HlsPrimeKind::Fresh, generation, s.hls_recovery()).unwrap();
+                    assert!(matches!(s.complete_hls_prime_play(play, true), HlsPlayCompletion::Accepted { .. }));
+                },
+                "stop" => s.stop_hls_clock(),
+                _ => {},
+            }
+            assert!(!s.publish_external_cold_offset(generation, 0, if case == "negative" { -1 } else { 1_000_000_000 }), "{case} cannot retime playback");
+            assert_eq!(s.disp_base.load(Ordering::Acquire), 0, "{case} preserves the new timeline");
+        }
+    }
+
+    #[test]
+    fn completed_fresh_proof_expires_with_its_source_or_first_play() {
+        for case in ["seek", "prepare-seek", "reset", "stop", "candidate", "play"] {
+            let s = Shared::new(); assert!(s.arm_initial_clock_hold(false, false));
+            let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+            let token = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+            s.complete_external_hls_interval(token);
+            s.release_external_hls_interval(token);
+            assert!(!s.active_external_hls_interval(generation));
+            assert!(s.external_hls_fresh_proof(generation));
+            match case {
+                "seek" => s.publish_seek_target(2_000_000_000),
+                "prepare-seek" => { let _ = s.prepare_seek_pause(); },
+                "reset" => s.reset_hls_clock(),
+                "stop" => s.stop_hls_clock(),
+                "candidate" => { s.hls_candidate_generation.fetch_add(2, Ordering::AcqRel); },
+                "play" => {
+                    let (play, _) = s.reserve_hls_prime_play_guarded(HlsPrimeKind::Fresh, generation, s.hls_recovery(), true).unwrap();
+                    assert!(matches!(s.complete_hls_prime_play(play, true), HlsPlayCompletion::Accepted { .. }));
+                    let pause = s.prepare_hls_rebuffer_pause().unwrap();
+                    assert_eq!(s.complete_hls_rebuffer_pause(pause, true), HlsPauseCompletion::Accepted);
+                    assert_eq!(s.hls_recovery().completed, 0, "finished Fresh data is not a new recovery acquisition");
+                },
+                _ => unreachable!(),
+            }
+            assert!(!s.external_hls_fresh_proof(generation), "{case} retires the completed certificate");
+        }
+        let s = Shared::new(); assert!(s.arm_initial_clock_hold(false, false));
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let failed = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.release_external_hls_interval(failed);
+        s.complete_external_hls_interval(failed);
+        assert!(!s.external_hls_fresh_proof(generation), "Drop/failed pushes cannot stamp completed proof");
+    }
+
+    #[test]
+    fn resident_snapshot_requires_its_exact_live_or_successfully_completed_lease() {
+        for complete in [false, true] {
+            let s = Shared::new(); assert!(s.arm_initial_clock_hold(false, false));
+            let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+            let first = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+            if complete { s.complete_external_hls_interval(first); }
+            s.release_external_hls_interval(first);
+            let second = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+            let reserved = s.reserve_hls_prime_play_resident(HlsPrimeKind::Fresh, generation, s.hls_recovery(), first);
+            assert_eq!(reserved.is_some(), complete, "a different active lease cannot lend its token");
+            s.release_external_hls_interval(second);
+        }
+    }
+
+    #[test]
+    fn fresh_queued_prime_revalidates_its_lease_at_the_native_play_reservation() {
+        for case in ["release", "seek", "reset", "candidate", "viewer", "stop"] {
+            let s = Shared::new();
+            assert!(s.arm_initial_clock_hold(false, false));
+            let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+            let token = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+            assert!(s.active_external_hls_interval(generation));
+            let recovery = s.hls_recovery();
+            match case {
+                "release" => s.release_external_hls_interval(token),
+                "seek" => s.publish_seek_target(2_000_000_000),
+                "reset" => s.reset_hls_clock(),
+                "candidate" => { s.hls_candidate_generation.fetch_add(2, Ordering::AcqRel); },
+                "viewer" => { let _ = s.prepare_hls_user_pause(); },
+                "stop" => s.stop_hls_clock(),
+                _ => unreachable!(),
+            }
+            assert!(s.reserve_hls_prime_play_guarded(HlsPrimeKind::Fresh, generation, recovery, true).is_none(),
+                "{case} won after the initial queue snapshot");
+        }
+    }
+
+    #[test]
+    fn seek_publication_revokes_the_prepare_window_without_stranding_the_producer() {
+        let s = Shared::new();
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let Some(HlsSeekPause::Issue(seek)) = s.prepare_seek_pause() else { panic!("seek pause"); };
+        assert_eq!(s.complete_seek_pause(seek, true), HlsPauseCompletion::Accepted);
+        // The old producer can reach admission after prepare/drain, before publication.
+        let old = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.publish_seek_target(8_000_000_000);
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        assert_eq!(s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)),
+            Err(ExternalHlsRetentionError::SeekPending));
+        // The same worker consumes the target, validates fresh bytes and remains usable.
+        assert_eq!(s.seek_to_ns.swap(-1, Ordering::AcqRel), 8_000_000_000);
+        let new = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.release_external_hls_interval(old);
+        assert!(s.has_retained_external_hls_interval_for_test());
+        s.release_external_hls_interval(new);
+    }
+
+    #[test]
+    fn reset_seek_and_old_lease_drop_cannot_lend_stale_media() {
+        let s = Shared::new();
+        let generation = s.hls_candidate_generation.load(Ordering::Acquire);
+        let old = s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).unwrap();
+        s.reset_hls_clock();
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        assert!(s.retain_external_hls_interval(generation, 100_000, Duration::from_secs(2)).is_err());
+        let current = s.hls_candidate_generation.load(Ordering::Acquire);
+        let new = s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).unwrap();
+        s.release_external_hls_interval(old);
+        assert!(s.has_retained_external_hls_interval_for_test(), "old Drop cannot clear a new interval");
+        let Some(HlsSeekPause::Issue(seek)) = s.prepare_seek_pause() else { panic!("seek pause"); };
+        assert!(!s.has_retained_external_hls_interval_for_test(), "accepted seek revokes the old interval");
+        assert_eq!(s.complete_seek_pause(seek, true), HlsPauseCompletion::Accepted);
+        s.release_external_hls_interval(new);
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        s.reset_hls_clock();
+        let current = s.hls_candidate_generation.load(Ordering::Acquire);
+        let cancelled = s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).unwrap();
+        s.stop_hls_clock();
+        assert!(!s.has_retained_external_hls_interval_for_test());
+        assert!(s.retain_external_hls_interval(current, 100_000, Duration::from_secs(2)).is_err());
+        s.release_external_hls_interval(cancelled);
+    }
+}
+
+
+#[cfg(test)]
+mod terminal_producer_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_publication_holds_epoch_lock_through_details_and_flag() {
+        use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
+        for source_io in [false, true] {
+            let shared = std::sync::Arc::new(Shared::new());
+            let epoch = shared.begin_native_session().unwrap();
+            let observation = shared.io_failure.lock().unwrap();
+            let worker_shared = shared.clone();
+            let worker = std::thread::spawn(move || {
+                if source_io {
+                    worker_shared.fail_source_io_for(epoch, Some((56, 20, false)))
+                } else {
+                    worker_shared.fail_hls_terminal_for(epoch, DemuxExitClass::HlsTransportFailed,
+                        Some(TraceOutcome::Transport), true)
+                }
+            });
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match shared.native_session.try_lock() {
+                    Err(std::sync::TryLockError::WouldBlock) => break,
+                    Ok(guard) => drop(guard),
+                    Err(_) => panic!("native owner mutex poisoned"),
+                }
+                assert!(std::time::Instant::now() < until, "terminal worker must acquire owner before IO detail");
+                std::thread::yield_now();
+            }
+            // The worker is stopped at the real detail mutex while retaining
+            // native ownership; a reset cannot slip between check and publish.
+            assert!(!shared.demux_io_failed.load(Ordering::Acquire));
+            drop(observation);
+            assert!(worker.join().unwrap());
+            assert!(shared.demux_io_failed.load(Ordering::Acquire));
+            shared.reset_session();
+            let replacement = shared.begin_native_session().unwrap();
+            assert_ne!(replacement, epoch);
+            assert!(!shared.fail_source_io_for(epoch, Some((18, 99, true))));
+            assert!(!shared.fail_hls_terminal_for(epoch, DemuxExitClass::HlsNotReady, None, true));
+            assert!(!shared.demux_io_failed.load(Ordering::Acquire));
+            assert_eq!(shared.io_failure(), None);
+            assert_eq!(shared.dg_transport_rc.load(Ordering::Acquire), 0);
+        }
     }
 }

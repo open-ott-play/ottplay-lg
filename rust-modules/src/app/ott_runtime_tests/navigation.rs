@@ -7,9 +7,17 @@ use plx_screens::registry::LoopReq;
 fn mount_ott(app: &mut App, page: &'static str, pushed: bool) {
     // The synthetic Saved fixture is verified. Unloaded state deliberately
     // denies navigation through the independent kiosk/persistence fence.
-    let runtime = app.ott.as_mut().unwrap();
-    runtime.loaded = true;
-    runtime.page = page;
+    let mode = {
+        let runtime = app.ott.as_mut().unwrap();
+        runtime.loaded = true;
+        // Model the public-preferences load boundary even when the stored
+        // document is absent. Otherwise the fixture leaves the bridge at its
+        // bootstrap Modern mode while Runtime already uses the Classic default.
+        runtime.public_preferences.accept(None);
+        runtime.page = page;
+        runtime.interface_mode()
+    };
+    app.bridge.apply_ui_mode(mode);
     if pushed {
         bridge::nav_push(&mut app.pages, AppArg::Ott);
     } else {
@@ -579,8 +587,13 @@ fn root_exit_answer_rejects_changed_owner_mode_source_root_and_policy() {
                 assert_ne!(app.pages.top_page(), old_owner, "the stale-answer case needs a new instance");
             },
             1 => {
-                app.bridge.apply_ui_mode(plx_machine::machine::UiMode::Classic);
-                app.ott.as_mut().unwrap().saved.settings.insert("interfaceMode".into(), json!(0));
+                let previous = app.bridge.ui_mode();
+                let changed = if previous == plx_machine::machine::UiMode::Classic {
+                    plx_machine::machine::UiMode::Modern
+                } else { plx_machine::machine::UiMode::Classic };
+                app.bridge.apply_ui_mode(changed);
+                app.ott.as_mut().unwrap().saved.settings.insert("interfaceMode".into(), json!(changed.index()));
+                assert_ne!(previous, app.bridge.ui_mode(), "the stale answer needs an actual mode change");
             },
             2 => app.ott.as_mut().unwrap().generation += 1,
             3 => app.ott.as_mut().unwrap().navigation_epoch += 1,

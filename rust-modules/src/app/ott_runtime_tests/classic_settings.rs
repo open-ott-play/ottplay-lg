@@ -87,9 +87,10 @@ fn classic_settings_schema_appends_all_classic_fields_and_hides_duplicate_arrow_
         cursor = result["data"]["next_cursor"].clone();
         if cursor.is_null() { break; }
     }
-    assert_eq!(ids.len(), 45);
+    assert_eq!(ids.len(), 46);
     assert_eq!(ids[43], "nativeEpgApiV1");
     assert_eq!(ids[44], "nativeInputProbeV1");
+    assert_eq!(ids[45], "nativeMultiviewService");
     assert_eq!(ids[40], "uiColorConfig");
     assert_eq!(&ids[41..43], &["nativeSubtitleMode", "nativeSubtitleLanguage"]);
     assert_eq!(&ids[26..40], &["volumeStep", "sleepTimeout", "infoTimeout", "osdOpacity", "permanentTime",
@@ -104,6 +105,18 @@ fn classic_settings_schema_appends_all_classic_fields_and_hides_duplicate_arrow_
     assert_eq!(arrow["descriptor"]["constraints"]["values"], json!([0,1,2,3]));
     let choices = arrow["descriptor"]["choices"].as_array().unwrap();
     assert_eq!(choices.iter().map(|v|v["value"].as_u64().unwrap()).collect::<Vec<_>>(), vec![0,1,2]);
+
+    let multiview = get(&mut app, 30, "nativeMultiviewService");
+    assert_eq!(multiview["descriptor"]["type"], "string");
+    assert_eq!(multiview["descriptor"]["scope"], "application");
+    assert_eq!(multiview["descriptor"]["sensitive"], true);
+    assert_eq!(multiview["descriptor"]["access"], json!({"read":true,"write":true}));
+    assert!(multiview["descriptor"].get("default_value").is_none());
+    assert_eq!(multiview["setting"]["redacted"], true);
+    assert_eq!(multiview["setting"]["configured"], false);
+    for key in ["value", "persisted_value", "effective_value"] {
+        assert!(multiview["setting"].get(key).is_none());
+    }
 }
 
 #[test]

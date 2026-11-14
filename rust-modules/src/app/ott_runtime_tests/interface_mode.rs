@@ -60,6 +60,22 @@ fn open(app: &mut App) {
 }
 
 #[test]
+fn fresh_install_defaults_to_classic_until_a_saved_mode_overrides_it() {
+    let _serial = plx_base::testlock::serial();
+    let _typography = TypographyReset(plx_ui::typography::current());
+    let app = mounted();
+    let runtime = app.ott.as_ref().unwrap();
+    assert_eq!(runtime.interface_mode(), UiMode::Classic);
+    assert_eq!(app.bridge.ui_mode(), UiMode::Classic);
+
+    for (value, expected) in [(0, UiMode::Classic), (1, UiMode::Modern)] {
+        let mut reopened = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        reopened.saved.settings.insert("interfaceMode".into(), json!(value));
+        assert_eq!(reopened.interface_mode(), expected);
+    }
+}
+
+#[test]
 fn mode_picker_cancel_preserves_selection_source_and_all_saved_data() {
     let _serial = plx_base::testlock::serial();
     let _typography = TypographyReset(plx_ui::typography::current());
@@ -130,8 +146,8 @@ fn rejected_mode_save_never_publishes_a_draft() {
             let runtime = app.ott.as_ref().unwrap();
             assert!(runtime.saving);
             assert!(matches!(runtime.save_navigation, SaveNavigation::Preserve));
-            assert_eq!(runtime.interface_mode(), UiMode::Modern);
-            assert_eq!(app.bridge.ui_mode(), UiMode::Modern);
+            assert_eq!(runtime.interface_mode(), UiMode::Classic);
+            assert_eq!(app.bridge.ui_mode(), UiMode::Classic);
             let job = Job::PublicSaved(
                 Err(public_preferences::WriteFailure::Rejected(private::Error::Revoked)),
                 None, json!({"status":"ok"}));
@@ -141,8 +157,8 @@ fn rejected_mode_save_never_publishes_a_draft() {
             runtime_tick(&mut app);
         }
         assert!(!app.ott.as_ref().unwrap().saving);
-        assert_eq!(app.ott.as_ref().unwrap().interface_mode(), UiMode::Modern);
-        assert_eq!(app.bridge.ui_mode(), UiMode::Modern);
+        assert_eq!(app.ott.as_ref().unwrap().interface_mode(), UiMode::Classic);
+        assert_eq!(app.bridge.ui_mode(), UiMode::Classic);
     }
 }
 
@@ -301,6 +317,6 @@ fn retired_picker_choice_cannot_commit_to_a_reopened_picker() {
         runtime.status,
         "Interface selection changed; select the mode again"
     );
-    assert_eq!(runtime.interface_mode(), UiMode::Modern);
-    assert_eq!(app.bridge.ui_mode(), UiMode::Modern);
+    assert_eq!(runtime.interface_mode(), UiMode::Classic);
+    assert_eq!(app.bridge.ui_mode(), UiMode::Classic);
 }

@@ -368,9 +368,9 @@ fn publish_info_presentation(app: &mut App) {
         if arg.kind == plx_screens::player::overlay::OverlayKind::Info) { return; }
     let Some(recipient) = entry.inst.as_ref().map(|instance| instance.id) else { return; };
     let sample = plx_appkit::info_panel::InfoPresentation {
-        opacity: app.ott.as_ref().map(super::ott_runtime::Runtime::osd_preferences)
+        opacity: app.ott.as_deref().map(super::ott_runtime::Runtime::osd_preferences)
             .unwrap_or_default().0,
-        wall_now_s: app.ott.as_ref().and_then(super::ott_runtime::Runtime::wall_now_s),
+        wall_now_s: app.ott.as_deref().and_then(super::ott_runtime::Runtime::wall_now_s),
     };
     let Some(effect) = info_presentation_delivery(
         matches!(&app.rec, super::recorder::Recplay::Off), app.bridge.is_controlled_replay(), recipient, sample,
@@ -504,8 +504,8 @@ unsafe fn prepare_window(app: &mut App, fr: &mut Frame) {
     // target by seconds a frame, and the clock prewarm warms only the displayed second and the next).
     if fr.player {
         let mut model = hud_model(&app.player.session, app.bridge.metadata_view(),
-            app.ott.as_ref().and_then(super::ott_runtime::Runtime::wall_now_s));
-        let (opacity, clock) = app.ott.as_ref()
+            app.ott.as_deref().and_then(super::ott_runtime::Runtime::wall_now_s));
+        let (opacity, clock) = app.ott.as_deref()
             .map(super::ott_runtime::Runtime::osd_preferences).unwrap_or_default();
         model.osd_opacity = opacity;
         model.permanent_clock = clock;
@@ -1500,10 +1500,16 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
             // above took the key; the row's press is the engine's, `PlayerScreen::row_pressed`.
             // The arm stays, empty, so OK keeps its place in front of the arms below.
         } else if matches!(key, Key::Pause) {
+            if super::ott_runtime::multiview_transport_unavailable(app) {
+                return;
+            }
             if key_pause(&mut app.adapters.player, app.last_input, &mut app.pages) {
                 super::ott_runtime::viewer_transport(app);
             }
         } else if matches!(key, Key::Play) {
+            if super::ott_runtime::multiview_transport_unavailable(app) {
+                return;
+            }
             if (app.adapters.player.is_live() && !app.player.lifecycle.awaiting_load()
                 || super::ott_runtime::foreign_native_start_allowed(app))
                 && key_play(&mut app.player.session,
@@ -1518,6 +1524,9 @@ pub(super) unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
                 super::ott_runtime::viewer_transport(app);
             }
         } else if matches!(key, Key::PlayPause) {
+            if super::ott_runtime::multiview_transport_unavailable(app) {
+                return;
+            }
             // ONE key, both directions. `key_play`/`key_pause` are each half of the
             // toggle, so this arm picks; off the player route `key_play` is what starts
             // playback, which is the right answer for a PLAYPAUSE press on a card.
@@ -8843,9 +8852,14 @@ pub(crate) mod lifecycle_regression_tests {
             "inside the credits the tile takes over",
         );
         assert!(!plx_media::route::play_pending(), "the countdown is still running");
+        assert_eq!(plx_media::route::playback_request_identity(&rig.app.player.session),
+            Some((rig.sid, "1")), "credits alone must retain the first episode");
         t += plx_appkit::up_next::COUNTDOWN_MS;
         step(&mut rig.app, &mut t, vec![]);
-        assert!(plx_media::route::play_pending(), "the countdown requests the successor");
+        // step also pumps a completed resolver in update. Its busy flag may
+        // already be cleared, but the exact admitted successor stays owned.
+        assert_eq!(plx_media::route::playback_request_identity(&rig.app.player.session),
+            Some((rig.sid, "2")), "the countdown requests the exact successor");
     }
 
     /// **Next episode: Off.** The end of an episode that HAS a successor leaves the player like a

@@ -1,0 +1,713 @@
+{
+  "status": "FROZEN_WIRE_V1_IMPLEMENTATION_IN_PROGRESS_NOT_PRODUCTION_QUALIFIED",
+  "wire_name": "multiview-private-v1",
+  "public_controller_contract": "multiview-v1 unchanged",
+  "authority": "This is the single private wire contract. Rust types are src-rs/core/src/multiview/broker/wire.rs. Earlier private-api-proposal.json is superseded.",
+  "example_notice": "Synthetic identities and zero hash only; not operational credentials.",
+  "pairing": {
+    "native_persisted_fields": {
+      "server_id": "server_A",
+      "origin": "https://compositor.example.test",
+      "audience": "ottplay-multiview-v1",
+      "installation_id": "native_A",
+      "control_bearer": "synthetic-dedicated-secret"
+    },
+    "provisioning": "Operator provisions a separate credential out of band. Never reuse control-server bearer or trust discovery as enrollment. Origin is exact verified HTTPS for LAN. server_epoch is learned only after authenticated capabilities; a changed epoch invalidates sessions.",
+    "server_record": "Server owns subject, installation_id, credential revision, expiry, exact permissions and allowed sources. Native cannot supply those authority fields. Native credentials have multiview-control only; source enrollment requires separate sources-manage operator.",
+    "bind": "Default loopback. LAN bind requires explicit trusted HTTPS origin/TLS and paired credentials. No listener activation in this patch.",
+    "output_admission": "Session output_profile_id must be a currently admitted profile and geometry.canvas must match exactly. Profile governs max inputs/geometry modes. Examples are synthetic, not operational capability."
+  },
+  "transport": {
+    "prefix": "/multiview/v1",
+    "authentication": "Exactly one Authorization: Bearer header; server derives principal and allowed native installation from its paired credential record. No owner or permission field in request JSON.",
+    "tls": "Verified HTTPS exact paired origin; native HTTP allowed only explicit isolated loopback fixtures.",
+    "origin": "Browser requests require an exact allowed Origin; native service requests may omit Origin. Origin is never identity. Reject duplicates and invalid present Origin.",
+    "content_type": "application/json",
+    "request_id": "X-Request-Id mandatory for mutations; key scoped authenticated principal + installation + credential revision + server epoch + session + endpoint. Same ID with different exact body conflicts. Reauthorize current principal/session/source permission before any cached secrets. No replay after revocation/expiry.",
+    "strict_json": true,
+    "max_control_bytes": 16384,
+    "max_result_bytes": 262144,
+    "hmac_token_grammar": "32 lowercase hexadecimal nonce characters, one dot, 64 lowercase hexadecimal HMAC characters; exactly 97 characters"
+  },
+  "identity": {
+    "favorite_sha256": "Lowercase SHA-256 of UTF-8 canonical normalized JSON {locator,origin}, matching existing native SHA helper. Excludes title and receiver UUID. It is matching metadata, never source authority. Old removal-ledger/FNV hashes are not this digest.",
+    "sources": "Server-owned profile UUID/config revision plus explicit source/network policy and exact item revision. No root aliases, title or hash auto-enrollment. Unknown protection fails closed under applicable local policy."
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/capabilities",
+      "response": {
+        "version": 1,
+        "server_id": "server_A",
+        "server_epoch": "epoch_A",
+        "max_inputs": 0,
+        "qualified_input_adapters": [],
+        "output_auth": "hmac_path_v1",
+        "catalog_revision": "catalog-1",
+        "output_profiles": []
+      },
+      "rules": [
+        "Nonzero capability requires qualified output_profiles with profile_id, canvas(width,height,fps), max_inputs, geometry_modes(disjoint|pip). Native computes exact pixels once on selected admitted raster. No memory budget escalation from requests. Empty while max_inputs=0."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/sessions",
+      "request": {
+        "version": 1,
+        "server_epoch": "epoch_A",
+        "native_expected": {
+          "runtime": "native-runtime-1",
+          "expected": {
+            "scene": "native-scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-1",
+            "audio_revision": "audio-1"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-1",
+          "source_revision": "source-1"
+        },
+        "geometry": {
+          "canvas": {
+            "width": 960,
+            "height": 540,
+            "fps": 15
+          },
+          "revision": 1,
+          "mode": "disjoint",
+          "rects": [
+            {
+              "slot_id": 0,
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 270,
+              "z": 0
+            },
+            {
+              "slot_id": 1,
+              "x": 480,
+              "y": 0,
+              "width": 480,
+              "height": 270,
+              "z": 1
+            },
+            {
+              "slot_id": 2,
+              "x": 0,
+              "y": 270,
+              "width": 480,
+              "height": 270,
+              "z": 2
+            },
+            {
+              "slot_id": 3,
+              "x": 480,
+              "y": 270,
+              "width": 480,
+              "height": 270,
+              "z": 3
+            }
+          ]
+        },
+        "output_profile_id": "synthetic_960x540_15"
+      },
+      "response": "StatusResponse (same closed schema as /status). Server allocates session/backend identity; caller must not invent prior backend CAS.",
+      "rules": [
+        "Geometry mode disjoint|pip; exact native canvas and rectangles validated server-side. No listener/decoder admission until qualified. Initial accepted creation does not imply Ready."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/status",
+      "request": {
+        "version": 1,
+        "server_epoch": "epoch_A",
+        "session_id": "session_A",
+        "native_expected": {
+          "runtime": "native-runtime-1",
+          "expected": {
+            "scene": "native-scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-1",
+            "audio_revision": "audio-1"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-1",
+          "source_revision": "source-1"
+        }
+      },
+      "response": {
+        "version": 1,
+        "server_id": "server_A",
+        "server_epoch": "epoch_A",
+        "session_id": "session_A",
+        "native_expected": {
+          "runtime": "native-runtime-1",
+          "expected": {
+            "scene": "native-scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-1",
+            "audio_revision": "audio-1"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-1",
+          "source_revision": "source-1"
+        },
+        "backend_expected": {
+          "runtime": 1,
+          "scene": "backend-scene-1",
+          "geometry_revision": 1,
+          "focus_revision": 1,
+          "audio_revision": 1
+        },
+        "state": "preparing",
+        "geometry": {
+          "canvas": {
+            "width": 960,
+            "height": 540,
+            "fps": 15
+          },
+          "revision": 1,
+          "mode": "disjoint",
+          "rects": [
+            {
+              "slot_id": 0,
+              "x": 0,
+              "y": 0,
+              "width": 480,
+              "height": 270,
+              "z": 0
+            },
+            {
+              "slot_id": 1,
+              "x": 480,
+              "y": 0,
+              "width": 480,
+              "height": 270,
+              "z": 1
+            },
+            {
+              "slot_id": 2,
+              "x": 0,
+              "y": 270,
+              "width": 480,
+              "height": 270,
+              "z": 2
+            },
+            {
+              "slot_id": 3,
+              "x": 480,
+              "y": 270,
+              "width": 480,
+              "height": 270,
+              "z": 3
+            }
+          ]
+        },
+        "slots": [
+          {
+            "slot_id": 0,
+            "source_revision": 1,
+            "state": "preparing",
+            "error": null,
+            "frames": 0,
+            "position_ms": null,
+            "duration_ms": null,
+            "source_ref": "source_A",
+            "item_ref": "item_A"
+          }
+        ],
+        "audio": {
+          "policy": "follows_focus",
+          "slot_id": 0
+        },
+        "output": null
+      },
+      "rules": [
+        "Owner authenticated read without prior backend revision; snapshot not execution permission. native_expected returns the stored authoritative binding for the requested immutable native identity. Session state preparing|ready|closing|closed|failed; slot state empty|preparing|playing|stalled|closing|closed|failed. Playing requires actual decoded frame; Ready requires actual output HLS frames. Audio is configured owner/policy, not proof of audible sound. Slot source_revision is backend revision used for next backend_slot_revision CAS.",
+        "Owner-bound recovery checks immutable native runtime/scene/slot and returns authoritative mutable revisions. Do not require stale source/layout/focus/audio tokens to match after a lost transition response."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/sources",
+      "request": {
+        "version": 1,
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-1",
+            "source_revision": "source-1"
+          },
+          "backend_slot_revision": 1
+        },
+        "cursor": null
+      },
+      "response": {
+        "version": 1,
+        "server_id": "server_A",
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-1",
+            "source_revision": "source-1"
+          },
+          "backend_slot_revision": 1
+        },
+        "catalog_revision": "catalog-1",
+        "items": [
+          {
+            "source_ref": "source_A",
+            "item_ref": "item_A",
+            "item_revision": "item-rev-1",
+            "identity_version": 1,
+            "favorite_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kind": "vod",
+            "input_adapter": "http_checked",
+            "protection": {
+              "known": true,
+              "restricted": false
+            },
+            "descriptor": {
+              "title": "Synthetic item",
+              "provider": "m3u"
+            }
+          }
+        ],
+        "next_cursor": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/input-grants",
+      "request": {
+        "version": 1,
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-1",
+            "source_revision": "source-1"
+          },
+          "backend_slot_revision": 0
+        },
+        "source_ref": "source_A",
+        "item_ref": "item_A",
+        "item_revision": "item-rev-1",
+        "identity_version": 1,
+        "favorite_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "catalog_revision": "catalog-1",
+        "remaining_budget_ms": 5000,
+        "next_native": {
+          "runtime": "native-runtime-1",
+          "expected": {
+            "scene": "native-scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-1",
+            "audio_revision": "audio-1"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-2",
+          "source_revision": "source-2"
+        }
+      },
+      "response": {
+        "version": 1,
+        "server_id": "server_A",
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-2",
+            "source_revision": "source-2"
+          },
+          "backend_slot_revision": 0
+        },
+        "item": {
+          "source_ref": "source_A",
+          "item_ref": "item_A",
+          "item_revision": "item-rev-1",
+          "identity_version": 1,
+          "favorite_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "kind": "vod",
+          "input_adapter": "http_checked",
+          "protection": {
+            "known": true,
+            "restricted": false
+          },
+          "descriptor": {
+            "title": "Synthetic item",
+            "provider": "m3u"
+          }
+        },
+        "catalog_revision": "catalog-1",
+        "policy_revision": "policy-1",
+        "input_grant": "synthetic-one-use-secret",
+        "expires_in_ms": 5000
+      },
+      "rules": [
+        "Remaining budget narrows 30s cap; server monotonic receipt deadline, not client wall-clock. All CAS/source permissions before any DNS/open/probe/create. One redemption only. Reauthorize at redemption and publication.",
+        "Optional next_native is an atomic source-only intent transition from the full prior context. The returned context is the exact one-use grant binding. Cache publication failure leaves prior state unchanged. Changed intent is refused while the target has an outstanding grant or lease."
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/control",
+      "request": {
+        "version": 1,
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-2",
+            "source_revision": "source-2"
+          },
+          "backend_slot_revision": 0
+        },
+        "op": {
+          "name": "play",
+          "input_grant": "synthetic-one-use-secret"
+        }
+      },
+      "variants": [
+        {
+          "name": "renew"
+        },
+        {
+          "name": "focus"
+        },
+        {
+          "name": "audio",
+          "policy": "follows_focus"
+        },
+        {
+          "name": "audio",
+          "policy": "muted"
+        },
+        {
+          "name": "audio",
+          "policy": "slot"
+        },
+        {
+          "name": "layout",
+          "geometry": {
+            "canvas": {
+              "width": 960,
+              "height": 540,
+              "fps": 15
+            },
+            "revision": 1,
+            "mode": "disjoint",
+            "rects": [
+              {
+                "slot_id": 0,
+                "x": 0,
+                "y": 0,
+                "width": 480,
+                "height": 270,
+                "z": 0
+              },
+              {
+                "slot_id": 1,
+                "x": 480,
+                "y": 0,
+                "width": 480,
+                "height": 270,
+                "z": 1
+              },
+              {
+                "slot_id": 2,
+                "x": 0,
+                "y": 270,
+                "width": 480,
+                "height": 270,
+                "z": 2
+              },
+              {
+                "slot_id": 3,
+                "x": 480,
+                "y": 270,
+                "width": 480,
+                "height": 270,
+                "z": 3
+              }
+            ]
+          }
+        },
+        {
+          "name": "stop"
+        },
+        {
+          "name": "off"
+        }
+      ],
+      "rules": [
+        "Closed operation union. Focus/audio-slot use context slot. Create and status have separate endpoints to avoid bootstrap/stale-CAS deadlock. Accepted/preparing never means decoded. Public controller semantics unaffected. Production create/play denied until decoder/output gate qualified.",
+        "Optional next_native follows the operation-specific native_transitions allowlist. Play uses the returned grant context with no second transition. Focus/audio/layout publish backend and native revisions atomically; no probe, network I/O or worker joining under that barrier."
+      ],
+      "response": {
+        "version": 1,
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-2",
+            "source_revision": "source-2"
+          },
+          "backend_slot_revision": 1
+        },
+        "accepted": true,
+        "operation_id": "operation_A",
+        "state": "preparing"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/media/{signed_opaque_lease}/{file}",
+      "authentication": "Path contains dedicated opaque media-only HMAC lease, not a control/provider credential. HMAC plus server-held lease binds epoch/session/output generation/absolute expiry. Every resource and every body chunk checks current authority/revocation/expiry.",
+      "allowed_files": ["index.m3u8", "segment-[0-9]{6}.ts"],
+      "private_output": {
+        "session_id": "session_A",
+        "server_epoch": "epoch_A",
+        "output_generation": "output-1",
+        "playlist_path": "/multiview/v1/media/00000000000000000000000000000000.1111111111111111111111111111111111111111111111111111111111111111/index.m3u8",
+        "lease_expires_in_ms": 90000
+      },
+      "rules": [
+        "All manifest children resolve under exact paired origin and same signed lease prefix. No redirects, query-token dependency, media-read renewal, source URL/token leakage, or external children. HMAC path is secret: no-store/no-referrer/redacted logs. GET only; HEAD/Range denied until qualified. Serving permits held through body lifetime; revocation checked per chunk."
+      ]
+    }
+  ],
+  "lifecycle": {
+    "input_grant": "min(receipt remaining_budget_ms,30000ms), one use, independent of playback",
+    "active_lease": "90s monotonic renewable only by currently authorized owner; recommended heartbeat30s; media reads never renew",
+    "hard_custody_ceiling": "Separate operator configured absolute bound. Decoder static expiry must not use redemption30s or rolling90s. No implicit infinity.",
+    "active_invalidation": "Favorite removal/re-add, attachment remap, parental/kiosk/credential/profile/policy/source revision change revoke pending and active. Native sends immediate stop/off on invalidation; server independently invalidates own authority. Lost network expires owner lease.",
+    "publication": "Source lease generation mutex covers exact bounded callback. No IO/join while held. Unrelated focus/layout/audio changes do not retire unchanged active source.",
+    "retirement": "cancellation_requested is not retired. New conflicting attach waits for output_revoked AND worker_reaped proof; preserve uncertainty if cleanup fails."
+  },
+  "limits": {
+    "max_control_bytes": 16384,
+    "source_page_items": 128,
+    "max_response_bytes": 262144,
+    "max_slots": 9,
+    "pending_grants_per_scene": 18,
+    "grant_ttl_ms": 30000,
+    "session_lease_ms": 90000,
+    "heartbeat_ms": 30000,
+    "idempotency_entries": 64,
+    "idempotency_bytes": 262144,
+    "idempotency_ttl_ms": 120000,
+    "output_playlist_bytes": 65536,
+    "output_segment_bytes": 8388608,
+    "output_stream_permits": 8,
+    "output_chunk_bytes": 65536
+  },
+  "production_gate": "max_inputs=0 until server-owned enrollment + exact auth/source CAS + nested transport + decoder integration + lifecycle/revocation + native output authority + actual independent source E2E qualify. Finite fetch/parser tests do not establish live adapter or TV capacity.",
+  "amendment": "Unreleased v1 explicit prior/next native transition, original grant binding, recovery and real HMAC path grammar. Public controller wire is unchanged; production admission remains disabled.",
+  "errors": {
+    "schema": {
+      "version": 1,
+      "error": "backend_unavailable"
+    },
+    "codes": [
+      "unauthorized",
+      "forbidden",
+      "invalid_request",
+      "revision_conflict",
+      "resource_limit",
+      "authority_revoked",
+      "backend_unavailable"
+    ],
+    "rule": "No source URLs/paths/tokens/raw transport diagnostics."
+  },
+  "native_transitions": {
+    "optional_fields": {
+      "GrantRequest": "next_native: NativeExpected | omitted",
+      "ControlRequest": "next_native: NativeExpected | omitted"
+    },
+    "rules": {
+      "native_identity": "Existing sessions never change native runtime, native scene or slot_id. Opaque revision tokens are compared, never incremented by the server.",
+      "grant": "Optional next_native changes only slot_generation/source_revision on an empty target. Validate full prior context, catalog/source/protection, capacity and no target grant/lease before any transition. Commit the next context and one-use grant atomically; redemption requires that exact returned context.",
+      "play": "Play consumes the exact grant context; no second native transition. Occupied targets are unsupported in the initial fixture and fail before revoking the old source.",
+      "focus": "Only focus_revision may change; audio_revision may additionally change when the authoritative policy follows focus.",
+      "audio": "Only audio_revision may change.",
+      "layout": "Only layout_revision may change; topology removal requiring further source/focus/audio transitions is unsupported in the initial fixture.",
+      "stop": "Only the target slot_generation/source_revision may change, after exact prior CAS. Revocation and confirmed cleanup are separate phases.",
+      "renew_off": "Renew accepts absent/equal next_native only. Off closes the session without rebinding native identity.",
+      "replay": "Retain original prior and committed context with the scoped body digest. Reauthenticate before replay; validate the recorded committed grant/source and original request, never re-execute the old transition or revive a consumed grant.",
+      "recovery": "Status authenticates owner/installation, server epoch/session, stable native runtime/scene and target slot; stale mutable revision tokens are allowed for recovery. Return stored current state without rebinding.",
+      "readiness": "Session Ready means actual closed composite HLS and may include slates. Slot Playing requires actual decoded frames. Post-revocation rearm requires qualified full audiovisual cleanliness; a video-only watermark is insufficient."
+    },
+    "focus_follows_focus_example": {
+      "request": {
+        "version": 1,
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 1,
+            "audio_revision": 1
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-2",
+            "source_revision": "source-2"
+          },
+          "backend_slot_revision": 1
+        },
+        "op": {
+          "name": "focus"
+        },
+        "next_native": {
+          "runtime": "native-runtime-1",
+          "expected": {
+            "scene": "native-scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-2",
+            "audio_revision": "audio-2"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-2",
+          "source_revision": "source-2"
+        }
+      },
+      "response": {
+        "version": 1,
+        "context": {
+          "server_epoch": "epoch_A",
+          "session_id": "session_A",
+          "backend_expected": {
+            "runtime": 1,
+            "scene": "backend-scene-1",
+            "geometry_revision": 1,
+            "focus_revision": 2,
+            "audio_revision": 2
+          },
+          "native_expected": {
+            "runtime": "native-runtime-1",
+            "expected": {
+              "scene": "native-scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-2",
+              "audio_revision": "audio-2"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-2",
+            "source_revision": "source-2"
+          },
+          "backend_slot_revision": 1
+        },
+        "accepted": true,
+        "operation_id": "focus_operation_A",
+        "state": "preparing"
+      }
+    },
+    "fixture_limits": "Initial live fixture: one compositor, at most60s hard lifetime, no occupied-target replacement. Stop retires its source and withholds output until Off; ordinary stable Stop and security-specific fresh codec epochs are separate qualification work."
+  }
+}

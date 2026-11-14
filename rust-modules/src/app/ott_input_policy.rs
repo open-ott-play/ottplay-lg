@@ -104,6 +104,7 @@ pub(super) fn read_only(inv: &Invocation) -> bool {
     match inv.action.as_str() {
         "state" | "status" | "capabilities" | "providers" | "channels" | "settings_compare" => true,
         "categories" => inv.params["op"] == "list",
+        "multiview" => inv.params["op"] == "status",
         "kiosk" => inv.params.get("mode").and_then(Value::as_str) == Some("status"),
         "player_settings" => matches!(operation(inv), "schema" | "get"),
         "profiles" | "profile_export" => true,

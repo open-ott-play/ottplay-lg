@@ -173,7 +173,7 @@ impl Drop for OrganizationRegistry {
         plx_plex::plex::grant::reset_for_test();
     }
 }
-fn classic_organization_fixture(durable: bool) -> (App, Runtime) {
+fn classic_organization_fixture(durable: bool) -> (App, Box<Runtime>) {
     plx_plex::plex::reset_servers_for_test();
     plx_plex::plex::grant::reset_for_test();
     let mut app = fixture();
@@ -341,7 +341,7 @@ fn runtime_tick(app: &mut App) {
 }
 fn fixture() -> App {
     let mut app = run::lifecycle_regression_tests::app();
-    app.ott = Some(runtime_fixture());
+    app.ott = Some(Box::new(runtime_fixture()));
     bridge::show_page(&mut app.pages, AppArg::Ott);
     settle(&mut app);
     runtime_tick(&mut app);

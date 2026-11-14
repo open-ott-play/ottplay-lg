@@ -482,7 +482,7 @@ larger object may be abandoned so recovery can fetch a smaller one. An already h
 arms no second abort loop. In every case network, demux and feeding remain active.
 
 Runtime resume does not use the historical `R_s` at all. A hold starts a fresh ordered recovery
-epoch. For complete active-rung acquisitions after that pause,
+epoch. For complete active-rung acquisitions available to that hold,
 
 ```text
 P_0 = 0
@@ -496,12 +496,40 @@ new completed segment beside an old debt. Candidate media is not credited as rec
 after a rung commit the epoch restarts and the next ordinary acquisition describes the encoder
 that will sustain playback.
 
-Resume requires all of:
+External HLS has one additional bounded handoff: a completely downloaded and validated
+immutable interval may still be owned by its producer while a full AU FIFO prevents the
+remaining samples from being enqueued. Its unique source-generation lease registers the
+complete acquisition before that push can block. If the native clock enters rebuffering
+later, the new epoch seeds from that still-owned interval; a producer already parked before
+Pause cannot otherwise publish another completion. Separate audio/video workers retain one
+jointly validated interval, using its actual video span and combined acquisition cost.
+
+Decoder prime remains an accepted-data requirement. The separate acquisition
+runway can also use already-enqueued media and actual access units still resident
+in that immutable loader output. Resident coverage comes from actual packet
+duration intervals, sorted and merged without bridging internal timestamp holes;
+unknown duration gives no extra coverage. Each expected lane must connect to
+the already-pushed prefix; a disjoint future interval, declared EXTINF or synthetic
+output tail cannot fill a hole. The enqueued-tail counters are not advanced for
+unpushed data. The final Play reservation revalidates the exact loader lease, so
+release, source replacement or a seek cannot substitute another one. This rule
+applies to Fresh startup, internal rebuffer and user Resume without relaxing
+their separate clock/debt/completion conditions.
+
+A successful whole feed can transfer Fresh evidence to a clock-owned certificate
+when a short finite producer finishes before the decoder starts. All its bytes
+are then already queued or accepted. The certificate is scoped to the held Fresh
+clock, revoked on seek, reset and stop, and consumed at the first successful Play.
+It never seeds a subsequent rebuffer epoch. Completion otherwise retires the
+producer lease; historical intervals cannot seed a later hold. Viewer Pause
+preserves immutable data but still prevents Play through the user-hold gate.
+
+Internal rebuffer resume requires all of:
 
 - Starfish accepted its ordinary decoder prime;
-- at least one complete segment landed in the current recovery epoch;
+- at least one complete validated active interval is retained in the current recovery epoch;
 - `P <= 0` — the epoch has repaid all acquisition time with at least as much media;
-- the whole already-playable pipeline (Starfish plus demuxed AU queues) covers `H` on every
+- the whole already-playable pipeline (Starfish, demuxed AU queues and overlapping validated resident AUs) covers `H` on every
   expected A/V lane;
 - the user transport is not paused;
 - Starfish accepted `Play`.

@@ -17,6 +17,7 @@ struct MappedSample {
     au: HlsAu,
     dts_ns: i64,
     end_ns: i64,
+    quantum_ns: i64,
 }
 pub(super) struct MappedSegment {
     binding: Binding,
@@ -106,13 +107,15 @@ impl LaneClock {
             if pts < 0 { return Err("HLS rendition starts before presentation origin"); }
             let dts = map_time(timing.dts.unwrap_or(timing.pts))?;
             let duration = timing.duration.filter(|d| *d > 0).ok_or("HLS rendition has no sample duration")?;
-            let end = pts.checked_add(rescale(i128::from(duration), tb)?)
-                .filter(|end| *end > pts).ok_or("Invalid HLS rendition sample duration")?;
+            let end = map_time(timing.pts.checked_add(duration)
+                .ok_or("HLS presentation time overflow")?)?;
+            if end <= pts { return Err("Invalid HLS rendition sample duration"); }
             bytes = bytes.checked_add(sample.data.len()).filter(|n| *n <= JOIN_BYTES)
                 .ok_or("HLS joined buffer exceeds limit")?;
             end_ns = end_ns.max(end);
             samples.push(MappedSample { au: HlsAu { data: sample.data, pts_ns: pts,
-                key: i32::from(sample.key), es: if lane == Lane::Video { 1 } else { 2 } }, dts_ns: dts, end_ns: end });
+                key: i32::from(sample.key), es: if lane == Lane::Video { 1 } else { 2 } }, dts_ns: dts, end_ns: end,
+                quantum_ns: hls_clock_quantum_ns(AVRational { num: tb.0, den: tb.1 }) });
         }
         if lane == Lane::Audio && samples.windows(2).any(|w| w[1].au.pts_ns < w[0].au.pts_ns
             || w[1].au.pts_ns.abs_diff(w[0].end_ns) > BOUNDARY_EPSILON_NS as u64)
@@ -192,6 +195,14 @@ impl JoinCursor {
             self.emitted_end = self.emitted_end.max(sample.end_ns);
             audio.push(sample);
         }
+        let resident = Some(crate::player::ExternalHlsResident {
+            video: hls_resident_intervals(video.samples.iter().filter(|sample| !sample.au.data.is_empty())
+                .map(|sample| (sample.au.pts_ns, sample.end_ns)),
+                video.samples.iter().map(|sample| sample.quantum_ns).max().unwrap_or(0)),
+            audio: hls_resident_intervals(audio.iter().filter(|sample| !sample.au.data.is_empty())
+                .map(|sample| (sample.au.pts_ns, sample.end_ns)),
+                audio.iter().map(|sample| sample.quantum_ns).max().unwrap_or(0)),
+        });
         let mut audio = audio.into_iter().peekable();
         let mut frames = video.samples.into_iter().peekable();
         let mut aus = Vec::new();
@@ -211,7 +222,7 @@ impl JoinCursor {
             total_us: video.transfer.total_us.saturating_add(self.pending_transfer.total_us), audio_expected: true,
         };
         self.pending_transfer = SegmentTransfer { bytes: 0, active_us: 0, total_us: 0, audio_expected: true };
-        Ok(HlsSegmentOutput { transport_timing: None, webvtt_clock: None, observed: None, aus, transfer, video_width: width, video_height: height,
+        Ok(HlsSegmentOutput { resident, transport_timing: None, webvtt_clock: None, observed: None, aus, transfer, video_width: width, video_height: height,
             video_tail_ns: video.end_ns, audio_tail_ns: Some(self.emitted_end) })
     }
 }

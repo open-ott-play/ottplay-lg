@@ -52,7 +52,7 @@ fn fixture() -> (App, plx_plex::plex::ServerId) {
         media: MediaLocator::Plex { server_id: "foreign-parental".into(), rating_key: "item".into() },
         duration_ms: Some(10_000), provider_id: Some("item".into()), provider_id_field: None, live: None,
     }];
-    app.ott = Some(runtime);
+    app.ott = Some(Box::new(runtime));
     (app, sid)
 }
 

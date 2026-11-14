@@ -70,13 +70,14 @@ use plx_base::task::MainThread;
 #[cfg(test)]
 pub(crate) use shared::pinned_pause_clock;
 pub use shared::HlsAutomaticTransition;
+pub(crate) use shared::{ExternalHlsRetentionError, ExternalHlsResident, HlsUserPause};
 pub use shared::HlsClockFenceError;
 /// one rect of an image-subtitle display set — the demuxer builds them, the HUD draws them
 pub use shared::SubRect;
 pub use plx_data::metadata::track_names::TrackNames;
 pub use shared::UserPauseCursor;
 use shared::{
-    HlsPauseCompletion, HlsPlayCompletion, HlsUserPause, HlsUserResume, Shared, SubBitmap,
+    HlsPauseCompletion, HlsPlayCompletion, HlsUserResume, Shared, SubBitmap,
     Transport,
 };
 
@@ -1599,6 +1600,16 @@ pub struct Diag {
     pub load_v: u8,
     pub load_a: u8,
     pub feed_state: u8,
+    pub prime_pending: bool,
+    pub prime_kind: u8,
+    pub prime_required_runway_ms: i64,
+    pub prime_accepted_video_ms: i64,
+    pub prime_accepted_audio_ms: i64,
+    pub prime_queued_video_ms: i64,
+    pub prime_queued_audio_ms: i64,
+    pub prime_external_lease: bool,
+    pub prime_audio_expected: bool,
+
     pub cb_err: i32,
     pub cb_err_at: u32,
     pub http_status: i32,
@@ -1768,6 +1779,16 @@ pub fn diag(ps: &crate::route::PlaybackSession) -> Diag {
         load_v: SHARED.dg_load_v.load(Relaxed),
         load_a,
         feed_state: SHARED.dg_feed_state.load(Relaxed),
+        prime_pending: SHARED.dg_prime_pending.load(Relaxed),
+        prime_kind: SHARED.dg_prime_kind.load(Relaxed),
+        prime_required_runway_ms: SHARED.dg_prime_required_runway_ms.load(Relaxed),
+        prime_accepted_video_ms: SHARED.dg_prime_accepted_video_ms.load(Relaxed),
+        prime_accepted_audio_ms: SHARED.dg_prime_accepted_audio_ms.load(Relaxed),
+        prime_queued_video_ms: SHARED.dg_prime_queued_video_ms.load(Relaxed),
+        prime_queued_audio_ms: SHARED.dg_prime_queued_audio_ms.load(Relaxed),
+        prime_external_lease: SHARED.dg_prime_external_lease.load(Relaxed),
+        prime_audio_expected: SHARED.dg_prime_audio_expected.load(Relaxed),
+
         cb_err: SHARED.dg_cb_err.load(Relaxed),
         cb_err_at: SHARED.dg_cb_err_at.load(Relaxed),
         http_status: SHARED.dg_http_status.load(Relaxed),

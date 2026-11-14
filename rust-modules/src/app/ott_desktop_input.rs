@@ -14,6 +14,10 @@ enum Action {
     Menu,
 }
 
+fn global_decoder_transport(action: Action) -> bool {
+    matches!(action, Action::Seek(_) | Action::Step(_))
+}
+
 const QUIT_KEY: u32 = b'q' as u32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +208,13 @@ fn perform(
     now: u32,
 ) -> Result<(), &'static str> {
     input_policy::navigation(runtime)?;
+    if global_decoder_transport(action) && super::multiview_output::owns_picture(runtime, app) {
+        return Err(match action {
+            Action::Seek(_) => "Per-window transport is unavailable for multiview output",
+            Action::Step(_) => "Per-window channel stepping is unavailable for multiview output",
+            _ => unreachable!("only seek and step are global decoder transport"),
+        });
+    }
     match action {
         Action::Menu => {
             let offer = player_remote::offer(runtime, app).ok_or("Playback changed before continuation")?;
@@ -269,6 +280,22 @@ fn perform(
     }
     runtime.changed();
     Ok(())
+}
+
+#[cfg(test)]
+mod multiview_transport_guard_tests {
+    use super::{global_decoder_transport, Action};
+
+    #[test]
+    fn only_seek_and_list_step_are_decoder_transport() {
+        assert!(global_decoder_transport(Action::Seek(10)));
+        assert!(global_decoder_transport(Action::Step(1)));
+        assert!(!global_decoder_transport(Action::Volume(5)));
+        assert!(!global_decoder_transport(Action::Mute));
+        assert!(!global_decoder_transport(Action::Favorite));
+        assert!(!global_decoder_transport(Action::Random));
+        assert!(!global_decoder_transport(Action::Menu));
+    }
 }
 
 /// Catalogue arrows use the same desired-volume door as desktop playback.

@@ -1,0 +1,1348 @@
+{
+  "contract": "multiview",
+  "version": 1,
+  "qualification": "Source integration contract; no runtime advertisement until native/backend end-to-end admission. Positive examples are synthetic.",
+  "action": "multiview",
+  "operations": [
+    "status",
+    "sources",
+    "layout",
+    "play",
+    "focus",
+    "audio",
+    "stop",
+    "off"
+  ],
+  "layouts": [
+    "single",
+    "pip",
+    "grid4",
+    "grid9",
+    "perimeter"
+  ],
+  "audio_policies": [
+    "follows_focus",
+    "muted",
+    "slot"
+  ],
+  "off_modes": [
+    "promote_active",
+    "restore_previous"
+  ],
+  "source_kinds": [
+    "live",
+    "vod",
+    "file"
+  ],
+  "slot_states": [
+    "empty",
+    "starting",
+    "playing",
+    "paused",
+    "stalled",
+    "ended",
+    "failed",
+    "stopped"
+  ],
+  "reasons": [
+    "invalid_request",
+    "unsupported",
+    "runtime_changed",
+    "scene_changed",
+    "layout_changed",
+    "focus_changed",
+    "audio_changed",
+    "slot_changed",
+    "source_changed",
+    "source_unavailable",
+    "source_expired",
+    "policy_restricted",
+    "limit_exceeded",
+    "busy",
+    "expired",
+    "unavailable",
+    "receipt_unavailable"
+  ],
+  "limits": {
+    "slots": 9,
+    "source_page": 128,
+    "label_utf8_bytes": 512,
+    "query_utf8_bytes": 512,
+    "token_ascii_bytes": 64,
+    "ticket_ascii_bytes": 256,
+    "provider_ascii_bytes": 64,
+    "request_envelope_bytes": 16384,
+    "response_envelope_bytes": 262144,
+    "result_bytes": 262144
+  },
+  "patterns": {
+    "token": "[A-Za-z0-9_.:-]{1,64}",
+    "ticket": "[A-Za-z0-9_-]{1,256}",
+    "provider": "[a-z0-9][a-z0-9_.-]*(/[a-z0-9][a-z0-9_.-]*)?"
+  },
+  "probe": {
+    "action": "capabilities",
+    "params": {
+      "multiview": true
+    }
+  },
+  "capability": {
+    "multiview": {
+      "version": 1,
+      "operations": [
+        "status",
+        "sources",
+        "layout",
+        "play",
+        "focus",
+        "audio",
+        "stop",
+        "off"
+      ],
+      "layouts": [
+        "single",
+        "pip",
+        "grid4",
+        "grid9",
+        "perimeter"
+      ],
+      "max_slots": 9,
+      "source_kinds": [
+        "live",
+        "vod",
+        "file"
+      ],
+      "audio_policies": [
+        "follows_focus",
+        "muted",
+        "slot"
+      ],
+      "off_modes": [
+        "promote_active",
+        "restore_previous"
+      ]
+    }
+  },
+  "zero_capacity_capability": {
+    "multiview": {
+      "version": 1,
+      "operations": [
+        "status"
+      ],
+      "layouts": [],
+      "max_slots": 0,
+      "source_kinds": [],
+      "audio_policies": [],
+      "off_modes": []
+    }
+  },
+  "expected_fields": [
+    "scene",
+    "layout_revision",
+    "focus_revision",
+    "audio_revision"
+  ],
+  "slot_binding_fields": [
+    "slot_id",
+    "slot_generation",
+    "source_revision"
+  ],
+  "request_required": {
+    "status": [
+      "version",
+      "op"
+    ],
+    "sources": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "slot_id",
+      "slot_generation",
+      "source_revision"
+    ],
+    "layout": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "layout"
+    ],
+    "play": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "slot_id",
+      "slot_generation",
+      "source_revision",
+      "source_ticket"
+    ],
+    "focus": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "slot_id",
+      "slot_generation",
+      "source_revision"
+    ],
+    "audio": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "policy"
+    ],
+    "stop": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "slot_id",
+      "slot_generation",
+      "source_revision"
+    ],
+    "off": [
+      "version",
+      "runtime",
+      "op",
+      "expected",
+      "mode"
+    ]
+  },
+  "request_optional": {
+    "status": [
+      "runtime"
+    ],
+    "sources": [
+      "provider",
+      "profile",
+      "query",
+      "cursor"
+    ],
+    "layout": [
+      "satellites"
+    ],
+    "play": [],
+    "focus": [],
+    "audio": [
+      "slot_id",
+      "slot_generation",
+      "source_revision"
+    ],
+    "stop": [],
+    "off": []
+  },
+  "conditions": [
+    "status is the only request permitted to omit runtime. A supplied runtime must match every response, including negative responses.",
+    "layout perimeter requires satellites integer0..8. Every other layout forbids satellites. CLI supplies default8.",
+    "audio policy slot requires all3 slot binding fields. follows_focus and muted forbid all3. Null slot input is invalid.",
+    "profile is an opaque saved authority ID, never a numeric profile number. Optional filters do not activate a global provider.",
+    "All objects are closed; reject duplicate keys at every depth, malformed Unicode, nonfinite numbers and noncanonical integer spellings.",
+    "Binding in every response is exactly request params minus version,runtime,op; compare decoded objects, not serialized key order.",
+    "Negative results contain only version,runtime,op,binding,reason. unsupported status requires reason unsupported; rejected excludes unsupported. No fresh context/ticket.",
+    "Successful status contains only common fields plus snapshot; sources plus items,cursor,complete; mutations plus accepted:true,outcome requested|applied.",
+    "Source page tickets and source_ids are unique. complete means cursor is null; incomplete means a nonempty opaque cursor. Labels and queries exclude control/format characters, URLs, path-like strings and credential assignments.",
+    "Snapshot slots are unique and contiguous0..count-1. off:0,single:1,pip:2,grid4:4,grid9:9,perimeter:satellites+1. Satellites is0 exceptperimeter.",
+    "Snapshot off has focus_slot/audio_slot null and audio_policy muted; otherwise focus_slot names an existing slot. Non-null audio_slot names an existing slot; muted requires null; follows_focus permits null or focus_slot.",
+    "Snapshot source has exactly source_id,label,provider,profile,kind; never a ticket, URI or secret. Source can be null. failed requires a closed error; other states permit null or a closed error without inventing playback proof.",
+    "Capabilities are closed; unique subsets of enums; status mandatory. max_slots0 permits only status with allotherlists empty. Positive capacity bounds every advertised fixed layout; perimeter requires1 slot minimum and each CLI request checks satellites+1<=max_slots.",
+    "A capability advertising layout requires nonempty layouts; play/sources require nonempty source_kinds; audio requires nonempty audio_policies; off requires nonempty off_modes. No marker is manufactured by controller.",
+    "Runtime and scene are non-reused incarnation identities. All revisions are opaque non-reused tokens within their incarnation. Original Invocation retains deadline and request ID; existing Delivery handles duplicates.",
+    "Receipt requested/applied describes the operation only, never simultaneous decoded frames, visible playback or current state. Native rechecks policy/admission and context immediately before effects.",
+    "Source tokens and cursors cannot be broadcast across players. Full inactive provider catalog and Plex broker support are not implied by sources; only advertised/native-authorized snapshot choices are valid.",
+    "Geometry is generated once by native and transferred privately to backend as exact even pixel rectangles. Public CLI has no arbitrary rectangle or HLS URI fields.",
+    "source_id uses token grammar1..64; ticket and cursor use ticket grammar1..256. Provider and profile are nonempty strings, never null; profile is a saved authority identity even for Local sources.",
+    "Query may be empty; label must be nonblank. Both exclude controls, formatting characters, malformed Unicode and private URL/path/credential patterns.",
+    "Snapshot slot order is immaterial. Resolve by slot_id, never by array position. source must be nonnull for starting,playing,paused,stalled. paused represents intentional suspension, not stalled or stopped playback.",
+    "Snapshot error is null or a STRING from reasons, not an open error object. failed requires a reason string.",
+    "audio_policy slot requires nonnull audio_slot naming an existing slot. audio_slot is the configured owner, not proof of audible samples."
+  ],
+  "requests": {
+    "status": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "op": "status"
+      }
+    },
+    "status_bound": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "status"
+      }
+    },
+    "sources": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "sources",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      }
+    },
+    "sources_filtered": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "sources",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "provider": "m3u",
+        "profile": "profile-home",
+        "query": "News",
+        "cursor": "cursor_1"
+      }
+    },
+    "layout": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "layout",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "grid4"
+      }
+    },
+    "layout_perimeter": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "layout",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "perimeter",
+        "satellites": 8
+      }
+    },
+    "play": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "play",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "source_ticket": "source_ticket_1"
+      }
+    },
+    "focus": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "focus",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      }
+    },
+    "audio": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "audio",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "policy": "slot"
+      }
+    },
+    "audio_follow": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "audio",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "policy": "follows_focus"
+      }
+    },
+    "audio_muted": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "audio",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "policy": "muted"
+      }
+    },
+    "stop": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "stop",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      }
+    },
+    "off": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "off",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "mode": "promote_active"
+      }
+    },
+    "off_restore": {
+      "action": "multiview",
+      "params": {
+        "version": 1,
+        "runtime": "native-runtime-1",
+        "op": "off",
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "mode": "restore_previous"
+      }
+    }
+  },
+  "results": {
+    "status": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "status",
+      "binding": {},
+      "snapshot": {
+        "context": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "grid4",
+        "satellites": 0,
+        "focus_slot": 0,
+        "audio_policy": "follows_focus",
+        "audio_slot": 0,
+        "slots": [
+          {
+            "slot_id": 0,
+            "slot_generation": "slot-0-generation-1",
+            "source_revision": "slot-0-source-1",
+            "state": "playing",
+            "source": {
+              "source_id": "source_1",
+              "label": "Fixture news",
+              "provider": "m3u",
+              "profile": "profile-home",
+              "kind": "live"
+            },
+            "error": null
+          },
+          {
+            "slot_id": 1,
+            "slot_generation": "slot-1-generation-1",
+            "source_revision": "slot-1-source-1",
+            "state": "empty",
+            "source": null,
+            "error": null
+          },
+          {
+            "slot_id": 2,
+            "slot_generation": "slot-2-generation-1",
+            "source_revision": "slot-2-source-1",
+            "state": "empty",
+            "source": null,
+            "error": null
+          },
+          {
+            "slot_id": 3,
+            "slot_generation": "slot-3-generation-1",
+            "source_revision": "slot-3-source-1",
+            "state": "empty",
+            "source": null,
+            "error": null
+          }
+        ]
+      }
+    },
+    "status_bound": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "status",
+      "binding": {},
+      "snapshot": {
+        "context": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "grid4",
+        "satellites": 0,
+        "focus_slot": 0,
+        "audio_policy": "follows_focus",
+        "audio_slot": 0,
+        "slots": [
+          {
+            "slot_id": 0,
+            "slot_generation": "slot-0-generation-1",
+            "source_revision": "slot-0-source-1",
+            "state": "playing",
+            "source": {
+              "source_id": "source_1",
+              "label": "Fixture news",
+              "provider": "m3u",
+              "profile": "profile-home",
+              "kind": "live"
+            },
+            "error": null
+          },
+          {
+            "slot_id": 1,
+            "slot_generation": "slot-1-generation-1",
+            "source_revision": "slot-1-source-1",
+            "state": "empty",
+            "source": null,
+            "error": null
+          },
+          {
+            "slot_id": 2,
+            "slot_generation": "slot-2-generation-1",
+            "source_revision": "slot-2-source-1",
+            "state": "empty",
+            "source": null,
+            "error": null
+          },
+          {
+            "slot_id": 3,
+            "slot_generation": "slot-3-generation-1",
+            "source_revision": "slot-3-source-1",
+            "state": "empty",
+            "source": null,
+            "error": null
+          }
+        ]
+      }
+    },
+    "sources": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "sources",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      },
+      "items": [
+        {
+          "source_id": "source_1",
+          "ticket": "source_ticket_1",
+          "label": "Fixture news",
+          "provider": "m3u",
+          "profile": "profile-home",
+          "kind": "live"
+        }
+      ],
+      "cursor": null,
+      "complete": true
+    },
+    "sources_filtered": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "sources",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "provider": "m3u",
+        "profile": "profile-home",
+        "query": "News",
+        "cursor": "cursor_1"
+      },
+      "items": [
+        {
+          "source_id": "source_1",
+          "ticket": "source_ticket_1",
+          "label": "Fixture news",
+          "provider": "m3u",
+          "profile": "profile-home",
+          "kind": "live"
+        }
+      ],
+      "cursor": null,
+      "complete": true
+    },
+    "layout": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "layout",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "grid4"
+      },
+      "accepted": true,
+      "outcome": "requested"
+    },
+    "layout_perimeter": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "layout",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "perimeter",
+        "satellites": 8
+      },
+      "accepted": true,
+      "outcome": "requested"
+    },
+    "play": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "play",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "source_ticket": "source_ticket_1"
+      },
+      "accepted": true,
+      "outcome": "requested"
+    },
+    "focus": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "focus",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      },
+      "accepted": true,
+      "outcome": "applied"
+    },
+    "audio": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "audio",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "policy": "slot"
+      },
+      "accepted": true,
+      "outcome": "applied"
+    },
+    "audio_follow": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "audio",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "policy": "follows_focus"
+      },
+      "accepted": true,
+      "outcome": "applied"
+    },
+    "audio_muted": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "audio",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "policy": "muted"
+      },
+      "accepted": true,
+      "outcome": "applied"
+    },
+    "stop": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "stop",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      },
+      "accepted": true,
+      "outcome": "applied"
+    },
+    "off": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "off",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "mode": "promote_active"
+      },
+      "accepted": true,
+      "outcome": "requested"
+    },
+    "off_restore": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "off",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "mode": "restore_previous"
+      },
+      "accepted": true,
+      "outcome": "requested"
+    }
+  },
+  "rejections": {
+    "status": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "status",
+      "binding": {},
+      "reason": "unavailable"
+    },
+    "status_bound": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "status",
+      "binding": {},
+      "reason": "unavailable"
+    },
+    "sources": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "sources",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      },
+      "reason": "focus_changed"
+    },
+    "sources_filtered": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "sources",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "provider": "m3u",
+        "profile": "profile-home",
+        "query": "News",
+        "cursor": "cursor_1"
+      },
+      "reason": "focus_changed"
+    },
+    "layout": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "layout",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "grid4"
+      },
+      "reason": "focus_changed"
+    },
+    "layout_perimeter": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "layout",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "layout": "perimeter",
+        "satellites": 8
+      },
+      "reason": "focus_changed"
+    },
+    "play": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "play",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "source_ticket": "source_ticket_1"
+      },
+      "reason": "focus_changed"
+    },
+    "focus": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "focus",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      },
+      "reason": "focus_changed"
+    },
+    "audio": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "audio",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1",
+        "policy": "slot"
+      },
+      "reason": "focus_changed"
+    },
+    "audio_follow": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "audio",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "policy": "follows_focus"
+      },
+      "reason": "focus_changed"
+    },
+    "audio_muted": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "audio",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "policy": "muted"
+      },
+      "reason": "focus_changed"
+    },
+    "stop": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "stop",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "slot_id": 0,
+        "slot_generation": "slot-0-generation-1",
+        "source_revision": "slot-0-source-1"
+      },
+      "reason": "focus_changed"
+    },
+    "off": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "off",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "mode": "promote_active"
+      },
+      "reason": "focus_changed"
+    },
+    "off_restore": {
+      "version": 1,
+      "runtime": "native-runtime-1",
+      "op": "off",
+      "binding": {
+        "expected": {
+          "scene": "scene-1",
+          "layout_revision": "layout-1",
+          "focus_revision": "focus-1",
+          "audio_revision": "audio-1"
+        },
+        "mode": "restore_previous"
+      },
+      "reason": "focus_changed"
+    }
+  },
+  "empty_status": {
+    "version": 1,
+    "runtime": "native-runtime-1",
+    "op": "status",
+    "binding": {},
+    "snapshot": {
+      "context": {
+        "scene": "scene-1",
+        "layout_revision": "layout-1",
+        "focus_revision": "focus-1",
+        "audio_revision": "audio-1"
+      },
+      "layout": "off",
+      "satellites": 0,
+      "focus_slot": null,
+      "audio_policy": "muted",
+      "audio_slot": null,
+      "slots": []
+    }
+  },
+  "failed_status": {
+    "version": 1,
+    "runtime": "native-runtime-1",
+    "op": "status",
+    "binding": {},
+    "snapshot": {
+      "context": {
+        "scene": "scene-1",
+        "layout_revision": "layout-1",
+        "focus_revision": "focus-1",
+        "audio_revision": "audio-1"
+      },
+      "layout": "grid4",
+      "satellites": 0,
+      "focus_slot": 0,
+      "audio_policy": "follows_focus",
+      "audio_slot": 0,
+      "slots": [
+        {
+          "slot_id": 0,
+          "slot_generation": "slot-0-generation-1",
+          "source_revision": "slot-0-source-1",
+          "state": "failed",
+          "source": {
+            "source_id": "source_1",
+            "label": "Fixture news",
+            "provider": "m3u",
+            "profile": "profile-home",
+            "kind": "live"
+          },
+          "error": "source_unavailable"
+        },
+        {
+          "slot_id": 1,
+          "slot_generation": "slot-1-generation-1",
+          "source_revision": "slot-1-source-1",
+          "state": "empty",
+          "source": null,
+          "error": null
+        },
+        {
+          "slot_id": 2,
+          "slot_generation": "slot-2-generation-1",
+          "source_revision": "slot-2-source-1",
+          "state": "empty",
+          "source": null,
+          "error": null
+        },
+        {
+          "slot_id": 3,
+          "slot_generation": "slot-3-generation-1",
+          "source_revision": "slot-3-source-1",
+          "state": "empty",
+          "source": null,
+          "error": null
+        }
+      ]
+    }
+  },
+  "paused_status": {
+    "version": 1,
+    "runtime": "native-runtime-1",
+    "op": "status",
+    "binding": {},
+    "snapshot": {
+      "context": {
+        "scene": "scene-1",
+        "layout_revision": "layout-1",
+        "focus_revision": "focus-1",
+        "audio_revision": "audio-1"
+      },
+      "layout": "grid4",
+      "satellites": 0,
+      "focus_slot": 0,
+      "audio_policy": "follows_focus",
+      "audio_slot": 0,
+      "slots": [
+        {
+          "slot_id": 0,
+          "slot_generation": "slot-0-generation-1",
+          "source_revision": "slot-0-source-1",
+          "state": "paused",
+          "source": {
+            "source_id": "source_1",
+            "label": "Fixture news",
+            "provider": "m3u",
+            "profile": "profile-home",
+            "kind": "live"
+          },
+          "error": null
+        },
+        {
+          "slot_id": 1,
+          "slot_generation": "slot-1-generation-1",
+          "source_revision": "slot-1-source-1",
+          "state": "empty",
+          "source": null,
+          "error": null
+        },
+        {
+          "slot_id": 2,
+          "slot_generation": "slot-2-generation-1",
+          "source_revision": "slot-2-source-1",
+          "state": "empty",
+          "source": null,
+          "error": null
+        },
+        {
+          "slot_id": 3,
+          "slot_generation": "slot-3-generation-1",
+          "source_revision": "slot-3-source-1",
+          "state": "empty",
+          "source": null,
+          "error": null
+        }
+      ]
+    }
+  },
+  "public_text_cases": {
+    "accepted_queries": [
+      "",
+      " ",
+      "Fixture news",
+      "Token",
+      "Secret Window",
+      "Password",
+      "API key documentary",
+      "Bearer",
+      "Bearerfixture",
+      "mytoken=fixture",
+      "News / Weather",
+      "\u041d\u043e\u0432\u043e\u0441\u0442\u0438",
+      "\u65e5\u672c\u8a9e",
+      "\u2065"
+    ],
+    "rejected": [
+      "Bearer fixture",
+      "prefix Bearer fixture",
+      "Bearer\u00a0fixture",
+      "blob:fixture",
+      "  blob:fixture ",
+      "\\fixture",
+      "~\\fixture",
+      "/",
+      " / ",
+      "api key=fixture",
+      "api key : fixture",
+      "token\u00a0=fixture",
+      "Authorization\u202f:fixture",
+      "\u65e5\u672c://fixture",
+      "\ue000/private/movie",
+      "to\u0301ken=fixture",
+      "api\u00a0key=fixture",
+      "token\u00e9=fixture"
+    ]
+  },
+  "native_delivery_rejections": [
+    {
+      "name": "status_bound_unavailable",
+      "request": {
+        "action": "multiview",
+        "params": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "status"
+        }
+      },
+      "response": {
+        "status": "rejected",
+        "data": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "status",
+          "binding": {},
+          "reason": "unavailable"
+        }
+      }
+    },
+    {
+      "name": "status_bound_limit_exceeded",
+      "request": {
+        "action": "multiview",
+        "params": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "status"
+        }
+      },
+      "response": {
+        "status": "rejected",
+        "data": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "status",
+          "binding": {},
+          "reason": "limit_exceeded"
+        }
+      }
+    },
+    {
+      "name": "play_unavailable",
+      "request": {
+        "action": "multiview",
+        "params": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "play",
+          "expected": {
+            "scene": "scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-1",
+            "audio_revision": "audio-1"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-0-generation-1",
+          "source_revision": "slot-0-source-1",
+          "source_ticket": "source_ticket_1"
+        }
+      },
+      "response": {
+        "status": "rejected",
+        "data": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "play",
+          "binding": {
+            "expected": {
+              "scene": "scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-0-generation-1",
+            "source_revision": "slot-0-source-1",
+            "source_ticket": "source_ticket_1"
+          },
+          "reason": "unavailable"
+        }
+      }
+    },
+    {
+      "name": "play_limit_exceeded",
+      "request": {
+        "action": "multiview",
+        "params": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "play",
+          "expected": {
+            "scene": "scene-1",
+            "layout_revision": "layout-1",
+            "focus_revision": "focus-1",
+            "audio_revision": "audio-1"
+          },
+          "slot_id": 0,
+          "slot_generation": "slot-0-generation-1",
+          "source_revision": "slot-0-source-1",
+          "source_ticket": "source_ticket_1"
+        }
+      },
+      "response": {
+        "status": "rejected",
+        "data": {
+          "version": 1,
+          "runtime": "native-runtime-1",
+          "op": "play",
+          "binding": {
+            "expected": {
+              "scene": "scene-1",
+              "layout_revision": "layout-1",
+              "focus_revision": "focus-1",
+              "audio_revision": "audio-1"
+            },
+            "slot_id": 0,
+            "slot_generation": "slot-0-generation-1",
+            "source_revision": "slot-0-source-1",
+            "source_ticket": "source_ticket_1"
+          },
+          "reason": "limit_exceeded"
+        }
+      }
+    }
+  ]
+}

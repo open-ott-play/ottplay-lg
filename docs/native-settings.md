@@ -14,7 +14,7 @@ Provider-specific manual protection lists (`parentalArray`) are not transferred 
 
 ## Supported schema
 
-`interfaceMode` defaults to Modern (`1`). Font scale is a percentage, default 100. `osdOpacity` is a level from 0 to 10. `players` is read-only because this build owns a native decoder pipeline. Subtitle appearance uses the native token vocabulary exposed in the schema.
+`interfaceMode` defaults to Classic (`0`) on a fresh install, matching the shared player default. A saved choice of Classic (`0`) or Modern (`1`) takes precedence and persists across restarts. Font scale is a percentage, default 100. `osdOpacity` is a level from 0 to 10. `players` is read-only because this build owns a native decoder pipeline. Subtitle appearance uses the native token vocabulary exposed in the schema.
 
 The [schema implementation](../rust-modules/src/app/ott_settings.rs) validates these settings before persistence; application and player code apply them in the declared scope.
 
@@ -26,7 +26,7 @@ The `showNumber`, `showName`, `showProgram`, `showDescription` and `showProgress
 | --- | --- | --- | --- |
 | `uiFontScale` | integer | `100` | read/write |
 | `players` | integer | `0` | read-only |
-| `interfaceMode` | integer | `1` | read/write |
+| `interfaceMode` | integer | `0` | read/write |
 | `nativeSubtitleFont` | string | `"inter_bold"` | read/write |
 | `nativeSubtitleColor` | string | `"white"` | read/write |
 | `nativeSubtitleOutline` | string | `"normal"` | read/write |

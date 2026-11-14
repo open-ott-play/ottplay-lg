@@ -37,7 +37,7 @@ fn paired_live_parser_bounds_work_and_refuses_epoch_without_pdt() {
 
 #[test]
 fn paired_live_near_edge_rebase_preserves_actual_audio_video_and_subtitle_offset() {
-    let mut output = HlsSegmentOutput { transport_timing: None,
+    let mut output = HlsSegmentOutput { resident: None, transport_timing: None,
         aus: vec![HlsAu { data: vec![1], pts_ns: 20_005_000_000, key: 1, es: 1 },
             HlsAu { data: vec![2], pts_ns: 19_990_000_000, key: 0, es: 2 }],
         webvtt_clock: Some(crate::ff::hls_webvtt::Clock { pts_90k: 900_000, presentation_ns: 0 }),

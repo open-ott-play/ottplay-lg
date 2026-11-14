@@ -3,7 +3,7 @@
 //! No launcher, worker thread, protected writer, decoder or device is invoked.
 use super::*;
 
-fn idle_cold_owner(retryable: bool) -> (Box<App>, Runtime) {
+fn idle_cold_owner(retryable: bool) -> (Box<App>, Box<Runtime>) {
     // Keep App on the heap across the nested Loaded/Restore fixture calls.
     let mut app = Box::new(app());
     let mut r = load_into(&mut app, saved_intent());

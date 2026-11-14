@@ -33,10 +33,10 @@ fn session(app: &mut App, epoch: u64) {
     app.bridge = bridge::Bridge::for_session_test(init);
     assert!(app.bridge.session_ready_current());
 }
-fn fixture() -> (App, Runtime) {
+fn fixture() -> (App, Box<Runtime>) {
     let mut app = run::lifecycle_regression_tests::app();
     session(&mut app, 10);
-    let mut runtime = runtime_fixture();
+    let mut runtime = Box::new(runtime_fixture());
     // Match the frame's clock boundary without ticking workers before their holds are set.
     let sample = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt())
         .expect("fixture clock");
@@ -227,7 +227,7 @@ fn classic_source_queued_batch_and_finished_cannot_cross_epoch_or_network_scope(
     }
 }
 
-fn retained_catalog(durable: bool) -> (App, Runtime, ProviderProfile) {
+fn retained_catalog(durable: bool) -> (App, Box<Runtime>, ProviderProfile) {
     let (mut app, mut runtime) = fixture();
     let saved = ProviderProfile { id: "unrelated-m3u".into(), name: "Other".into(),
         kind: ProviderKind::M3u, source: "https://fixture.invalid/other.m3u".into(),
@@ -455,7 +455,7 @@ fn classic_saved_category_and_focus_roundtrip_preserve_active_provider() {
         let profiles = snapshot.profiles.clone(); let resumes = snapshot.resume.clone();
         let encoded = serde_json::to_vec(&snapshot).unwrap();
         assert!(!String::from_utf8_lossy(&encoded).contains("synthetic-token"));
-        runtime = runtime_fixture();
+        runtime = Box::new(runtime_fixture());
         // Recreated Runtime needs the same clock boundary as the original fixture.
         let sample = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt())
             .expect("fixture clock");

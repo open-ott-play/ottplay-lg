@@ -41,7 +41,7 @@ fn deliver(runtime: &mut Runtime, programmes: Vec<Programme>) -> Guide {
     reply
 }
 
-fn opened() -> (Box<App>, Runtime) {
+fn opened() -> (Box<App>, Box<Runtime>) {
     let (mut app, mut runtime) = fixture();
     handle_action(
         &mut runtime,

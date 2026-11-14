@@ -263,6 +263,10 @@ fn saved_source_catalog_play_back_and_restart_keep_the_profile() {
         Some(item.id.as_str())
     );
     setup_key(&mut app, Key::Back);
+    assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+    assert!(app.ott.as_ref().unwrap().play_target.is_none(),
+        "Classic Back cancels the unresolved play request before leaving its channel list");
+    setup_key(&mut app, Key::Back);
     assert_eq!(app.ott.as_ref().unwrap().page, "profiles");
     setup_key(&mut app, Key::Back);
     assert_eq!(app.ott.as_ref().unwrap().page, "providers");

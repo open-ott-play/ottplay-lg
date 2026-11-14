@@ -804,7 +804,7 @@ fn saved_vportal_structural_category_and_focus_restore_together() {
     assert!(r.play_target.is_none() && r.resolver_next.is_none() && r.playing.is_none());
     let mut snapshot = r.saved.clone(); browse_focus::prepare(r, &mut snapshot).unwrap();
     let encoded = serde_json::to_vec(&snapshot).unwrap();
-    app.ott = Some(runtime_fixture());
+    app.ott = Some(Box::new(runtime_fixture()));
     let r = app.ott.as_mut().unwrap();
     r.loaded = true; r.resume_source_work();
     r.saved = serde_json::from_slice(&encoded).unwrap(); r.sync_saved_context();

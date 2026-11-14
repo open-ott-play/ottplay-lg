@@ -85,7 +85,7 @@ impl State {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Record {
     t_ms: u32,
     stage: &'static str,
@@ -99,6 +99,15 @@ struct Record {
     fed_pts_skew_ms: Option<i32>,
     playable_buffer_ms: Option<u32>,
     feed_state: &'static str,
+    prime_pending: bool,
+    prime_kind: &'static str,
+    prime_required_runway_ms: u32,
+    prime_accepted_video_ms: u32,
+    prime_accepted_audio_ms: u32,
+    prime_queued_video_ms: u32,
+    prime_queued_audio_ms: u32,
+    prime_external_lease: bool,
+    prime_audio_expected: bool,
     callback_count: u32,
     callback_error_code: Option<i32>,
     callback_error_age_ms: Option<u32>,
@@ -186,6 +195,20 @@ fn sample(session: &mut Session, app: &App, now: u32) {
             5 => "empty",
             _ => "none",
         },
+        prime_pending: d.prime_pending,
+        prime_kind: match d.prime_kind {
+            1 => "fresh",
+            2 => "rebuffer",
+            3 => "resume",
+            _ => "none",
+        },
+        prime_required_runway_ms: clamp_u32(d.prime_required_runway_ms),
+        prime_accepted_video_ms: clamp_u32(d.prime_accepted_video_ms),
+        prime_accepted_audio_ms: clamp_u32(d.prime_accepted_audio_ms),
+        prime_queued_video_ms: clamp_u32(d.prime_queued_video_ms),
+        prime_queued_audio_ms: clamp_u32(d.prime_queued_audio_ms),
+        prime_external_lease: d.prime_external_lease,
+        prime_audio_expected: d.prime_audio_expected,
         callback_count: d.cb_count,
         callback_error_code: (d.cb_err != 0).then_some(d.cb_err),
         callback_error_age_ms: (d.cb_err != 0).then(|| age(now, d.cb_err_at)),
@@ -218,6 +241,15 @@ fn record_json(record: &Record) -> Value {
         "fed_pts_skew_ms": record.fed_pts_skew_ms,
         "playable_buffer_ms": record.playable_buffer_ms,
         "feed_state": record.feed_state,
+        "prime_pending": record.prime_pending,
+        "prime_kind": record.prime_kind,
+        "prime_required_runway_ms": record.prime_required_runway_ms,
+        "prime_accepted_video_ms": record.prime_accepted_video_ms,
+        "prime_accepted_audio_ms": record.prime_accepted_audio_ms,
+        "prime_queued_video_ms": record.prime_queued_video_ms,
+        "prime_queued_audio_ms": record.prime_queued_audio_ms,
+        "prime_external_lease": record.prime_external_lease,
+        "prime_audio_expected": record.prime_audio_expected,
         "callback_count": record.callback_count,
         "callback_error_code": record.callback_error_code,
         "callback_error_age_ms": record.callback_error_age_ms,
@@ -451,6 +483,38 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn capture_distinguishes_native_accepted_media_from_queued_startup_runway() {
+        let record = Record {
+            stage: "streaming",
+            load_state: "complete",
+            feed_state: "full",
+            prime_pending: true,
+            prime_kind: "fresh",
+            prime_required_runway_ms: 2_000,
+            prime_accepted_video_ms: 1_000,
+            prime_accepted_audio_ms: 1_000,
+            prime_queued_video_ms: 2_700,
+            prime_queued_audio_ms: 2_700,
+            prime_external_lease: true,
+            prime_audio_expected: true,
+            ..Record::default()
+        };
+        let wire = record_json(&record);
+        assert_eq!(wire["prime_pending"], true);
+        assert_eq!(wire["prime_kind"], "fresh");
+        assert_eq!(wire["prime_required_runway_ms"], 2_000);
+        assert_eq!(wire["prime_accepted_video_ms"], 1_000);
+        assert_eq!(wire["prime_accepted_audio_ms"], 1_000);
+        assert_eq!(wire["prime_queued_video_ms"], 2_700);
+        assert_eq!(wire["prime_queued_audio_ms"], 2_700);
+        assert_eq!(wire["prime_external_lease"], true);
+        assert_eq!(wire["prime_audio_expected"], true);
+        assert_eq!(wire["load_state"], "complete");
+        assert_eq!(wire["feed_state"], "full");
+        assert_eq!(wire["frames"], 0, "queued media is not proof of a rendered picture");
+    }
 
     #[test]
     fn omitted_capture_duration_defaults_to_thirty_seconds() {

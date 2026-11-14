@@ -2,6 +2,7 @@
 //! The app runner owns IO and supplies complete, bounded responses or directory batches.
 
 pub mod favorites;
+pub mod multiview;
 pub mod protection;
 pub mod favorites_wire;
 pub mod local_metadata;

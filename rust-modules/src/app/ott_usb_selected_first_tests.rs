@@ -40,7 +40,7 @@ fn hold_slots(r: &mut Runtime) {
     r.resolver_busy = true;
 }
 
-fn loaded(saved: Saved) -> (Box<App>, Runtime) {
+fn loaded(saved: Saved) -> (Box<App>, Box<Runtime>) {
     // App embeds the runtime owner. Keep it off the libtest thread stack while
     // Loaded/Restore/Saved helpers retain their own runtime and receipt values.
     let mut app = Box::new(app());
@@ -50,7 +50,7 @@ fn loaded(saved: Saved) -> (Box<App>, Runtime) {
 
 // Keep nested fixture owners in place rather than copying App through every
 // Loaded/Restore/Saved return tuple on the libtest thread stack.
-fn load_into(app: &mut App, saved: Saved) -> Runtime {
+fn load_into(app: &mut App, saved: Saved) -> Box<Runtime> {
     app.running = true;
     let mut r = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
     r.remote = Remote::disabled_for_test("dev_usb_cold_fixture", "usb");
@@ -61,7 +61,7 @@ fn load_into(app: &mut App, saved: Saved) -> Runtime {
         transient::InventoryPhase::Unloaded
     ));
     r.tx.send(Job::Loaded(Ok((saved, [9; 16])))).unwrap();
-    app.ott = Some(r);
+    app.ott = Some(Box::new(r));
     let sample = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
     crate::app::ott_runtime::tick(app, sample);
     let r = app.ott.take().unwrap();
@@ -113,7 +113,7 @@ fn restored(r: &Runtime, directory: &Directory, task: usb::Task) -> usb::Answer 
     .unwrap()
 }
 
-fn installed(directory: &Directory) -> (Box<App>, Runtime, LocalSource, u64) {
+fn installed(directory: &Directory) -> (Box<App>, Box<Runtime>, LocalSource, u64) {
     let mut app = Box::new(app());
     let mut r = load_into(&mut app, saved_intent());
     let old_generation = r.generation;

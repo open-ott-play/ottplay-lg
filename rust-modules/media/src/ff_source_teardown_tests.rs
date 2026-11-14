@@ -351,7 +351,7 @@ fn a_prefetched_segment_does_not_move_the_published_buffer() {
     let prev_audio = SHARED.hls_audio_tail_ns.swap(-1, Ordering::AcqRel);
     let prev_pos = SHARED.playpos_ns.swap(0, Ordering::AcqRel);
     let prev_base = SHARED.disp_base.swap(0, Ordering::AcqRel);
-    let held = HlsSegmentOutput { transport_timing: None,
+    let held = HlsSegmentOutput { resident: None, transport_timing: None,
         webvtt_clock: None,
         observed: None,
         aus: Vec::new(),
@@ -653,11 +653,12 @@ fn a_curl_transport_failure_crosses_avio_as_io_error_not_eof() {
         struct ClearIoFailure;
         impl Drop for ClearIoFailure {
             fn drop(&mut self) {
-                SHARED.demux_io_failed.store(false, Ordering::Relaxed);
+                SHARED.reset_session();
             }
         }
         let _clear = ClearIoFailure;
-        SHARED.demux_io_failed.store(false, Ordering::Relaxed);
+        SHARED.reset_session();
+        let epoch = SHARED.begin_native_session().expect("current source owner");
 
         let mut cs =
             crate::curlio::CurlSource::open(&format!("http://127.0.0.1:{port}/f.mkv"), 0)
@@ -708,7 +709,7 @@ fn a_curl_transport_failure_crosses_avio_as_io_error_not_eof() {
             "a callback alone is not fatal because libavformat may still recover via seek"
         );
         assert!(
-            !frame_read_failed(&mut st, 0, 0),
+            !frame_read_failed(&mut st, 0, epoch),
             "a successful packet is not a demux failure"
         );
         assert!(
@@ -720,7 +721,7 @@ fn a_curl_transport_failure_crosses_avio_as_io_error_not_eof() {
         let terminal = read_cb(op, dst.as_mut_ptr(), dst.len() as c_int);
         assert_eq!(terminal, AVERROR_IO);
         assert!(
-            frame_read_failed(&mut st, terminal, 0),
+            frame_read_failed(&mut st, terminal, epoch),
             "an unrecovered frame read ends the demux loop"
         );
         assert!(
@@ -1023,6 +1024,14 @@ fn a_cut_hls_segment_read_is_not_reopened_by_the_read_callback() {
     assert_eq!(terminal, AVERROR_IO);
     assert!(st.io_failed);
     assert_eq!(seen.lock().unwrap().len(), 1, "no reopen: the cut is the retry policy's");
+    assert!(matches!(classify_hls_avio_operation(&st, true, std::time::Instant::now(), false),
+        Some(HlsExit::OpenFailed { reason: "segment body transport failed", outcome: TraceOutcome::Transport })),
+        "the actual truncated curl response must retain its checked body transport cause");
+    assert!(classify_hls_avio_operation(&st, false, std::time::Instant::now(), false).is_none(),
+        "a successful native operation may have recovered the callback failure");
+    st.reserve_deadline.expired = true;
+    assert!(matches!(classify_hls_avio_operation(&st, true, std::time::Instant::now(), false), Some(HlsExit::PrimeExpired)),
+        "reserve expiration must outrank body failure");
     crate::aq::aq_destroy(&mut *aq);
 }
 
@@ -1074,7 +1083,7 @@ fn frame_read_failure_context_requires_terminal_io_and_its_native_epoch() {
     assert_ne!(epoch, replacement);
     assert!(frame_read_failed(&mut state, -5, epoch));
     assert_eq!(SHARED.io_failure(), None, "an old producer cannot attribute the replacement");
-    assert!(SHARED.demux_io_failed.load(Ordering::Acquire), "legacy flag behavior is unchanged");
+    assert!(!SHARED.demux_io_failed.load(Ordering::Acquire), "retired producer cannot fail the replacement");
     assert!(frame_read_failed(&mut state, -5, replacement));
     assert_eq!(SHARED.io_failure(), Some(IoFailureDetails::source_io(0, false)));
 }
@@ -1180,4 +1189,38 @@ fn typed_hls_open_failure_settles_detail_and_flags_under_one_native_owner_fence(
         crate::aq::aq_destroy(&mut *old_video);
         crate::aq::aq_destroy(&mut *old_audio);
     }
+}
+
+
+#[test]
+fn retired_hls_terminal_reducers_cannot_fail_a_replacement_epoch() {
+    let _serial = plx_base::testlock::serial();
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { SHARED.reset_session(); PUSHED_ANY.store(false, Ordering::Relaxed); } }
+    let _reset = Reset;
+    let transfer = SegmentTransfer { bytes: 0, active_us: 0, total_us: 1, audio_expected: true };
+    for pushed in [false, true] {
+        for failure in [HlsExit::Failed("segment body transport failed"), HlsExit::NotReady,
+            HlsExit::PrimeExpired, HlsExit::StallAbort(transfer), HlsExit::Aborted,
+            HlsExit::OpenFailed { reason: "HTTP request failed", outcome: TraceOutcome::Refused }] {
+            SHARED.reset_session();
+            let old = SHARED.begin_native_session().unwrap();
+            SHARED.reset_session();
+            let current = SHARED.begin_native_session().unwrap();
+            assert_ne!(old, current);
+            PUSHED_ANY.store(pushed, Ordering::Relaxed);
+            settle_hls_demux(old, Ok(Err(failure)));
+            assert_eq!(SHARED.io_failure(), None, "retired {failure:?}");
+            assert!(!SHARED.demux_io_failed.load(Ordering::Acquire), "retired {failure:?} poisoned replacement");
+            assert!(!SHARED.demux_failed.load(Ordering::Acquire), "retired {failure:?} poisoned prefeed state");
+            assert_eq!(SHARED.dg_demux_exit.load(Ordering::Acquire), 0);
+        }
+    }
+    SHARED.reset_session();
+    let old = SHARED.begin_native_session().unwrap();
+    SHARED.reset_session();
+    SHARED.begin_native_session().unwrap();
+    settle_hls_demux(old, Err(Box::new("retired panic")));
+    assert!(!SHARED.demux_failed.load(Ordering::Acquire));
+    assert_eq!(SHARED.dg_demux_exit.load(Ordering::Acquire), 0);
 }

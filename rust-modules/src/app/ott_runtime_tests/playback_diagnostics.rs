@@ -618,12 +618,15 @@ fn transient_hls() -> IoFailureDetails {
         outcome: Some(TraceOutcome::Transport) }
 }
 fn live_failure() -> Box<App> {
+    live_failure_with(transient_hls())
+}
+fn live_failure_with(cause: IoFailureDetails) -> Box<App> {
     let mut app = fixture();
     app.ott.as_mut().unwrap().saving = true;
     admit(&mut app, "first");
     make_live(&mut app);
     let epoch = install_owned_engine(&mut app);
-    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, cause));
     signal_error(&app, FailureKind::PlaybackInterrupted);
     reconcile(&mut app);
     // Real admission consumed its Job and freed the slot. Hold the next worker
@@ -637,13 +640,15 @@ fn live_transport_recovery_requires_precise_closed_transient_cause() {
     use plx_media::player::report::FailureDetails;
     for exit in [DemuxExitClass::HlsTransportOpenFailed, DemuxExitClass::HlsTransportFailed,
         DemuxExitClass::HlsPlaylistFetchFailed,
-        DemuxExitClass::HlsPlaylistInvalid, DemuxExitClass::Other, DemuxExitClass::NoVideoStream] {
+        DemuxExitClass::HlsPlaylistWindow, DemuxExitClass::HlsPlaylistInvalid,
+        DemuxExitClass::Other, DemuxExitClass::NoVideoStream] {
         for outcome in [None, Some(TraceOutcome::Transport), Some(TraceOutcome::Deadline),
             Some(TraceOutcome::ServerState), Some(TraceOutcome::Refused),
             Some(TraceOutcome::Inconclusive), Some(TraceOutcome::Started), Some(TraceOutcome::NoBody)] {
             let expected = matches!(exit, DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
                 | DemuxExitClass::HlsPlaylistFetchFailed)
-                && matches!(outcome, Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState));
+                && matches!(outcome, Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
+                || (exit == DemuxExitClass::HlsPlaylistWindow && outcome == Some(TraceOutcome::ServerState));
             assert_eq!(recoverable_live_transport(Some(FailureDetails {
                 demux_exit: exit, pipeline_error: 0,
                 io_failure: Some(IoFailureDetails::Hls { exit, outcome }),
@@ -721,6 +726,41 @@ fn owned_live_transient_failure_retries_only_exact_channel_without_new_viewer_in
     // Automatic admission must not reset the shared bounded failure budget.
     assert_eq!(runtime.continuity.live_disconnected(generation, "first", due), continuity::Decision::Wait);
     assert_eq!(runtime.continuity.pending_retry().unwrap().failures, 2);
+}
+
+#[test]
+fn live_window_slip_reopens_original_catalog_source_and_pause_cancels_it() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = live_failure_with(IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsPlaylistWindow, outcome: Some(TraceOutcome::ServerState),
+    });
+    let runtime = app.ott.as_mut().unwrap();
+    let due = runtime.continuity.pending_retry().expect("owned live-window slip").not_before_ms;
+    assert!(matches!(runtime.retry_continuity(due - 1, &["first", "second"], true), continuity::Decision::Wait));
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    assert!(matches!(&decision, continuity::Decision::Start {
+        entry_id, reason: continuity::Reason::LiveRetry, ..
+    } if entry_id == "first"));
+    runtime.apply_continuity(decision);
+    let request = runtime.resolver_next.as_ref().expect("original source must be resolved again");
+    assert_eq!(request.profile.source, "https://diag.invalid/list.m3u");
+    let entry = request.entry.as_ref().expect("same catalog entry");
+    assert_eq!(entry.id, "first");
+    assert!(matches!(&entry.media, MediaLocator::Http { url } if url == PRIVATE_URL));
+    assert!(!runtime.play_target.as_ref().unwrap().advance_on_failure);
+    let generation = runtime.play_generation;
+    let cancel = request.cancel.clone();
+    runtime.resolver_next.take();
+    late_live_result(&app, generation);
+    accepted_pause(&mut app);
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    tick_with_start(&mut app, clock, |_, _, _, _, _| panic!("Pause must fence window recovery"));
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+    assert_ne!(runtime.play_generation, generation);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert!(runtime.continuity.pending_retry().is_none());
 }
 
 #[test]
@@ -849,3 +889,69 @@ fn newer_explicit_selection_is_not_cancelled_by_old_live_retry_pause_receipt() {
 
 #[path = "player_startup_feedback.rs"]
 mod startup_feedback;
+
+#[test]
+fn live_retry_after_actual_catalog_rpc_and_back_keeps_the_rpc_selected_channel() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = fixture();
+    app.running = true;
+    let mut runtime = app.ott.take().unwrap();
+    let mut source = profile();
+    source.kind = ProviderKind::M3u;
+    source.source = "https://diag.invalid/list.m3u".into();
+    runtime.saved.profiles.profiles = vec![source.clone()];
+    runtime.saved.profiles.active_profile = Some(source.id.clone());
+    runtime.provider = ProviderKind::M3u;
+    for channel in &mut runtime.catalog.entries {
+        channel.duration_ms = None;
+        channel.live = Some(Default::default());
+        channel.media = MediaLocator::Http { url: PRIVATE_URL.into() };
+    }
+    runtime.page = "channels";
+    apply_ui_action(&mut runtime, &mut app, OttAction::Back, true, false, false);
+    assert!(runtime.returned_catalog_complete());
+    app.ott = Some(runtime);
+    let runtime_id = app.ott.as_ref().unwrap().remote.runtime().to_owned();
+    let cats = read_params(&mut app, "categories", 801,
+        json!({"op":"list","runtime":runtime_id,"offset":0,"limit":200}));
+    assert_eq!(cats["status"], "ok");
+    let page = read_params(&mut app, "channels", 802,
+        json!({"runtime":runtime_id,"catalog":cats["data"]["catalog"],"category":"all","offset":0,"limit":200}));
+    assert_eq!(page["status"], "ok");
+    let mut runtime = app.ott.take().unwrap();
+    let now = runtime.now_ms();
+    let body = json!({"commands":[],"server_time":1000,"requests":[{
+        "id":format!("{:032x}",803),"action":"play_catalog","expires_at":1020,
+        "params":{"catalog":page["data"]["catalog"],"id":"second"}
+    }]}).to_string();
+    let invocation = runtime.remote.raw_poll_for_test(&body, now).pop().unwrap();
+    let response = commands::command(&mut runtime, &mut app, &invocation);
+    assert!(response.is_none(), "actual exact RPC admission: {response:?}");
+    let request = runtime.resolver_next.take().expect("actual exact RPC resolver");
+    let channel = request.entry.clone().unwrap();
+    let mut info = unsupported_info();
+    info.video_codec = "h264".into(); info.audio_codec = "aac".into();
+    info.audio_channels = 2; info.audio_sample_rate = 48_000; info.audio_bit_depth = 16;
+    runtime.tx.send(Job::Play(request.generation, request.profile,
+        Ok((channel, ReadySource::External(plx_media::ff::ExternalSource::Http(PRIVATE_URL.into()), info, None)))))
+        .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
+    app.ott = Some(runtime);
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    let mut resources = AcceptedResources::default();
+    tick_with_start(&mut app, clock, |runtime, app, profile, entry, source|
+        start_resolved_with(runtime, app, profile, entry, source, &mut resources));
+    assert_eq!(resources.starts, 1);
+    assert_eq!(app.ott.as_ref().unwrap().playing.as_ref().unwrap().selection_id, "second");
+    let epoch = install_owned_engine(&mut app);
+    app.ott.as_mut().unwrap().saving = true;
+    assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));
+    signal_error(&app, FailureKind::PlaybackInterrupted);
+    reconcile(&mut app);
+    let runtime = app.ott.as_mut().unwrap();
+    let retry = runtime.continuity.pending_retry().expect("actual RPC selection must own same-channel recovery after Back");
+    assert_eq!(retry.after, "second");
+    let due = retry.not_before_ms;
+    let decision = runtime.retry_continuity(due, &["first", "second"], true);
+    assert!(matches!(decision, continuity::Decision::Start { ref entry_id, reason: continuity::Reason::LiveRetry, .. } if entry_id == "second"));
+}

@@ -270,7 +270,7 @@ pub(crate) struct Adapters {
 /// helpers they still reach through `&mut App` need to be visible outside this module's subtree.
 /// Nothing here becomes `pub` — only as wide as the crate.
 pub(crate) struct App {
-    ott: Option<ott_runtime::Runtime>,
+    ott: Option<Box<ott_runtime::Runtime>>,
     language_apply: preferences::LanguageState,
     player_viewport: player_viewport::Placement,
     player_geometry: player_geometry::Geometry,

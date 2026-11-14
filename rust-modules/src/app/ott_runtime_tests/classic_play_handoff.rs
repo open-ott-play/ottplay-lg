@@ -2,7 +2,7 @@
 use super::*;
 use plx_machine::machine::UiMode;
 
-fn fixture() -> (App, Runtime) {
+fn fixture() -> (App, Box<Runtime>) {
     let mut app = ready_app_fixture();
     app.running = true;
     app.bridge.apply_ui_mode(UiMode::Classic);
@@ -130,7 +130,7 @@ impl Drop for Reset {
         plx_media::route::reset_player_control_for_test(&plx_media::route::PlaybackSession::IDLE);
     }
 }
-fn install(app: &mut App, runtime: Runtime) -> Runtime {
+fn install(app: &mut App, runtime: Box<Runtime>) -> Box<Runtime> {
     app.ott = Some(runtime);
     local_integration::install(app, None, "late-fixture");
     let mut r = app.ott.take().unwrap();

@@ -569,3 +569,41 @@ fn malformed_live_refresh_cannot_gain_a_retryable_network_cause() {
         assert_eq!(server.count.load(Ordering::Acquire), 1);
     }
 }
+
+
+#[test]
+fn segment_missing_after_bounded_retries_preserves_server_state_but_auth_stays_refused() {
+    let _serial = curl();
+    let _reset = ProducerStateReset;
+    for status in [404, 401, 403] {
+        SHARED.reset_session();
+        let server = Server::start(status, Duration::ZERO, Duration::ZERO, None);
+        let segment = crate::hls::Segment { sequence: 1, duration: Duration::from_millis(100),
+            resource: resource(&server.url).unwrap() };
+        let mut queue = crate::aq::aq_new(1024);
+        let mut stream = plx_net::stream::http_stream_boxed();
+        let mut net = HlsNet { hs: &mut *stream, curl: None };
+        let mut clock = crate::hls::SegmentTimeline::default().begin(segment.duration).unwrap();
+        let mut state = H264SegmentState::default();
+        let start = Instant::now();
+        let result = unsafe { hls_demux_segment_path(&segment,
+            HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External,
+                body_limit: None, audio: None, rendition: None,
+                video: HlsVideoEntry::External(&mut state), mp2: None },
+            &mut clock, &mut *queue, &mut net, "", SegmentAcquisition::for_cursor(None)) };
+        drop(net);
+        plx_net::stream::http_close(&mut *stream);
+        crate::aq::aq_destroy(&mut *queue);
+        if status == 404 {
+            assert!(matches!(result, Err(HlsExit::OpenFailed {
+                reason: "HLS segment was not produced in time", outcome: TraceOutcome::ServerState })),
+                "spent actual 404 retry state must not be erased: {:?}", result.as_ref().err());
+            assert!(start.elapsed() >= Duration::from_secs(3), "preserve existing retry budget");
+            assert!((2..=20).contains(&server.count.load(Ordering::Acquire)));
+        } else {
+            assert!(matches!(result, Err(HlsExit::OpenFailed { outcome: TraceOutcome::Refused, .. })),
+                "authentication refusal must stay terminal: {:?}", result.as_ref().err());
+            assert_eq!(server.count.load(Ordering::Acquire), 1);
+        }
+    }
+}
