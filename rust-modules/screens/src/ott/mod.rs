@@ -1401,13 +1401,10 @@ impl<H: AppLike<Memory = PageMemory>> Machine<H> for OttScreen {
         if was_covered && !self.loading_cover() && self.classic_visible {
             // Initial Enter has no focusable groups while the cover is up.
             // Reconcile cannot seat an empty engine cursor when a ready
-            // snapshot arrives, so enter the newly interactive presentation at
-            // its exact form/card/restoration target. Ordinary refreshes never
-            // pass this edge and keep the viewer's current focus.
-            let focus = self.focus_request.or_else(|| self.form.selected_key()
-                .map(|key| self.card_target(key.0)))
-                .map(|elem| plx_ui::screen::FocusTarget::Elem(FocusKey { entry: self.entry, elem }))
-                .unwrap_or(plx_ui::screen::FocusTarget::ContainerGroup(GroupId(0)));
+            // snapshot arrives. Resolve the selection when this Enter is
+            // delivered: a following RestoreMemory may replace it in the same
+            // batch. Ordinary refreshes never pass this edge.
+            let focus = plx_ui::screen::FocusTarget::FirstInGroup(GroupId(0));
             fx.push(Fx::Deliver(MachineId::Instance(self.instance),
                 Delivery::Screen(ScreenEvent::Enter(plx_ui::screen::Enter::Fresh { focus }))));
         }
@@ -1609,15 +1606,6 @@ impl OttScreen {
                 Handled::Yes
             }
             ScreenEvent::FocusMoved { to, by, .. } => {
-                // The cover's queued Enter can arrive after RestoreMemory. Keep
-                // that newer target until reconciliation seats it, provided it
-                // still belongs to the current, placeable surface.
-                if matches!(by, plx_ui::screen::By::Restore)
-                    && self.focus_request.is_some_and(|requested| requested != to.elem
-                        && Focusable::<H>::group_of(self, &requested, cx).is_some()
-                        && Focusable::<H>::place(self, &requested, cx, At::SpringTarget).is_some()) {
-                    return Handled::Yes;
-                }
                 let header_focus = self.header(cx.measure).is_some_and(|header| header.stops.iter().any(|(key, _)| *key == to.elem))
                     || self.modern_footer(cx.measure).is_some_and(|footer| footer.stops.iter().any(|(key, _)| *key == to.elem));
                 if matches!(by, plx_ui::screen::By::Dir | plx_ui::screen::By::Pointer) {
@@ -1788,6 +1776,17 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
     fn seat(&self, group: GroupId, from: Placed, cx: &Cx<'_, H>) -> FocusKey<u32> {
         if self.exit.prompt.is_open() {
             if let Some(key) = self.exit.prompt.seat(group, self.entry) { return key; }
+        }
+        // An initial cover has never seated an engine cursor. Resolve its
+        // first seat from the latest model, including memory delivered after
+        // the ready snapshot. Existing cursors keep normal group/card policy.
+        if cx.focus.current.is_none() {
+            if let Some(elem) = self.focus_request.or_else(|| self.form.selected_key()
+                .map(|key| self.card_target(key.0)))
+                .filter(|key| Focusable::<H>::group_of(self, key, cx).is_some()
+                    && Focusable::<H>::place(self, key, cx, At::SpringTarget).is_some()) {
+                return FocusKey { entry: self.entry, elem };
+            }
         }
         if group == navigation::GROUP {
             if let Some(header) = self.header(cx.measure) {
