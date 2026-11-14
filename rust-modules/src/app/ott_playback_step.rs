@@ -212,6 +212,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     {
         runtime.cancel_play_request();
         runtime.selected = Some(id.clone());
+        browse_focus::record(runtime, &id);
         runtime.continuity.user_selected(runtime.generation, &id);
         runtime.status.clear();
         runtime.cancel_setup();
@@ -221,6 +222,9 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     }
     // A refused destination must not fall forward to unrelated media.
     runtime.play_with_policy(app, &id, false)?;
+    // An admitted rocker destination is explicit list intent, just like Play
+    // from a row. Record it now so a late resolver cannot rewind newer focus.
+    browse_focus::record(runtime, &id);
     parental_runtime::mark_ui_origin(runtime, app);
     if let Some(page) = bridge::player_mut(&mut app.pages) {
         page.begin_channel_change(clock::now());

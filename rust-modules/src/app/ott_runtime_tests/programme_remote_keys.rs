@@ -931,3 +931,6 @@ fn numeric_channels_accept_only_the_owned_checkpoint_writer_and_not_a_stale_sett
         }
     }
 }
+
+#[path = "player_remote.rs"]
+mod player_remote;

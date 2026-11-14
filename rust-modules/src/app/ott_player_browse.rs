@@ -139,6 +139,7 @@ pub(super) fn native_list_step(runtime: &mut Runtime, app: &mut App,
     input_policy::ui(runtime, &OttAction::Play(target.clone()))?;
     parental_runtime::ui_gate(runtime, app, &OttAction::Play(target.clone()))?;
     runtime.play_with_policy(app, &target, false)?;
+    browse_focus::record(runtime, &target);
     parental_runtime::mark_ui_origin(runtime, app);
     runtime.cancel_setup();
     Ok(true)
