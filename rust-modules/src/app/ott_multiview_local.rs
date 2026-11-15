@@ -27,6 +27,7 @@ struct Work {
     ticket: ResolveTicket,
     cancel: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    terminal_consumed: bool,
 }
 struct Picture {
     ticket: ResolveTicket,
@@ -48,7 +49,7 @@ pub(super) struct Driver {
     pictures: [Option<Picture>; 9],
     workers: [Option<Work>; 9],
     stopping: [Option<ResolveTicket>; 9],
-    leases: [Option<LeaseWork>; 9],
+    leases: [std::collections::VecDeque<LeaseWork>; 9],
     tx: Sender<Job>,
     rx: Receiver<Job>,
     layout: Option<Layout>,
@@ -71,7 +72,7 @@ impl Default for Driver {
             pictures: std::array::from_fn(|_| None),
             workers: std::array::from_fn(|_| None),
             stopping: [None; 9],
-            leases: std::array::from_fn(|_| None),
+            leases: std::array::from_fn(|_| Default::default()),
             tx,
             rx,
             layout: None,
@@ -198,7 +199,7 @@ impl Driver {
             || self.pictures.iter().any(Option::is_some)
             || self.stopping.iter().any(Option::is_some)
             || self.replacements.iter().any(Option::is_some)
-            || self.leases.iter().any(Option::is_some)
+            || self.leases.iter().any(|leases| !leases.is_empty())
     }
     pub fn take_restore_previous(&mut self) -> bool {
         std::mem::take(&mut self.restore_ready)
@@ -260,7 +261,7 @@ impl Driver {
         }
         if self.workers[index].is_some()
             || self.pictures[index].is_some()
-            || self.leases[index].is_some()
+            || !self.leases[index].is_empty()
         {
             let transition = runtime.multiview.close_slot(slot)?;
             self.replacements[index] = Some(handle);
@@ -376,6 +377,145 @@ impl Driver {
             runtime.multiview_effects.extend(transition.effects);
         }
     }
+    fn retain_lease(&mut self, index: usize, lease: crate::app::ott_vportal_lease::Lease) {
+        lease.begin_release();
+        self.leases[index].push_back(LeaseWork {
+            lease: Arc::new(std::sync::Mutex::new(Some(lease))),
+            done: Arc::new(AtomicBool::new(false)),
+            success: Arc::new(AtomicBool::new(false)),
+            started: false,
+        });
+    }
+    fn retire_receipt(&mut self, index: usize, mut receipt: LocalResolved) {
+        receipt.input.cancellation().store(true, Ordering::Release);
+        if let Some(lease) = receipt.lease.take() {
+            self.retain_lease(index, lease);
+        }
+    }
+    fn reject_job(&mut self, job: Job) {
+        if let Job::Media(ticket, Ok(receipt)) = job {
+            self.retire_receipt(ticket.slot().index(), receipt);
+        }
+    }
+    fn receive_job(&mut self, runtime: &mut Runtime, app: &App, job: Job) {
+        let ticket = match &job {
+            Job::Metadata(t, _) | Job::Media(t, _) => *t,
+        };
+        let index = ticket.slot().index();
+        let admitted = self.workers[index]
+            .as_mut()
+            .filter(|w| w.ticket == ticket)
+            .is_some_and(|w| {
+                w.terminal_consumed = true;
+                !w.cancel.load(Ordering::Acquire)
+            });
+        if !admitted {
+            self.reject_job(job);
+            return;
+        }
+        match job {
+            Job::Metadata(_, result) => {
+                let mut coordinator = std::mem::take(&mut runtime.multiview);
+                let transition = match result {
+                    Ok(metadata) => coordinator.metadata_succeeded(metadata, runtime, app),
+                    Err(error) => coordinator.metadata_failed(ticket, error),
+                };
+                runtime.multiview = coordinator;
+                self.queue(runtime, transition);
+            }
+            Job::Media(_, result) => {
+                self.media_ready_with(runtime, app, ticket, result, |source| {
+                    Session::open(source, Limits::default())
+                })
+            }
+        }
+    }
+    fn retire_worker(&mut self, index: usize) {
+        // Worker retirement alone is insufficient: a successful receipt may
+        // still be queued after this frame's RX drain and own a provider lease.
+        if self.workers[index]
+            .as_ref()
+            .is_some_and(|w| w.terminal_consumed && w.done.load(Ordering::Acquire))
+        {
+            self.workers[index] = None;
+        }
+    }
+    fn slot_drained(&self, index: usize) -> bool {
+        self.pictures[index].is_none()
+            && self.workers[index].is_none()
+            && self.leases[index].is_empty()
+    }
+    fn finish_lease_if_ready(&mut self, runtime: &mut Runtime, index: usize) {
+        let Some(cleanup) = self.leases[index].front() else {
+            return;
+        };
+        if !cleanup.done.load(Ordering::Acquire) {
+            return;
+        }
+        if !cleanup.success.load(Ordering::Acquire) {
+            self.cleanup_failed = true;
+            self.restore_previous = false;
+            self.replacements[index] = None;
+            runtime.status = "Previous window playback session did not finish closing".into();
+            runtime.changed();
+        }
+        self.leases[index].pop_front();
+    }
+    fn media_ready_with(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        ticket: ResolveTicket,
+        result: Result<LocalResolved, multiview_sources::Error>,
+        open: impl FnOnce(
+            plx_media::ff::ExternalSource,
+        ) -> Result<Session, plx_media::local_multiview::Error>,
+    ) {
+        let index = ticket.slot().index();
+        match result {
+            Ok(receipt) => {
+                if self.closing
+                    || self.cleanup_failed
+                    || receipt.input.reauthorize(runtime, app).is_err()
+                {
+                    self.retire_receipt(index, receipt);
+                    let t = runtime
+                        .multiview
+                        .backend_start_completed(ticket, AdmissionOutcome::Rejected);
+                    self.queue(runtime, t);
+                    return;
+                }
+                match open(receipt.source.clone()) {
+                    Ok(mut decoder) => {
+                        decoder.set_audio(false);
+                        self.pictures[index] = Some(Picture {
+                            ticket,
+                            receipt,
+                            decoder,
+                            admitted: false,
+                            frame: None,
+                            terminal: false,
+                            paused: false,
+                            position_us: 0,
+                        });
+                    }
+                    Err(_) => {
+                        self.retire_receipt(index, receipt);
+                        let t = runtime
+                            .multiview
+                            .backend_start_completed(ticket, AdmissionOutcome::Unsupported);
+                        self.queue(runtime, t);
+                    }
+                }
+            }
+            Err(_) => {
+                let t = runtime
+                    .multiview
+                    .backend_start_completed(ticket, AdmissionOutcome::Rejected);
+                self.queue(runtime, t);
+            }
+        }
+    }
     pub fn revoke(&mut self, runtime: &mut Runtime) {
         self.restore_previous = false;
         self.replacements = [None; 9];
@@ -402,6 +542,9 @@ impl Driver {
         }
     }
     pub fn tick(&mut self, runtime: &mut Runtime, app: &App) {
+        for index in 0..9 {
+            self.finish_lease_if_ready(runtime, index);
+        }
         if self.closing && !commands::eligible(runtime, app) {
             self.restore_previous = false;
         }
@@ -424,7 +567,15 @@ impl Driver {
             let Some(effect) = runtime.multiview_effects.pop_front() else {
                 break;
             };
-            if !slots_ready
+            let start = match &effect {
+                Effect::PrepareMetadata { ticket, .. }
+                | Effect::Backend(BackendIntent::Load { ticket, .. }) => {
+                    Some(ticket.slot().index())
+                }
+                _ => None,
+            };
+            if (!slots_ready
+                || start.is_some_and(|i| self.workers[i].is_some() || !self.leases[i].is_empty()))
                 && !self.closing
                 && matches!(
                     &effect,
@@ -443,61 +594,7 @@ impl Driver {
             let Ok(job) = self.rx.try_recv() else {
                 break;
             };
-            let ticket = match &job {
-                Job::Metadata(t, _) | Job::Media(t, _) => *t,
-            };
-            let index = ticket.slot().index();
-            if !self.workers[index]
-                .as_ref()
-                .is_some_and(|w| w.ticket == ticket && !w.cancel.load(Ordering::Acquire))
-            {
-                continue;
-            }
-            self.workers[index] = None;
-            match job {
-                Job::Metadata(_, result) => {
-                    let mut coordinator = std::mem::take(&mut runtime.multiview);
-                    let transition = match result {
-                        Ok(metadata) => coordinator.metadata_succeeded(metadata, runtime, app),
-                        Err(error) => coordinator.metadata_failed(ticket, error),
-                    };
-                    runtime.multiview = coordinator;
-                    self.queue(runtime, transition);
-                }
-                Job::Media(_, result) => {
-                    let receipt = result
-                        .ok()
-                        .filter(|r| r.input.reauthorize(runtime, app).is_ok());
-                    if let Some(receipt) = receipt {
-                        match Session::open(receipt.source.clone(), Limits::default()) {
-                            Ok(mut decoder) => {
-                                decoder.set_audio(false);
-                                self.pictures[index] = Some(Picture {
-                                    ticket,
-                                    receipt,
-                                    decoder,
-                                    admitted: false,
-                                    frame: None,
-                                    terminal: false,
-                                    paused: false,
-                                    position_us: 0,
-                                });
-                            }
-                            Err(_) => {
-                                let transition = runtime
-                                    .multiview
-                                    .backend_start_completed(ticket, AdmissionOutcome::Unsupported);
-                                self.queue(runtime, transition);
-                            }
-                        }
-                    } else {
-                        let transition = runtime
-                            .multiview
-                            .backend_start_completed(ticket, AdmissionOutcome::Rejected);
-                        self.queue(runtime, transition);
-                    }
-                }
-            }
+            self.receive_job(runtime, app, job);
         }
         for index in 0..9 {
             let Some(picture) = self.pictures[index].as_mut() else {
@@ -582,12 +679,7 @@ impl Driver {
             }
         }
         for index in 0..9 {
-            if self.workers[index]
-                .as_ref()
-                .is_some_and(|w| w.cancel.load(Ordering::Acquire) && w.done.load(Ordering::Acquire))
-            {
-                self.workers[index] = None;
-            }
+            self.retire_worker(index);
             let retired = self.pictures[index].as_ref().is_none_or(|p| {
                 p.decoder.is_retired()
                     && (p.terminal
@@ -597,16 +689,11 @@ impl Driver {
             if retired && self.workers[index].is_none() {
                 if let Some(mut picture) = self.pictures[index].take() {
                     if let Some(lease) = picture.receipt.lease.take() {
-                        self.leases[index] = Some(LeaseWork {
-                            lease: Arc::new(std::sync::Mutex::new(Some(lease))),
-                            done: Arc::new(AtomicBool::new(false)),
-                            success: Arc::new(AtomicBool::new(false)),
-                            started: false,
-                        });
+                        self.retain_lease(index, lease);
                     }
                 }
             }
-            if let Some(cleanup) = self.leases[index].as_mut() {
+            if let Some(cleanup) = self.leases[index].front_mut() {
                 if !cleanup.started {
                     let lease = cleanup.lease.clone();
                     let done = cleanup.done.clone();
@@ -626,22 +713,9 @@ impl Driver {
                             done.store(true, Ordering::Release);
                         });
                 }
-                if cleanup.done.load(Ordering::Acquire) {
-                    if !cleanup.success.load(Ordering::Acquire) {
-                        self.cleanup_failed = true;
-                        self.restore_previous = false;
-                        self.replacements[index] = None;
-                        runtime.status =
-                            "Previous window playback session did not finish closing".into();
-                        runtime.changed();
-                    }
-                    self.leases[index] = None;
-                }
             }
-            if self.pictures[index].is_none()
-                && self.workers[index].is_none()
-                && self.leases[index].is_none()
-            {
+            self.finish_lease_if_ready(runtime, index);
+            if self.slot_drained(index) {
                 if let Some(ticket) = self.stopping[index].take() {
                     let transition = runtime
                         .multiview
@@ -664,7 +738,7 @@ impl Driver {
         }
     }
     fn apply(&mut self, runtime: &mut Runtime, app: &App, effect: Effect) {
-        if self.closing {
+        if self.closing || self.cleanup_failed {
             match &effect {
                 Effect::PrepareMetadata { work, .. } => {
                     work.cancellation().store(true, Ordering::Release);
@@ -702,6 +776,7 @@ impl Driver {
                         ticket,
                         cancel,
                         done,
+                        terminal_consumed: false,
                     });
                 } else {
                     let t = runtime
@@ -747,6 +822,7 @@ impl Driver {
                         ticket,
                         cancel,
                         done,
+                        terminal_consumed: false,
                     });
                 } else {
                     let t = runtime
@@ -801,3 +877,7 @@ impl Drop for Driver {
         }
     }
 }
+
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "ott_multiview_local_lease_tests.rs"]
+mod lease_tests;

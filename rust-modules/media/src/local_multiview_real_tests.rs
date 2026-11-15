@@ -8,6 +8,224 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+
+/// This listener is created only by the explicitly requested ignored fixture test.
+/// No arbitrary paths, upstream requests, persistent service or external network.
+struct FixtureServer {
+    address: std::net::SocketAddr,
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    redirects: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl FixtureServer {
+    fn open(root: PathBuf) -> Self {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let redirects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let flag = Arc::clone(&stop);
+        let finished = Arc::clone(&done);
+        let redirected = Arc::clone(&redirects);
+        let worker = std::thread::Builder::new()
+            .name("fixture-http".into())
+            .spawn(move || {
+                struct Done(Arc<AtomicBool>);
+                impl Drop for Done {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
+                let _done = Done(finished);
+                let expiry = Instant::now() + Duration::from_secs(45);
+                while !flag.load(Ordering::Acquire) && Instant::now() < expiry {
+                    match listener.accept() {
+                        Ok((socket, _)) => {
+                            let _ = Self::serve(socket, &root, &redirected);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2))
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .unwrap();
+        Self {
+            address,
+            stop,
+            done,
+            worker: Some(worker),
+            redirects,
+        }
+    }
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.address)
+    }
+    fn response(
+        socket: &mut std::net::TcpStream,
+        status: &str,
+        headers: &str,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+        write!(
+            socket,
+            "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n",
+            body.len()
+        )?;
+        socket.write_all(body)
+    }
+    fn serve(
+        mut socket: std::net::TcpStream,
+        root: &std::path::Path,
+        redirects: &std::sync::atomic::AtomicUsize,
+    ) -> std::io::Result<()> {
+        use std::io::Read;
+        socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+        socket.set_write_timeout(Some(Duration::from_millis(500)))?;
+        let mut header = Vec::new();
+        let mut scratch = [0u8; 1024];
+        while !header.windows(4).any(|w| w == b"\r\n\r\n") {
+            if header.len() >= 8192 {
+                return Self::response(&mut socket, "431 Request Header Fields Too Large", "", b"");
+            }
+            let n = socket.read(&mut scratch)?;
+            if n == 0 {
+                return Ok(());
+            }
+            header.extend_from_slice(&scratch[..n]);
+        }
+        let text = std::str::from_utf8(&header).map_err(|_| std::io::ErrorKind::InvalidData)?;
+        let mut request = text.lines().next().unwrap_or("").split_whitespace();
+        if request.next() != Some("GET") {
+            return Self::response(&mut socket, "405 Method Not Allowed", "", b"");
+        }
+        let path = request.next().unwrap_or("");
+        let mut file = None;
+        for index in [1, 3, 5] {
+            if path == format!("/files/{index}.mp4") {
+                file = Some(root.join(format!("slot{index}.mp4")));
+            }
+        }
+        for index in [2, 6, 7] {
+            if path == format!("/hls/{index}/master.m3u8") {
+                redirects.fetch_add(1, Ordering::AcqRel);
+                return Self::response(
+                    &mut socket,
+                    "302 Found",
+                    &format!("Location: /redirected/{index}/master.m3u8\r\n"),
+                    b"",
+                );
+            }
+            if path == format!("/redirected/{index}/master.m3u8") {
+                return Self::response(
+                    &mut socket,
+                    "200 OK",
+                    "Content-Type: application/vnd.apple.mpegurl\r\n",
+                    b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nmedia.m3u8\n",
+                );
+            }
+            if path == format!("/redirected/{index}/media.m3u8") {
+                redirects.fetch_add(1, Ordering::AcqRel);
+                return Self::response(
+                    &mut socket,
+                    "302 Found",
+                    &format!("Location: /edge/{index}/media.m3u8\r\n"),
+                    b"",
+                );
+            }
+            if path == format!("/edge/{index}/media.m3u8") {
+                file = Some(root.join(format!("slot{index}-hls/media.m3u8")));
+            }
+            if let Some(name) = path.strip_prefix(&format!("/edge/{index}/")) {
+                if name.len() == 13
+                    && name.starts_with("segment")
+                    && name.ends_with(".ts")
+                    && name.as_bytes()[7..10].iter().all(u8::is_ascii_digit)
+                {
+                    file = Some(root.join(format!("slot{index}-hls")).join(name));
+                }
+            }
+        }
+        let Some(file) = file else {
+            return Self::response(&mut socket, "404 Not Found", "", b"");
+        };
+        let mut input = File::open(file)?;
+        let length = input.metadata()?.len();
+        if length > 16 * 1024 * 1024 {
+            return Self::response(&mut socket, "413 Content Too Large", "", b"");
+        }
+        let range = text.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("range").then_some(value.trim())
+        });
+        let (start, end, partial) = if let Some(range) = range {
+            let Some((start, end)) = range.strip_prefix("bytes=").and_then(|r| r.split_once('-'))
+            else {
+                return Self::response(&mut socket, "416 Range Not Satisfiable", "", b"");
+            };
+            let Some(start) = start.parse::<u64>().ok().filter(|n| *n < length) else {
+                return Self::response(&mut socket, "416 Range Not Satisfiable", "", b"");
+            };
+            let end = if end.is_empty() {
+                length - 1
+            } else {
+                match end.parse::<u64>() {
+                    Ok(end) if end >= start => end.min(length - 1),
+                    _ => return Self::response(&mut socket, "416 Range Not Satisfiable", "", b""),
+                }
+            };
+            (start, end, true)
+        } else {
+            (0, length.saturating_sub(1), false)
+        };
+        use std::io::{Seek, SeekFrom};
+        input.seek(SeekFrom::Start(start))?;
+        let mut body = Vec::new();
+        input
+            .take(if length == 0 { 0 } else { end - start + 1 })
+            .read_to_end(&mut body)?;
+        let headers = if partial {
+            format!("Accept-Ranges: bytes\r\nContent-Range: bytes {start}-{end}/{length}\r\n")
+        } else {
+            "Accept-Ranges: bytes\r\n".into()
+        };
+        Self::response(
+            &mut socket,
+            if partial {
+                "206 Partial Content"
+            } else {
+                "200 OK"
+            },
+            &headers,
+            &body,
+        )
+    }
+    fn stop(&mut self) -> bool {
+        self.stop.store(true, Ordering::Release);
+        let end = Instant::now() + Duration::from_secs(2);
+        while (!self.done.load(Ordering::Acquire)
+            || self.worker.as_ref().is_some_and(|w| !w.is_finished()))
+            && Instant::now() < end
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.worker.as_ref().is_some_and(|w| w.is_finished()) {
+            if let Some(worker) = self.worker.take() {
+                return worker.join().is_ok();
+            }
+        }
+        self.worker.is_none()
+    }
+}
+impl Drop for FixtureServer {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
 struct Readers(Vec<Session>);
 impl Drop for Readers {
     fn drop(&mut self) {
@@ -123,22 +341,32 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
     assert!(plx_net::net::global_init());
     crate::ff::boot();
     assert!(available(), "bundled H264 decoder unavailable");
+    let mut server = FixtureServer::open(root.clone());
     let mut readers = Readers(Vec::new());
     let mut latches = Vec::new();
     let off = plx_base::task::OffFrame::for_test();
     for index in 0..9 {
-        let path = root.join(format!("slot{index}.mp4"));
         let latch = Arc::new(AtomicBool::new(false));
-        let held = HeldLocalFile::from_authorized(
-            &off,
-            File::open(&path).expect("fixture missing"),
-            path,
-            Arc::clone(&latch),
-        )
-        .unwrap();
+        let source = match index {
+            0 | 4 | 8 => {
+                let path = root.join(format!("slot{index}.mp4"));
+                ExternalSource::HeldLocal(
+                    HeldLocalFile::from_authorized(
+                        &off,
+                        File::open(&path).expect("fixture missing"),
+                        path,
+                        Arc::clone(&latch),
+                    )
+                    .unwrap(),
+                )
+            }
+            1 | 3 | 5 => ExternalSource::Http(server.url(&format!("/files/{index}.mp4"))),
+            2 | 6 | 7 => ExternalSource::Hls(server.url(&format!("/hls/{index}/master.m3u8"))),
+            _ => unreachable!(),
+        };
         readers
             .0
-            .push(Session::open(ExternalSource::HeldLocal(held), Limits::default()).unwrap());
+            .push(Session::open(source, Limits::default()).unwrap());
         latches.push(latch);
     }
     let path = root.join("slot0.mp4");
@@ -168,6 +396,14 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
             .len(),
         9,
         "pictures are not independent"
+    );
+    assert!(
+        server.redirects.load(Ordering::Acquire) >= 6,
+        "HLS readers did not traverse real master+media redirects"
+    );
+    eprintln!(
+        "mixed real decode: HeldLocal=3 HTTP=3 HLS=3, first PTS={:?}",
+        seen.iter().map(|s| s.last).collect::<Vec<_>>()
     );
     let audio_epoch = readers.0[0]
         .control
@@ -243,4 +479,5 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(reopened.is_retired());
+    assert!(server.stop(), "owned fixture HTTP worker did not retire");
 }

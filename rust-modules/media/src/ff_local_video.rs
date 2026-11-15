@@ -114,6 +114,34 @@ fn collect(mut r: Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
         out.extend_from_slice(&scratch[..n]);
     }
 }
+// Only a transport-validated effective URL can become a playlist's relative base.
+// Kept together with its bytes through explicit URLs, sniffed responses and refreshes.
+struct Manifest {
+    effective_url: String,
+    bytes: Vec<u8>,
+}
+impl Manifest {
+    fn from_remote(remote: Remote, c: &Control) -> Result<Self, Error> {
+        let effective_url = remote.source.effective_url().to_owned();
+        resource(&effective_url)?;
+        Ok(Self {
+            effective_url,
+            bytes: collect(remote, 512 * 1024, c)?,
+        })
+    }
+    fn fetch(url: &str, c: &Control) -> Result<Self, Error> {
+        Self::from_remote(Remote::open(url, false, c)?, c)
+    }
+    fn text(&self) -> Result<&str, Error> {
+        std::str::from_utf8(&self.bytes).map_err(|_| Error::Playlist)
+    }
+    fn media(&self) -> Result<Playlist, Error> {
+        parse_playlist(&self.effective_url, self.text()?)
+    }
+    fn variant(&self) -> Result<Option<String>, Error> {
+        select_variant(&self.effective_url, self.text()?)
+    }
+}
 #[derive(Clone)]
 struct Segment {
     sequence: u64,
@@ -260,6 +288,40 @@ fn parse_playlist(base: &str, text: &str) -> Result<Playlist, Error> {
     }
     Ok(out)
 }
+fn select_variant(url: &str, text: &str) -> Result<Option<String>, Error> {
+    if text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .next()
+        .map(str::trim)
+        != Some("#EXTM3U")
+    {
+        return Err(Error::Playlist);
+    }
+    let mut selected: Option<(u64, String)> = None;
+    let mut variant = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            if attr(value, "AUDIO").is_some() || attr(value, "VIDEO").is_some() {
+                return Err(Error::Unsupported);
+            }
+            variant = Some(
+                attr(value, "BANDWIDTH")
+                    .ok_or(Error::Playlist)?
+                    .parse::<u64>()
+                    .map_err(|_| Error::Playlist)?,
+            );
+        } else if !line.is_empty() && !line.starts_with('#') {
+            if let Some(bandwidth) = variant.take() {
+                if selected.as_ref().is_none_or(|(b, _)| bandwidth < *b) {
+                    selected = Some((bandwidth, child(url, line)?));
+                }
+            }
+        }
+    }
+
+    Ok(selected.map(|(_, url)| url))
+}
 struct Hls {
     url: String,
     playlist: Playlist,
@@ -280,51 +342,18 @@ impl Hls {
         c: &Control,
         first: Option<Remote>,
     ) -> Result<Self, Error> {
-        // At most one master indirection. Select the least advertised bandwidth, not a UHD default.
-        let bytes = if let Some(first) = first {
-            url = first.source.effective_url().to_owned();
-            collect(first, 512 * 1024, c)?
-        } else {
-            fetch(&url, 512 * 1024, c)?
+        // At most one master indirection. Every response carries its own validated base.
+        let first = match first {
+            Some(remote) => Manifest::from_remote(remote, c)?,
+            None => Manifest::fetch(&url, c)?,
         };
-        let text = std::str::from_utf8(&bytes).map_err(|_| Error::Playlist)?;
-        if text
-            .trim_start_matches('\u{feff}')
-            .lines()
-            .next()
-            .map(str::trim)
-            != Some("#EXTM3U")
-        {
-            return Err(Error::Playlist);
-        }
-        let mut selected: Option<(u64, String)> = None;
-        let mut variant = None;
-        for line in text.lines().map(str::trim) {
-            if let Some(value) = line.strip_prefix("#EXT-X-STREAM-INF:") {
-                if attr(value, "AUDIO").is_some() || attr(value, "VIDEO").is_some() {
-                    return Err(Error::Unsupported);
-                }
-                variant = Some(
-                    attr(value, "BANDWIDTH")
-                        .ok_or(Error::Playlist)?
-                        .parse::<u64>()
-                        .map_err(|_| Error::Playlist)?,
-                );
-            } else if !line.is_empty() && !line.starts_with('#') {
-                if let Some(bandwidth) = variant.take() {
-                    if selected.as_ref().is_none_or(|(b, _)| bandwidth < *b) {
-                        selected = Some((bandwidth, child(&url, line)?));
-                    }
-                }
-            }
-        }
-        let playlist = if let Some((_, u)) = selected {
-            url = u;
-            let b = fetch(&url, 512 * 1024, c)?;
-            parse_playlist(&url, std::str::from_utf8(&b).map_err(|_| Error::Playlist)?)?
+        let manifest = if let Some(child) = first.variant()? {
+            Manifest::fetch(&child, c)?
         } else {
-            parse_playlist(&url, text)?
+            first
         };
+        url = manifest.effective_url.clone();
+        let playlist = manifest.media()?;
         let start = if playlist.ended {
             0
         } else {
@@ -385,11 +414,8 @@ impl Hls {
             if !c.wait(self.playlist.target.min(Duration::from_secs(2)) / 2) {
                 return Err(Error::Cancelled);
             }
-            let b = fetch(&self.url, 512 * 1024, c)?;
-            let fresh = parse_playlist(
-                &self.url,
-                std::str::from_utf8(&b).map_err(|_| Error::Playlist)?,
-            )?;
+            let manifest = Manifest::fetch(&self.url, c)?;
+            let fresh = manifest.media()?;
             if fresh.init != self.playlist.init {
                 return Err(Error::Unsupported);
             }
@@ -401,6 +427,7 @@ impl Hls {
             if self.refreshed.elapsed() > Duration::from_secs(30) {
                 return Err(Error::Source);
             }
+            self.url = manifest.effective_url;
             self.playlist = fresh;
         }
         let n = out.len().min(self.bytes.len() - self.pos);
@@ -959,5 +986,37 @@ mod tests {
         assert!(playlist_header(b"\xef\xbb\xbf#EXTM3U\n"));
         assert!(!playlist_header(b"\x00\x00\x00\x18ftypisom"));
         assert!(!playlist_header(b"\x47\x40\x11\x10"));
+    }
+    #[test]
+    fn redirected_master_media_and_refresh_use_each_validated_response_base() {
+        let master = Manifest {
+            effective_url: "https://cdn.example.test/new/master.m3u8".into(),
+            bytes: b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nlow/list.m3u8\n".to_vec(),
+        };
+        assert_eq!(
+            master.variant().unwrap().as_deref(),
+            Some("https://cdn.example.test:443/new/low/list.m3u8")
+        );
+        let media = Manifest {
+            effective_url: "https://edge.example.test/session/list.m3u8".into(),
+            bytes: b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:4\n#EXTINF:2,\na.ts\n".to_vec(),
+        };
+        assert_eq!(
+            media.media().unwrap().segments[0].url,
+            "https://edge.example.test:443/session/a.ts"
+        );
+        let refresh = Manifest {
+            effective_url: "https://edge2.example.test/rotated/list.m3u8".into(),
+            bytes: b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:5\n#EXTINF:2,\nb.ts\n".to_vec(),
+        };
+        assert_eq!(
+            refresh.media().unwrap().segments[0].url,
+            "https://edge2.example.test:443/rotated/b.ts"
+        );
+        assert!(parse_playlist(
+            &media.effective_url,
+            "#EXTM3U\n#EXTINF:2,\nhttps://old.example.test/a.ts\n"
+        )
+        .is_err());
     }
 }

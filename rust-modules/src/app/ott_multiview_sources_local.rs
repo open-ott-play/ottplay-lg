@@ -50,9 +50,9 @@ impl AuthorizedInput {
                 resolved.lease,
             )
         };
-        if self.is_cancelled() || !self.current_plex_authority() {
-            return Err(Error::Cancelled);
-        }
+        // Even a newly cancelled result transfers its private lease to the
+        // owner for tracked retirement. This receipt never grants admission:
+        // the main owner reauthorizes it again before opening a decoder.
         Ok(LocalResolved {
             input: self,
             source,
