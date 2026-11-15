@@ -563,7 +563,8 @@ fn classic_settings_footer_and_zero_dispatch_the_same_published_save() {
 fn classic_settings_save_keys_dispatch_only_the_current_rows_exact_action() {
     use plx_machine::machine::UiMode;
     for (sym, wcode) in [(b'0' as u32, 39), (0, consts::WCODE_PLAY),
-        (0, consts::WCODE_PAUSE), (0, consts::WCODE_GREEN)] {
+        (0, consts::WCODE_PAUSE), (0, consts::WCODE_PLAYPAUSE),
+        (consts::WCODE_PLAYPAUSE, 0), (0, consts::WCODE_GREEN)] {
         let mut screen = settings_group_screen(UiMode::Classic);
         let before = screen.snapshot.clone();
         let selection = screen.form.selected_key();
@@ -581,7 +582,8 @@ fn classic_settings_save_keys_dispatch_only_the_current_rows_exact_action() {
 fn classic_settings_save_keys_reject_repeat_release_and_edge_redelivery() {
     use plx_machine::machine::UiMode;
     for (sym, wcode) in [(b'0' as u32, 39), (0, consts::WCODE_PLAY),
-        (0, consts::WCODE_PAUSE), (0, consts::WCODE_GREEN)] {
+        (0, consts::WCODE_PAUSE), (0, consts::WCODE_PLAYPAUSE),
+        (consts::WCODE_PLAYPAUSE, 0), (0, consts::WCODE_GREEN)] {
         let mut screen = settings_group_screen(UiMode::Classic);
         for edge in [Edge::Repeat, Edge::Up] {
             assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
@@ -631,8 +633,10 @@ fn classic_settings_save_keys_require_unique_enabled_canonical_address() {
         }
         view.revision += 1;
         screen.install(Arc::new(view));
-        assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
-            raw_mode(consts::WCODE_GREEN, Edge::Down))).is_empty(), "{case}");
+        for wcode in [consts::WCODE_GREEN, consts::WCODE_PLAYPAUSE] {
+            assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
+                raw_mode(wcode, Edge::Down))).is_empty(), "{case}/{wcode}");
+        }
     }
 }
 
@@ -646,8 +650,20 @@ fn classic_settings_save_keys_do_not_escape_mode_page_or_modal_owner() {
         view.page_id = page.into();
         view.revision += 1;
         screen.install(Arc::new(view));
-        assert!(mode_actions(&step_mode(&mut screen, mode,
-            raw_mode(consts::WCODE_GREEN, Edge::Down))).is_empty(), "{page}");
+        for wcode in [consts::WCODE_GREEN, consts::WCODE_PLAYPAUSE] {
+            let actions = mode_actions(&step_mode(&mut screen, mode,
+                raw_mode(wcode, Edge::Down)));
+            assert!(!actions.iter().any(|action| matches!(action,
+                OttAction::EditSetting(key) if key.starts_with("settings.draft:") && key.ends_with(":save"))),
+                "{page}/{wcode} must not save a settings draft");
+            if mode == UiMode::Classic && page == "channels" && wcode == consts::WCODE_PLAYPAUSE {
+                // The existing list shortcut remains Categories; leaving Settings
+                // withdraws Save authority without swallowing ordinary list input.
+                assert_eq!(actions, vec![OttAction::ShowCategories]);
+            } else {
+                assert!(actions.is_empty(), "{page}/{wcode}");
+            }
+        }
     }
     for owner in ["editor", "reader", "browse"] {
         let mut screen = settings_group_screen(UiMode::Classic);
@@ -661,8 +677,10 @@ fn classic_settings_save_keys_do_not_escape_mode_page_or_modal_owner() {
             }
             _ => unreachable!(),
         }
-        assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
-            raw_mode(consts::WCODE_GREEN, Edge::Down))).is_empty(), "{owner}");
+        for wcode in [consts::WCODE_GREEN, consts::WCODE_PLAYPAUSE] {
+            assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
+                raw_mode(wcode, Edge::Down))).is_empty(), "{owner}/{wcode}");
+        }
         match owner {
             "editor" => assert!(screen.editor.is_some()),
             "reader" => assert!(screen.reading),
@@ -676,18 +694,20 @@ fn classic_settings_save_keys_do_not_escape_mode_page_or_modal_owner() {
 fn classic_settings_save_keys_preserve_canonical_navigation_and_digit_namespace() {
     use plx_machine::machine::UiMode;
     for (sym, wcode) in [(0, 48), (0, 39), (b'1' as u32, 30),
-        (b'p' as u32, 0), (b' ' as u32, 0), (0, consts::WCODE_PLAYPAUSE)] {
+        (b'p' as u32, 0), (b' ' as u32, 0)] {
         let mut screen = settings_group_screen(UiMode::Classic);
         assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
             settings_key(sym, wcode, Edge::Down))).is_empty());
     }
     for key in [Key::Up, Key::Down, Key::Left, Key::Right] {
-        let mut screen = settings_group_screen(UiMode::Classic);
-        let mut event = raw_mode(consts::WCODE_PLAY, Edge::Down);
-        if let ScreenEvent::Input(input) = &mut event {
-            if let InputKind::Key { key: canonical, .. } = &mut input.kind { *canonical = key; }
+        for wcode in [consts::WCODE_PLAY, consts::WCODE_PLAYPAUSE] {
+            let mut screen = settings_group_screen(UiMode::Classic);
+            let mut event = raw_mode(wcode, Edge::Down);
+            if let ScreenEvent::Input(input) = &mut event {
+                if let InputKind::Key { key: canonical, .. } = &mut input.kind { *canonical = key; }
+            }
+            assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic, event)).is_empty());
         }
-        assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic, event)).is_empty());
     }
 }
 
@@ -700,14 +720,18 @@ fn classic_settings_save_keys_follow_replaced_nonce_and_do_not_save_a_child_pick
     view.rows[1].id = "settings.draft:18446744073709551615:save".into();
     view.rows[1].action = OttAction::EditSetting(view.rows[1].id.clone());
     screen.install(Arc::new(view));
-    assert_eq!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
-        raw_mode(consts::WCODE_GREEN, Edge::Down))),
-        vec![OttAction::EditSetting("settings.draft:18446744073709551615:save".into())]);
+    for wcode in [consts::WCODE_GREEN, consts::WCODE_PLAYPAUSE] {
+        assert_eq!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
+            raw_mode(wcode, Edge::Down))),
+            vec![OttAction::EditSetting("settings.draft:18446744073709551615:save".into())]);
+    }
     let mut child = (*screen.snapshot).clone();
     child.revision += 1;
     child.rows[1].id = "settings.draft:18446744073709551615:choose:uiFontScale:100".into();
     child.rows[1].action = OttAction::EditSetting(child.rows[1].id.clone());
     screen.install(Arc::new(child));
-    assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
-        raw_mode(consts::WCODE_GREEN, Edge::Down))).is_empty());
+    for wcode in [consts::WCODE_GREEN, consts::WCODE_PLAYPAUSE] {
+        assert!(mode_actions(&step_mode(&mut screen, UiMode::Classic,
+            raw_mode(wcode, Edge::Down))).is_empty());
+    }
 }

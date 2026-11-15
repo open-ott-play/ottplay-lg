@@ -18,6 +18,19 @@ exits; **Cancel**, or Back within that confirmation, keeps the application open.
 Reaching a horizontal focus boundary with Left does not itself mean Back.
 The explicit contextual-arrow choice described below retains its own actions.
 
+Opening Settings from the list's Menu remembers that caller. Back from the
+Settings root reopens the same Menu with Settings focused; the next Back closes
+Menu to the retained list. A list covering fullscreen video then returns to
+that video through its ordinary Back. Inner setting pickers return to Settings
+first. A replaced source, authentication session, interface mode or screen
+owner retires the caller receipt. Direct Settings entry keeps its existing root
+return, and the fullscreen player's own Menu keeps its separate return path.
+
+Mixed Favorites show provider, profile, subprofile and source alias in the
+selected-item details, omitting empty or repeated labels. The origin remains
+visible beside a live item's programme information; ordinary channel rows do
+not gain an extra line and labels never determine playback identity.
+
 ## List and playback preferences
 
 The native player exposes these preferences in Settings. They use the same
@@ -32,6 +45,9 @@ remain a group draft until **Save Settings** succeeds. **Cancel** discards
 unsubmitted changes; Back from a value picker returns to its group and keeps
 other draft choices. Interface mode, profile, remote-control and parental
 operations have separate save flows and are not part of this draft.
+On the grouped Settings page, Play, Pause and the combined Play/Pause key
+activate its current **Save Settings** action. They do not save an open value
+picker, covered editor or a stale draft.
 
 - **Classic list rows** (`pageSize`): a preferred count from 10 to 30, default 25.
   The effective count can be smaller because of larger interface text or the
@@ -43,8 +59,9 @@ operations have separate save flows and are not part of this draft.
 - **Classic list arrows** (`arrowFun`): paging (`0`, default), volume (`1`) or
   contextual navigation (`2`). Volume uses the current playback volume controls
   when available. Contextual navigation opens categories and programme details
-  for channels, or the existing Back and description actions for media. Category
-  lists continue to page. These choices affect the Classic catalogue body, not
+  for channels, or the existing Back and description actions for media. In
+  Categories, contextual Left opens the existing Menu and Right selects the
+  focused category, just like OK. Paging mode retains category paging. These choices affect the Classic catalogue body, not
   editors, the Modern grid or fullscreen controls.
 - **Seek step for 1/3** (`seek13Duration`): seconds to skip backward with `1` or
   forward with `3` during a video or archive. The default is 15 seconds. Choices

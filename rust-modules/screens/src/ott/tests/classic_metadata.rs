@@ -760,3 +760,32 @@ fn classic_sidebar_next_title_is_mint_and_its_clock_is_white_until_rollover() {
     let expired = sidebar_runs(row, Some(1_700_000_120), screen.snapshot.classic_preferences);
     assert!(!expired.iter().any(|run| run.text.contains("NOW_A") || run.text.contains("NOW_B")));
 }
+
+#[test]
+fn favorite_origin_is_painted_once_for_live_and_nonlive_selected_rows() {
+    let _serial = plx_base::testlock::serial();
+    let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+    let mut row = fixture("NEXT_SYNOPSIS").snapshot.rows[0].clone();
+    row.id = "favorite:retained-identity".into();
+    row.detail = "m3u · Home · Slot B · Living room".into();
+    let preferences = plx_appkit::classic_settings::Preferences::default();
+    let before = row.clone();
+    let live = sidebar_runs(&row, Some(1_700_000_010), preferences);
+    assert_eq!(live.iter().filter(|run| run.text == row.detail).count(), 1);
+    assert!(live.iter().any(|run| run.text == "NOW_A"));
+    assert!(live.iter().any(|run| run.text == "SYNOPSIS_A"));
+    assert_eq!(row, before, "painting cannot change the retained source/action");
+    row.guide = None;
+    row.current_programme = None;
+    row.media = None;
+    let vod = sidebar_runs(&row, None, preferences);
+    assert_eq!(vod.iter().filter(|run| run.text == row.detail).count(), 1);
+    row.id = "ordinary-channel".into();
+    row.guide = before.guide;
+    let ordinary = sidebar_runs(&row, Some(1_700_000_010), preferences);
+    assert!(!ordinary.iter().any(|run| run.text == row.detail));
+    row.id = "favorite:retained-identity".into();
+    row.detail.clear();
+    let empty = sidebar_runs(&row, Some(1_700_000_010), preferences);
+    assert!(empty.iter().any(|run| run.text == "NOW_A"));
+}

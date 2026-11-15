@@ -47,7 +47,7 @@ fn playback() -> (plx_media::route::PlaybackSession, OttPlayerOffer) {
     plx_media::route::install_plex_playback_for_test(&mut session,
         plx_plex::plex::ServerId::from_raw(0), "remote-fixture");
     let source = plx_media::route::playback_identity(&session).unwrap();
-    (session, OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows: false, accept: Action::OpenCatalog, guide: true })
+    (session, OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows: false, accept: Action::OpenCatalog, guide: true, records: false })
 }
 fn bare(session: &plx_media::route::PlaybackSession) -> PlayerScreen {
     let mut page = PlayerScreen::new(ENTRY);
@@ -533,5 +533,28 @@ fn failed_current_source_keeps_catalogue_and_channel_keys_but_never_seeks() {
             assert!(requests.is_empty(), "dead source cannot receive seek or play/pause");
         }
         offer.seek_arrows = false;
+    }
+}
+
+#[test]
+fn green_opens_only_an_offered_archive_and_does_not_retarget_replacement() {
+    let _lock = plx_base::testlock::serial();
+    let (session, mut offer) = playback();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        offer.records = false;
+        let (_, requests) = send(&mut bare(&session), &session, Some(&offer), mode,
+            0, 487, Edge::Down, false, None);
+        assert!(ott(&requests).is_empty());
+        offer.records = true;
+        let (_, requests) = send(&mut bare(&session), &session, Some(&offer), mode,
+            0, 487, Edge::Down, false, None);
+        assert_eq!(ott(&requests).len(), 1);
+        assert_eq!(ott(&requests)[0].action, Action::OpenRecords);
+        assert_eq!(ott(&requests)[0].source, offer.source);
+        let mut retired = offer.clone();
+        retired.recovery_only = true;
+        let (_, requests) = send(&mut bare(&session), &session, Some(&retired), mode,
+            0, 487, Edge::Down, false, None);
+        assert!(ott(&requests).is_empty(), "recovery has no archive authority");
     }
 }

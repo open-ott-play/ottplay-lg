@@ -2931,20 +2931,21 @@ mod fixture_preflight_tests {
 
     #[test]
     fn pre_ott_startup_footer_recording_headers_remain_refused() {
-        // Only three reviewed anchors that cannot instantiate OTT migrate their
-        // unused census header. The production parser still rejects the prior
-        // contract before reading arbitrary old recordings.
-        const OLD: u64 = 12606294384504129118;
-        assert_ne!(OLD, state_fp());
+        // Three controlled anchors cannot instantiate OTT or Player/More. Only
+        // their unused census headers migrate; arbitrary prior recordings still
+        // fail before parsing a segment under either predecessor contract.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/replay");
-        for name in ["1-boot-home-chip-grid", "6-settings-family", "12-filmography-detail-return"] {
-            let dir = root.join(name);
-            let mut manifest: Value = serde_json::from_str(
-                &std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
-            manifest["state_fp"] = json!(OLD);
-            let malformed_segment: &[u8] = b"not a recording record\n";
-            assert_eq!(Recording::parse(&manifest.to_string(), &[malformed_segment], state_fp()).err(),
-                Some(RecError::StateShape { theirs: OLD, ours: state_fp() }), "{name}");
+        for old in [12606294384504129118_u64, 3202398292000993197] {
+            assert_ne!(old, state_fp());
+            for name in ["1-boot-home-chip-grid", "6-settings-family", "12-filmography-detail-return"] {
+                let dir = root.join(name);
+                let mut manifest: Value = serde_json::from_str(
+                    &std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+                manifest["state_fp"] = json!(old);
+                let malformed_segment: &[u8] = b"not a recording record\n";
+                assert_eq!(Recording::parse(&manifest.to_string(), &[malformed_segment], state_fp()).err(),
+                    Some(RecError::StateShape { theirs: old, ours: state_fp() }), "{name}");
+            }
         }
     }
 

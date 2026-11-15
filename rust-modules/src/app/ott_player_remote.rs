@@ -89,16 +89,16 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
         && playback_step::pending_id(runtime, app).is_some()
     {
         return Some(OttPlayerOffer { source: playback_step::pending_source(runtime)?,
-            recovery_only: true, seek_arrows: false, accept: Action::OpenCatalog, guide: false });
+            recovery_only: true, seek_arrows: false, accept: Action::OpenCatalog, guide: false, records: false });
     }
     if let Some(source) = loading_source(runtime, app) {
         return Some(OttPlayerOffer { source, recovery_only: true, seek_arrows: false,
-            accept: Action::OpenCatalog, guide: false });
+            accept: Action::OpenCatalog, guide: false, records: false });
     }
     if failed_playback::ready(runtime, app) {
         let source = failed_playback::current(runtime, app)?.identity.clone()?;
         return Some(OttPlayerOffer { source: source.into(), recovery_only: true, seek_arrows: false,
-            accept: Action::OpenCatalog, guide: false });
+            accept: Action::OpenCatalog, guide: false, records: false });
     }
     if runtime.playing.is_none() {
         if app.pages.surface_up() || input_policy::navigation(runtime).is_err() { return None; }
@@ -106,7 +106,7 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
         let accept = if runtime.view_selection().1 || !lifecycle::viewer_paused() {
             Action::OpenCatalog
         } else { Action::TogglePause };
-        return Some(OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows: true, accept, guide: false });
+        return Some(OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows: true, accept, guide: false, records: false });
     }
     let playing = playing(runtime, app)?;
     let source = playing.identity.clone()?;
@@ -121,7 +121,8 @@ pub(super) fn offer(runtime: &Runtime, app: &App) -> Option<OttPlayerOffer> {
     } else if playing.archive.is_some() {
         Action::OpenGuide
     } else { Action::OpenCatalog };
-    Some(OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows, accept, guide })
+    let records = guide && guide_ui::records_available(runtime, &playing.profile, &playing.entry);
+    Some(OttPlayerOffer { source: source.into(), recovery_only: false, seek_arrows, accept, guide, records })
 }
 
 fn action_allowed(offer: &OttPlayerOffer, action: Action) -> bool {
@@ -130,8 +131,9 @@ fn action_allowed(offer: &OttPlayerOffer, action: Action) -> bool {
     match action {
         Action::SeekBackward | Action::SeekForward => offer.seek_arrows,
         Action::OpenGuide => offer.guide,
+        Action::OpenRecords => offer.records,
         Action::TogglePause => offer.accept == Action::TogglePause,
-        Action::ShowDescription => !offer.seek_arrows,
+        Action::ShowDescription => true,
         Action::Previous | Action::Next | Action::OpenCatalog | Action::OpenCategories
             | Action::OpenMenu | Action::ShowInfo => true,
     }
@@ -176,8 +178,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
         Action::OpenMenu => Some(PlayerReq::OpenOverlay(
             plx_screens::player::overlay::OverlayKind::More { page: None })),
         Action::ShowInfo => Some(PlayerReq::ExtendDefaultHud),
-        Action::ShowDescription => Some(if plx_appkit::info_panel::live_information_available(
-            app.bridge.metadata_view(), (runtime.wall_clock_ms / 1000) as i64) {
+        Action::ShowDescription => Some(if playback_menu::description_available(runtime, app) {
             PlayerReq::OpenOverlay(plx_screens::player::overlay::OverlayKind::Info)
         } else { PlayerReq::ExtendDefaultHud }),
         Action::TogglePause => Some(PlayerReq::Transport(None)),
@@ -197,9 +198,11 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &OttPlayerR
             }
             None
         }
-        Action::OpenGuide => {
+        Action::OpenGuide | Action::OpenRecords => {
             let id = runtime.playing.as_ref().ok_or(CHANGED)?.selection_id.clone();
-            handle_action(runtime, app, OttAction::OpenGuide(id))?;
+            let action = if request.action == Action::OpenRecords { OttAction::OpenRecords(id) }
+                else { OttAction::OpenGuide(id) };
+            handle_action(runtime, app, action)?;
             player_browse::present(runtime, app, None, "guide");
             None
         }

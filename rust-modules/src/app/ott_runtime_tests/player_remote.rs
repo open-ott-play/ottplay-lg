@@ -39,7 +39,7 @@ pub(super) fn open_fullscreen_catalog(app: &mut App) -> plx_machine::machine::In
     ott_surface(app).expect("fullscreen OK mounts the catalogue panel")
 }
 
-fn admit_latest_channel(app: &mut App, wanted: &str) {
+pub(super) fn admit_latest_channel(app: &mut App, wanted: &str) {
     let queued = app.ott.as_mut().unwrap().resolver_next.take()
         .expect("physical channel input queued its ordinary resolver");
     assert_eq!(queued.entry.as_ref().unwrap().id, wanted);

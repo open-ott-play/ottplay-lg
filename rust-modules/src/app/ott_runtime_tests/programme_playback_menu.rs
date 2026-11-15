@@ -41,7 +41,7 @@ fn request(app: &mut App, action: Action) -> PlayerMenuRequest {
     let wanted = match action { Action::Categories => 40, Action::Guide => 41,
         Action::Records => 42, Action::TogglePause => 43, Action::ReloadStream => 44,
         Action::ReturnLive => 45, Action::Chapters => 46, Action::FromBeginning => 47,
-        Action::GoToDetail => 48 };
+        Action::GoToDetail => 48, Action::Description => 49, Action::Favorites => 50 };
     // Refresh uses the actual publication before the physical row is selected.
     idle(app);
     for _ in 0..24 {
@@ -280,4 +280,100 @@ fn menu_real_guide_row_reports_refusal_in_more_after_source_binding_changes() {
     assert_eq!(menu.playback_failure_note(), Some("This action is no longer available for the playing source"));
     assert!(app.ott.as_ref().unwrap().guide.is_none());
     assert!(app.ott.as_ref().unwrap().play_target.is_none());
+}
+
+#[test]
+fn finite_summary_more_description_is_source_bound_and_missing_summary_is_not_offered() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for changed in [false, true] {
+        let mut app = menu_app(false);
+        let mut now = app.bridge.metadata_view().now_playing().unwrap().clone();
+        now.summary = "The complete playing film synopsis".into();
+        app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::SetNowPlaying(Some(now)));
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        let request = request(&mut app, Action::Description);
+        let source = route::playback_identity(&app.player.session);
+        if changed { app.ott.as_mut().unwrap().playing.as_mut().unwrap().identity = None; }
+        let result = perform(&mut app, request);
+        if changed {
+            assert!(result.is_err());
+            still_more(&app);
+        } else {
+            assert!(matches!(result, Ok(Some(PlayerReq::OpenOverlay(OverlayKind::Info)))));
+        }
+        assert_eq!(route::playback_identity(&app.player.session), source);
+        assert!(app.ott.as_ref().unwrap().play_target.is_none());
+    }
+    let mut app = menu_app(false);
+    let mut now = app.bridge.metadata_view().now_playing().unwrap().clone();
+    now.summary.clear();
+    app.bridge.metadata_run(plx_data::stores::metadata::MetadataCmd::SetNowPlaying(Some(now)));
+    crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+    assert!(!app.bridge.playback_menu_offer().unwrap().actions.description);
+}
+
+#[test]
+fn favorites_more_uses_the_durable_category_choice_and_only_current_settlement_opens_list() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for navigate_away in [false, true] {
+        let mut app = menu_app(false);
+        let candidate = app.ott.as_ref().unwrap().category_choice_candidate(None).unwrap();
+        let source = route::playback_identity(&app.player.session);
+        let request = request(&mut app, Action::Favorites);
+        assert!(matches!(perform(&mut app, request), Ok(None)));
+        let runtime = app.ott.as_mut().unwrap();
+        assert!(runtime.saving && runtime.pending_category_choice.is_some());
+        assert_eq!(runtime.page, "categories", "the durable selection has not committed yet");
+        assert!(matches!(runtime.rx.recv_timeout(Duration::from_secs(1)).unwrap(), Job::Saved(Err(_), None, false, _)));
+        if navigate_away { runtime.accepted_navigation(false); runtime.page = "profiles"; }
+        runtime.tx.send(Job::Saved(Ok(candidate), None, false, json!({"persisted":true})))
+            .unwrap_or_else(|_| panic!("fixture writer receiver"));
+        runtime_tick(&mut app);
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(runtime.page, if navigate_away { "profiles" } else { "favorites" });
+        assert!(runtime.saved.favorites_selected);
+        assert!(runtime.play_target.is_none());
+        assert_eq!(route::playback_identity(&app.player.session), source);
+    }
+}
+
+#[test]
+fn records_more_offers_only_advertised_archive_and_rechecks_before_opening() {
+    use plx_data::ott::archive::{CatchupMode, CatchupSource};
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for remove_archive in [false, true] {
+        let mut app = menu_app(true);
+        let runtime = app.ott.as_mut().unwrap();
+        runtime.wall_clock_ms = 1_700_000_000_000;
+        let mut entry = runtime.catalog.entries[0].clone();
+        entry.live.as_mut().unwrap().guide_id = Some("playing-channel".into());
+        entry.live.as_mut().unwrap().guide_feed = "https://media.invalid/guide.xml".into();
+        entry.live.as_mut().unwrap().catchup = Some(CatchupSource {
+            mode: CatchupMode::Append, source: "?start={utc}&end={utcend}".into(),
+            retention_seconds: 86400, correction_seconds: 0,
+        });
+        runtime.catalog.entries[0] = entry.clone();
+        runtime.playing.as_mut().unwrap().entry = entry;
+        crate::app::ott_runtime::publish_remote_player_offer(&mut app);
+        let request = request(&mut app, Action::Records);
+        if remove_archive {
+            app.ott.as_mut().unwrap().catalog.entries[0].live.as_mut().unwrap().catchup = None;
+        }
+        let source = route::playback_identity(&app.player.session);
+        let result = perform(&mut app, request);
+        if remove_archive {
+            assert!(result.is_err());
+            still_more(&app);
+        } else {
+            assert!(matches!(result, Ok(None)));
+            let runtime = app.ott.as_ref().unwrap();
+            assert!(matches!(runtime.metadata_query, Some(plx_data::ott::guide::Query::Records { .. })));
+            assert_eq!(runtime.metadata_target.as_ref().unwrap().1, "c");
+        }
+        assert_eq!(route::playback_identity(&app.player.session), source);
+        assert!(app.ott.as_ref().unwrap().play_target.is_none());
+    }
 }
