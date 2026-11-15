@@ -1690,7 +1690,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             }
             if !super::playback_allowed(app) {
                 data["input"] = json!([]);
-            } else if controls::transport_ready(app) {
+            } else if super::player_volume_ready(runtime, app) {
                 data["input"].as_array_mut().unwrap().extend([
                     json!("mute"),
                     json!("volume_up"),
@@ -1839,9 +1839,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 p["key"].as_str(),
                 Some("mute" | "volume_up" | "volume_down")
             ) {
-                if !controls::transport_ready(app) {
+                let Some(source) = super::capture_volume_destination(runtime, app) else {
                     return Some(rejected("No active foreground playback"));
-                }
+                };
                 let current = app.player.volume.desired();
                 let (level, muted) = match p["key"].as_str() {
                     Some("mute") => (current.level(), !current.muted()),
@@ -1849,6 +1849,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                     _ => (current.level().saturating_sub(5), false),
                 };
                 let effect = AfterReply::Volume {
+                    source,
                     level,
                     muted,
                     last_input: app.last_input,
@@ -1903,7 +1904,7 @@ fn legacy_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Opt
     let p = &inv.params;
     let mut translated = inv.clone();
     match p["command"].as_str() {
-        Some("set_volume") => return Some(controls::volume_command(app, inv)),
+        Some("set_volume") => return Some(controls::volume_command(runtime, app, inv)),
         Some("channel_by_number" | "channel_by_name") => {
             translated.action = "play".into();
             translated.params = json!({"query":p.get("channel_name").or_else(||p.get("channel_number")).cloned().unwrap_or(Value::Null)});
@@ -1976,25 +1977,23 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
     for effect in runtime.remote.take_effects() {
         match effect {
             AfterReply::Volume {
+                source,
                 level,
                 muted,
                 last_input,
             } => {
                 if super::input_policy::navigation(runtime).is_ok()
                     && app.last_input == last_input
-                    && controls::transport_ready(app)
                 {
-                    if let Some(desired) =
-                        plx_media::player::volume::DesiredVolume::new(i32::from(level), muted)
-                    {
-                        plx_media::player::volume::set_volume(
-                            &mut app.adapters.player,
-                            &mut app.player.volume,
-                            desired,
-                        );
-                        app.last_input = clock::now();
-                        runtime.changed();
-                    }
+                    let current = super::capture_volume_destination(runtime, app);
+                    super::with_volume_destination(&source, current.as_ref(), &mut (&mut *runtime, &mut *app),
+                        |(runtime, app)| {
+                            if let Some(desired) = plx_media::player::volume::DesiredVolume::new(i32::from(level), muted) {
+                                super::set_player_volume_with_runtime(runtime, app, desired);
+                                app.last_input = clock::now();
+                                runtime.changed();
+                            }
+                        });
                 }
             }
             AfterReply::Standby(standby) => {

@@ -101,6 +101,115 @@ pub(super) fn local_multiview_draw(app: &mut App) {
 pub(super) fn local_multiview_player_request(app: &mut App, request: &plx_screens::registry::PlayerReq) -> bool {
     multiview_local::player_request(app, request)
 }
+fn local_volume_owned(runtime: &Runtime) -> bool {
+    runtime.multiview_local.active() || runtime.multiview_local.has_work()
+        || multiview_local_present::has_owned_work(runtime)
+}
+fn player_volume_ready(runtime: &Runtime, app: &App) -> bool {
+    if local_volume_owned(runtime) {
+        runtime.multiview_local.owns_ui(runtime, app)
+    } else { commands::playback_ready(app) }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum VolumeDestination<I = plx_media::route::PlaybackIdentity,
+    T = plx_media::route::PlayRequestTicket> {
+    Local { runtime: String, scene: String },
+    Native { identity: I, ticket: T },
+}
+fn capture_volume_destination(runtime: &Runtime, app: &App) -> Option<VolumeDestination> {
+    if !player_volume_ready(runtime, app) { return None; }
+    if local_volume_owned(runtime) {
+        let scene = runtime.multiview.scene_status(runtime)?;
+        Some(VolumeDestination::Local { runtime: scene.runtime, scene: scene.scene })
+    } else {
+        Some(VolumeDestination::Native {
+            identity: plx_media::route::playback_identity(&app.player.session)?,
+            ticket: plx_media::route::play_request_ticket(),
+        })
+    }
+}
+// Check the captured destination before mutating desired volume or submitting
+// either actuator. An acknowledgement cannot migrate across playback owners.
+fn with_volume_destination<I: PartialEq, T: PartialEq, C>(
+    captured: &VolumeDestination<I, T>, current: Option<&VolumeDestination<I, T>>,
+    context: &mut C, apply: impl FnOnce(&mut C)) -> bool {
+    if current != Some(captured) { return false; }
+    apply(context);
+    true
+}
+// The local actuator's refusal/defer must never fall through to an older native
+// object. Keep this choice explicit and testable without invoking either sink.
+fn dispatch_player_volume<C>(context: &mut C, desired: plx_media::player::volume::DesiredVolume,
+    local_owned: bool, local: impl FnOnce(&mut C, plx_media::player::volume::DesiredVolume) -> bool,
+    native: impl FnOnce(&mut C, plx_media::player::volume::DesiredVolume) -> bool) -> bool {
+    if local_owned { local(context, desired) } else { native(context, desired) }
+}
+fn set_player_volume_with_runtime(runtime: &mut Runtime, app: &mut App,
+    desired: plx_media::player::volume::DesiredVolume) -> bool {
+    let local_owned = local_volume_owned(runtime);
+    dispatch_player_volume(&mut (runtime, app), desired, local_owned,
+        |(runtime, app), desired| {
+            app.player.volume.set_desired(desired);
+            app.player.volume.forget_pipeline();
+            multiview_local_present::apply_volume(runtime, app)
+        },
+        |(_, app), desired| plx_media::player::volume::set_volume(
+            &mut app.adapters.player, &mut app.player.volume, desired))
+}
+
+#[cfg(test)]
+mod volume_destination_tests {
+    use super::{dispatch_player_volume, with_volume_destination, VolumeDestination};
+    use plx_media::player::volume::{DesiredVolume, VolumeState};
+    #[test]
+    fn deferred_local_gain_keeps_the_single_desired_level_and_mute_without_native_fallback() {
+        let mut context = (VolumeState::new(), 0usize);
+        for desired in [DesiredVolume::new(37, false).unwrap(), DesiredVolume::new(37, true).unwrap(),
+            DesiredVolume::new(37, false).unwrap()] {
+            assert!(!dispatch_player_volume(&mut context, desired, true,
+                |(state, _), desired| { state.set_desired(desired); false },
+                |(_, native_calls), _| { *native_calls += 1; true }));
+            assert_eq!(context.0.desired(), desired);
+            assert_eq!(context.0.readback().measured_output, None);
+            assert_eq!(context.1, 0, "deferred local gain cannot actuate an older native object");
+        }
+    }
+    #[test]
+    fn absent_local_custody_preserves_native_submission_and_does_not_call_the_local_sink() {
+        let mut calls = (0usize, 0usize);
+        assert!(dispatch_player_volume(&mut calls, DesiredVolume::DEFAULT, false,
+            |(local, _), _| { *local += 1; false }, |(_, native), _| { *native += 1; true }));
+        assert_eq!(calls, (0, 1));
+    }
+    #[test]
+    fn late_ack_cannot_change_desired_or_actuate_restored_native_or_another_scene() {
+        let local = |scene: &str| VolumeDestination::<u8, u32>::Local {
+            runtime: "runtime-a".into(), scene: scene.into() };
+        let captured = local("scene-a");
+        let native = VolumeDestination::Native { identity: 1, ticket: 7 };
+        let mut context = (VolumeState::new(), 0usize);
+        let before = context.0.desired();
+        for current in [None, Some(native.clone()), Some(local("scene-b")),
+            Some(VolumeDestination::Local { runtime: "runtime-b".into(), scene: "scene-a".into() })] {
+            assert!(!with_volume_destination(&captured, current.as_ref(), &mut context,
+                |(state, calls)| { state.set_desired(DesiredVolume::new(0, true).unwrap()); *calls += 1; }));
+            assert_eq!(context.0.desired(), before);
+            assert_eq!(context.1, 0);
+        }
+        // The reverse takeover and a newer native request are fenced too.
+        for current in [captured.clone(), VolumeDestination::Native { identity: 1, ticket: 8 },
+            VolumeDestination::Native { identity: 2, ticket: 7 }] {
+            assert!(!with_volume_destination(&native, Some(&current), &mut context,
+                |(state, calls)| { state.set_desired(DesiredVolume::new(0, true).unwrap()); *calls += 1; }));
+            assert_eq!(context.0.desired(), before);
+            assert_eq!(context.1, 0);
+        }
+        assert!(with_volume_destination(&captured, Some(&captured), &mut context,
+            |(state, calls)| { state.set_desired(DesiredVolume::new(37, true).unwrap()); *calls += 1; }));
+        assert_eq!(context.0.desired(), DesiredVolume::new(37, true).unwrap());
+        assert_eq!(context.1, 1);
+    }
+}
 /// Unsupported per-input transport must never target the entire composite or
 /// an old provider queue. Master volume and lifecycle use their existing paths.
 pub(super) fn multiview_transport_unavailable(app: &mut App) -> bool {

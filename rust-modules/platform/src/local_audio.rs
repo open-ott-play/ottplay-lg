@@ -3,6 +3,7 @@
 //! No environment/driver override, native-player state or external process.
 use plx_base::{dynlib::Handle, task::MainThread};
 use std::{
+    borrow::Cow,
     ffi::{c_char, c_void, CStr},
     marker::PhantomData,
     rc::Rc,
@@ -84,11 +85,30 @@ impl Api {
         }
     }
 }
-#[derive(Default)]
 struct Policy {
     owner: Option<OwnerToken>,
+    gain: u8,
+}
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            owner: None,
+            gain: 100,
+        }
+    }
 }
 impl Policy {
+    fn set_gain(&mut self, owner: OwnerToken, level: u8) -> Result<bool, &'static str> {
+        if self.owner != Some(owner) {
+            return Err("Local audio owner changed");
+        }
+        if level > 100 {
+            return Err("Invalid local audio gain");
+        }
+        let changed = self.gain != level;
+        self.gain = level;
+        Ok(changed)
+    }
     fn set(&mut self, owner: Option<OwnerToken>) -> Result<bool, &'static str> {
         if owner.is_some_and(|owner| owner.slot >= 9) {
             return Err("Invalid local audio slot");
@@ -115,6 +135,26 @@ impl Policy {
             return Err("Local audio backpressure");
         }
         Ok(bytes)
+    }
+}
+/// Bounded S16 attenuation. The decoder's shared PCM is always left unchanged.
+/// Unity gain borrows the original chunk without allocating or copying it.
+fn attenuate(samples: &[i16], level: u8) -> Result<Cow<'_, [i16]>, &'static str> {
+    if level > 100 {
+        return Err("Invalid local audio gain");
+    }
+    if samples.is_empty() || samples.len() % 2 != 0 || samples.len() > MAX_CHUNK_SAMPLES {
+        return Err("Invalid stereo PCM chunk");
+    }
+    match level {
+        100 => Ok(Cow::Borrowed(samples)),
+        0 => Ok(Cow::Owned(vec![0; samples.len()])),
+        _ => Ok(Cow::Owned(
+            samples
+                .iter()
+                .map(|sample| (i32::from(*sample) * i32::from(level) / 100) as i16)
+                .collect(),
+        )),
     }
 }
 /// !Send/!Sync; only one Sink may own the queued output. Closing releases only
@@ -212,6 +252,21 @@ impl Sink {
         }
         Ok(())
     }
+    /// Player-owned output level, independent of slot ownership. A changed
+    /// level withdraws already queued PCM so an old unmuted tail cannot escape.
+    /// Only the currently acknowledged slot owner may change it.
+    /// This controls this software sink only, never the television's volume.
+    pub fn set_gain(
+        &mut self,
+        main: &MainThread,
+        owner: OwnerToken,
+        level: u8,
+    ) -> Result<(), &'static str> {
+        if self.policy.set_gain(owner, level)? {
+            self.clear(main);
+        }
+        Ok(())
+    }
     pub fn clear(&mut self, _main: &MainThread) {
         unsafe {
             (self.api.pause)(self.device, 1);
@@ -232,7 +287,8 @@ impl Sink {
         let bytes = self
             .policy
             .admit(owner, samples.len(), self.queued_bytes(main))?;
-        if unsafe { (self.api.queue)(self.device, samples.as_ptr().cast(), bytes) } != 0 {
+        let adjusted = attenuate(samples, self.policy.gain)?;
+        if unsafe { (self.api.queue)(self.device, adjusted.as_ptr().cast(), bytes) } != 0 {
             return Err("SDL audio queue failed");
         }
         unsafe { (self.api.pause)(self.device, 0) };
@@ -292,6 +348,104 @@ mod tests {
         assert!(p.admit(t, 2, MAX_QUEUED_BYTES).is_err());
         assert!(p.admit(t, 2, u32::MAX).is_err());
         assert_eq!(p.admit(t, 2, MAX_QUEUED_BYTES - 4), Ok(4));
+    }
+    #[test]
+    fn gain_unity_borrows_extremes_and_half_gain_is_safe_and_non_mutating() {
+        let samples = [i16::MIN, i16::MAX, -1, 1, -24000, 24000];
+        let original = samples;
+        let unity = attenuate(&samples, 100).unwrap();
+        assert!(matches!(&unity, Cow::Borrowed(_)));
+        assert_eq!(unity.as_ptr(), samples.as_ptr());
+        assert_eq!(unity.as_ref(), samples);
+        assert_eq!(
+            attenuate(&samples, 50).unwrap().as_ref(),
+            [-16384, 16383, 0, 0, -12000, 12000]
+        );
+        assert_eq!(samples, original);
+        for level in 0..=100 {
+            for (output, input) in attenuate(&samples, level).unwrap().iter().zip(samples) {
+                assert!(i32::from(*output).abs() <= i32::from(input).abs());
+            }
+        }
+    }
+    #[test]
+    fn mute_and_unmute_restore_gain_without_rebinding_the_owner() {
+        let mut policy = Policy::default();
+        assert_eq!(policy.gain, 100);
+        let owner = token();
+        policy.set(Some(owner)).unwrap();
+        assert_eq!(policy.set_gain(owner, 37), Ok(true));
+        assert_eq!(policy.set_gain(owner, 37), Ok(false));
+        let samples = [i16::MIN, i16::MAX];
+        let remembered = attenuate(&samples, policy.gain).unwrap().into_owned();
+        assert_eq!(policy.set_gain(owner, 0), Ok(true));
+        assert_eq!(attenuate(&samples, policy.gain).unwrap().as_ref(), [0, 0]);
+        assert_eq!(policy.owner, Some(owner));
+        assert_eq!(policy.set_gain(owner, 37), Ok(true));
+        assert_eq!(
+            attenuate(&samples, policy.gain).unwrap().as_ref(),
+            remembered
+        );
+        policy.set(Some(OwnerToken { slot: 3, ..owner })).unwrap();
+        assert_eq!(policy.gain, 37);
+        policy.set(None).unwrap();
+        assert_eq!(policy.gain, 37);
+    }
+    #[test]
+    fn gain_rejects_invalid_levels_and_pcm_bounds_before_allocating() {
+        let mut policy = Policy::default();
+        policy.set(Some(token())).unwrap();
+        policy.set_gain(token(), 42).unwrap();
+        for invalid in [101, u8::MAX] {
+            assert!(policy.set_gain(token(), invalid).is_err());
+            assert_eq!(policy.gain, 42);
+            assert_eq!(policy.owner, Some(token()));
+            assert!(attenuate(&[1, 2], invalid).is_err());
+        }
+        for level in [0, 50, 100] {
+            assert!(attenuate(&[], level).is_err());
+            assert!(attenuate(&[1], level).is_err());
+            assert!(attenuate(&vec![1; MAX_CHUNK_SAMPLES + 2], level).is_err());
+            assert_eq!(
+                attenuate(&vec![i16::MIN; MAX_CHUNK_SAMPLES], level)
+                    .unwrap()
+                    .len(),
+                MAX_CHUNK_SAMPLES
+            );
+        }
+    }
+    #[test]
+    fn stale_or_withdrawn_owner_cannot_change_gain_or_request_a_flush() {
+        let owner = token();
+        let mut policy = Policy::default();
+        assert!(policy.set_gain(owner, 25).is_err());
+        assert_eq!(policy.gain, 100);
+        policy.set(Some(owner)).unwrap();
+        assert_eq!(policy.set_gain(owner, 62), Ok(true));
+        for stale in [
+            OwnerToken { scene: 5, ..owner },
+            OwnerToken { slot: 3, ..owner },
+            OwnerToken {
+                generation: 8,
+                ..owner
+            },
+        ] {
+            assert!(policy.set_gain(stale, 0).is_err());
+            assert_eq!(policy.gain, 62);
+            assert_eq!(policy.owner, Some(owner));
+        }
+        policy.set(None).unwrap();
+        assert!(policy.set_gain(owner, 0).is_err());
+        assert_eq!(policy.gain, 62);
+        let next = OwnerToken {
+            generation: 8,
+            ..owner
+        };
+        policy.set(Some(next)).unwrap();
+        assert_eq!(policy.gain, 62);
+        assert!(policy.set_gain(owner, 100).is_err());
+        assert_eq!(policy.gain, 62);
+        assert_eq!(policy.set_gain(next, 62), Ok(false));
     }
     #[test]
     fn sdl_audio_spec_layout_matches_pointer_width_abi() {

@@ -85,6 +85,49 @@ impl State {
             runtime.changed();
         }
     }
+    /// Apply the ONE player-owned desired volume only to this acknowledged local sink.
+    /// Success is dispatch, never a physical volume readback or a TV volume grant.
+    fn apply_volume(&mut self, runtime: &mut Runtime, app: &App) -> bool {
+        if !self.taken
+            || !self.graphics_ready
+            || self.lease.is_some()
+            || self.lease_failed
+            || app.adapters.player.is_live()
+            || app.adapters.player.release_busy()
+            || app.adapters.player.has_pending_release()
+            || !runtime.multiview_local.owns_ui(runtime, app)
+        {
+            return false;
+        }
+        let Some((slot, ticket, token)) = self.audio else {
+            return false;
+        };
+        if runtime.multiview_local.audio_owner() != Some(slot)
+            || runtime.multiview_local.slot_ticket(slot) != Some(ticket)
+        {
+            return false;
+        }
+        let Some(sink) = self.sink.as_mut() else {
+            return false;
+        };
+        match sink.set_gain(
+            app.adapters.player.mt(),
+            token,
+            app.player.volume.desired().output(),
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                sink.clear(app.adapters.player.mt());
+                self.audio = None;
+                self.pending_pcm = None;
+                self.error(runtime, error);
+                let mut driver = std::mem::take(&mut runtime.multiview_local);
+                driver.audio_output_failed(runtime);
+                runtime.multiview_local = driver;
+                false
+            }
+        }
+    }
     fn clear_output(&mut self, app: &App) {
         if let Some(sink) = self.sink.as_mut() {
             sink.clear(app.adapters.player.mt());
@@ -356,6 +399,11 @@ impl State {
             }
             self.audio = None;
         }
+        // The default SDL gain is unity; apply an earlier mute/level immediately
+        // after acknowledgement and before the first sample reaches the queue.
+        if self.audio.is_some() && !self.apply_volume(runtime, app) {
+            return;
+        }
         for _ in 0..16 {
             let Some((slot, ticket, chunk)) = self
                 .pending_pcm
@@ -557,4 +605,12 @@ mod tests {
         tick(&mut runtime, &mut app);
         assert!(runtime.play_target.is_none());
     }
+}
+
+/// Callers update app.player.volume first. No native fallback or second preference copy.
+pub(super) fn apply_volume(runtime: &mut Runtime, app: &App) -> bool {
+    let mut state = std::mem::take(&mut runtime.multiview_local_present);
+    let applied = state.apply_volume(runtime, app);
+    runtime.multiview_local_present = state;
+    applied
 }
