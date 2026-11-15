@@ -1044,6 +1044,12 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
     }
     let p = &inv.params;
     let operation = p["operation"].as_str().unwrap_or("");
+    if super::local_multiview_enabled(runtime)
+        && runtime.multiview_local.active()
+        && multiview_owns_decoder_operation(operation)
+    {
+        return local_window_playback(runtime, app, inv);
+    }
     if multiview_owns_decoder_operation(operation)
         && super::multiview_output::owns_picture(runtime, app)
     {
@@ -1191,6 +1197,102 @@ fn playback_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> O
     Some(unsupported("Unsupported native playback operation"))
 }
 
+fn local_window_playback(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
+    let p = &inv.params;
+    let operation = p["operation"].as_str().unwrap_or("");
+    let mut driver = std::mem::take(&mut runtime.multiview_local);
+    let mut data = json!({"dispatched":true,"operation":operation});
+    let result = (|| -> Result<(), &'static str> {
+        match operation {
+            "pause" | "resume" => {
+                if !fields(p, &["operation"]) {
+                    return Err("Playback operation accepts no other parameters");
+                }
+                driver.set_active_paused(runtime, app, operation == "pause")
+            }
+            "previous_channel" | "next_channel" | "step_channel" => {
+                let offset = if operation == "step_channel" {
+                    if !fields(p, &["operation", "offset"]) {
+                        return Err("Invalid channel movement");
+                    }
+                    p["offset"]
+                        .as_i64()
+                        .filter(|n| *n != 0 && n.unsigned_abs() <= 9007199254740991)
+                        .ok_or("Invalid channel movement")?
+                } else {
+                    if !fields(p, &["operation"]) {
+                        return Err("Invalid channel movement");
+                    }
+                    if operation == "next_channel" {
+                        1
+                    } else {
+                        -1
+                    }
+                };
+                driver
+                    .step_active(runtime, app, offset)
+                    .map_err(|_| "Window source changed before continuation")?;
+                if operation == "step_channel" {
+                    data["offset"] = json!(offset);
+                }
+                Ok(())
+            }
+            "seek" | "seek_relative" => {
+                let key = if operation == "seek" {
+                    "position"
+                } else {
+                    "offset"
+                };
+                if !fields(p, &["operation", key]) {
+                    return Err("Invalid seek parameters");
+                }
+                let value = p[key]
+                    .as_f64()
+                    .filter(|n| n.is_finite() && n.abs() <= 86400.0)
+                    .ok_or("Use a finite window seek within 24 hours")?;
+                if (operation == "seek" && value < 0.0)
+                    || (operation == "seek_relative" && value == 0.0)
+                {
+                    return Err("Invalid seek position");
+                }
+                let (from, duration, _) = driver
+                    .active_timeline(runtime)
+                    .ok_or("No active window picture")?;
+                let requested = if operation == "seek" {
+                    value
+                } else {
+                    from as f64 / 1e6 + value
+                };
+                let position = if operation == "seek" {
+                    if duration.is_some_and(|d| value * 1e6 > d as f64) {
+                        return Err("Seek position exceeds video duration");
+                    }
+                    driver.seek_active(runtime, app, (value * 1e6) as i64)?;
+                    (value * 1e6) as i64
+                } else {
+                    driver.seek_relative(runtime, app, (value * 1e6) as i64)?
+                };
+                data["position"] = json!(position as f64 / 1e6);
+                if operation == "seek_relative" {
+                    data["from"] = json!(from as f64 / 1e6);
+                    data["offset"] = json!(value);
+                    data["clamped"] = json!((position as f64 / 1e6 - requested).abs() > 0.000001);
+                }
+                Ok(())
+            }
+            _ => Err("Window transport is unavailable"),
+        }
+    })();
+    runtime.multiview_local = driver;
+    match result {
+        Ok(()) => {
+            super::multiview_local_present::flush_audio(runtime, app);
+            Some(ok(data))
+        }
+        Err(error) => Some(unsupported(error)),
+    }
+}
+
 fn multiview_owns_decoder_operation(operation: &str) -> bool {
     matches!(
         operation,
@@ -1286,6 +1388,27 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
     settings_failure(inv, "policy_restricted").unwrap_or_else(|| rejected(error))
 }
 
+/// The local scene owns its transport independently of the retired native player.
+/// `None` means no admitted picture; `Some` carries its actual reader seekability.
+fn local_transport_capabilities(
+    owned: bool,
+    picture_seekable: Option<bool>,
+) -> (Vec<&'static str>, bool) {
+    let mut commands = Vec::new();
+    if !owned {
+        return (commands, false);
+    }
+    commands.extend(["previous_channel", "next_channel", "step_channel"]);
+    if let Some(seekable) = picture_seekable {
+        commands.extend(["pause", "resume"]);
+        if seekable {
+            commands.push("seek");
+        }
+    }
+    let relative = commands.contains(&"seek");
+    (commands, relative)
+}
+
 fn valid_capability_probe(value: &Value) -> bool {
     let allowed = [
         "local_media_session",
@@ -1304,7 +1427,28 @@ fn valid_capability_probe(value: &Value) -> bool {
 pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Option<Value> {
     runtime.remote.note_command(inv, runtime.now_ms());
     if inv.action == "multiview" {
+        if super::local_multiview_enabled(runtime) {
+            let mut driver = std::mem::take(&mut runtime.multiview_local);
+            let response = driver.command(runtime, app, inv);
+            runtime.multiview_local = driver;
+            return response;
+        }
+        if runtime.multiview_local.active()
+            || runtime.multiview_local.has_work()
+            || super::multiview_local_present::has_owned_work(runtime)
+        {
+            let request =
+                crate::app::ott_remote::multiview::Request::decode(inv.multiview_projection()?)
+                    .ok()?;
+            return request
+                .rejected(
+                    runtime.remote.runtime(),
+                    crate::app::ott_remote::multiview::Reason::Busy,
+                )
+                .ok();
+        }
         let mut driver = std::mem::take(&mut runtime.multiview_driver);
+        driver.resume_if_idle();
         let response = driver.command(runtime, app, inv);
         runtime.multiview_driver = driver;
         return response;
@@ -1504,12 +1648,38 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                     playback.push("seek");
                 }
             }
+            let local_scene = super::local_multiview_enabled(runtime)
+                && runtime.multiview_local.active();
+            let local_seek_relative = if local_scene {
+                let driver = std::mem::take(&mut runtime.multiview_local);
+                let owner = driver.owns_ui(runtime, app);
+                let window = driver.active_timeline(runtime)
+                    .map(|_| driver.active_seekable(runtime, app));
+                runtime.multiview_local = driver;
+                let (commands, relative) = local_transport_capabilities(owner, window);
+                playback = commands;
+                relative
+            } else {
+                false
+            };
             let mut data = json!({"version":1,"player":{"version":env!("PLX_VERSION"),"build_sha":env!("PLX_BUILD_SHA"),"platform":"webos-native","runtime":runtime.remote.runtime(),"standby":app.ott_standby},
                 "input":["up","down","left","right","ok","back","channel_up","channel_down"],"playback":playback,"lifecycle":["exit_app","standby","wake"],
                 "vportal_settings":{"version":1},"player_settings":{"version":1,"operations":["schema","get","set"],"max_page_size":20},
                 "favorites_global":plx_data::ott::favorites_wire::Protocol::capability(),
                 "favorites_global_items":{"version":1}});
-            let (admission, recovery) = runtime.multiview_driver.capability_markers(runtime, app);
+            let (admission, recovery) = if super::local_multiview_enabled(runtime) {
+                runtime.multiview_local.capability_markers(runtime, app)
+            } else if runtime.multiview_local.active()
+                || runtime.multiview_local.has_work()
+                || super::multiview_local_present::has_owned_work(runtime)
+            {
+                (
+                    json!({"version":1,"operations":["status"],"layouts":[],"max_slots":0,"source_kinds":[],"audio_policies":[],"off_modes":[]}),
+                    json!({"version":1,"runtime":runtime.remote.runtime(),"operations":["status"],"off_modes":[]}),
+                )
+            } else {
+                runtime.multiview_driver.capability_markers(runtime, app)
+            };
             data["multiview"] = admission;
             data["multiview_recovery"] = recovery;
             data["native_playback_capture"] = json!({"version":1,"operations":["start","status","read","stop"],
@@ -1541,12 +1711,13 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 data["categories"] =
                     json!({"version":1,"operations":["list","select"],"maxPageSize":200});
             }
-            if controls::transport_ready(app) && playback::dur() > 0 {
+            if if local_scene { local_seek_relative }
+                else { controls::transport_ready(app) && playback::dur() > 0 } {
                 data["playback_seek_relative"] = json!({"version":1});
             }
             if !super::playback_allowed(app) {
                 data["input"] = json!([]);
-            } else if controls::transport_ready(app) {
+            } else if super::player_volume_ready(runtime, app) {
                 data["input"].as_array_mut().unwrap().extend([
                     json!("mute"),
                     json!("volume_up"),
@@ -1695,9 +1866,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 p["key"].as_str(),
                 Some("mute" | "volume_up" | "volume_down")
             ) {
-                if !controls::transport_ready(app) {
+                let Some(source) = super::capture_volume_destination(runtime, app) else {
                     return Some(rejected("No active foreground playback"));
-                }
+                };
                 let current = app.player.volume.desired();
                 let (level, muted) = match p["key"].as_str() {
                     Some("mute") => (current.level(), !current.muted()),
@@ -1705,6 +1876,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                     _ => (current.level().saturating_sub(5), false),
                 };
                 let effect = AfterReply::Volume {
+                    source,
                     level,
                     muted,
                     last_input: app.last_input,
@@ -1759,7 +1931,7 @@ fn legacy_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Opt
     let p = &inv.params;
     let mut translated = inv.clone();
     match p["command"].as_str() {
-        Some("set_volume") => return Some(controls::volume_command(app, inv)),
+        Some("set_volume") => return Some(controls::volume_command(runtime, app, inv)),
         Some("channel_by_number" | "channel_by_name") => {
             translated.action = "play".into();
             translated.params = json!({"query":p.get("channel_name").or_else(||p.get("channel_number")).cloned().unwrap_or(Value::Null)});
@@ -1832,25 +2004,23 @@ pub(super) fn after_tick(runtime: &mut Runtime, app: &mut App) {
     for effect in runtime.remote.take_effects() {
         match effect {
             AfterReply::Volume {
+                source,
                 level,
                 muted,
                 last_input,
             } => {
                 if super::input_policy::navigation(runtime).is_ok()
                     && app.last_input == last_input
-                    && controls::transport_ready(app)
                 {
-                    if let Some(desired) =
-                        plx_media::player::volume::DesiredVolume::new(i32::from(level), muted)
-                    {
-                        plx_media::player::volume::set_volume(
-                            &mut app.adapters.player,
-                            &mut app.player.volume,
-                            desired,
-                        );
-                        app.last_input = clock::now();
-                        runtime.changed();
-                    }
+                    let current = super::capture_volume_destination(runtime, app);
+                    super::with_volume_destination(&source, current.as_ref(), &mut (&mut *runtime, &mut *app),
+                        |(runtime, app)| {
+                            if let Some(desired) = plx_media::player::volume::DesiredVolume::new(i32::from(level), muted) {
+                                super::set_player_volume_with_runtime(runtime, app, desired);
+                                app.last_input = clock::now();
+                                runtime.changed();
+                            }
+                        });
                 }
             }
             AfterReply::Standby(standby) => {
@@ -2390,6 +2560,26 @@ mod name_tests;
 #[cfg(test)]
 mod multiview_capability_probe_tests {
     use super::*;
+    #[test]
+    fn local_transport_wire_exposes_seek_and_relative_marker_only_for_seekable_pictures() {
+        let channel_commands = json!(["previous_channel", "next_channel", "step_channel"]);
+        let playable_commands = json!(["previous_channel", "next_channel", "step_channel", "pause", "resume"]);
+        let seek_commands = json!(["previous_channel", "next_channel", "step_channel", "pause", "resume", "seek"]);
+        // Reader-derived truth is checked separately with actual held, HTTP and
+        // HLS sessions. This is the controller's closed wire projection of it.
+        for (owner, picture, expected, relative) in [
+            (true, Some(true), seek_commands, true),
+            (true, Some(false), playable_commands, false),
+            (true, None, channel_commands, false),
+            (false, Some(true), json!([]), false),
+            (false, None, json!([]), false),
+        ] {
+            let (commands, marker) = local_transport_capabilities(owner, picture);
+            assert_eq!(json!(commands), expected);
+            assert_eq!(marker, relative);
+            assert_eq!(marker, commands.contains(&"seek"));
+        }
+    }
     #[test]
     fn negotiated_native_probe_is_closed_and_go_empty_projection_stays_supported() {
         for value in [

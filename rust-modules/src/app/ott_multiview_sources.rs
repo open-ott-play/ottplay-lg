@@ -8,8 +8,12 @@ use plx_data::ott::multiview::{MediaRef, ResolveTicket, SourceRef};
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, Weak};
+#[path = "ott_multiview_sources_local.rs"]
+mod local;
+pub(super) use local::LocalResolved;
 
 const MAX_ROWS: usize = 256;
+const MAX_LOCAL_ROWS: usize = 1152;
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 fn next_id(counter: &AtomicU64) -> Result<NonZeroU64, Error> {
     let mut current = counter.load(Ordering::Acquire);
@@ -85,7 +89,6 @@ impl SourceRow {
 }
 struct Row {
     view: SourceRow,
-    favorite: Favorite,
     binding: Option<Binding>,
 }
 #[derive(Clone)]
@@ -93,7 +96,8 @@ struct Binding {
     request: PlaybackRequest,
     profile: ProviderProfile,
     entry: Option<CatalogEntry>,
-    favorite: Favorite,
+    favorite: Option<Favorite>,
+    catalog_revision: Option<u64>,
     attachment: Option<crate::app::ott_m3u_attachment::Receipt>,
 }
 impl Binding {
@@ -112,17 +116,34 @@ impl Binding {
             request,
             profile,
             entry,
-            favorite: favorite.clone(),
+            favorite: Some(favorite.clone()),
+            catalog_revision: None,
             attachment,
         })
     }
     fn current(&self, runtime: &Runtime) -> bool {
-        Self::capture(runtime, &self.favorite).is_ok_and(|next| {
-            self.request == next.request
-                && self.profile == next.profile
-                && self.entry == next.entry
-                && self.favorite == next.favorite
-                && self.attachment == next.attachment
+        if self.catalog_revision.is_some() {
+            // A captured device input is independent of which provider the UI
+            // browses next. Definition edits are separately ABA-fenced by the
+            // work's profile epoch; physical roots also retain their live read.
+            return runtime
+                .saved
+                .profiles
+                .profiles
+                .iter()
+                .any(|p| p == &self.profile)
+                || (self.profile.kind == ProviderKind::Local
+                    && runtime.local_profile_selection(&self.profile).is_some())
+                || runtime.effective_profile() == Some(&self.profile);
+        }
+        self.favorite.as_ref().is_some_and(|favorite| {
+            Self::capture(runtime, favorite).is_ok_and(|next| {
+                self.request == next.request
+                    && self.profile == next.profile
+                    && self.entry == next.entry
+                    && self.favorite == next.favorite
+                    && self.attachment == next.attachment
+            })
         })
     }
     fn descriptor(&self) -> Option<SourceDescriptor> {
@@ -148,7 +169,7 @@ impl Binding {
                 "vod"
             }
         } else {
-            match self.favorite.locator {
+            match self.favorite.as_ref()?.locator {
                 Locator::Local { .. } => "file",
                 Locator::Plex { .. } | Locator::VPortal { .. } => "vod",
                 Locator::Channel { .. } | Locator::ChannelName { .. } => "live",
@@ -176,6 +197,7 @@ impl Binding {
 /// A caller-owned immutable list. No Clone: handles cannot accidentally be copied into a
 /// second mutable owner with an independent retirement lifetime.
 pub(super) struct Snapshot {
+    local: bool,
     epoch: u64,
     pending: Mutex<Vec<Weak<AtomicBool>>>,
     runtime: String,
@@ -187,9 +209,12 @@ pub(super) struct Snapshot {
 }
 impl Snapshot {
     pub fn capture(runtime: &Runtime) -> Result<Self, Error> {
+        Self::capture_with_limit(runtime, MAX_ROWS)
+    }
+    fn capture_with_limit(runtime: &Runtime, limit: usize) -> Result<Self, Error> {
         let epoch = next_id(&NEXT_SOURCE)?.get();
         let mut rows = Vec::new();
-        for favorite in runtime.saved.favorites.entries().iter().take(MAX_ROWS) {
+        for favorite in runtime.saved.favorites.entries().iter().take(limit) {
             let token = next_id(&NEXT_SOURCE)?;
             let source = SourceRef::from_opaque(token);
             let binding = Binding::capture(runtime, favorite).ok();
@@ -210,11 +235,11 @@ impl Snapshot {
                         favorite.identity().as_bytes(),
                     ),
                 },
-                favorite: favorite.clone(),
                 binding,
             });
         }
         Ok(Self {
+            local: false,
             epoch,
             pending: Mutex::new(Vec::new()),
             runtime: runtime.remote.runtime().into(),
@@ -225,8 +250,127 @@ impl Snapshot {
             retired: Arc::new(AtomicBool::new(false)),
         })
     }
+    /// Direct current-catalogue rows carry their real prepared request and
+    /// catalogue revision. They are never inserted into persisted Favorites.
+    pub fn capture_local(runtime: &Runtime) -> Result<Self, Error> {
+        if runtime.multiview_local_profile_epoch == 0 || runtime.multiview_authority_epoch == 0 {
+            return Err(Error::Stale);
+        }
+        let mut snapshot = Self::capture_with_limit(runtime, MAX_LOCAL_ROWS)?;
+        snapshot.local = true;
+        snapshot.profile_epoch = runtime.multiview_local_profile_epoch;
+        if !runtime.catalog.entries.is_empty() {
+            snapshot.rows.truncate(MAX_LOCAL_ROWS / 2);
+        }
+        for entry in runtime
+            .catalog
+            .entries
+            .iter()
+            .take(MAX_LOCAL_ROWS.saturating_sub(snapshot.rows.len()))
+        {
+            let Ok((request, profile, Some(bound), favorite)) =
+                runtime.prepare_play_request(PlaybackRequest::ordinary(&entry.id, 0))
+            else {
+                continue;
+            };
+            if favorite.is_some() || bound != *entry {
+                continue;
+            }
+            let binding = Binding {
+                request,
+                profile,
+                entry: Some(bound),
+                favorite: None,
+                catalog_revision: Some(runtime.catalog_revision),
+                attachment: None,
+            };
+            let token = next_id(&NEXT_SOURCE)?;
+            let digest = plx_data::ott::favorites_wire::hash(
+                serde_json::to_string(&(&binding.profile, entry))
+                    .map_err(|_| Error::Stale)?
+                    .as_bytes(),
+            );
+            snapshot.rows.push(Row {
+                view: SourceRow {
+                    handle: SourceHandle {
+                        source: SourceRef::from_opaque(token),
+                        media: MediaRef::from_opaque(token),
+                        epoch: snapshot.epoch,
+                    },
+                    title: entry.title.clone(),
+                    support: binding.support(),
+                    descriptor: binding.descriptor(),
+                    identity_digest: digest,
+                },
+                binding: Some(binding),
+            });
+        }
+        Ok(snapshot)
+    }
+    pub fn refresh_local(&mut self, runtime: &Runtime) -> Result<(), Error> {
+        if !self.local || !self.current(runtime) {
+            return Err(Error::Stale);
+        }
+        let mut fresh = Self::capture_local(runtime)?;
+        for mut row in fresh.rows.drain(..) {
+            if self.rows.len() >= MAX_LOCAL_ROWS {
+                break;
+            }
+            let duplicate = self
+                .rows
+                .iter()
+                .any(|old| match (&old.binding, &row.binding) {
+                    (Some(a), Some(b)) if a.profile == b.profile => {
+                        match (&a.favorite, &b.favorite) {
+                            (Some(a), Some(b)) => a == b,
+                            (None, None) => a
+                                .entry
+                                .as_ref()
+                                .zip(b.entry.as_ref())
+                                .is_some_and(|(a, b)| a.id == b.id && a.media == b.media),
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                });
+            if !duplicate {
+                row.view.handle.epoch = self.epoch;
+                self.rows.push(row);
+            }
+        }
+        Ok(())
+    }
     pub fn rows(&self) -> impl Iterator<Item = &SourceRow> {
         self.rows.iter().map(|r| &r.view)
+    }
+    pub fn step_local(&self, from: SourceHandle, offset: i64) -> Option<SourceHandle> {
+        if !self.local || !self.contains(&from) {
+            return None;
+        }
+        let anchor = self
+            .rows
+            .iter()
+            .find(|r| r.view.handle == from)?
+            .binding
+            .as_ref()?;
+        let candidates = self
+            .rows
+            .iter()
+            .filter(|r| {
+                r.binding.as_ref().is_some_and(|binding| {
+                    if anchor.favorite.is_some() {
+                        binding.favorite.is_some()
+                    } else {
+                        binding.favorite.is_none() && binding.profile == anchor.profile
+                    }
+                })
+            })
+            .map(|r| r.view.handle)
+            .collect::<Vec<_>>();
+        let at = candidates.iter().position(|h| *h == from)? as i64;
+        let next =
+            (at + offset.rem_euclid(candidates.len() as i64)).rem_euclid(candidates.len() as i64);
+        candidates.get(next as usize).copied()
     }
     pub fn epoch(&self) -> u64 {
         self.epoch
@@ -249,9 +393,14 @@ impl Snapshot {
     fn current(&self, runtime: &Runtime) -> bool {
         !self.retired.load(Ordering::Acquire)
             && self.runtime == runtime.remote.runtime()
-            && self.generation == runtime.generation
+            && (self.local || self.generation == runtime.generation)
             && self.profile_epoch != 0
-            && self.profile_epoch == runtime.profile_edit_epoch
+            && self.profile_epoch
+                == if self.local {
+                    runtime.multiview_local_profile_epoch
+                } else {
+                    runtime.profile_edit_epoch
+                }
             && self.authority_epoch != 0
             && self.authority_epoch == runtime.multiview_authority_epoch
     }
@@ -261,6 +410,25 @@ impl Snapshot {
         app: &App,
         handle: &SourceHandle,
         ticket: ResolveTicket,
+    ) -> Result<SourceWork, Error> {
+        self.capture_work_using(runtime, app, handle, ticket, false)
+    }
+    pub fn capture_local_work(
+        &self,
+        runtime: &mut Runtime,
+        app: &App,
+        handle: &SourceHandle,
+        ticket: ResolveTicket,
+    ) -> Result<SourceWork, Error> {
+        self.capture_work_using(runtime, app, handle, ticket, true)
+    }
+    fn capture_work_using(
+        &self,
+        runtime: &mut Runtime,
+        app: &App,
+        handle: &SourceHandle,
+        ticket: ResolveTicket,
+        local: bool,
     ) -> Result<SourceWork, Error> {
         if !self.current(runtime) {
             return Err(Error::Stale);
@@ -277,13 +445,15 @@ impl Snapshot {
             .find(|r| r.view.handle == *handle)
             .ok_or(Error::UnknownSource)?;
         let binding = row.binding.as_ref().ok_or(Error::Stale)?;
-        if !runtime.saved.favorites.entries().contains(&row.favorite) || !binding.current(runtime) {
+        if !binding.current(runtime) {
             return Err(Error::Stale);
         }
-        if matches!(
-            binding.support(),
-            Support::LocalRelayRequired | Support::Unavailable
-        ) {
+        if !local
+            && matches!(
+                binding.support(),
+                Support::LocalRelayRequired | Support::Unavailable
+            )
+        {
             return Err(Error::Unsupported);
         }
         let plex = if binding.profile.kind == ProviderKind::Plex {
@@ -293,11 +463,16 @@ impl Snapshot {
                 next_id(&NEXT_SOURCE)?.get()
             );
             Some(
-                super::multiview_plex::Capture::capture(
-                    &binding.profile,
-                    &binding.favorite,
-                    session,
-                )
+                match &binding.favorite {
+                    Some(favorite) => {
+                        super::multiview_plex::Capture::capture(&binding.profile, favorite, session)
+                    }
+                    None => super::multiview_plex::Capture::capture_entry(
+                        &binding.profile,
+                        binding.entry.as_ref().ok_or(Error::Stale)?,
+                        session,
+                    ),
+                }
                 .map_err(|_| Error::Unsupported)?,
             )
         } else {
@@ -309,13 +484,22 @@ impl Snapshot {
                 &binding.request,
                 &binding.profile,
                 binding.entry.as_ref(),
-                Some(&binding.favorite),
+                binding.favorite.as_ref(),
                 None,
             )
             .map_err(|_| Error::Policy)?;
-        let permit = runtime
-            .favorite_permit(&binding.profile, &binding.favorite)
-            .map_err(|_| Error::Policy)?;
+        let permit = match &binding.favorite {
+            Some(favorite) => runtime
+                .favorite_permit(&binding.profile, favorite)
+                .map_err(|_| Error::Policy)?,
+            None => None,
+        };
+        let local_read = if local {
+            transient::capture_video_root(runtime, &binding.request, &binding.profile)
+                .map_err(|_| Error::Policy)?
+        } else {
+            None
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
@@ -329,6 +513,8 @@ impl Snapshot {
             pending.push(Arc::downgrade(&cancel));
         }
         Ok(SourceWork {
+            local,
+            local_read,
             ticket,
             plex,
             binding: binding.clone(),
@@ -351,6 +537,8 @@ impl Drop for Snapshot {
 /// One slot's worker. Cancellation is allocated per capture and never shares the global player
 /// or a sibling slot's cancellation. Dropping the snapshot retires all outstanding work.
 pub(super) struct SourceWork {
+    local: bool,
+    local_read: Option<transient::LocalSourceRead>,
     plex: Option<super::multiview_plex::Capture>,
     ticket: ResolveTicket,
     binding: Binding,
@@ -363,6 +551,13 @@ pub(super) struct SourceWork {
     cancel: Arc<AtomicBool>,
 }
 impl SourceWork {
+    pub fn prepare_local_metadata(
+        mut self,
+        worker: &plx_base::task::OffFrame,
+    ) -> Result<PreparedMetadata, Error> {
+        self.local = true;
+        self.prepare_metadata(worker)
+    }
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.cancel.clone()
     }
@@ -402,14 +597,14 @@ impl SourceWork {
                 ott_catalog::find_attachment_favorite(
                     worker,
                     receipt,
-                    &self.binding.favorite,
+                    self.binding.favorite.as_ref().ok_or(Error::Stale)?,
                     &self.cancel,
                 )
             } else {
                 ott_catalog::find_favorite(
                     worker,
                     &self.binding.profile,
-                    &self.binding.favorite,
+                    self.binding.favorite.as_ref().ok_or(Error::Stale)?,
                     self.permit.as_ref(),
                     &self.cancel,
                 )
@@ -425,10 +620,12 @@ impl SourceWork {
         if self.cancelled() {
             return Err(Error::Cancelled);
         }
-        if matches!(
-            entry.media,
-            MediaLocator::Local { .. } | MediaLocator::Plex { .. }
-        ) {
+        if !self.local
+            && matches!(
+                entry.media,
+                MediaLocator::Local { .. } | MediaLocator::Plex { .. }
+            )
+        {
             return Err(Error::Unsupported);
         }
         Ok(PreparedMetadata {
@@ -470,7 +667,7 @@ impl PreparedMetadata {
                 &work.binding.request,
                 &work.binding.profile,
                 work.binding.entry.as_ref(),
-                Some(&work.binding.favorite),
+                work.binding.favorite.as_ref(),
                 Some(&self.entry),
             )
             .map_err(|_| Error::Policy)?;
@@ -480,8 +677,19 @@ impl PreparedMetadata {
         {
             return Err(Error::Stale);
         }
-        let digest =
-            plx_data::ott::favorites_wire::hash(work.binding.favorite.identity().as_bytes());
+        let digest = plx_data::ott::favorites_wire::hash(
+            work.binding
+                .favorite
+                .as_ref()
+                .map(Favorite::identity)
+                .unwrap_or_else(|| {
+                    format!(
+                        "catalog:{}:{}",
+                        work.binding.profile.id, work.binding.request.id
+                    )
+                })
+                .as_bytes(),
+        );
         Ok(AuthorizedInput {
             ticket: work.ticket,
             entry: self.entry,
@@ -494,17 +702,26 @@ impl PreparedMetadata {
 impl SourceWork {
     fn current_for(&self, runtime: &Runtime) -> bool {
         !self.cancelled()
+            && self
+                .local_read
+                .as_ref()
+                .is_none_or(|read| runtime.local_source_read_is_current(read))
             && self.runtime == runtime.remote.runtime()
-            && self.generation == runtime.generation
+            && (self.local || self.generation == runtime.generation)
             && self.profile_epoch != 0
-            && self.profile_epoch == runtime.profile_edit_epoch
+            && self.profile_epoch
+                == if self.local {
+                    runtime.multiview_local_profile_epoch
+                } else {
+                    runtime.profile_edit_epoch
+                }
             && self.authority_epoch != 0
             && self.authority_epoch == runtime.multiview_authority_epoch
-            && runtime
-                .saved
-                .favorites
-                .entries()
-                .contains(&self.binding.favorite)
+            && self
+                .binding
+                .favorite
+                .as_ref()
+                .is_none_or(|favorite| runtime.saved.favorites.entries().contains(favorite))
             && self.binding.current(runtime)
     }
 }
@@ -532,7 +749,7 @@ impl AuthorizedInput {
                 &binding.request,
                 &binding.profile,
                 binding.entry.as_ref(),
-                Some(&binding.favorite),
+                binding.favorite.as_ref(),
                 Some(&self.entry),
             )
             .map_err(|_| Error::Policy)?;
@@ -573,7 +790,11 @@ pub(super) fn prepared_http_fixture_for_test(
     }
     if work.binding.profile.kind != ProviderKind::M3u
         || !matches!(entry.media, MediaLocator::Http { .. })
-        || !selection::matches_entry(&work.binding.favorite, &entry)
+        || !work
+            .binding
+            .favorite
+            .as_ref()
+            .is_some_and(|favorite| selection::matches_entry(favorite, &entry))
     {
         return Err(Error::Unsupported);
     }

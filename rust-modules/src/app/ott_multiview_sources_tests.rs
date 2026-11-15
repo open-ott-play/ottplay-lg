@@ -78,7 +78,7 @@ fn entry() -> CatalogEntry {
 }
 fn result(work: SourceWork) -> PreparedMetadata {
     let mut metadata = entry();
-    if let Locator::ChannelName { name, group } = &work.binding.favorite.locator {
+    if let Locator::ChannelName { name, group } = &work.binding.favorite.as_ref().unwrap().locator {
         metadata.title = name.clone();
         metadata.category = group.clone().unwrap_or_default();
     }
@@ -248,11 +248,9 @@ fn work_admission_bounds_pending_captures_and_rejects_foreign_handles() {
         Err(Error::Exhausted)
     ));
     drop(work);
-    assert!(
-        snapshot
-            .capture_work(&mut runtime, &app, &handle, ticket(handle, SlotId::SLOT_0))
-            .is_ok()
-    );
+    assert!(snapshot
+        .capture_work(&mut runtime, &app, &handle, ticket(handle, SlotId::SLOT_0))
+        .is_ok());
 }
 
 #[test]
