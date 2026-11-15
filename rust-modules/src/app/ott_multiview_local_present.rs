@@ -10,6 +10,57 @@ struct Previous {
     request: PlaybackRequest,
     profile: ProviderProfile,
     entry: CatalogEntry,
+    favorite: Option<Favorite>,
+}
+type PreviousPrepared = (
+    PlaybackRequest,
+    ProviderProfile,
+    Option<CatalogEntry>,
+    Option<Favorite>,
+);
+impl Previous {
+    fn capture(runtime: &Runtime, playing: &Playing, position_ms: u64) -> Option<Self> {
+        let request = PlaybackRequest {
+            kiosk_selection: playing.kiosk_selection.clone(),
+            archive: playing.archive.clone(),
+            transient_owner: playing.transient_owner,
+            local_selection: playing.local_selection.clone(),
+            continuation: None,
+            id: playing.selection_id.clone(),
+            position_ms,
+            advance_on_failure: false,
+        };
+        let (bound, profile, _entry, favorite) =
+            runtime.prepare_play_request(request.clone()).ok()?;
+        if bound.id != request.id || profile != playing.profile {
+            return None;
+        }
+        Some(Self {
+            request,
+            profile,
+            entry: playing.entry.clone(),
+            favorite,
+        })
+    }
+    fn prepared(&self, runtime: &Runtime) -> Result<PreviousPrepared, &'static str> {
+        let prepared = runtime.prepare_play_request(self.request.clone())?;
+        if prepared.0.id != self.request.id
+            || prepared.1 != self.profile
+            || prepared.3 != self.favorite
+        {
+            return Err("Previous source changed; select it again");
+        }
+        if let Some(favorite) = self.favorite.as_ref() {
+            if self.request.id != format!("favorite:{}", favorite.identity()) {
+                return Err("Previous favorite identity changed");
+            }
+        } else if runtime.effective_profile() != Some(&self.profile)
+            || prepared.2.as_ref() != Some(&self.entry)
+        {
+            return Err("Previous source changed; select it again");
+        }
+        Ok(prepared)
+    }
 }
 struct LeaseClose {
     lease: Arc<std::sync::Mutex<Option<super::super::ott_vportal_lease::Lease>>>,
@@ -148,23 +199,16 @@ impl State {
                     plx_media::route::playback_identity_matches(&app.player.session, id)
                 })
             })
-            .map(|p| Previous {
-                request: PlaybackRequest {
-                    kiosk_selection: p.kiosk_selection.clone(),
-                    archive: p.archive.clone(),
-                    transient_owner: p.transient_owner,
-                    local_selection: p.local_selection.clone(),
-                    continuation: None,
-                    id: p.selection_id.clone(),
-                    position_ms: if guide_ui::is_live(&p.profile, &p.entry) {
+            .and_then(|p| {
+                Previous::capture(
+                    runtime,
+                    p,
+                    if guide_ui::is_live(&p.profile, &p.entry) {
                         0
                     } else {
                         (playback::intended_pos(&app.player.session).max(0) as u64) / 1_000_000
                     },
-                    advance_on_failure: false,
-                },
-                profile: p.profile.clone(),
-                entry: p.entry.clone(),
+                )
             });
         runtime.checkpoint(app, true);
         runtime.cancel_play_request();
@@ -248,19 +292,13 @@ impl State {
                     && !app.ott_standby
                 {
                     if let Some(previous) = previous {
-                        // Re-enter the ordinary policy/resolver path; never replay a captured URL.
-                        // A changed profile/catalogue cannot accidentally reinterpret its old id.
-                        let current = runtime.effective_profile() == Some(&previous.profile)
-                            && runtime
-                                .catalog
-                                .entries
-                                .iter()
-                                .any(|entry| entry == &previous.entry);
-                        if !current
-                            || runtime
-                                .play_request_with_policy(app, previous.request)
-                                .is_err()
-                        {
+                        // Bind a Favorite by its captured canonical identity even when its
+                        // provider is not the currently browsed provider. The ordinary
+                        // prepared request still owns fresh policy and source resolution.
+                        let result = previous.prepared(runtime).and_then(|prepared| {
+                            runtime.play_prepared_request_with_quality_policy(app, prepared, false)
+                        });
+                        if result.is_err() {
                             runtime.status = "Previous source changed; select it again".into();
                             runtime.changed();
                         }
@@ -532,6 +570,126 @@ pub(super) fn flush_audio(runtime: &mut Runtime, app: &App) {
 #[cfg(all(test, feature = "hostsim"))]
 mod tests {
     use super::*;
+    fn previous_favorite_fixture() -> (Runtime, Playing, Favorite) {
+        use plx_data::ott::favorites::{Locator, Origin};
+        let mut runtime =
+            Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        runtime.loaded = true;
+        runtime.state_load = StateLoad::Idle;
+        runtime.entropy = Some([7; 16]);
+        runtime.resume_source_work();
+        for (id, name) in [("active", "Active"), ("other", "Other")] {
+            runtime.saved.profiles.profiles.push(ProviderProfile {
+                id: id.into(),
+                name: name.into(),
+                kind: ProviderKind::M3u,
+                source: format!("https://source.invalid/{id}.m3u"),
+                source_alias: name.into(),
+                enabled: true,
+            });
+        }
+        runtime.saved.profiles.active_profile = Some("active".into());
+        runtime.provider = ProviderKind::M3u;
+        let favorite = Favorite {
+            title: "Original movie".into(),
+            origin: Origin {
+                provider: "m3u".into(),
+                profile: "Other".into(),
+                subprofile: None,
+                source_alias: "Other".into(),
+            },
+            locator: Locator::ChannelName {
+                name: "Original movie".into(),
+                group: Some("Movies".into()),
+            },
+        };
+        runtime.saved.favorites.toggle(favorite.clone()).unwrap();
+        let entry = CatalogEntry {
+            id: "resolved-movie".into(),
+            title: "Original movie".into(),
+            category: "Movies".into(),
+            description: String::new(),
+            poster: String::new(),
+            synopsis: None,
+            protection: Some(false),
+            media: MediaLocator::Http {
+                url: "https://source.invalid/movie.mp4".into(),
+            },
+            duration_ms: Some(120_000),
+            provider_id: None,
+            provider_id_field: None,
+            live: None,
+        };
+        let playing = Playing {
+            channel_capture: None,
+            kiosk_selection: None,
+            archive: None,
+            transient_owner: None,
+            local_selection: None,
+            identity: None,
+            profile: runtime.saved.profiles.profiles[1].clone(),
+            entry,
+            selection_id: format!("favorite:{}", favorite.identity()),
+            source: None,
+            advance_on_failure: false,
+            requires_server_lease: false,
+        };
+        (runtime, playing, favorite)
+    }
+    #[test]
+    fn previous_favorite_from_inactive_profile_uses_fresh_ordinary_binding_without_provider_mutation(
+    ) {
+        let _serial = plx_base::testlock::serial();
+        let (runtime, playing, favorite) = previous_favorite_fixture();
+        let before = serde_json::to_value(&runtime.saved).unwrap();
+        let previous =
+            Previous::capture(&runtime, &playing, 12_345).expect("ordinary Favorite capture");
+        let prepared = previous
+            .prepared(&runtime)
+            .expect("inactive Favorite remains bound");
+        assert_eq!(prepared.0.id, format!("favorite:{}", favorite.identity()));
+        assert_eq!(prepared.0.position_ms, 12_345);
+        assert!(prepared.1 == playing.profile);
+        assert!(prepared.2.is_none());
+        assert_eq!(prepared.3, Some(favorite));
+        assert!(runtime.effective_profile() != Some(&prepared.1));
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+        assert!(
+            runtime.play_target.is_none()
+                && runtime.resolver_next.is_none()
+                && runtime.playing.is_none()
+        );
+    }
+    #[test]
+    fn previous_favorite_rejects_changed_definition_removed_favorite_and_revoked_profile() {
+        let _serial = plx_base::testlock::serial();
+        for scenario in 0..3 {
+            let (mut runtime, playing, favorite) = previous_favorite_fixture();
+            let previous = Previous::capture(&runtime, &playing, 5_000).unwrap();
+            match scenario {
+                0 => {
+                    runtime.saved.favorites.remove(&favorite.identity());
+                }
+                1 => {
+                    runtime.saved.favorites.remove(&favorite.identity());
+                    let mut changed = favorite.clone();
+                    changed.title = "Changed display identity".into();
+                    runtime.saved.favorites.toggle(changed).unwrap();
+                }
+                _ => runtime.saved.profiles.profiles[1].enabled = false,
+            }
+            assert!(
+                previous.prepared(&runtime).is_err(),
+                "changed/revoked Favorite must not restore"
+            );
+            assert_eq!(
+                runtime.saved.profiles.active_profile.as_deref(),
+                Some("active")
+            );
+            assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+        }
+    }
+
     #[test]
     fn retired_slots_cannot_release_presenter_custody_to_a_new_fullscreen_source() {
         let mut app = crate::app::run::lifecycle_regression_tests::app();
@@ -541,6 +699,7 @@ mod tests {
         assert!(!runtime.multiview_local.has_work());
         runtime.multiview_local_present.taken = true;
         runtime.multiview_local_present.previous = Some(Previous {
+            favorite: None,
             request: PlaybackRequest::ordinary("old-source", 0),
             profile: ProviderProfile {
                 id: "old".into(),

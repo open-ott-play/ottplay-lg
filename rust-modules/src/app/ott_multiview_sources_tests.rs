@@ -248,11 +248,9 @@ fn work_admission_bounds_pending_captures_and_rejects_foreign_handles() {
         Err(Error::Exhausted)
     ));
     drop(work);
-    assert!(
-        snapshot
-            .capture_work(&mut runtime, &app, &handle, ticket(handle, SlotId::SLOT_0))
-            .is_ok()
-    );
+    assert!(snapshot
+        .capture_work(&mut runtime, &app, &handle, ticket(handle, SlotId::SLOT_0))
+        .is_ok());
 }
 
 #[test]

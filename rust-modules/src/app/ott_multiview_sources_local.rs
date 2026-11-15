@@ -222,4 +222,77 @@ mod tests {
         assert!(!snapshot.current_for(&runtime) && !work.current_for(&runtime));
         assert!(Snapshot::capture_local(&runtime).is_err());
     }
+    #[test]
+    fn local_catalogue_beyond_255_is_selectable_and_refresh_preserves_its_handle() {
+        let _serial = plx_base::testlock::serial();
+        let (app, mut runtime) = fixture();
+        let template = runtime.catalog.entries[0].clone();
+        runtime.catalog.entries = (0..1300)
+            .map(|n| {
+                let mut entry = template.clone();
+                entry.id = format!("channel-{n}");
+                entry.title = format!("Channel {n}");
+                entry.media = MediaLocator::Http {
+                    url: format!("https://source.invalid/{n}.mp4"),
+                };
+                entry
+            })
+            .collect();
+        let before = serde_json::to_value(&runtime.saved).unwrap();
+        let mut snapshot = Snapshot::capture_local(&runtime).unwrap();
+        assert_eq!(snapshot.rows().count(), MAX_LOCAL_ROWS);
+        let handle = snapshot.rows().nth(600).unwrap().handle;
+        let work = snapshot
+            .capture_local_work(&mut runtime, &app, &handle, resolve_ticket(handle))
+            .unwrap();
+        let metadata = work
+            .prepare_local_metadata(&plx_base::task::OffFrame::for_test())
+            .unwrap();
+        let resolved = metadata
+            .authorize_completion(&mut runtime, &app)
+            .unwrap()
+            .resolve_local(&plx_base::task::OffFrame::for_test())
+            .unwrap();
+        assert!(
+            matches!(resolved.source,ExternalSource::Http(ref url) if url=="https://source.invalid:443/600.mp4")
+        );
+        snapshot.refresh_local(&runtime).unwrap();
+        assert!(snapshot.contains(&handle));
+        assert_eq!(snapshot.rows().count(), MAX_LOCAL_ROWS);
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
+    }
+    #[test]
+    fn local_favorite_bound_expands_without_changing_the_legacy_service_limit() {
+        use plx_data::ott::favorites::{Locator, Origin};
+        let _serial = plx_base::testlock::serial();
+        let (_app, mut runtime) = fixture();
+        runtime.catalog.entries.clear();
+        for n in 0..300 {
+            runtime
+                .saved
+                .favorites
+                .toggle(Favorite {
+                    title: format!("Favorite {n}"),
+                    origin: Origin {
+                        provider: "m3u".into(),
+                        profile: "Source".into(),
+                        subprofile: None,
+                        source_alias: "Source".into(),
+                    },
+                    locator: Locator::ChannelName {
+                        name: format!("Favorite {n}"),
+                        group: None,
+                    },
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            Snapshot::capture(&runtime).unwrap().rows().count(),
+            MAX_ROWS
+        );
+        assert_eq!(
+            Snapshot::capture_local(&runtime).unwrap().rows().count(),
+            300
+        );
+    }
 }

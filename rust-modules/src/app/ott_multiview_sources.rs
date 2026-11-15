@@ -209,9 +209,12 @@ pub(super) struct Snapshot {
 }
 impl Snapshot {
     pub fn capture(runtime: &Runtime) -> Result<Self, Error> {
+        Self::capture_with_limit(runtime, MAX_ROWS)
+    }
+    fn capture_with_limit(runtime: &Runtime, limit: usize) -> Result<Self, Error> {
         let epoch = next_id(&NEXT_SOURCE)?.get();
         let mut rows = Vec::new();
-        for favorite in runtime.saved.favorites.entries().iter().take(MAX_ROWS) {
+        for favorite in runtime.saved.favorites.entries().iter().take(limit) {
             let token = next_id(&NEXT_SOURCE)?;
             let source = SourceRef::from_opaque(token);
             let binding = Binding::capture(runtime, favorite).ok();
@@ -253,17 +256,17 @@ impl Snapshot {
         if runtime.multiview_local_profile_epoch == 0 || runtime.multiview_authority_epoch == 0 {
             return Err(Error::Stale);
         }
-        let mut snapshot = Self::capture(runtime)?;
+        let mut snapshot = Self::capture_with_limit(runtime, MAX_LOCAL_ROWS)?;
         snapshot.local = true;
         snapshot.profile_epoch = runtime.multiview_local_profile_epoch;
         if !runtime.catalog.entries.is_empty() {
-            snapshot.rows.truncate(MAX_ROWS / 2);
+            snapshot.rows.truncate(MAX_LOCAL_ROWS / 2);
         }
         for entry in runtime
             .catalog
             .entries
             .iter()
-            .take(MAX_ROWS.saturating_sub(snapshot.rows.len()))
+            .take(MAX_LOCAL_ROWS.saturating_sub(snapshot.rows.len()))
         {
             let Ok((request, profile, Some(bound), favorite)) =
                 runtime.prepare_play_request(PlaybackRequest::ordinary(&entry.id, 0))
