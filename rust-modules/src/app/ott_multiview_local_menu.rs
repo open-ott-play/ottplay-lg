@@ -467,6 +467,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "hostsim")]
     #[test]
     fn parent_focus_returns_to_the_same_window_or_video_controls() {
         let _serial = plx_base::testlock::serial();
@@ -492,6 +493,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "hostsim")]
     #[test]
     fn stale_stop_rows_cannot_queue_transport_or_change_the_ordinary_source() {
         let _serial = plx_base::testlock::serial();
@@ -521,6 +523,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "hostsim")]
     #[test]
     fn back_leaves_a_retired_parent_without_starting_or_restoring_video() {
         let _serial = plx_base::testlock::serial();

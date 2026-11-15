@@ -28,7 +28,7 @@ fn visible(runtime: &Runtime, id: &str) -> bool {
         runtime.saved.favorites.entries().iter()
             .any(|favorite| search(&favorite.title) && favorite.identity() == identity)
     } else {
-        runtime.ordered_ids().iter().any(|current| current == id)
+        commands::selected_ids(runtime).iter().any(|current| current == id)
             && runtime.catalog.entries.iter().any(|entry| entry.id == id && search(&entry.title))
     }
 }
