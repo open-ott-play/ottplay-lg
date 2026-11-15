@@ -131,6 +131,13 @@ reviewed exception for a census-only change in an unused type is documented belo
 every recorded payload and still requires full replay validation. The D1 results below describe
 that earlier build, not current all-domain acceptance.
 
+The standalone `Native checks` workflow runs the `Controlled renderer replay`
+job on macOS. It builds the pinned host renderer directly for this controlled
+no-Play scope, proves OS-level outbound denial, and invokes this same driver with
+one process at a time. `CI gate` requires its success in pull requests and in the
+main-only release workflow. Complete per-process evidence is retained even on
+failure; source tests alone do not qualify renderer replay.
+
 **Unused More capability census migration (2026-11-15, source-only).**
 The PlayerOverlay More capability canon grows from 9 to 11 entries for Description
 and Favorites. The observed screen census is `7325516116693834611`; the product

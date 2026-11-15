@@ -268,17 +268,16 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(seen, {'default': '1920x1080', 'small': '960x540'})
 
     def test_the_macos_replay_step_passes_a_window_the_driver_accepts(self):
-        text = (self.ROOT / '.github/workflows/simulators.yml').read_text()
-        job = re.search(r'(?m)^  macos:\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$)', text, re.S).group(1)
-        step = re.search(r'(?m)^      - name: Replay all committed product recordings\n(.*?)(?=^      - name: )',
+        text = (self.ROOT / '.github/workflows/ci.yml').read_text()
+        job = re.search(r'(?m)^  renderer-replay:\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$)', text, re.S).group(1)
+        step = re.search(r'(?m)^      - name: Prove outbound network denial and replay every controlled anchor\n(.*?)(?=^      - name: )',
                          job, re.S).group(1)
         command = ' '.join(line for line in step.splitlines() if not line.lstrip().startswith('#'))
         windows = re.findall(r'--window\s+(\S+)', command)
         self.assertEqual(len(windows), 1, command)
         self.assertEqual(replay.parse_window(windows[0]), windows[0])
-        # The launch step keeps its own full-size window, so CI still opens a 1080p one.
-        self.assertIn('Launch and capture 1080p frame', job)
-        self.assertNotIn('--window', job.split('Launch and capture 1080p frame')[1])
+        self.assertIn('--jobs 1 --timeout 300', command)
+        self.assertIn('--fixtures tests/fixtures/replay --assets pkg', command)
 
 
 if __name__ == '__main__':
