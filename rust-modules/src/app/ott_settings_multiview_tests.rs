@@ -20,10 +20,11 @@ fn fixture() -> Runtime {
 }
 #[test]
 fn multiview_service_is_appended_without_reordering_existing_settings() {
-    assert_eq!(Setting::ALL.len(), 46);
+    assert_eq!(Setting::ALL.len(), 47);
     assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
     assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");
     assert_eq!(Setting::ALL[45].id(), multiview::KEY);
+    assert_eq!(Setting::ALL[46].id(), "nativeMultiviewBackend");
     let descriptor = Setting::MultiviewService.descriptor();
     assert_eq!(descriptor["type"], "string");
     assert_eq!(descriptor["scope"], "application");
