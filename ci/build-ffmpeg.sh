@@ -169,8 +169,10 @@ fi
 #              h264/hevc are the raw Annex-B paths (/tmp/sample.h264 and the dev triggers).
 #   parsers    needed by avformat_find_stream_info to fill AVCodecParameters.
 #   bsf        AVCC -> Annex-B for mp4-family video, which the Starfish pipeline requires.
-#   decoders   SUBTITLES, and AUDIO decoded in the app. Video is decoded by the TV's hardware via
-#              Starfish; FFmpeg here never touches a video frame. The audio decoders run in two
+#   decoders   Subtitles and app-decoded audio, plus independent software video for local
+#              multi-view textures. Ordinary single-picture video keeps the native Starfish
+#              route; local windows never share its decoder or global feed queues.
+#              The ordinary audio decoders run in two
 #              cases. (1) FLAC, ALAC and LPCM at 1x: libpf has no input for them, so the app decodes
 #              them and feeds the TV PCM (`devcaps::APP_DECODED` names the decoders, and a test
 #              holds that list to this one); DTS (`dca`) joins them in a release build where Force Direct Play
@@ -234,6 +236,7 @@ set -- "$@" \
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
   --enable-decoder=pgssub,dvdsub,dvbsub,ass,srt,subrip,text,mov_text,webvtt,ccaption \
   --enable-decoder=aac,ac3,eac3,dca,mp3,mp2,flac,opus,vorbis,truehd,mlp,alac,pcm_s16le,pcm_s24le,pcm_s16be,pcm_s24be,pcm_s32le,pcm_s32be \
+  --enable-decoder=h264,hevc,mpeg2video,mpeg4,vp8,vp9,mjpeg,vc1,wmv3 \
   --enable-protocol=file
 
 if [ "${RELEASE:-}" = "1" ]; then

@@ -545,6 +545,11 @@ pub(super) fn begin_shutdown(runtime: &mut Runtime, app: &mut App) {
     runtime.multiview_output = state;
     app.bridge.publish_multiview_offer(None);
 }
+/// Read-only ownership fence for admitting the independent local backend.
+pub(super) fn has_owned_work(runtime: &Runtime) -> bool {
+    let state = &runtime.multiview_output;
+    state.pending.is_some() || state.waiting.is_some() || state.admission.is_some()
+}
 /// Poll only already-owned inspection retirement. No join, source activation,
 /// decoder start, or new independent timeout is introduced by shutdown.
 pub(super) fn shutdown_pending(runtime: &mut Runtime) -> bool {

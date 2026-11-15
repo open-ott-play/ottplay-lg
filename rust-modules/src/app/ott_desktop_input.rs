@@ -110,10 +110,34 @@ const MENU_KEY: u32 = b't' as u32;
 
 struct Held {
     action: Action,
-    identity: plx_media::route::PlaybackIdentity,
-    ticket: plx_media::route::PlayRequestTicket,
+    source: HeldSource,
     page: Option<InstanceId>,
     last_ms: u32,
+}
+enum HeldSource {
+    Native { identity: plx_media::route::PlaybackIdentity, ticket: plx_media::route::PlayRequestTicket },
+    Local { runtime: String, scene: String },
+}
+impl HeldSource {
+    fn capture(runtime: &Runtime, app: &App, action: Action) -> Option<Self> {
+        if matches!(action, Action::Volume(_) | Action::Mute) && super::local_volume_owned(runtime) {
+            if !super::player_volume_ready(runtime, app) { return None; }
+            let scene = runtime.multiview.scene_status(runtime)?;
+            return Some(Self::Local { runtime: scene.runtime, scene: scene.scene });
+        }
+        Some(Self::Native { identity: plx_media::route::playback_identity(&app.player.session)?,
+            ticket: plx_media::route::play_request_ticket() })
+    }
+    fn current(&self, runtime: &Runtime, app: &App, action: Action) -> bool {
+        match self {
+            Self::Local { runtime: owner, scene } => super::player_volume_ready(runtime, app)
+                && runtime.multiview.scene_status(runtime).is_some_and(|current| current.runtime == *owner && current.scene == *scene),
+            Self::Native { identity, ticket } =>
+                !(matches!(action, Action::Volume(_) | Action::Mute) && super::local_volume_owned(runtime))
+                && plx_media::route::playback_identity_matches(&app.player.session, identity)
+                && plx_media::route::play_request_is_current(*ticket),
+        }
+    }
 }
 #[derive(Default)]
 pub(super) struct State {
@@ -238,7 +262,7 @@ fn perform(
             return Ok(());
         }
         Action::Volume(_) | Action::Mute => {
-            if !commands::playback_ready(app) {
+            if !super::player_volume_ready(runtime, app) {
                 return Err("No active foreground playback");
             }
             let current = app.player.volume.desired();
@@ -252,13 +276,9 @@ fn perform(
                 Action::Mute => current.with_muted(!current.muted()),
                 _ => unreachable!(),
             };
-            // This is the existing native volume door; a requested level is not
-            // a claim that a TV reported or accepted its physical volume.
-            plx_media::player::volume::set_volume(
-                &mut app.adapters.player,
-                &mut app.player.volume,
-                desired,
-            );
+            // Local custody never submits to a retained ordinary native object.
+            // The notice still describes desired volume, never physical readback.
+            super::set_player_volume_with_runtime(runtime, app, desired);
             if let Some(page) = bridge::player_mut(&mut app.pages) {
                 // Feedback describes the application's desired level, not a hardware readback.
                 page.volume_notice(desired, now);
@@ -302,10 +322,12 @@ mod multiview_transport_guard_tests {
 /// The ordinary OTT action runner owns the input instance and policy admission.
 pub(super) fn volume_step(runtime: &mut Runtime, app: &mut App, direction: i8) -> Result<(), &'static str> {
     if !matches!(direction, -1 | 1) { return Err("Invalid volume direction"); }
+    let source_owned = if super::local_volume_owned(runtime) { super::player_volume_ready(runtime, app) }
+        else { runtime.playing.as_ref().and_then(|playing| playing.identity.as_ref()).is_some_and(|identity|
+            plx_media::route::playback_identity_matches(&app.player.session, identity)) };
     if !app.running || !playback_allowed(app) || !runtime.loaded || runtime.persistence_uncertain
         || runtime.edit_session.is_some() || runtime.setup.is_some()
-        || !runtime.playing.as_ref().and_then(|playing| playing.identity.as_ref()).is_some_and(|identity|
-            plx_media::route::playback_identity_matches(&app.player.session, identity))
+        || !source_owned
     { return Err("Volume is unavailable in this input context"); }
     perform(runtime, app, Action::Volume(i32::from(direction)), clock::now())
 }
@@ -358,8 +380,7 @@ pub(super) fn ingest(app: &mut App) -> bool {
                 return false;
             };
             let current = held.page == app.pages.top_page()
-                && plx_media::route::playback_identity_matches(&app.player.session, &held.identity)
-                && plx_media::route::play_request_is_current(held.ticket)
+                && held.source.current(&runtime, app, held.action)
                 && input_context(&runtime, app, now, held.action);
             if !current
                 || matches!(held.action, Action::Step(_) | Action::Favorite | Action::Mute | Action::Random | Action::Menu)
@@ -383,15 +404,14 @@ pub(super) fn ingest(app: &mut App) -> bool {
         if !input_context(&runtime, app, now, action) {
             return false;
         }
-        let Some(identity) = plx_media::route::playback_identity(&app.player.session) else {
+        let Some(source) = HeldSource::capture(&runtime, app, action) else {
             return false;
         };
         runtime.desktop_input.held.insert(
             sym,
             Held {
                 action,
-                identity,
-                ticket: plx_media::route::play_request_ticket(),
+                source,
                 page: app.pages.top_page(),
                 last_ms: now,
             },

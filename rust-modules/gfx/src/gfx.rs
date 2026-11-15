@@ -16,6 +16,9 @@ use crate::overdraw::{
 // at its old path (`ui::Rect`, `ui::frame::backdrop`, `ui::profile`, `ui::theme`).
 /// The live-backdrop walk: layer/damage algebra, the discovery pass and the retained glass sources.
 pub mod backdrop;
+/// Slot-owned software video textures; no native decoder or playback authority.
+#[path = "video.rs"]
+pub mod video;
 mod geom;
 /// Draw-phase instrumentation (`phase`, the GPU timer / HWCNT / CPU profilers) and the LOAD DIAL's
 /// published state.
@@ -2578,9 +2581,13 @@ pub mod tex_ledger {
 
     /// `tex` was (re)specified at `w`×`h`: a re-spec of a known name replaces its size.
     pub fn specified(tex: c_uint, w: c_int, h: c_int) {
+        specified_bytes(tex, w.max(0) as u64 * h.max(0) as u64 * 4);
+    }
+
+    /// Planar video planes are one byte per texel, not RGBA art allocations.
+    pub(super) fn specified_bytes(tex: c_uint, bytes: u64) {
         #[cfg(any(test, feature = "test-support"))]
         note_mutation();
-        let bytes = w.max(0) as u64 * h.max(0) as u64 * 4;
         LIVE.with(|m| {
             let revision=REVISION.with(|n| { let next=n.get().wrapping_add(1); n.set(next); next });
             m.borrow_mut().insert(tex, (bytes,revision));

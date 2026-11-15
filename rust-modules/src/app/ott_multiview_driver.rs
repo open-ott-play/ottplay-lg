@@ -2621,6 +2621,11 @@ impl Driver {
         // work, but must not spin the caller's drain after all workers retired.
         self.pending.is_some() || !self.cleanup.is_empty()
     }
+    /// Re-enable only an entirely retired backend; preserve monotonically issued
+    /// request identities and all uncertainty fences across preference changes.
+    pub fn resume_if_idle(&mut self) {
+        if self.shutdown_confirmed() { self.shutting_down = false; }
+    }
     pub fn shutdown_confirmed(&self) -> bool {
         !self.uncertain
             && !self.shutdown_pending()

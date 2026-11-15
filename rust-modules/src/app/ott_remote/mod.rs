@@ -70,11 +70,12 @@ enum Kind {
     Pairing,
     CancelPairing,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AfterReply {
     Exit,
     Standby(bool),
     Volume {
+        source: super::ott_runtime::VolumeDestination,
         level: u8,
         muted: bool,
         last_input: u32,

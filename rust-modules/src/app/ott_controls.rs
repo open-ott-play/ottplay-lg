@@ -123,8 +123,8 @@ fn volume_level(params: &Value, current: u8) -> Option<u8> {
     Some(target.clamp(0.0, 100.0).round() as u8)
 }
 
-pub(super) fn volume_command(app: &mut App, inv: &Invocation) -> Value {
-    if !transport_ready(app) {
+pub(super) fn volume_command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) -> Value {
+    if !super::player_volume_ready(runtime, app) {
         return rejected("No active foreground playback");
     }
     let mut params = inv.params.clone();
@@ -142,17 +142,14 @@ pub(super) fn volume_command(app: &mut App, inv: &Invocation) -> Value {
         return rejected("Use a finite volume level or step");
     };
     let desired = plx_media::player::volume::DesiredVolume::new(i32::from(level), false).unwrap();
-    let dispatched = plx_media::player::volume::set_volume(
-        &mut app.adapters.player,
-        &mut app.player.volume,
-        desired,
-    );
+    let dispatched = super::set_player_volume_with_runtime(runtime, app, desired);
     // This firmware has no reliable volume getter. Keep requested state distinct
     // from measured output, including when the native setter defers or refuses it.
     let mut result = json!({"status":if dispatched {"ok"} else {"rejected"},"data":{"dispatched":dispatched,"volume":null,"desired_volume":level,"muted":false}});
     if !dispatched {
-        result["data"]["error"] =
-            json!("The volume is retained but native application is not confirmed");
+        result["data"]["error"] = json!(if super::local_volume_owned(runtime) {
+            "The volume is retained but local output application is not confirmed"
+        } else { "The volume is retained but native application is not confirmed" });
     }
     result
 }

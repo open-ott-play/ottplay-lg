@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
 
 pub mod inspect;
+#[path = "ff_local_video.rs"]
+pub(crate) mod local_video;
 pub mod hls_audio;
 mod h264_recovery;
 mod hevc_ts;
@@ -570,6 +572,8 @@ plx_base::dynlib! {
         prev: *const AVDictionaryEntry,
         flags: c_int,
     ) -> *const AVDictionaryEntry;
+    fn av_dict_set(dict: *mut *mut AVDictionary, key: *const c_char, value: *const c_char, flags: c_int) -> c_int;
+    fn av_dict_free(dict: *mut *mut AVDictionary);
 }}
 plx_base::dynlib! {
     swscale: [

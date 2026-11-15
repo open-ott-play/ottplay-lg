@@ -68,6 +68,12 @@ mod multiview_service;
 mod multiview_connection;
 #[path = "ott_multiview_driver.rs"]
 mod multiview_driver;
+#[path = "ott_multiview_local.rs"]
+mod multiview_local;
+#[path = "ott_multiview_local_present.rs"]
+mod multiview_local_present;
+#[path = "ott_multiview_local_menu.rs"]
+mod multiview_local_menu;
 #[path = "ott_multiview_output.rs"]
 mod multiview_output;
 #[cfg(all(test, feature = "hostsim"))]
@@ -80,7 +86,129 @@ pub(super) fn multiview_player_action(app: &mut App, event: plx_appkit::multivie
     multiview_ui::player_action(app, event);
 }
 pub(super) fn multiview_picture_owned(app: &App) -> bool {
-    app.ott.as_ref().is_some_and(|runtime| multiview_output::owns_picture(runtime, app))
+    app.ott.as_ref().is_some_and(|runtime| runtime.multiview_local.active() || multiview_output::owns_picture(runtime, app))
+}
+/// Local is the default; service mode is an explicit idle-only preference.
+fn local_multiview_enabled(runtime: &Runtime) -> bool {
+    runtime.saved.settings.get("nativeMultiviewBackend").and_then(Value::as_str) != Some("service")
+}
+pub(super) fn local_multiview_active(app: &App) -> bool {
+    app.ott.as_ref().is_some_and(|runtime| runtime.multiview_local.active())
+}
+pub(super) fn local_multiview_draw(app: &mut App) {
+    multiview_local_present::draw(app);
+}
+pub(super) fn local_multiview_player_request(app: &mut App, request: &plx_screens::registry::PlayerReq) -> bool {
+    multiview_local::player_request(app, request)
+}
+fn local_volume_owned(runtime: &Runtime) -> bool {
+    runtime.multiview_local.active() || runtime.multiview_local.has_work()
+        || multiview_local_present::has_owned_work(runtime)
+}
+fn player_volume_ready(runtime: &Runtime, app: &App) -> bool {
+    if local_volume_owned(runtime) {
+        runtime.multiview_local.owns_ui(runtime, app)
+    } else { commands::playback_ready(app) }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum VolumeDestination<I = plx_media::route::PlaybackIdentity,
+    T = plx_media::route::PlayRequestTicket> {
+    Local { runtime: String, scene: String },
+    Native { identity: I, ticket: T },
+}
+fn capture_volume_destination(runtime: &Runtime, app: &App) -> Option<VolumeDestination> {
+    if !player_volume_ready(runtime, app) { return None; }
+    if local_volume_owned(runtime) {
+        let scene = runtime.multiview.scene_status(runtime)?;
+        Some(VolumeDestination::Local { runtime: scene.runtime, scene: scene.scene })
+    } else {
+        Some(VolumeDestination::Native {
+            identity: plx_media::route::playback_identity(&app.player.session)?,
+            ticket: plx_media::route::play_request_ticket(),
+        })
+    }
+}
+// Check the captured destination before mutating desired volume or submitting
+// either actuator. An acknowledgement cannot migrate across playback owners.
+fn with_volume_destination<I: PartialEq, T: PartialEq, C>(
+    captured: &VolumeDestination<I, T>, current: Option<&VolumeDestination<I, T>>,
+    context: &mut C, apply: impl FnOnce(&mut C)) -> bool {
+    if current != Some(captured) { return false; }
+    apply(context);
+    true
+}
+// The local actuator's refusal/defer must never fall through to an older native
+// object. Keep this choice explicit and testable without invoking either sink.
+fn dispatch_player_volume<C>(context: &mut C, desired: plx_media::player::volume::DesiredVolume,
+    local_owned: bool, local: impl FnOnce(&mut C, plx_media::player::volume::DesiredVolume) -> bool,
+    native: impl FnOnce(&mut C, plx_media::player::volume::DesiredVolume) -> bool) -> bool {
+    if local_owned { local(context, desired) } else { native(context, desired) }
+}
+fn set_player_volume_with_runtime(runtime: &mut Runtime, app: &mut App,
+    desired: plx_media::player::volume::DesiredVolume) -> bool {
+    let local_owned = local_volume_owned(runtime);
+    dispatch_player_volume(&mut (runtime, app), desired, local_owned,
+        |(runtime, app), desired| {
+            app.player.volume.set_desired(desired);
+            app.player.volume.forget_pipeline();
+            multiview_local_present::apply_volume(runtime, app)
+        },
+        |(_, app), desired| plx_media::player::volume::set_volume(
+            &mut app.adapters.player, &mut app.player.volume, desired))
+}
+
+#[cfg(test)]
+mod volume_destination_tests {
+    use super::{dispatch_player_volume, with_volume_destination, VolumeDestination};
+    use plx_media::player::volume::{DesiredVolume, VolumeState};
+    #[test]
+    fn deferred_local_gain_keeps_the_single_desired_level_and_mute_without_native_fallback() {
+        let mut context = (VolumeState::new(), 0usize);
+        for desired in [DesiredVolume::new(37, false).unwrap(), DesiredVolume::new(37, true).unwrap(),
+            DesiredVolume::new(37, false).unwrap()] {
+            assert!(!dispatch_player_volume(&mut context, desired, true,
+                |(state, _), desired| { state.set_desired(desired); false },
+                |(_, native_calls), _| { *native_calls += 1; true }));
+            assert_eq!(context.0.desired(), desired);
+            assert_eq!(context.0.readback().measured_output, None);
+            assert_eq!(context.1, 0, "deferred local gain cannot actuate an older native object");
+        }
+    }
+    #[test]
+    fn absent_local_custody_preserves_native_submission_and_does_not_call_the_local_sink() {
+        let mut calls = (0usize, 0usize);
+        assert!(dispatch_player_volume(&mut calls, DesiredVolume::DEFAULT, false,
+            |(local, _), _| { *local += 1; false }, |(_, native), _| { *native += 1; true }));
+        assert_eq!(calls, (0, 1));
+    }
+    #[test]
+    fn late_ack_cannot_change_desired_or_actuate_restored_native_or_another_scene() {
+        let local = |scene: &str| VolumeDestination::<u8, u32>::Local {
+            runtime: "runtime-a".into(), scene: scene.into() };
+        let captured = local("scene-a");
+        let native = VolumeDestination::Native { identity: 1, ticket: 7 };
+        let mut context = (VolumeState::new(), 0usize);
+        let before = context.0.desired();
+        for current in [None, Some(native.clone()), Some(local("scene-b")),
+            Some(VolumeDestination::Local { runtime: "runtime-b".into(), scene: "scene-a".into() })] {
+            assert!(!with_volume_destination(&captured, current.as_ref(), &mut context,
+                |(state, calls)| { state.set_desired(DesiredVolume::new(0, true).unwrap()); *calls += 1; }));
+            assert_eq!(context.0.desired(), before);
+            assert_eq!(context.1, 0);
+        }
+        // The reverse takeover and a newer native request are fenced too.
+        for current in [captured.clone(), VolumeDestination::Native { identity: 1, ticket: 8 },
+            VolumeDestination::Native { identity: 2, ticket: 7 }] {
+            assert!(!with_volume_destination(&native, Some(&current), &mut context,
+                |(state, calls)| { state.set_desired(DesiredVolume::new(0, true).unwrap()); *calls += 1; }));
+            assert_eq!(context.0.desired(), before);
+            assert_eq!(context.1, 0);
+        }
+        assert!(with_volume_destination(&captured, Some(&captured), &mut context,
+            |(state, calls)| { state.set_desired(DesiredVolume::new(37, true).unwrap()); *calls += 1; }));
+        assert_eq!(context.0.desired(), DesiredVolume::new(37, true).unwrap());
+        assert_eq!(context.1, 1);
+    }
 }
 /// Unsupported per-input transport must never target the entire composite or
 /// an old provider queue. Master volume and lifecycle use their existing paths.
@@ -597,14 +725,20 @@ struct SetupSession {
 pub(super) struct Runtime {
     multiview_connection: multiview_connection::State,
     multiview_driver: multiview_driver::Driver,
+    multiview_local: multiview_local::Driver,
+    multiview_local_present: multiview_local_present::State,
     multiview_output: multiview_output::State,
     multiview_ui: multiview_ui::State,
+    multiview_menu: multiview_local_menu::State,
     multiview: Box<multiview::Coordinator>,
     multiview_effects: std::collections::VecDeque<multiview::Effect>,
     multiview_picture: Option<plx_media::route::PlaybackIdentity>,
     // A content hash cannot fence remove/re-add. This stamp observes accepted
     // source-policy images without invalidating them for ordinary UI changes.
     multiview_authority_epoch: u64,
+    // Local windows retain their exact profile across ordinary provider browsing.
+    // Definition edits still retire receipts, including inactive A -> B -> A changes.
+    multiview_local_profile_epoch: u64,
     system_tv: system_tv::State,
     home_integration: home_integration::State,
     settings_groups: settings_groups::State,
@@ -1103,12 +1237,16 @@ impl Runtime {
         Self {
             multiview_connection: Default::default(),
             multiview_driver: Default::default(),
+            multiview_local: Default::default(),
+            multiview_local_present: Default::default(),
             multiview_output: Default::default(),
             multiview_ui: Default::default(),
+            multiview_menu: Default::default(),
             multiview: Box::default(),
             multiview_effects: std::collections::VecDeque::new(),
             multiview_picture: None,
             multiview_authority_epoch: 1,
+            multiview_local_profile_epoch: 1,
             home_integration: home_integration::State::default(),
             settings_groups: settings_groups::State::default(),
             classic_navigation: classic_navigation::State::default(),
@@ -1383,6 +1521,8 @@ impl Runtime {
                 != next.settings.get(crate::app::ott_kiosk_stored::KEY)
             || self.saved.settings.get("nativeMultiviewService")
                 != next.settings.get("nativeMultiviewService")
+            || self.saved.settings.get("nativeMultiviewBackend")
+                != next.settings.get("nativeMultiviewBackend")
         {
             if self.multiview_authority_epoch != 0 {
                 self.multiview_authority_epoch = self.multiview_authority_epoch.checked_add(1).unwrap_or(0);
@@ -1390,6 +1530,12 @@ impl Runtime {
         }
         if self.saved.profiles != next.profiles || m3u_slots::settings_changed(&self.saved, next) {
             self.retire_profile_edits();
+        }
+        if self.saved.profiles.profiles != next.profiles.profiles
+            || m3u_slots::settings_changed(&self.saved, next)
+        {
+            self.multiview_local_profile_epoch = self.multiview_local_profile_epoch
+                .checked_add(1).unwrap_or(0);
         }
     }
     fn profile_edit_context(&self, profile: &ProviderProfile) -> String {
@@ -3119,6 +3265,7 @@ impl Runtime {
     }
 
     fn raw_view(&self) -> OttView {
+        if let Some(view) = multiview_local_menu::view(self) { return view; }
         if let Some(view) = vportal_quality::view(self) {
             return view;
         }
@@ -3470,6 +3617,7 @@ impl Runtime {
                 item
             })
             .chain(std::iter::once(home_integration::entry(self)))
+            .chain(std::iter::once(multiview_local_menu::entry(self)))
             .collect(),
             _ => {
                 let context = ui_projection::CatalogContext::new(self.effective_profile());
@@ -4242,6 +4390,9 @@ impl Runtime {
         profile: &ProviderProfile,
         entry: &CatalogEntry,
     ) -> Result<(), &'static str> {
+        if self.multiview_local.active() || self.multiview_local.has_work() || multiview_local_present::has_owned_work(self) {
+            return Err("Close multiview before starting fullscreen playback");
+        }
         parental_runtime::observe_session(self, app);
         profile_rename::guard(self, profile)?;
         managed::guard_profile(self, app, profile)?;
@@ -4354,6 +4505,9 @@ impl Runtime {
         ),
         interactive: bool,
     ) -> Result<(), &'static str> {
+        if self.multiview_local.active() || self.multiview_local.has_work() || multiview_local_present::has_owned_work(self) {
+            return Err("Close multiview before starting fullscreen playback");
+        }
         if !self.play_work_allowed() {
             return Err("Media work is waiting for foreground or worker retirement");
         }
@@ -5192,6 +5346,10 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
     // Capture one shared allowance for ordinary and composite cleanup. No
     // subsystem is allowed to restart a separate shutdown waiting budget.
     let started = ClockSample::capture_main(app.adapters.player.mt()).ok();
+    let mut local_driver = std::mem::take(&mut runtime.multiview_local);
+    local_driver.revoke(&mut runtime);
+    runtime.multiview_local = local_driver;
+    multiview_local_present::flush_audio(&mut runtime, app);
     let mut multiview_driver = std::mem::take(&mut runtime.multiview_driver);
     multiview_driver.begin_shutdown(&mut runtime, app);
     runtime.multiview_connection.shutdown();
@@ -5244,10 +5402,16 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
         if let Ok(sample) = ClockSample::capture_main(app.adapters.player.mt()) {
             runtime.clock_sample = Some(sample.steady_from(runtime.clock_anchor.unwrap_or(sample)));
         }
+        if runtime.multiview_local.active() || runtime.multiview_local.has_work() || multiview_local_present::has_owned_work(runtime) {
+            let mut local = std::mem::take(&mut runtime.multiview_local);
+            local.tick(runtime, app);
+            runtime.multiview_local = local;
+            multiview_local_present::tick(runtime, app);
+        }
         driver.tick_shutdown(runtime, app);
         let connection = runtime.multiview_connection.shutdown_pending();
         let output = multiview_output::shutdown_pending(runtime);
-        driver.shutdown_pending() || connection || output
+        driver.shutdown_pending() || connection || output || runtime.multiview_local.has_work() || multiview_local_present::has_owned_work(runtime)
     }
     let rx = std::mem::replace(&mut runtime.rx, mpsc::channel().1);
     // A completed resolver may already be queued even when no state write is
@@ -5283,7 +5447,8 @@ fn shutdown_with_budget(app: &mut App, allowance: std::time::Duration) {
             false
         });
     }
-    let composite_unconfirmed = !multiview_driver.shutdown_confirmed()
+    let composite_unconfirmed = runtime.multiview_local.has_work() || multiview_local_present::has_owned_work(&runtime)
+        || !multiview_driver.shutdown_confirmed()
         || runtime.multiview_connection.shutdown_pending()
         || multiview_output::shutdown_pending(&mut runtime);
     if composite_unconfirmed {
@@ -6678,11 +6843,12 @@ fn tick_with_start(
     runtime.refresh_plex_sources();
     companion_adapter::tick(&mut runtime, app);
     home_integration::tick(&mut runtime, app);
-    runtime.reconcile_failure(app);
+    if !runtime.multiview_local.active() { runtime.reconcile_failure(app); }
     if let Err(error) = kiosk_capture::tick(&mut runtime, app) {
         runtime.status = error.message().into();
     }
     if playback_allowed(app) && runtime.play_work_allowed()
+        && !runtime.multiview_local.active()
         && !multiview_output::owns_picture(&runtime, app)
     {
         let resume = match runtime
@@ -6798,6 +6964,8 @@ fn tick_with_start(
                     action
                         if settings_groups::presentation_action(&runtime, action)
                             || interface_mode::presentation_action(&runtime, action)
+                            || matches!(action, OttAction::EditSetting(key) if key.starts_with("localmv."))
+                            || (runtime.page == "multiview-local" && matches!(action, OttAction::Back))
                             || sleep_timer::presentation_action(&runtime, action)
                             || osd_ui::presentation_action(&runtime, action) =>
                     {
@@ -6872,7 +7040,8 @@ fn tick_with_start(
     // Discover only the explicitly paired service. A saved provider, a discovered
     // URL or a previous foreground session cannot confer service authority.
     runtime.multiview_connection.tick(
-        runtime.loaded && runtime.state_load == StateLoad::Idle && !runtime.persistence_uncertain,
+        !local_multiview_enabled(&runtime) && runtime.loaded
+            && runtime.state_load == StateLoad::Idle && !runtime.persistence_uncertain,
         app.running && playback_allowed(app),
         runtime.saved.settings.get("nativeMultiviewService"),
         runtime.remote.persisted_device_id(),
@@ -6935,16 +7104,42 @@ fn tick_with_start(
         runtime.remote_snapshot = snapshot;
         runtime.changed();
     }
-    let mut driver = std::mem::take(&mut runtime.multiview_driver);
-    driver.tick(&mut runtime, app);
-    let output = driver.take_ready_output(&runtime);
-    runtime.multiview_driver = driver;
-    if let Some(output) = output {
-        if let Err(error) = multiview_output::offer(&mut runtime, app, output) {
-            runtime.status = error.into();
+    if local_multiview_enabled(&runtime) {
+        if !runtime.multiview_driver.shutdown_confirmed() || multiview_output::has_owned_work(&runtime) {
+            let mut service = std::mem::take(&mut runtime.multiview_driver);
+            service.begin_shutdown(&mut runtime, app);
+            multiview_output::begin_shutdown(&mut runtime, app);
+            service.tick_shutdown(&mut runtime, app);
+            runtime.multiview_driver = service;
+            multiview_output::shutdown_pending(&mut runtime);
+        }
+        multiview_local_present::tick(&mut runtime, app);
+        let mut driver = std::mem::take(&mut runtime.multiview_local);
+        driver.tick(&mut runtime, app);
+        runtime.multiview_local = driver;
+        multiview_local_present::tick(&mut runtime, app);
+    } else {
+        // An imported setting cannot transfer local decoder authority to a service.
+        if runtime.multiview_local.active() || runtime.multiview_local.has_work() || multiview_local_present::has_owned_work(&runtime) {
+            let mut driver = std::mem::take(&mut runtime.multiview_local);
+            driver.revoke(&mut runtime);
+            driver.tick(&mut runtime, app);
+            runtime.multiview_local = driver;
+            multiview_local_present::tick(&mut runtime, app);
+        } else {
+            let mut driver = std::mem::take(&mut runtime.multiview_driver);
+            driver.resume_if_idle();
+            driver.tick(&mut runtime, app);
+            let output = driver.take_ready_output(&runtime);
+            runtime.multiview_driver = driver;
+            if let Some(output) = output {
+                if let Err(error) = multiview_output::offer(&mut runtime, app, output) {
+                    runtime.status = error.into();
+                }
+            }
+            multiview_output::tick(&mut runtime, app);
         }
     }
-    multiview_output::tick(&mut runtime, app);
     multiview_ui::publish(&mut runtime, app);
     managed::tick(&mut runtime, app);
     commands::after_tick(&mut runtime, app);
@@ -6972,6 +7167,7 @@ fn tick_with_start(
     }
     if playback_allowed(app)
         && runtime.play_work_allowed()
+        && !runtime.multiview_local.active()
         && !multiview_output::owns_picture(&runtime, app)
         && runtime.play_target.is_none()
         && runtime
@@ -7152,7 +7348,7 @@ fn handle_action(
     }
     // This inner picker owns Back even when the catalogue is a Player modal.
     // It still passes the ordinary policy gates before retiring its resources.
-    if !(runtime.page == "vportal-quality" && matches!(&selected, OttAction::Back)) {
+    if !(matches!(runtime.page, "vportal-quality" | "multiview-local") && matches!(&selected, OttAction::Back)) {
         if let Some(result) = menu_settings::back(runtime, app, &selected) {
             return result;
         }
@@ -7233,6 +7429,7 @@ fn handle_action(
     if let Some(result) = menu_visibility::action(runtime, &selected) {
         return result;
     }
+    if multiview_local_menu::action(runtime, app, &selected) { return Ok(()); }
     if let Some(result) = interface_mode::action(runtime, &selected) {
         return result;
     }
@@ -8488,6 +8685,7 @@ struct ProgrammeLeaf {
 fn publish_programme(runtime: &mut Runtime, app: &mut App, changed: bool) {
     // Composite ownership is independent of the previous OTT/Plex item. Keep
     // late single-item metadata replies out of its footer and information view.
+    if runtime.multiview_local.active() { return; }
     if multiview_output::publish_metadata(runtime, app) { return; }
     if archive_programme::publish(runtime, app) {
         return;
@@ -8999,6 +9197,7 @@ pub(super) fn desktop_key_boundary(app: &mut App) -> bool {
 }
 
 pub(super) fn foreign_native_start_allowed(app: &mut App) -> bool {
+    if local_multiview_active(app) { return false; }
     parental_foreign::native_start_allowed(app)
 }
 

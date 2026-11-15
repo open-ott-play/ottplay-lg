@@ -13,7 +13,7 @@ fn exact_geometry_aliases_are_appended_and_advertise_only_real_native_rungs() {
         ("nativeSubtitleTone", json!(["white", "grey_85", "grey_70", "grey_55", "grey_40", "grey_28"]), json!("white")),
     ];
     assert_eq!(Setting::ALL[22].id(), "m3uMediaUrl");
-    assert_eq!(Setting::ALL.len(), 46);
+    assert_eq!(Setting::ALL.len(), 47);
     assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
     assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");
     assert_eq!(Setting::ALL[45].id(), "nativeMultiviewService");
