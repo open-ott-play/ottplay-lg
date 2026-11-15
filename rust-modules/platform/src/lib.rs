@@ -30,3 +30,6 @@ pub mod labcfg; // `lab.json` (the Cloud Lab session config) and the two answers
 pub mod storage;
 pub mod tv; // the television as everything outside the port sees it: the interfaces the webOS port fills at boot (step L15)
 pub mod webos; // which webOS this set is — nyx's os_info.json, read once at boot (release + codename)
+
+/// Generation-fenced, single-owner local software PCM output.
+pub mod local_audio;

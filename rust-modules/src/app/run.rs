@@ -3180,7 +3180,8 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         // `Bridge::clear_opaque_region` performs it, keyed on the plane's bit
                         // rather than on this route test. Calling it in both places would send the
                         // same wayland request twice per frame for the whole of a playback.
-                        plx_gfx::gfx::set_clear_color(0.0, 0.0, 0.0, 0.0);
+                        let local_multiview = super::ott_runtime::local_multiview_active(app);
+                        plx_gfx::gfx::set_clear_color(0.0, 0.0, 0.0, if local_multiview { 1.0 } else { 0.0 });
                         // The frame's first framebuffer-0 command, where this driver parks the
                         // wait for a free back buffer: spanned like every other route's `clear`.
                         // dev (`/tmp/plxnative-framecb`): the frame thread's cost over the wait
@@ -3198,7 +3199,8 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         // `transport` is the other per-frame fact the instance cannot resolve for
                         // itself: the transport's MIDDLE is hidden behind an open Info card or
                         // Chapters strip, and which panel is up is the container's answer.
-                        let busy = player_feedback(app);
+                        if local_multiview { super::ott_runtime::local_multiview_draw(app); }
+                        let busy = if local_multiview { plx_appkit::player_hud::Busy::None } else { player_feedback(app) };
                         let bare_middle = !matches!(
                             super::bridge::player_overlay_kind(&app.pages),
                             Some(plx_screens::player::overlay::OverlayKind::Info)
@@ -3212,7 +3214,7 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         let hud_policy = super::bridge::player_hud_policy(&app.pages);
                         if let Some(player) = super::bridge::player_mut(&mut app.pages) {
                             player.busy = busy;
-                            player.transport = bare_middle;
+                            player.transport = bare_middle && !local_multiview;
                             player.set_hud_policy(hud_policy);
                         }
                         // THE PAGE, and its panels: `Dispatcher::draw(.., true)` runs the page

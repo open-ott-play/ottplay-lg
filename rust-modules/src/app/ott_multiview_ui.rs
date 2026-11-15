@@ -14,9 +14,15 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
     // Consuming any offer edge invalidates its issuance, including a busy or
     // stale refusal. A later fresh publication must not be hidden by the cache.
     runtime.multiview_ui.published = None;
-    if !runtime.multiview_picture.as_ref().is_some_and(|identity| {
-        plx_media::route::playback_identity_matches(&app.player.session, identity)
-    }) {
+    let local = runtime.multiview_local.active();
+    let owned = if local {
+        runtime.multiview_local.owns_ui(&runtime, app)
+    } else {
+        runtime.multiview_picture.as_ref().is_some_and(|identity| {
+            plx_media::route::playback_identity_matches(&app.player.session, identity)
+        })
+    };
+    if !owned {
         app.bridge.publish_multiview_offer(None);
         app.ott = Some(runtime);
         return;
@@ -57,21 +63,32 @@ pub(super) struct State {
 #[derive(PartialEq, Eq)]
 struct Publication {
     scene: multiview::SceneStatus,
-    geometry: multiview_service::Geometry,
+    geometry: plx_appkit::multiview_layout::RasterPlan,
     focused: Option<plx_data::ott::multiview::SlotId>,
     audio: Option<plx_data::ott::multiview::SlotId>,
 }
 
-/// Only an admitted native picture can publish controls. Rectangles come from
-/// the verified backend receipt, then project once onto the actual UI surface.
+/// Publish controls only for the current local scene or an admitted service
+/// picture. Both paths use the same raster plan as their respective renderer.
 pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
     let publication = (|| {
-        if !multiview_output::owns_picture(runtime, app) {
-            return None;
-        }
+        let geometry = if runtime.multiview_local.active() {
+            if !runtime.multiview_local.owns_ui(runtime, app) {
+                return None;
+            }
+            runtime.multiview_local.geometry(
+                plx_base::surface::LOGICAL_W as u32,
+                plx_base::surface::LOGICAL_H as u32,
+            )?
+        } else {
+            if !multiview_output::owns_picture(runtime, app) {
+                return None;
+            }
+            backend_plan(runtime)?
+        };
         Some(Publication {
             scene: runtime.multiview.scene_status(runtime)?,
-            geometry: runtime.multiview_driver.admitted_geometry(runtime)?.clone(),
+            geometry,
             focused: runtime.multiview.focused_slot(),
             audio: runtime.multiview.audio_route_state().applied,
         })
@@ -86,41 +103,8 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
     {
         return;
     }
-    use plx_appkit::{multiview_chrome as chrome, multiview_layout as geometry};
-    use plx_data::ott::multiview::Layout;
-    let mode = match runtime.multiview.layout() {
-        Some(Layout::Single) => geometry::Mode::Perimeter { satellites: 0 },
-        Some(Layout::PictureInPicture) => geometry::Mode::Pip,
-        Some(Layout::Grid4) => geometry::Mode::Grid4,
-        Some(Layout::Grid9) => geometry::Mode::Grid9,
-        Some(Layout::Perimeter { satellites }) => geometry::Mode::Perimeter { satellites },
-        None => {
-            app.bridge.publish_multiview_offer(None);
-            return;
-        }
-    };
-    let g = &publication.geometry;
-    let plan = geometry::RasterPlan::checked(
-        g.revision,
-        g.canvas.width,
-        g.canvas.height,
-        mode,
-        g.rects
-            .iter()
-            .map(|r| geometry::RasterSlot {
-                id: r.slot_id,
-                layer: r.z,
-                x: r.x,
-                y: r.y,
-                width: r.width,
-                height: r.height,
-            })
-            .collect(),
-    );
-    let Ok(plan) = plan else {
-        app.bridge.publish_multiview_offer(None);
-        return;
-    };
+    use plx_appkit::multiview_chrome as chrome;
+    let plan = &publication.geometry;
     let Ok(offer) = runtime.multiview.publish_ui_offer() else {
         app.bridge.publish_multiview_offer(None);
         return;
@@ -146,17 +130,123 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
         .collect();
     let state = chrome::ViewState {
         revision: offer.ui_serial,
-        geometry_revision: g.revision,
+        geometry_revision: plan.revision(),
         active: runtime.multiview.active_slot().map(|s| s.index() as u8),
         audio: publication.audio.map(|s| s.index() as u8),
         focused: publication.focused.map(|s| s.index() as u8),
         input_owned: true,
     };
-    match chrome::ChromeFrame::from_raster_in(&plan, &views, state, 1.0, plx_ui::Rect::FULL) {
+    match project_frame(plan, &views, state) {
         Ok(frame) => {
             app.bridge.publish_multiview_offer(Some(frame));
             runtime.multiview_ui.published = Some(publication);
         }
         Err(_) => app.bridge.publish_multiview_offer(None),
+    }
+}
+
+fn backend_plan(runtime: &Runtime) -> Option<plx_appkit::multiview_layout::RasterPlan> {
+    use plx_appkit::multiview_layout as geometry;
+    use plx_data::ott::multiview::Layout;
+    let mode = match runtime.multiview.layout() {
+        Some(Layout::Single) => geometry::Mode::Perimeter { satellites: 0 },
+        Some(Layout::PictureInPicture) => geometry::Mode::Pip,
+        Some(Layout::Grid4) => geometry::Mode::Grid4,
+        Some(Layout::Grid9) => geometry::Mode::Grid9,
+        Some(Layout::Perimeter { satellites }) => geometry::Mode::Perimeter { satellites },
+        None => {
+            return None;
+        }
+    };
+    let g = runtime.multiview_driver.admitted_geometry(runtime)?;
+    let plan = geometry::RasterPlan::checked(
+        g.revision,
+        g.canvas.width,
+        g.canvas.height,
+        mode,
+        g.rects
+            .iter()
+            .map(|r| geometry::RasterSlot {
+                id: r.slot_id,
+                layer: r.z,
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            })
+            .collect(),
+    );
+    plan.ok()
+}
+
+fn project_frame(
+    plan: &plx_appkit::multiview_layout::RasterPlan,
+    views: &[plx_appkit::multiview_chrome::SlotView],
+    state: plx_appkit::multiview_chrome::ViewState,
+) -> Result<plx_appkit::multiview_chrome::ChromeFrame, plx_appkit::multiview_chrome::ChromeError> {
+    plx_appkit::multiview_chrome::ChromeFrame::from_raster_in(
+        plan,
+        views,
+        state,
+        1.0,
+        plx_ui::Rect::FULL,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plx_appkit::{multiview_chrome as chrome, multiview_layout as geometry};
+    #[test]
+    fn local_common_geometry_keeps_grid_video_and_pointer_slots_aligned() {
+        for mode in [geometry::Mode::Grid4, geometry::Mode::Grid9] {
+            let plan = geometry::Layout::new(plx_ui::Rect::FULL, mode, 1.0)
+                .unwrap()
+                .rasterize_even(7)
+                .unwrap();
+            let state = chrome::ViewState {
+                revision: 11,
+                geometry_revision: 7,
+                input_owned: true,
+                ..Default::default()
+            };
+            let frame = project_frame(&plan, &[], state).unwrap();
+            let pointer =
+                geometry::PointerMap::contain(plx_ui::Rect::FULL, plx_ui::Rect::FULL).unwrap();
+            for slot in frame.slots() {
+                let r = slot.bounds;
+                assert_eq!(
+                    frame.pointer(
+                        &pointer,
+                        geometry::PointerAction::PrimaryClick,
+                        r.x + r.w / 2.0,
+                        r.y + r.h / 2.0
+                    ),
+                    Some(chrome::Event::ActivateSlot {
+                        revision: 11,
+                        slot: slot.id
+                    })
+                );
+            }
+            assert_eq!(frame.slots().len(), plan.slots().len());
+        }
+    }
+    #[test]
+    fn changed_geometry_cannot_publish_stale_pointer_offer() {
+        let plan = geometry::Layout::new(plx_ui::Rect::FULL, geometry::Mode::Grid4, 1.0)
+            .unwrap()
+            .rasterize_even(8)
+            .unwrap();
+        assert!(project_frame(
+            &plan,
+            &[],
+            chrome::ViewState {
+                revision: 11,
+                geometry_revision: 7,
+                input_owned: true,
+                ..Default::default()
+            }
+        )
+        .is_err());
     }
 }

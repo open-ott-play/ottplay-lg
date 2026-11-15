@@ -5,7 +5,49 @@ application. A layout, an accepted control request, a successful host test and
 physical TV playback are different qualification results. Geometry and host
 checks do not establish a qualified multi-view playback feature.
 
-## Playback architecture
+## Device-local playback (default)
+
+`nativeMultiviewBackend` selects `local` (default) or `service`. Change it only
+while all scene work is idle; a busy request is rejected. The local backend does
+not discover, enroll in, or send media to a compositor. Each occupied window owns
+an independent bounded software decoder, a private source authorization and one
+latest planar YUV frame. GLES renders those planes directly into the common
+layout. It does not create nine instances of the single global hardware player.
+
+The same scene supports PiP, four equal windows, nine equal windows, and a large
+central window with up to eight satellites. Rendering and Magic Remote hit tests
+share one pixel layout. Selecting a window changes the active input; one audio
+owner feeds the queued SDL output. Owner changes, pause, seek and scene retirement
+flush queued audio. Volume remains a television-wide control.
+
+Local source choices combine captured saved Favorites and the current catalog.
+They retain provider and profile identities, so M3U, VPortal, Plex and authorized
+local files can coexist without changing the saved ordinary provider. Opening a
+local file retains the existing read permit; no copy or remote file relay is
+required. Requests carry opaque source handles bound to the current scene and
+slot, never raw URLs, paths or credentials. Refresh or page the source picker to
+see more captured catalog rows; discovery is bounded to 1152 entries.
+
+Software limits are admission limits, not a promise of nine simultaneous HD
+streams. Each slot has one decoder thread, a 1080p input-pixel ceiling, a bounded
+mailbox and a 15 fps presentation ceiling. Unsupported codecs, pixel formats or
+sources fail that slot independently. Supported output is 8-bit planar YUV420.
+HTTP progressive media and authorized local files support seek. The initial HLS
+reader supports same-origin TS/fMP4 playlists; encrypted, byte-range,
+discontinuous and external-audio renditions are rejected. HLS seek is unavailable.
+Plex uses direct media; this path does not silently start a transcoder.
+
+Pause/resume and supported seeks target the active slot. Backgrounding, policy
+changes and source revocation cancel local work. A replacement waits for its old
+decoder and provider lease to retire. Explicit Off may restore the captured
+ordinary item only after a fresh authorization check; background retirement must
+not restart it. Strict single-source kiosk rejects multi-view.
+
+The feature must be qualified in stages: pure tests, actual concurrent decoding,
+GL and audio output, ARM packaging, then sustained playback on the target TV.
+Host compilation alone does not establish physical TV capacity or playback.
+
+## Optional service backend
 
 The paired service decodes independent inputs and composes one H.264/AAC HLS
 output. The LG application plays that output with its existing native video
@@ -18,7 +60,7 @@ application chooses exact even-pixel rectangles from an admitted output profile.
 Pointer hit testing uses the same rectangles. Focus, the highlighted window and
 the single audio owner are separate state. TV volume remains global.
 
-## Service authority
+### Service authority
 
 `nativeMultiviewService` is a sensitive, installation-specific application
 setting. It contains a compact JSON string of at most 4096 UTF-8 bytes with
@@ -28,8 +70,8 @@ persisted remote-control device identity. Provision credentials separately for
 each installation. This setting is excluded from portable Local profiles;
 reads and receipts return redacted metadata.
 
-The protected setting is empty by default: no configured service means no
-discovery request or service session. An advertised multi-view capability of `0`
+The protected setting is empty by default. Even if credentials exist, only explicit
+`service` mode permits discovery or a service session. An advertised multi-view capability of `0`
 signals missing qualification; it is not a command-dispatch kill switch.
 Explicitly configuring a correctly paired service can permit raw experimental
 `multiview` commands after the existing policy, service, source and native-start
@@ -45,7 +87,7 @@ authority. Its control bearer is never passed to the media player. The server
 enforces signed media-lease paths and expiry. Generic native HLS acquisition trusts that configured manifest authority; it
 does not independently confine every fetched child to the signed lease prefix.
 
-## Sources and controls
+### Service sources and controls
 
 The first native source snapshot is bounded to existing saved Favorites, including
 their original provider/profile bindings. It is not a complete browser for every
@@ -62,7 +104,7 @@ Every mutation retains the original runtime, scene, geometry and relevant slot
 binding. A late completion may clean up only the resources it created. The
 ordinary saved provider is not changed by a temporary multi-view command.
 
-Current limitations include serialized metadata/probe and focus/audio work,
+Service-backend limitations include serialized metadata/probe and focus/audio work,
 unsupported replacement of an occupied slot, and incomplete Off modes. Off
 closes the owned backend session; restoring the previous ordinary source and
 promoting the active slot are not implemented. Independent focus/audio during

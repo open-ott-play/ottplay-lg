@@ -25,6 +25,7 @@ mod multiview_tests;
 enum Setting {
     NativeInputProbe,
     MultiviewService,
+    MultiviewBackend,
     HostedEpg,
     InfoTimeout,
     FontScale,
@@ -43,7 +44,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Self; 46] = [Self::FontScale, Self::Player, Self::Interface,
+    const ALL: [Self; 47] = [Self::FontScale, Self::Player, Self::Interface,
         Self::Appearance(appearance::Field::ALL[0]), Self::Appearance(appearance::Field::ALL[1]),
         Self::Appearance(appearance::Field::ALL[2]), Self::Appearance(appearance::Field::ALL[3]),
         Self::Menu(MenuItem::Providers), Self::Menu(MenuItem::Profiles), Self::Menu(MenuItem::Catalog),
@@ -59,7 +60,7 @@ impl Setting {
         Self::Classic(classic::Field::ALL[4]), Self::Classic(classic::Field::ALL[5]),
         Self::Classic(classic::Field::ALL[6]), Self::Classic(classic::Field::ALL[7]),
         Self::Classic(classic::Field::ALL[8]), Self::UiColors,
-        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe, Self::MultiviewService];
+        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe, Self::MultiviewService, Self::MultiviewBackend];
 
     fn find(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|setting| setting.id() == if id == "sUiColorConfig" { "uiColorConfig" } else { id })
@@ -74,6 +75,7 @@ impl Setting {
         match self {
             Self::NativeInputProbe => "nativeInputProbeV1",
             Self::MultiviewService => multiview::KEY,
+            Self::MultiviewBackend => "nativeMultiviewBackend",
             Self::HostedEpg => "nativeEpgApiV1",
             Self::InfoTimeout => "infoTimeout",
             Self::FontScale => "uiFontScale",
@@ -94,6 +96,7 @@ impl Setting {
 
     fn default(self) -> Value {
         match self {
+            Self::MultiviewBackend => json!("local"),
             Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::MultiviewService => json!(""),
             Self::InfoTimeout => json!(plx_screens::player::input::InfoTimeout::DEFAULT.seconds()),
             Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(0),
@@ -111,6 +114,7 @@ impl Setting {
     }
     fn valid(self, value: &Value) -> bool {
         match self {
+            Self::MultiviewBackend => matches!(value.as_str(), Some("local" | "service")),
             Self::MultiviewService => multiview::valid(value),
             Self::NativeInputProbe => value.as_str().is_some_and(|text|text.len()<=4096),
             Self::HostedEpg => hosted_epg_settings::parse(value).is_ok(),
@@ -131,18 +135,18 @@ impl Setting {
                 Self::Player => number == 0,
                 Self::Interface => plx_machine::machine::UiMode::from_index(number).is_some(),
                 Self::Sleep => super::super::sleep_timer::Choice::from_index(number).is_some(),
-                Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::MultiviewService | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
+                Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::MultiviewService | Self::MultiviewBackend | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
             }),
         }
     }
 
     fn writable(self) -> bool {
-        matches!(self, Self::MultiviewService | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
+        matches!(self, Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
     }
 
     fn reason(self) -> &'static str {
         match self {
-            Self::MultiviewService | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
+            Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
             Self::NativeInputProbe => "unsupported",
             Self::Player => "device_forced_auto",
         }
@@ -150,6 +154,13 @@ impl Setting {
 
     fn descriptor(self) -> Value {
         if matches!(self, Self::MultiviewService) { return multiview::descriptor(); }
+        if matches!(self, Self::MultiviewBackend) {
+            return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
+                "access":{"read":true,"write":true},"default_value":"local","apply":"immediate",
+                "constraints":{"values":["local","service"]},
+                "choices":[{"value":"local","label":"On this TV"},{"value":"service","label":"External service"}],
+                "description":"Local decoding and composition is the default. Backend changes require every multi-view scene and owned worker to be closed."});
+        }
         if matches!(self, Self::NativeInputProbe) {
             return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
                 "access":{"read":true,"write":false,"reason":"unsupported"},"default_value":"","apply":"immediate",
@@ -222,7 +233,7 @@ impl Setting {
                     .map(|choice| json!({"value":choice.index(),"label":choice.label(),"aliases":[]})).collect::<Vec<_>>());
                 result["description"] = json!("Standby after no input. Disabled by kiosk; a new session starts a fresh interval.");
             }
-            Self::NativeInputProbe | Self::MultiviewService | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
+            Self::NativeInputProbe | Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::UiColors | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) | Self::M3uMedia => unreachable!(),
         }
         result
     }
@@ -591,6 +602,13 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
     }
     if !setting.writable() {
         return fail("unsupported");
+    }
+    if matches!(setting, Setting::MultiviewBackend)
+        && (runtime.multiview.scene_status(runtime).is_some()
+            || !runtime.multiview_driver.shutdown_confirmed()
+            || runtime.multiview_local.has_work() || multiview_local_present::has_owned_work(runtime))
+    {
+        return fail("busy");
     }
     // Syntax alone grants no authority: a nonempty binding must address this
     // installation before consuming CAS or admitting the durable transaction.
@@ -1193,7 +1211,7 @@ mod menu_tests {
     }
     #[test]
     fn menu_fields_extend_existing_paginated_schema_without_reordering_it() {
-        assert_eq!(Setting::ALL.len(), 31 + MenuItem::ALL.len());
+        assert_eq!(Setting::ALL.len(), 32 + MenuItem::ALL.len());
         assert_eq!(Setting::ALL[45].id(), "nativeMultiviewService");
         assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
         assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");

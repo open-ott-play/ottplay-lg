@@ -78,7 +78,7 @@ fn entry() -> CatalogEntry {
 }
 fn result(work: SourceWork) -> PreparedMetadata {
     let mut metadata = entry();
-    if let Locator::ChannelName { name, group } = &work.binding.favorite.locator {
+    if let Locator::ChannelName { name, group } = &work.binding.favorite.as_ref().unwrap().locator {
         metadata.title = name.clone();
         metadata.category = group.clone().unwrap_or_default();
     }

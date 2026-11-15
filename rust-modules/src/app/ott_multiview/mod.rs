@@ -277,9 +277,31 @@ impl Coordinator {
         app: &App,
         layout: Layout,
     ) -> Result<Transition, Error> {
+        self.activate_using(runtime, app, layout, false)
+    }
+    pub fn activate_local(
+        &mut self,
+        runtime: &Runtime,
+        app: &App,
+        layout: Layout,
+    ) -> Result<Transition, Error> {
+        self.activate_using(runtime, app, layout, true)
+    }
+    fn activate_using(
+        &mut self,
+        runtime: &Runtime,
+        app: &App,
+        layout: Layout,
+        local: bool,
+    ) -> Result<Transition, Error> {
         self.ensure_inactive()?;
         self.ensure_policy(runtime, app)?;
-        let snapshot = Snapshot::capture(runtime).map_err(Error::Source)?;
+        let snapshot = if local {
+            Snapshot::capture_local(runtime)
+        } else {
+            Snapshot::capture(runtime)
+        }
+        .map_err(Error::Source)?;
         let (scene_id, scene_token) = mint_scene_id()?;
         let mut scene = Scene::new(scene_id);
         scene.set_layout(layout)?;
@@ -333,12 +355,36 @@ impl Coordinator {
             })
             .collect()
     }
+    pub fn refresh_local_sources(&mut self, runtime: &Runtime) -> Result<(), Error> {
+        self.ensure_active()?;
+        self.snapshot
+            .as_mut()
+            .ok_or(Error::SourceStale)?
+            .refresh_local(runtime)
+            .map_err(Error::Source)
+    }
 
     pub fn source_id(&self, handle: SourceHandle) -> Option<String> {
         let snapshot = self.snapshot.as_ref()?;
         snapshot.rows().enumerate().find_map(|(index, row)| {
             (row.handle == handle).then(|| format!("src_{}_{}", snapshot.epoch(), index + 1))
         })
+    }
+
+    pub fn source_handle(&self, id: &str) -> Option<SourceHandle> {
+        self.snapshot.as_ref()?.rows().find_map(|row| {
+            (self.source_id(row.handle).as_deref() == Some(id)).then_some(row.handle)
+        })
+    }
+    pub fn local_step_source(
+        &self,
+        slot: SlotId,
+        pending: Option<SourceHandle>,
+        offset: i64,
+    ) -> Option<SourceHandle> {
+        self.snapshot
+            .as_ref()?
+            .step_local(pending.or(self.sources[slot.index()])?, offset)
     }
 
     fn source_view(&self, handle: SourceHandle) -> Option<SourceView> {
@@ -672,6 +718,23 @@ impl Coordinator {
         app: &App,
         slot: SlotId,
     ) -> Result<Transition, Error> {
+        self.begin_play_using(runtime, app, slot, false)
+    }
+    pub fn begin_play_local(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        slot: SlotId,
+    ) -> Result<Transition, Error> {
+        self.begin_play_using(runtime, app, slot, true)
+    }
+    fn begin_play_using(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        slot: SlotId,
+        local: bool,
+    ) -> Result<Transition, Error> {
         self.ensure_active()?;
         self.ensure_policy(runtime, app)?;
         if self.stopping[slot.index()].is_some() {
@@ -688,12 +751,13 @@ impl Coordinator {
             .ok_or(Error::SceneInactive)?
             .begin_resolution(slot, handle.source_ref(), handle.media_ref())?;
         self.tickets[slot.index()] = Some(ticket);
-        let result = match self
-            .snapshot
-            .as_ref()
-            .ok_or(Error::SourceStale)?
-            .capture_work(runtime, app, &handle, ticket)
-        {
+        let snapshot = self.snapshot.as_ref().ok_or(Error::SourceStale)?;
+        let captured = if local {
+            snapshot.capture_local_work(runtime, app, &handle, ticket)
+        } else {
+            snapshot.capture_work(runtime, app, &handle, ticket)
+        };
+        let result = match captured {
             Ok(work) => {
                 self.cancellations[slot.index()] = Some(work.cancellation());
                 let mut transition =

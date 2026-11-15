@@ -684,6 +684,7 @@ pub(crate) fn player_requests_checked(app: &mut super::App,
     use plx_screens::registry::PlayerReq;
     let mut accepted = ViewerTransport::None;
     for request in reqs {
+        if super::ott_runtime::local_multiview_player_request(app, &request) { continue; }
         if multiview_uses_global_transport(&request)
             && super::ott_runtime::multiview_transport_unavailable(app)
         {
@@ -766,6 +767,9 @@ pub(crate) fn perform_hud_command_checked(app: &mut super::App,
     command: plx_appkit::player_hud::command::HudCommand, now: u32) -> ViewerTransport
 {
     use plx_appkit::player_hud::command::HudCommand;
+    if super::ott_runtime::local_multiview_player_request(app, &plx_screens::registry::PlayerReq::Command(command)) {
+        return ViewerTransport::None;
+    }
     if multiview_command_uses_global_transport(command)
         && super::ott_runtime::multiview_transport_unavailable(app)
     {

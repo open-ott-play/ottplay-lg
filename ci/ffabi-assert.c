@@ -107,6 +107,14 @@ SAME32(offsetof(AVFrame, height), 72, "OFF_FRAME_HEIGHT != 72");
 SAME64(offsetof(AVFrame, height), 108, "OFF_FRAME_HEIGHT != 72 [host]");
 SAME32(offsetof(AVFrame, format), 80, "OFF_FRAME_FORMAT != 80");
 SAME64(offsetof(AVFrame, format), 116, "OFF_FRAME_FORMAT != 80 [host]");
+/* Independent local software pictures copy exactly three 8-bit 4:2:0 planes.
+ * Other pixel formats must be rejected, never interpreted as this layout. */
+SAME(AV_PIX_FMT_YUV420P, 0, "local software YUV420P pixel format changed");
+SAME(AV_PIX_FMT_YUVJ420P, 12, "local software YUVJ420P pixel format changed");
+SAME32(offsetof(AVCodecParameters, color_range), 84, "local software color range moved");
+SAME64(offsetof(AVCodecParameters, color_range), 100, "local software color range moved [host]");
+SAME(AVCOL_RANGE_JPEG, 2, "local software full-range constant changed");
+SAME(AVCOL_SPC_BT709, 1, "local software BT709 matrix constant changed");
 /* +96 on FFmpeg 9, +104 on 6 and on the n3.3 the TVs ship — AVFrame lost fields ahead of it.
    Still 8-aligned by an ARM EABI pad, which is the classic AVFrame-on-ARM trap and the one most
    likely to be got wrong by reading a struct definition on a 64-bit machine. This assertion is
