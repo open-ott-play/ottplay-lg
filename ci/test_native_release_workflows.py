@@ -22,7 +22,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertNotIn("--verify-graph", source)
         self.assertNotIn("continue-on-error:", source)
         self.assertNotRegex(source, r"(?m)^    if:")
-        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
         native = body.split("  native:", 1)[1].split("\n  arm:", 1)[0]
         self.assertLess(native.index("uses: ./.github/actions/rust-toolchain"),
                         native.index("python3 scripts/lg-build.py check"))
@@ -101,13 +101,13 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertRegex(body, r"(?m)^  workflow_call:")
         self.assertIn("name: Release contracts", body)
         self.assertIn("ci.test_native_release_workflows", body)
-        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
         self.assertIn('test "$RELEASE" = success', body)
 
     def test_real_decoder_qualification_is_separate_dependent_and_required(self):
         body = workflow("ci.yml")
         build = body.split("  local-decoder-build:\n", 1)[1].split("\n  local-decoder-sessions:", 1)[0]
-        real = body.split("  local-decoder-sessions:\n", 1)[1].split("\n  arm:", 1)[0]
+        real = body.split("  local-decoder-sessions:\n", 1)[1].split("\n  local-virtual-output:", 1)[0]
         self.assertIn("timeout-minutes: 40", build)
         self.assertIn("timeout-minutes: 40", real)
         self.assertIn("needs: [local-decoder-build]", real)
@@ -161,6 +161,41 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertLess(build.index("assert_source(ident)"), build.index('"BUILD.json"'))
         self.assertLess(qualification.index('"nine-sessions"'), qualification.index("assert_source(ident)"))
         self.assertLess(qualification.index("assert_source(ident)"), qualification.index('"QUALIFIED.json"'))
+
+    def test_virtual_output_is_owned_dependent_and_part_of_the_gate(self):
+        body = workflow("ci.yml")
+        job = body.split("  local-virtual-output:\n", 1)[1].split("\n  arm:", 1)[0]
+        self.assertIn("needs: [local-decoder-build, local-decoder-sessions]", job)
+        self.assertIn("timeout-minutes: 40", job)
+        self.assertIn("CARGO_BUILD_JOBS: '1'", job)
+        self.assertIn("ci/qualify-local-multiview.py output", job)
+        self.assertIn("if: always()", job)
+        self.assertIn("proof-*/**", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertIn('test "$VIRTUAL_OUTPUT" = success', body)
+        helper = (ROOT / "ci/qualify-local-multiview.py").read_text()
+        self.assertIn("nine_real_yuv_textures_and_virtual_sdl_audio", helper)
+        self.assertIn('LIBGL_ALWAYS_SOFTWARE="1", SDL_AUDIODRIVER="pulseaudio"', helper)
+        self.assertIn('"--daemonize=no"', helper)
+        self.assertIn('private.mkdir(mode=0o700)', helper)
+        self.assertIn('DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(private / "nonexistent-session-bus")', helper)
+        self.assertIn('DBUS_SYSTEM_BUS_ADDRESS="unix:path=" + str(private / "nonexistent-system-bus")', helper)
+        self.assertIn('"-displayfd"', helper)
+        self.assertIn('"--device=ottplay_ci.monitor"', helper)
+        self.assertIn("Virtual audio monitor captured only silence", helper)
+        self.assertIn("owned_cleanup", helper)
+        self.assertIn('for profile in ("core", "es2"):', helper)
+        self.assertIn("PLXNATIVE_LOCAL_VIDEO_GL_PROFILE=profile", helper)
+        self.assertIn('"counts_scope": "per configuration"', helper)
+        self.assertIn("self.__exit__(*sys.exc_info())", helper)
+        self.assertIn('with VirtualOutput(runner, env, profile) as output:', helper)
+        self.assertIn('"stale_audio_owner", "stale_gain_owner", "gain_mute_measured"', helper)
+        self.assertIn('self.phase_order = ("full", "half", "mute", "unmute")', helper)
+        self.assertIn('"trim_start_s": 0.5, "trim_end_s": 0.1', helper)
+        self.assertIn('if not 0.4 <= ratio <= 0.65:', helper)
+        self.assertIn('if not 0.8 <= ratio <= 1.2:', helper)
+        self.assertIn('phase == "mute" and measured["rms"] > 1', helper)
+        self.assertIn("tick=output.phase_tick", helper)
 
     def test_legacy_draft_path_is_removed(self):
         self.assertFalse((ROOT / ".github/workflows/native-candidate-draft.yml").exists())

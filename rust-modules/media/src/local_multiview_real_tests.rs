@@ -238,6 +238,39 @@ impl Drop for Readers {
         }
     }
 }
+fn open_mixed_readers(
+    root: &std::path::Path,
+    server: &FixtureServer,
+) -> (Readers, Vec<Arc<AtomicBool>>) {
+    let mut readers = Readers(Vec::new());
+    let mut latches = Vec::new();
+    let off = plx_base::task::OffFrame::for_test();
+    for index in 0..9 {
+        let latch = Arc::new(AtomicBool::new(false));
+        let source = match index {
+            0 | 4 | 8 => {
+                let path = root.join(format!("slot{index}.mp4"));
+                ExternalSource::HeldLocal(
+                    HeldLocalFile::from_authorized(
+                        &off,
+                        File::open(&path).expect("fixture missing"),
+                        path,
+                        Arc::clone(&latch),
+                    )
+                    .unwrap(),
+                )
+            }
+            1 | 3 | 5 => ExternalSource::Http(server.url(&format!("/files/{index}.mp4"))),
+            2 | 6 | 7 => ExternalSource::Hls(server.url(&format!("/hls/{index}/master.m3u8"))),
+            _ => unreachable!(),
+        };
+        readers
+            .0
+            .push(Session::open(source, Limits::default()).unwrap());
+        latches.push(latch);
+    }
+    (readers, latches)
+}
 #[derive(Default)]
 struct Seen {
     frames: usize,
@@ -342,33 +375,8 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
     crate::ff::boot();
     assert!(available(), "bundled H264 decoder unavailable");
     let mut server = FixtureServer::open(root.clone());
-    let mut readers = Readers(Vec::new());
-    let mut latches = Vec::new();
+    let (mut readers, latches) = open_mixed_readers(&root, &server);
     let off = plx_base::task::OffFrame::for_test();
-    for index in 0..9 {
-        let latch = Arc::new(AtomicBool::new(false));
-        let source = match index {
-            0 | 4 | 8 => {
-                let path = root.join(format!("slot{index}.mp4"));
-                ExternalSource::HeldLocal(
-                    HeldLocalFile::from_authorized(
-                        &off,
-                        File::open(&path).expect("fixture missing"),
-                        path,
-                        Arc::clone(&latch),
-                    )
-                    .unwrap(),
-                )
-            }
-            1 | 3 | 5 => ExternalSource::Http(server.url(&format!("/files/{index}.mp4"))),
-            2 | 6 | 7 => ExternalSource::Hls(server.url(&format!("/hls/{index}/master.m3u8"))),
-            _ => unreachable!(),
-        };
-        readers
-            .0
-            .push(Session::open(source, Limits::default()).unwrap());
-        latches.push(latch);
-    }
     let path = root.join("slot0.mp4");
     let held = HeldLocalFile::from_authorized(
         &off,
@@ -481,3 +489,6 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
     assert!(reopened.is_retired());
     assert!(server.stop(), "owned fixture HTTP worker did not retire");
 }
+
+#[path = "local_multiview_output_tests.rs"]
+mod output;

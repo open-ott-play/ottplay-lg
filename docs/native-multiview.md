@@ -18,7 +18,10 @@ The same scene supports PiP, four equal windows, nine equal windows, and a large
 central window with up to eight satellites. Rendering and Magic Remote hit tests
 share one pixel layout. Selecting a window changes the active input; one audio
 owner feeds the queued SDL output. Owner changes, pause, seek and scene retirement
-flush queued audio. Volume remains a television-wide control.
+flush queued audio. One player volume/mute setting applies to the acknowledged
+audio owner through the software sink. It does not change the television's
+hardware volume. Commands accepted for an earlier scene cannot change a later
+scene or ordinary playback.
 
 Local source choices combine captured saved Favorites and the current catalog.
 They retain provider and profile identities, so M3U, VPortal, Plex and authorized
@@ -81,6 +84,33 @@ Other layouts are `pip`, `grid4`, and `perimeter --satellites 8`. Use explicit
 which this initial local backend does not advertise. Source support and actual
 admission are checked for each window independently; successful CLI dispatch is
 not a decoded-frame or TV-capacity measurement.
+
+## Hosted output qualification
+
+The Native checks workflow keeps three mandatory results separate:
+
+- Build the pinned bundled FFmpeg component set, assert the C ABI, and record
+  source, configuration, library and header identities.
+- Execute the explicit mixed nine-session test: three held files, three HTTP
+  sources and three HLS sources, with seek, cancellation and retirement checks.
+- Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
+  and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
+
+The output test compares framebuffer pixels with a CPU YUV reference, updates
+one window, checks ordinary UI drawing afterwards, rejects invalid planes and
+foreign contexts, and checks texture retirement. Real decoded PCM passes through
+SDL; the owned PulseAudio monitor must capture nonzero audio. Owner changes,
+queue clearing, draining and reopening are checked separately. Four independent
+monitor captures measure the same decoded PCM at full gain, half gain, mute and
+restored gain. Receipts retain raw PCM and the declared steady measurement window;
+bytes already accepted by the audio driver are not claimed to stop instantly.
+
+Each stage verifies the same source and decoder artifact before execution.
+The output receipt records actual GL/GLSL versions, texture format and stride,
+SDL driver and PCM format. Raw frames, PNGs, hashes and logs remain CI artifacts.
+These are virtual host results, not a measurement of LG graphics, speakers,
+thermal limits or nine HD streams. The integration tests are explicitly ignored
+in the ordinary Rust suite and run only in their dedicated hosted stages.
 
 ## Optional service backend
 

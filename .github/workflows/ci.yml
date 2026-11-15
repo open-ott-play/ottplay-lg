@@ -141,6 +141,53 @@ jobs:
             ${{ runner.temp }}/local-decoder-sessions/*.log
             ${{ runner.temp }}/local-decoder-sessions/fixtures/MANIFEST.json
 
+  local-virtual-output:
+    name: Virtual video and audio output
+    needs: [local-decoder-build, local-decoder-sessions]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev libgl1-mesa-dri libwayland-dev libglib2.0-dev ffmpeg xvfb pulseaudio pulseaudio-utils
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: rust-modules
+          key: local-decoder-sessions
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: local-decoder-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-output-decoder-artifact
+      - name: Verify bundled decoder again and qualify owned virtual GL and audio output
+        run: >-
+          python3 ci/qualify-local-multiview.py output
+          --artifact "$RUNNER_TEMP/local-output-decoder-artifact"
+          --out "$RUNNER_TEMP/local-virtual-output"
+      - name: Retain virtual framebuffer, PCM monitor and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: local-virtual-output-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/local-virtual-output/RESULT.json
+            ${{ runner.temp }}/local-virtual-output/VERIFIED.json
+            ${{ runner.temp }}/local-virtual-output/QUALIFIED.json
+            ${{ runner.temp }}/local-virtual-output/*.log
+            ${{ runner.temp }}/local-virtual-output/fixtures/MANIFEST.json
+            ${{ runner.temp }}/local-virtual-output/proof-*/**
+
   arm:
     name: ARM shared core
     runs-on: ubuntu-24.04-arm
@@ -182,7 +229,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions]
+    needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions, local-virtual-output]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -194,7 +241,9 @@ jobs:
           RELEASE: ${{ needs.release-contracts.result }}
           DECODER_BUILD: ${{ needs.local-decoder-build.result }}
           DECODER_SESSIONS: ${{ needs.local-decoder-sessions.result }}
+          VIRTUAL_OUTPUT: ${{ needs.local-virtual-output.result }}
         run: >-
           test "$SOURCE" = success && test "$NATIVE" = success &&
           test "$ARM" = success && test "$RELEASE" = success &&
-          test "$DECODER_BUILD" = success && test "$DECODER_SESSIONS" = success
+          test "$DECODER_BUILD" = success && test "$DECODER_SESSIONS" = success &&
+          test "$VIRTUAL_OUTPUT" = success
