@@ -33,17 +33,33 @@ function fixture(){
  const f=fixture();f.line('HOME');f.line('LGHOME');f.line('HOME');f.requests[0].cb({payload:{returnValue:true}});
  assert.equal(f.requests[1].id,'com.webos.app.home');
 }
-// Pause or failed OTT request cancels intent; no deferred foreground mutation.
-for(const pause of [true,false]){
- const f=fixture();f.line('HOME');f.line('LGHOME');if(pause)f.handlers.SIGTERM();
- f.requests[0].cb({payload:{returnValue:pause}});
+// Explicit pause cancels a confirmed escape, including after failure cleanup began.
+for(const stage of ['before-failure','after-failure','cleanup-pending']){
+ const f=fixture();f.line('HOME');f.line('LGHOME');
+ if(stage!=='before-failure')f.requests[0].cb({payload:{returnValue:false}});
+ if(stage==='cleanup-pending')f.worker.emit('exit',0);
+ f.handlers.SIGTERM();
+ if(stage==='before-failure')f.requests[0].cb({payload:{returnValue:true}});
  assert.equal(f.requests.length,1);assert.equal(f.worker.ended,'Q');
- f.worker.emit('exit',0);assert.deepEqual(Array.from(f.children[1].args),['cleanup']);f.children[1].emit('exit',0);assert.equal(f.requests.length,1);
+ if(stage!=='cleanup-pending')f.worker.emit('exit',0);assert.deepEqual(Array.from(f.children[1].args),['cleanup']);f.children[1].emit('exit',0);assert.equal(f.requests.length,1);
 }
-// A timeout fails closed; its late success callback cannot dispatch escape.
+// A confirmed long-Home survives failed/timed-out OTT only after worker release
+// AND key cleanup. A late OTT reply never retries OTT or duplicates LG Home.
+for(const timeout of [false,true]){
+ const f=fixture();f.line('HOME');f.advance(2000);f.line('LGHOME');
+ if(timeout)f.lastTimer(3000).fn();else f.requests[0].cb({payload:{returnValue:false}});
+ assert.equal(f.worker.ended,'Q');assert.equal(f.requests.length,1);
+ f.worker.stdin.emit('error',new Error('closed after Q'));
+ f.requests[0].cb({payload:{returnValue:true}});assert.equal(f.requests.length,1);
+ f.worker.emit('exit',0);assert.deepEqual(Array.from(f.children[1].args),['cleanup']);assert.equal(f.requests.length,1);
+ f.children[1].emit('exit',0);
+ assert.deepEqual(f.requests.map(x=>x.id),['com.openottplay.player.native','com.webos.app.home']);
+ f.requests[1].cb({payload:{returnValue:true}});assert.deepEqual(f.exits,[0]);
+}
+// An ordinary failed short-Home request does not manufacture an escape.
 {
- const f=fixture();f.line('HOME');f.line('LGHOME');f.lastTimer(3000).fn();
- assert.equal(f.worker.ended,'Q');f.requests[0].cb({payload:{returnValue:true}});assert.equal(f.requests.length,1);
+ const f=fixture();f.line('HOME');f.requests[0].cb({payload:{returnValue:false}});
+ f.worker.emit('exit',0);f.children[1].emit('exit',0);assert.equal(f.requests.length,1);
 }
 // Eight-second native release clears pending intent, cleans up, then orders
 // LG Home after the outstanding OTT request has settled.
@@ -53,4 +69,4 @@ for(const pause of [true,false]){
  assert.deepEqual(f.requests.map(x=>x.id),['com.openottplay.player.native','com.webos.app.home']);
  f.requests[1].cb({payload:{returnValue:true}});assert.deepEqual(f.exits,[0]);
 }
-console.log('PASS: actual controller delayed OTT→LG escape, priority, pause/failure cancellation and 8-second cleanup/launch ordering. VM doubles only.');
+console.log('PASS: actual controller delayed OTT→LG escape, priority, pause cancellation, rejection/timeout escape preservation and 8-second cleanup/launch ordering. VM doubles only.');

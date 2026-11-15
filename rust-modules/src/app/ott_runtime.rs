@@ -7387,7 +7387,13 @@ fn handle_action(
     if !submitted {
         parental_runtime::ui_gate(runtime, app, &selected)?;
     }
-    home_integration::before_action(runtime, &selected);
+    // A stale group command can be rejected without leaving Settings. Retire
+    // Home only after the group handler has accepted this presentation change.
+    let home_group_navigation =
+        matches!(&selected, OttAction::EditSetting(key) if key.starts_with("settings.open:"));
+    if !home_group_navigation {
+        home_integration::before_action(runtime, &selected);
+    }
     if let OttAction::VolumeStep(direction) = &selected {
         return desktop_input::volume_step(runtime, app, *direction);
     }
@@ -7414,6 +7420,9 @@ fn handle_action(
         return result;
     }
     if let Some(result) = settings_groups::action(runtime, &selected) {
+        if home_group_navigation && result.is_ok() {
+            home_integration::before_action(runtime, &selected);
+        }
         return result;
     }
     settings_groups::external_action(runtime, &selected);
