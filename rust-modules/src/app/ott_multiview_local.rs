@@ -172,6 +172,21 @@ impl Driver {
             p.paused,
         ))
     }
+    pub fn active_seekable(&self, runtime: &mut Runtime, app: &App) -> bool {
+        self.owns_ui(runtime, app)
+            && runtime.multiview.active_slot().is_some_and(|slot| {
+                self.stopping[slot.index()].is_none()
+                    && self.pictures[slot.index()].as_ref().is_some_and(|picture| {
+                        picture.admitted && !picture.terminal
+                            && runtime.multiview.active_playback() == Some((slot, picture.ticket))
+                            && runtime.multiview.slot_status(slot).is_ok_and(|status| matches!(status,
+                                plx_data::ott::multiview::SlotStatus::Playing { .. }
+                                    | plx_data::ott::multiview::SlotStatus::Paused { .. }))
+                            && picture.receipt.input.reauthorize(runtime, app).is_ok()
+                            && picture.decoder.is_seekable()
+                    })
+            })
+    }
     pub fn step_active(
         &mut self,
         runtime: &mut Runtime,
@@ -268,7 +283,9 @@ impl Driver {
                 Ok(plx_data::ott::multiview::SlotStatus::Resolving { .. }
                     | plx_data::ott::multiview::SlotStatus::Resolved { .. }
                     | plx_data::ott::multiview::SlotStatus::Playing { .. }
-                    | plx_data::ott::multiview::SlotStatus::Paused { .. }))
+                    | plx_data::ott::multiview::SlotStatus::Paused { .. }
+                    | plx_data::ott::multiview::SlotStatus::Failed { .. }
+                    | plx_data::ott::multiview::SlotStatus::Unsupported { .. }))
         {
             let transition = runtime.multiview.close_slot(slot)?;
             self.replacements[index] = Some(handle);
@@ -296,15 +313,19 @@ impl Driver {
         let slot = runtime.multiview.active_slot().ok_or("No active slot")?;
         let p = self.pictures[slot.index()]
             .as_mut()
-            .filter(|p| p.admitted)
+            .filter(|p| p.admitted && !p.terminal)
             .ok_or("No active picture")?;
         p.receipt
             .input
             .reauthorize(runtime, app)
             .map_err(|_| "Source changed")?;
+        let transition = runtime.multiview.set_paused(p.ticket, paused)
+            .map_err(|_| "Window playback changed before pause")?;
         p.decoder.set_paused(paused);
         p.paused = paused;
         self.audio.clear();
+        runtime.multiview_effects.extend(transition.effects);
+        runtime.changed();
         Ok(())
     }
     pub fn seek_active(
