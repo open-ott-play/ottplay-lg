@@ -5,7 +5,7 @@ var processState=require('./process-state'),policy=require('./policy'),root=__di
 var service=new Service('com.openottplay.homehelper'),options=JSON.parse(fs.readFileSync(root+'/options.json','utf8'));
 var params=JSON.parse(process.argv[2]||'{}'),boot=fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim();
 var shared='/media/developer/apps/usr/palm/services/com.openottplay.homehelper.control/state';
-var child=null,ready=false,stopping=false,timer=null,workerTick=null,buffer='',lastAck=0,launching=false,pendingIntent=null,activeIntent=null;
+var child=null,ready=false,stopping=false,timer=null,workerTick=null,buffer='',lastAck=0,launching=false,pendingIntent=null,activeIntent=null,escapeAfterRelease=false;
 var parentTick=processState.read(process.pid).tick,monotonicStart=process.hrtime();
 function now(){var t=process.hrtime();return t[0]*1000+t[1]/1e6;}
 function control(){try{return JSON.parse(fs.readFileSync(shared+'/control.json','utf8'));}catch(e){return null;}}
@@ -20,7 +20,7 @@ function requestIntent(id){
   launch(id,function(ok){
     launching=false;activeIntent=null;
     if(stopping)return;
-    if(!ok){stop();return;}
+    if(!ok){stop(id==='com.openottplay.player.native'&&pendingIntent==='com.webos.app.home');return;}
     var next=pendingIntent;pendingIntent=null;if(next)requestIntent(next);
   });
 }
@@ -28,8 +28,8 @@ function finish(code,signal){if(stopping==='finished')return;stopping='finished'
   // Worker has exited: clear any relayed held keys before announcing release.
   var cleanup=cp.spawn(root+'/relay',['cleanup'],{stdio:'ignore'}),done=false,guard=setTimeout(function(){try{cleanup.kill('SIGKILL');}catch(e){}},1500);
   function completed(){if(done)return;done=true;clearTimeout(guard);report(true,code);
-    if(code!==22){process.exit(code||0);return;}
-    // The 8-second escape has already released input. Order the LG Home
+    if(code!==22&&!escapeAfterRelease){process.exit(code||0);return;}
+    // A confirmed long-Home or 8-second escape has released input. Order LG Home
     // request after the prior bounded foreground request settles, not beside it.
     var until=now()+3200;
     function escape(){if(launching&&now()<until){setTimeout(escape,50);return;}launch('com.webos.app.home',function(){process.exit(0);});}
@@ -37,8 +37,9 @@ function finish(code,signal){if(stopping==='finished')return;stopping='finished'
   }
   cleanup.on('exit',completed);cleanup.on('error',completed);
 }
-function stop(){if(stopping)return;stopping=true;pendingIntent=null;ready=false;block();if(child){try{child.stdin.end('Q');}catch(e){}setTimeout(function(){try{child.kill('SIGKILL');}catch(e){}},1500);}else finish(0);}
-process.on('SIGTERM',stop);process.on('SIGINT',stop);process.on('uncaughtException',stop);
+function stop(keepHome){if(keepHome===true)escapeAfterRelease=true;if(stopping)return;stopping=true;pendingIntent=null;ready=false;block();if(child){try{child.stdin.end('Q');}catch(e){}setTimeout(function(){try{child.kill('SIGKILL');}catch(e){}},1500);}else finish(0);}
+function cancel(){escapeAfterRelease=false;stop();}
+process.on('SIGTERM',cancel);process.on('SIGINT',cancel);process.on('uncaughtException',cancel);
 if(!policy.identity(options,process.getuid(),process.getgid(),process.getgroups()) || !params.session || !parentTick){process.exit(3);}
 try{fs.unlinkSync(data+'/blocked');}catch(e){if(e.code!=='ENOENT')process.exit(4);}
 if(!allowed() || params.mode!==control().mode || params.mode==='trial' && (params.trialSeconds%1!==0 || params.trialSeconds<1 || params.trialSeconds>120)){block();process.exit(5);}

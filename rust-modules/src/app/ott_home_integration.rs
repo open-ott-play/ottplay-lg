@@ -186,6 +186,7 @@ pub(super) fn suspend(runtime: &mut Runtime) {
 
 pub(super) fn tick(runtime: &mut Runtime, app: &App) {
     let current = address(runtime, app);
+    let had_flight = runtime.home_integration.flight.is_some();
     if let Some(result) = runtime.home_integration.poll(current) {
         runtime.status = match result {
             HomeIntegrationLaunch::Requested => {
@@ -197,6 +198,10 @@ pub(super) fn tick(runtime: &mut Runtime, app: &App) {
             }
         }
         .into();
+    }
+    // Retired replies cannot publish status, but draining their flight enables
+    // the Home row again and must invalidate the retained Settings snapshot.
+    if had_flight && runtime.home_integration.flight.is_none() {
         runtime.changed();
     }
 }
@@ -451,8 +456,9 @@ mod tests {
         tick(&mut runtime, &app);
         assert!(runtime.home_integration.flight.is_none());
         assert_eq!(
-            runtime.revision, revision,
-            "late ack must not invalidate paint"
+            runtime.revision,
+            revision.wrapping_add(1),
+            "draining the cancelled flight must publish row availability"
         );
         assert_eq!(
             runtime.status, status,
@@ -468,5 +474,143 @@ mod tests {
             !LAUNCH_PENDING.load(Ordering::Acquire),
             "late ack cannot retry launch"
         );
+    }
+
+    #[cfg(feature = "hostsim")]
+    fn mounted_settings() -> (App, Runtime) {
+        use plx_machine::machine::{MachineId, NavOp, Tick};
+        use plx_screens::registry::AppArg;
+        use plx_ui::containers::modal::Style;
+        fn settle(app: &mut App) {
+            for _ in 0..24 {
+                app.loop_t = app.loop_t.wrapping_add(16);
+                let tick = Tick {
+                    ms: app.loop_t,
+                    dt_us: 16_000,
+                };
+                bridge::frame(&mut app.pages, &mut app.bridge, tick, Vec::new());
+            }
+        }
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        bridge::show_page(&mut app.pages, AppArg::Player);
+        settle(&mut app);
+        app.pages.nav.next_style = Style::PlayerPanel {
+            survives_failure: true,
+        };
+        app.pages
+            .request(MachineId::Nav, NavOp::Present(AppArg::Ott));
+        settle(&mut app);
+        app.running = true;
+        assert!(bridge::ott_catalog_surface(&app.pages).is_some());
+        assert!(!app.pages.has_pending_navigation());
+        let mut runtime =
+            Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+        runtime.remote = Remote::disabled_for_test("dev_home_group_fixture", "fixture");
+        runtime.loaded = true;
+        runtime.page = "settings";
+        runtime.reply = current_ui_owner(&app);
+        assert!(address(&runtime, &app).is_some());
+        (app, runtime)
+    }
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn actual_settings_group_navigation_retires_only_after_acceptance() {
+        let _serial = plx_base::testlock::serial();
+        for (group, accepted) in [("remote", true), ("not-a-settings-group", false)] {
+            let (mut app, mut runtime) = mounted_settings();
+            let original = address(&runtime, &app).unwrap();
+            let (send, cancelled) = runtime.home_integration.prepare(original).unwrap();
+            // A focus-only intent must leave the pending launch alone.
+            before_action(
+                &mut runtime,
+                &OttAction::FocusAt {
+                    context: String::new(),
+                    id: "settings.open:remote".into(),
+                },
+            );
+            assert!(!cancelled.load(Ordering::Acquire));
+            let result = handle_action(
+                &mut runtime,
+                &mut app,
+                OttAction::EditSetting(format!("settings.open:{group}")),
+            );
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(cancelled.load(Ordering::Acquire), accepted);
+            assert_eq!(
+                runtime.home_integration.epoch,
+                original.epoch + if accepted { 1 } else { 0 }
+            );
+            assert!(runtime.home_integration.flight.is_some());
+            assert_eq!(runtime.page, "settings");
+            assert!(
+                address(&runtime, &app).is_some(),
+                "the same Settings owner remains mounted"
+            );
+            send.try_send(HomeIntegrationLaunch::Requested).unwrap();
+            let current = address(&runtime, &app);
+            assert_eq!(
+                runtime.home_integration.poll(current),
+                if accepted {
+                    None
+                } else {
+                    Some(HomeIntegrationLaunch::Requested)
+                }
+            );
+        }
+    }
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn actual_cancelled_completion_republishes_enabled_home_row_without_stale_status() {
+        let _serial = plx_base::testlock::serial();
+        for reply in [true, false] {
+            let (app, mut runtime) = mounted_settings();
+            let original = address(&runtime, &app).unwrap();
+            let (send, _) = runtime.home_integration.prepare(original).unwrap();
+            runtime.home_integration.retire();
+            runtime.status = "Retained Settings status".into();
+            let revision = runtime.revision;
+            let pending_view = runtime.view();
+            assert_eq!(pending_view.revision, revision);
+            assert!(
+                !pending_view
+                    .rows
+                    .iter()
+                    .find(|row| row.id == KEY)
+                    .unwrap()
+                    .enabled
+            );
+            tick(&mut runtime, &app);
+            assert_eq!(
+                runtime.revision, revision,
+                "pending work must not repaint every tick"
+            );
+            if reply {
+                send.try_send(HomeIntegrationLaunch::Requested).unwrap();
+            }
+            drop(send); // Also cover worker disconnect without an acknowledgement.
+            tick(&mut runtime, &app);
+            assert!(runtime.home_integration.flight.is_none());
+            assert_eq!(runtime.revision, revision.wrapping_add(1));
+            assert_eq!(runtime.status, "Retained Settings status");
+            let completed_view = runtime.view();
+            assert_eq!(completed_view.revision, revision.wrapping_add(1));
+            assert!(
+                completed_view
+                    .rows
+                    .iter()
+                    .find(|row| row.id == KEY)
+                    .unwrap()
+                    .enabled
+            );
+            tick(&mut runtime, &app);
+            assert_eq!(
+                runtime.revision,
+                revision.wrapping_add(1),
+                "completion publishes once"
+            );
+            assert!(!LAUNCH_PENDING.load(Ordering::Acquire));
+        }
     }
 }
