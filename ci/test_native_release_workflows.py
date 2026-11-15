@@ -22,7 +22,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertNotIn("--verify-graph", source)
         self.assertNotIn("continue-on-error:", source)
         self.assertNotRegex(source, r"(?m)^    if:")
-        self.assertIn("needs: [source, native, arm, release-contracts]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions]", body)
         native = body.split("  native:", 1)[1].split("\n  arm:", 1)[0]
         self.assertLess(native.index("uses: ./.github/actions/rust-toolchain"),
                         native.index("python3 scripts/lg-build.py check"))
@@ -101,8 +101,66 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertRegex(body, r"(?m)^  workflow_call:")
         self.assertIn("name: Release contracts", body)
         self.assertIn("ci.test_native_release_workflows", body)
-        self.assertIn("needs: [source, native, arm, release-contracts]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions]", body)
         self.assertIn('test "$RELEASE" = success', body)
+
+    def test_real_decoder_qualification_is_separate_dependent_and_required(self):
+        body = workflow("ci.yml")
+        build = body.split("  local-decoder-build:\n", 1)[1].split("\n  local-decoder-sessions:", 1)[0]
+        real = body.split("  local-decoder-sessions:\n", 1)[1].split("\n  arm:", 1)[0]
+        self.assertIn("timeout-minutes: 40", build)
+        self.assertIn("timeout-minutes: 40", real)
+        self.assertIn("needs: [local-decoder-build]", real)
+        self.assertIn("CARGO_BUILD_JOBS: '1'", real)
+        self.assertIn("ci/qualify-local-multiview.py build", build)
+        self.assertIn("ci/qualify-local-multiview.py qualify", real)
+        artifact = "local-decoder-${{ github.run_id }}-${{ github.run_attempt }}"
+        self.assertIn("name: " + artifact, build)
+        self.assertIn("name: " + artifact, real)
+        for stage in (build, real):
+            self.assertNotIn("continue-on-error", stage)
+            self.assertIn("if: always()", stage)
+            self.assertIn("RESULT.json", stage)
+        self.assertIn('test "$DECODER_BUILD" = success', body)
+        self.assertIn('test "$DECODER_SESSIONS" = success', body)
+
+    def test_decoder_receipts_bind_source_libraries_cabi_and_the_one_real_test(self):
+        body = (ROOT / "ci/qualify-local-multiview.py").read_text()
+        self.assertIn('HOST="1", JOBS="1", RELEASE="1"', body)
+        self.assertIn('"GITHUB_RUN_ID"', body)
+        self.assertIn('"GITHUB_RUN_ATTEMPT"', body)
+        self.assertIn('"HEAD^{tree}"', body)
+        self.assertIn('receipt.get("identity") != ident', body)
+        self.assertIn('inventory(prefix) != receipt["prefix"]', body)
+        self.assertIn('sha(destination / "source" / dep["archive"]) != dep["sha256"]', body)
+        self.assertIn('registry(prefix) != receipt["registry"]', body)
+        self.assertIn('"ci/ffabi-assert.c"', body)
+        self.assertIn("codec.avcodec_find_decoder_by_name", body)
+        self.assertIn('nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement', body)
+        self.assertIn('"--exact", "--ignored", "--list"', body)
+        self.assertIn('"--exact", "--ignored", "--nocapture", "--test-threads=1"', body)
+        self.assertIn('test result: ok. 1 passed; 0 failed; 0 ignored;', body)
+        qualification = body.split("def qualify(", 1)[1].split("def main(", 1)[0]
+        self.assertLess(qualification.index("verify(runner"), qualification.index('"fixtures"'))
+        self.assertIn("signal.SIGTERM", body)
+        self.assertIn("signal.SIGKILL", body)
+        generator = (ROOT / "ci/generate-local-multiview-fixtures.py").read_text()
+        self.assertNotIn("/opt/homebrew", generator)
+        self.assertIn("range(9)", generator)
+        self.assertIn("timeout=45", generator)
+        self.assertIn("fixture destination must be empty", generator)
+        self.assertIn('if index in (2, 6, 7):', generator)
+        self.assertIn('"video_count": 9', generator)
+        self.assertIn('"hls_objects": hls_objects', generator)
+        self.assertIn("Fixture object escaped its source directory", body)
+        self.assertIn("Duplicate fixture objects", body)
+        self.assertIn('["git", "diff", "--quiet", "HEAD", "--"]', body)
+        self.assertIn("if identity() != ident:", body)
+        self.assertIn("Decoder inventory contains an escaping or absolute symlink", body)
+        build = body.split("def build(", 1)[1].split("def verify(", 1)[0]
+        self.assertLess(build.index("assert_source(ident)"), build.index('"BUILD.json"'))
+        self.assertLess(qualification.index('"nine-sessions"'), qualification.index("assert_source(ident)"))
+        self.assertLess(qualification.index("assert_source(ident)"), qualification.index('"QUALIFIED.json"'))
 
     def test_legacy_draft_path_is_removed(self):
         self.assertFalse((ROOT / ".github/workflows/native-candidate-draft.yml").exists())

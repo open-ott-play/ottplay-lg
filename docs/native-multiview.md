@@ -47,6 +47,41 @@ The feature must be qualified in stages: pure tests, actual concurrent decoding,
 GL and audio output, ARM packaging, then sustained playback on the target TV.
 Host compilation alone does not establish physical TV capacity or playback.
 
+## Using local scenes
+
+Open **Settings → Multiview** and choose a layout. On the video surface,
+press Back to open its controls, then use **Choose video / active slot** to pick
+a source for each window. The slot menu also selects the active video and audio owner. On the
+video surface, the shared focus controls and Magic Remote pointer use the same
+rectangles as rendering. Back opens the Multiview controls; Close restores the
+previous ordinary source only after retirement and fresh authorization.
+
+On a build that advertises these capabilities, the existing CLI uses windows
+1–9 (the wire protocol uses 0–8):
+
+```sh
+ott l mv status
+ott l mv layout grid9
+ott l mv sources 1 --provider m3u
+ott l mv window 1 play TICKET_FROM_WINDOW_1
+ott l mv sources 2 --provider plex
+ott l mv window 2 play TICKET_FROM_WINDOW_2
+ott l mv focus 2
+ott l mv audio follows-focus
+ott l mv off restore_previous
+```
+
+Repeat the source-list/play pair for `vportal` or `local`, or use a returned
+opaque profile token with `--profile`. Apply each fresh source ticket before
+refreshing discovery; tickets and cursors cannot be reused across windows or
+scenes. A displayed name or a numeric profile position is not a source token.
+
+Other layouts are `pip`, `grid4`, and `perimeter --satellites 8`. Use explicit
+`off restore_previous`: the CLI's unqualified Off defaults to `promote_active`,
+which this initial local backend does not advertise. Source support and actual
+admission are checked for each window independently; successful CLI dispatch is
+not a decoded-frame or TV-capacity measurement.
+
 ## Optional service backend
 
 The paired service decodes independent inputs and composes one H.264/AAC HLS

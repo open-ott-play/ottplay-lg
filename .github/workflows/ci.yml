@@ -65,6 +65,82 @@ jobs:
       - name: Test native application and layers
         run: python3 scripts/lg-build.py check --work-dir "$RUNNER_TEMP/lg-check" --jobs 2
 
+  local-decoder-build:
+    name: Bundled local decoder and C ABI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config nasm zlib1g-dev
+      - name: Build the pinned bundled decoder registry with one job
+        run: python3 ci/qualify-local-multiview.py build --out "$RUNNER_TEMP/local-decoder-build"
+      - name: Retain decoder identity, C ABI evidence and failure logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: local-decoder-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/local-decoder-build/BUILD.json
+            ${{ runner.temp }}/local-decoder-build/RESULT.json
+            ${{ runner.temp }}/local-decoder-build/*.log
+            ${{ runner.temp }}/local-decoder-build/decoder-bundle.tar.gz
+            ${{ runner.temp }}/local-decoder-build/decoder-bundle.sha256
+
+  local-decoder-sessions:
+    name: Nine independent software decoder sessions
+    needs: [local-decoder-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: build-essential pkg-config libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev libwayland-dev libglib2.0-dev ffmpeg
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: rust-modules
+          key: local-decoder-sessions
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: local-decoder-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-decoder-artifact
+      - name: Verify source and bundled ABI, then qualify the exact ignored decoder test
+        run: >-
+          python3 ci/qualify-local-multiview.py qualify
+          --artifact "$RUNNER_TEMP/local-decoder-artifact"
+          --out "$RUNNER_TEMP/local-decoder-sessions"
+      - name: Retain exact test inventory, fixture hashes and outcome on success or failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: local-decoder-sessions-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/local-decoder-sessions/RESULT.json
+            ${{ runner.temp }}/local-decoder-sessions/VERIFIED.json
+            ${{ runner.temp }}/local-decoder-sessions/QUALIFIED.json
+            ${{ runner.temp }}/local-decoder-sessions/*.log
+            ${{ runner.temp }}/local-decoder-sessions/fixtures/MANIFEST.json
+
   arm:
     name: ARM shared core
     runs-on: ubuntu-24.04-arm
@@ -106,7 +182,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [source, native, arm, release-contracts]
+    needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -116,6 +192,9 @@ jobs:
           NATIVE: ${{ needs.native.result }}
           ARM: ${{ needs.arm.result }}
           RELEASE: ${{ needs.release-contracts.result }}
+          DECODER_BUILD: ${{ needs.local-decoder-build.result }}
+          DECODER_SESSIONS: ${{ needs.local-decoder-sessions.result }}
         run: >-
           test "$SOURCE" = success && test "$NATIVE" = success &&
-          test "$ARM" = success && test "$RELEASE" = success
+          test "$ARM" = success && test "$RELEASE" = success &&
+          test "$DECODER_BUILD" = success && test "$DECODER_SESSIONS" = success
