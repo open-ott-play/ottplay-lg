@@ -362,6 +362,168 @@ pub fn poll_home() {
 /// minimize leg instead of leaving the user on a screen whose BACK did nothing.
 const HOME_APP_ID: &str = "com.webos.app.home";
 
+/// Optional public companion app. No caller can supply an application identifier.
+pub const OTT_HOME_APP_ID: &str = "com.openottplay.home";
+
+use crate::tv::home_integration::Launch as HomeIntegrationLaunch;
+
+#[cfg(any(test, all(not(feature = "hostsim"), not(feature = "test-support"))))]
+fn home_integration_reply(reply: &str, hub_error: bool) -> HomeIntegrationLaunch {
+    if hub_error || reply.len() > 4096 {
+        return HomeIntegrationLaunch::Unavailable;
+    }
+    match serde_json::from_str::<serde_json::Value>(reply)
+        .ok()
+        .as_ref()
+        .and_then(|value| value.get("returnValue"))
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => HomeIntegrationLaunch::Requested,
+        Some(false) => HomeIntegrationLaunch::Rejected,
+        None => HomeIntegrationLaunch::Unavailable,
+    }
+}
+
+/// Registration may block outside the LS2 reply budget. Check cancellation
+/// again after it returns, before admitting the actual launch dispatch.
+#[cfg(any(test, all(not(feature = "hostsim"), not(feature = "test-support"))))]
+fn home_launch_with_registration<R>(
+    cancelled: &std::sync::atomic::AtomicBool,
+    register: impl FnOnce() -> Option<R>,
+    dispatch: impl FnOnce(R) -> HomeIntegrationLaunch,
+) -> HomeIntegrationLaunch {
+    use std::sync::atomic::Ordering;
+    if cancelled.load(Ordering::Acquire) {
+        return HomeIntegrationLaunch::Unavailable;
+    }
+    let Some(registration) = register() else {
+        return HomeIntegrationLaunch::Unavailable;
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return HomeIntegrationLaunch::Unavailable;
+    }
+    dispatch(registration)
+}
+
+/// Off-frame caller only. Uses the existing bounded LS2 request, without retries.
+#[cfg(all(not(feature = "hostsim"), not(any(test, feature = "test-support"))))]
+pub fn launch_ott_home(cancelled: &std::sync::atomic::AtomicBool) -> HomeIntegrationLaunch {
+    let payload = format!("{{\"id\":\"{OTT_HOME_APP_ID}\"}}");
+    home_launch_with_registration(
+        cancelled,
+        || ls2::register().ok(),
+        |registration| match registration.call_reply(
+            "luna://com.webos.applicationManager/launch",
+            &payload,
+            std::time::Duration::from_millis(600),
+        ) {
+            Ok(reply) => home_integration_reply(&reply.payload, reply.hub_error),
+            Err(_) => HomeIntegrationLaunch::Unavailable,
+        },
+    )
+}
+
+#[cfg(any(feature = "hostsim", test, feature = "test-support"))]
+pub fn launch_ott_home(_cancelled: &std::sync::atomic::AtomicBool) -> HomeIntegrationLaunch {
+    HomeIntegrationLaunch::Unavailable
+}
+
+#[cfg(test)]
+mod home_integration_tests {
+    use super::*;
+    #[test]
+    fn cancellation_during_registration_prevents_actual_dispatch_admission() {
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Registration<'a>(&'a Cell<bool>);
+        impl Drop for Registration<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let cancelled = AtomicBool::new(false);
+        let registered = Cell::new(0);
+        let dispatched = Cell::new(0);
+        let released = Cell::new(false);
+        let result = home_launch_with_registration(
+            &cancelled,
+            || {
+                registered.set(registered.get() + 1);
+                cancelled.store(true, Ordering::Release);
+                Some(Registration(&released))
+            },
+            |_| {
+                dispatched.set(dispatched.get() + 1);
+                HomeIntegrationLaunch::Requested
+            },
+        );
+        assert_eq!(result, HomeIntegrationLaunch::Unavailable);
+        assert_eq!(registered.get(), 1);
+        assert_eq!(dispatched.get(), 0);
+        assert!(released.get());
+        assert_eq!(
+            home_launch_with_registration(
+                &cancelled,
+                || -> Option<()> { panic!("cancelled before registration") },
+                |_| panic!("cancelled dispatch")
+            ),
+            HomeIntegrationLaunch::Unavailable
+        );
+        cancelled.store(false, Ordering::Release);
+        assert_eq!(
+            home_launch_with_registration(
+                &cancelled,
+                || Some(()),
+                |_| {
+                    dispatched.set(dispatched.get() + 1);
+                    HomeIntegrationLaunch::Requested
+                }
+            ),
+            HomeIntegrationLaunch::Requested
+        );
+        assert_eq!(dispatched.get(), 1);
+        assert_eq!(
+            home_launch_with_registration(
+                &cancelled,
+                || None::<()>,
+                |_| panic!("failed registration")
+            ),
+            HomeIntegrationLaunch::Unavailable
+        );
+        assert_eq!(dispatched.get(), 1, "No implicit retry");
+    }
+    #[test]
+    fn fixed_destination_and_host_unavailable_never_claim_foreground() {
+        assert_eq!(OTT_HOME_APP_ID, "com.openottplay.home");
+        assert_eq!(
+            launch_ott_home(&std::sync::atomic::AtomicBool::new(false)),
+            HomeIntegrationLaunch::Unavailable
+        );
+        assert_eq!(
+            home_integration_reply(r#"{"returnValue":true}"#, false),
+            HomeIntegrationLaunch::Requested
+        );
+        assert_eq!(
+            home_integration_reply(r#"{"returnValue":false}"#, false),
+            HomeIntegrationLaunch::Rejected
+        );
+        for raw in ["null", "[]", "{}", r#"{"returnValue":"true"}"#, "not json"] {
+            assert_eq!(
+                home_integration_reply(raw, false),
+                HomeIntegrationLaunch::Unavailable
+            );
+        }
+        assert_eq!(
+            home_integration_reply(&"x".repeat(4097), false),
+            HomeIntegrationLaunch::Unavailable
+        );
+        assert_eq!(
+            home_integration_reply(r#"{"returnValue":true}"#, true),
+            HomeIntegrationLaunch::Unavailable
+        );
+    }
+}
+
 #[cfg(any(feature = "hostsim", test, feature = "test-support"))]
 fn launch_home() -> bool {
     plx_base::eventlog::log(&format!(

@@ -51,5 +51,12 @@
   "ott.favorite_removed": "Выдалена з абранага",
   "ott.favorite_update_failed": "Не ўдалося абнавіць абранае",
   "ott.input_keyboard_hint": "OK · Увод",
-  "ott.input_hidden_hint": "Схавана · OK"
+  "ott.input_hidden_hint": "Схавана · OK",
+  "ott.home_network.title": "Дом і сетка",
+  "ott.home_network.detail": "Адкрыць асобна ўсталяваную праграму OTT Home",
+  "ott.home_network.busy": "Запыт на запуск OTT Home ужо выконваецца",
+  "ott.home_network.opening": "Запыт запуску OTT Home…",
+  "ott.home_network.requested": "Запуск OTT Home запытаны; змена экрана не пацверджана",
+  "ott.home_network.rejected": "Запуск OTT Home адхілены; праверце, ці ўсталявана дадатковая праграма",
+  "ott.home_network.unavailable": "OTT Home недаступны ў бягучым кантэксце"
 }

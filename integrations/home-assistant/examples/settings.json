@@ -1,0 +1,7 @@
+{
+  "id": "example_tv",
+  "name": "Example LG TV",
+  "renewal_mode": "external",
+  "daily_time": "12:00:00",
+  "minimum_hours": 168
+}

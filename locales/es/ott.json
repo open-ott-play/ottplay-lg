@@ -51,5 +51,12 @@
   "ott.favorite_removed": "Eliminado de Favoritos",
   "ott.favorite_update_failed": "No se pudieron actualizar los Favoritos",
   "ott.input_keyboard_hint": "OK · Editar",
-  "ott.input_hidden_hint": "Oculto · OK"
+  "ott.input_hidden_hint": "Oculto · OK",
+  "ott.home_network.title": "Hogar y red",
+  "ott.home_network.detail": "Abrir la aplicación OTT Home instalada por separado",
+  "ott.home_network.busy": "Ya hay una solicitud de inicio de OTT Home en curso",
+  "ott.home_network.opening": "Solicitando el inicio de OTT Home…",
+  "ott.home_network.requested": "Inicio de OTT Home solicitado; cambio de pantalla sin confirmar",
+  "ott.home_network.rejected": "Se rechazó el inicio de OTT Home; comprueba que la aplicación complementaria esté instalada",
+  "ott.home_network.unavailable": "OTT Home no está disponible en el contexto actual"
 }

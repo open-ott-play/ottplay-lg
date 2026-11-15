@@ -1,6 +1,7 @@
 //! The television, as everything outside the port sees it (step L15, docs/module-layers.md).
 pub mod device;
 pub mod home;
+pub mod home_integration;
 pub mod removable;
 pub mod launch;
 pub mod sandbox;
@@ -32,6 +33,7 @@ pub struct Port {
     pub sound_output: fn() -> sound::Reply,
     pub go_home: fn(),
     pub poll_home: fn(),
+    pub open_home_integration: fn(&std::sync::atomic::AtomicBool) -> home_integration::Launch,
     pub deliver_toast: fn(&str, toast::Identity) -> toast::Sent,
     pub bind_window: fn(*mut c_void),
     pub grab_surface: fn(*mut c_void),
@@ -72,6 +74,7 @@ static ABSENT: Port = Port {
     sound_output: || sound::Reply::NoPlatform,
     go_home: nothing,
     poll_home: nothing,
+    open_home_integration: |_| home_integration::Launch::Unavailable,
     deliver_toast: toast::deliver_without_port,
     bind_window: |_| {},
     grab_surface: |_| {},

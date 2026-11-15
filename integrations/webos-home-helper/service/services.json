@@ -1,0 +1,1 @@
+{"id":"com.openottplay.homehelper.control","description":"Optional, explicitly enabled Home mapping","services":[{"name":"com.openottplay.homehelper.control","commands":[{"name":"status","public":false},{"name":"trial","public":false},{"name":"enable","public":false},{"name":"ensure","public":false},{"name":"pause","public":false}]}],"requiredACG":["application.launcher"]}

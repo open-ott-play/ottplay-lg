@@ -51,5 +51,12 @@
   "ott.favorite_removed": "Eltávolítva a kedvencek közül",
   "ott.favorite_update_failed": "A kedvencek frissítése nem sikerült",
   "ott.input_keyboard_hint": "OK · Bevitel",
-  "ott.input_hidden_hint": "Rejtett · OK"
+  "ott.input_hidden_hint": "Rejtett · OK",
+  "ott.home_network.title": "Otthon és hálózat",
+  "ott.home_network.detail": "A külön telepített OTT Home alkalmazás megnyitása",
+  "ott.home_network.busy": "Az OTT Home indítására vonatkozó kérés már folyamatban van",
+  "ott.home_network.opening": "Az OTT Home indításának kérése…",
+  "ott.home_network.requested": "Az OTT Home indítása kérve; a képernyőváltás nincs megerősítve",
+  "ott.home_network.rejected": "Az OTT Home indítása elutasítva; ellenőrizze, hogy a kiegészítő alkalmazás telepítve van-e",
+  "ott.home_network.unavailable": "Az OTT Home a jelenlegi környezetben nem érhető el"
 }
