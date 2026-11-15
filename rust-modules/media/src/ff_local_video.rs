@@ -580,6 +580,36 @@ fn dimensions(w: i32, h: i32, limits: Limits) -> Result<(usize, usize, usize, us
     }
     Ok((w, h, cw, ch))
 }
+/// After a seek, keep only PCM overlapping or following the target, with at
+/// most one actual stereo48k chunk of overlap. Untimed packets are decoded for
+/// codec continuity but dropped after a seek: a guessed zero PTS cannot prove
+/// that preroll has ended. With no seek floor, normal playback is unchanged.
+fn audio_reaches_seek_floor(
+    pts_us: Option<i64>,
+    bytes: usize,
+    floor: Option<(u64, i64)>,
+    generation: u64,
+) -> bool {
+    let Some((owner, target)) = floor else {
+        return true;
+    };
+    if owner != generation || bytes == 0 || bytes % 4 != 0 {
+        return false;
+    }
+    let Some(pts) = pts_us else {
+        return false;
+    };
+    let Some(duration) = (bytes / 4)
+        .checked_mul(1_000_000)
+        .and_then(|n| n.checked_add(47_999))
+        .map(|n| n / 48_000)
+        .and_then(|n| i64::try_from(n).ok())
+    else {
+        return false;
+    };
+    pts.checked_add(duration).is_some_and(|end| end >= target)
+}
+
 pub(crate) fn run(
     _off: &plx_base::task::OffFrame,
     source: ExternalSource,
@@ -737,6 +767,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     let mut flushing = false;
     let mut fallback = 0i64;
     let mut landing: Option<(u64, i64)> = None;
+    let mut seek_audio_floor: Option<(u64, i64)> = None;
     loop {
         if c.stopped() {
             return Err(Error::Cancelled);
@@ -776,6 +807,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
             flushing = false;
             fallback = position;
             landing = Some((epoch, position));
+            seek_audio_floor = Some((epoch, position));
         }
         if generation != audio_generation {
             audio = None;
@@ -807,7 +839,8 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         if !flushing && (*d.packet).stream_index == ai {
             if let Some(decoder) = audio.as_mut() {
                 let ast = *(*d.fmt).streams.add(ai as usize);
-                for (pts, bytes) in decoder.decode(d.packet, pts_ns(d.packet, ast)) {
+                let packet_pts = pts_ns_opt(d.packet, ast);
+                for (pts, bytes) in decoder.decode(d.packet, packet_pts.unwrap_or(0)) {
                     if bytes.len() > 4096 {
                         return Err(Error::Budget);
                     }
@@ -823,6 +856,10 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
                         // Decode preroll for codec continuity, but its PCM must
                         // not outrun the first exact video landing frame.
                         && landing.is_none()
+                        && audio_reaches_seek_floor(
+                            packet_pts.filter(|_| pts != AV_NOPTS_VALUE).map(|_| pts / 1000),
+                            bytes.len(), seek_audio_floor, seek_generation,
+                        )
                     {
                         let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
                         // At most a quarter-second of stereo48k PCM; expired UI consumption
@@ -946,6 +983,22 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn seek_audio_floor_uses_the_actual_chunk_and_fails_closed_on_unknown_or_overflow() {
+        let floor = Some((7, 4_300_000));
+        assert!(!audio_reaches_seek_floor(Some(4_266_666), 4096, floor, 7));
+        assert!(audio_reaches_seek_floor(Some(4_278_666), 4096, floor, 7));
+        assert!(!audio_reaches_seek_floor(Some(4_278_665), 4096, floor, 7));
+        assert!(audio_reaches_seek_floor(Some(4_288_000), 4096, floor, 7));
+        assert!(audio_reaches_seek_floor(Some(4_300_000), 4, floor, 7));
+        assert!(!audio_reaches_seek_floor(Some(4_300_000), 4, floor, 6));
+        assert!(!audio_reaches_seek_floor(None, 4096, floor, 7));
+        assert!(!audio_reaches_seek_floor(Some(i64::MAX), 4, floor, 7));
+        assert!(!audio_reaches_seek_floor(Some(0), usize::MAX, floor, 7));
+        assert!(!audio_reaches_seek_floor(Some(4_300_000), 2, floor, 7));
+        assert!(audio_reaches_seek_floor(None, 4096, None, 7));
+        assert!(audio_reaches_seek_floor(Some(0), 4096, None, 7));
+    }
     #[test]
     fn planar_budget_includes_odd_chroma_edges() {
         let mut l = Limits::default();
