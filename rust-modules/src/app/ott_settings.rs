@@ -158,7 +158,7 @@ impl Setting {
             return json!({"id":self.id(),"type":"string","scope":"application","sensitive":false,
                 "access":{"read":true,"write":true},"default_value":"local","apply":"immediate",
                 "constraints":{"values":["local","service"]},
-                "choices":[{"value":"local","label":"On this TV"},{"value":"service","label":"External service"}],
+                "choices":[{"value":"local","label":"On this TV","aliases":[]},{"value":"service","label":"External service","aliases":[]}],
                 "description":"Local decoding and composition is the default. Backend changes require every multi-view scene and owned worker to be closed."});
         }
         if matches!(self, Self::NativeInputProbe) {

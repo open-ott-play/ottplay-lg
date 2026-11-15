@@ -33,6 +33,11 @@ fn multiview_service_is_appended_without_reordering_existing_settings() {
     assert_eq!(descriptor["constraints"]["max_utf8_bytes"], 4096);
     assert_eq!(descriptor["apply"], "next_stream");
     assert!(descriptor.get("default_value").is_none());
+    let backend = Setting::MultiviewBackend.descriptor();
+    assert_eq!(backend["choices"], json!([
+        {"value":"local","label":"On this TV","aliases":[]},
+        {"value":"service","label":"External service","aliases":[]},
+    ]));
 }
 #[test]
 fn same_installation_candidate_preserves_every_other_setting_and_never_reloads() {
