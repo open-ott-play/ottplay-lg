@@ -48,9 +48,15 @@ fn action(app: &mut App, act: OttAction) {
     settle_pages(app);
 }
 fn offer(app: &App, id: &str) -> OttAction {
-    app.ott.as_ref().unwrap().view().rows.into_iter().find_map(|row| match &row.action {
+    let runtime = app.ott.as_ref().unwrap();
+    runtime.view().rows.into_iter().find_map(|row| match &row.action {
         OttAction::EditM3uMediaLink { profile, .. } if profile == id => Some(row.action), _ => None,
-    }).expect("selector must expose the captured M3U parent")
+    }).unwrap_or_else(|| panic!(
+        "selector must expose captured parent {id}; page={} provider={:?} profiles={:?} editor={:?} navigation_epoch={} pending_navigation={}",
+        runtime.page, runtime.provider,
+        runtime.saved.profiles.profiles.iter().map(|profile| (&profile.id, profile.kind, profile.enabled)).collect::<Vec<_>>(),
+        runtime.edit_session.as_ref().map(|editor| (editor.id, editor.owner, editor.key.as_str())),
+        runtime.navigation_epoch, app.pages.has_pending_navigation()))
 }
 fn open(app: &mut App) -> EditorSession {
     if app.ott.as_ref().unwrap().page != "m3u-media-links" {
@@ -285,8 +291,19 @@ fn media_link_policy_and_uncertain_state_refuse_before_private_editor_replacemen
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for guard in ["soft", "strict", "parental", "uncertain"] {
         let mut app = mounted(1);
-        let session = open(&mut app);
+        // This test owns policy admission, independently of dispatcher pumping.
+        // The selector/cancel test above covers that real navigation path.
+        checked(&mut app, OttAction::ShowM3uMediaLinks).unwrap();
+        let edit = offer(&app, "tv-b");
+        checked(&mut app, edit).unwrap();
+        let session = app.ott.as_ref().unwrap().edit_session.clone().unwrap();
+        // Capture fresh authority after the editor has opened, so policy gates
+        // cannot pass merely because a pre-editor row became stale.
         let offered = offer(&app, "tv-b");
+        assert_eq!(session.key, "profile.media");
+        let OttAction::EditM3uMediaLink { profile, context } = &offered else { unreachable!() };
+        assert!(app.ott.as_ref().unwrap().m3u_media_target(&app, profile, context).is_ok(),
+            "policy test must begin with a currently authorized editor offer");
         let runtime = app.ott.as_mut().unwrap();
         if guard == "uncertain" {
             runtime.persistence_uncertain = true;
