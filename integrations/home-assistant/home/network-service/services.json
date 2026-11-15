@@ -1,0 +1,1 @@
+{"id":"com.openottplay.home.network","description":"Optional bounded TCP connectivity check","services":[{"name":"com.openottplay.home.network","commands":[{"name":"probe","public":false}]}],"requiredACG":["network.query"]}

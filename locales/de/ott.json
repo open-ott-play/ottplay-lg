@@ -51,5 +51,12 @@
   "ott.favorite_removed": "Aus Favoriten entfernt",
   "ott.favorite_update_failed": "Favoriten konnten nicht aktualisiert werden",
   "ott.input_keyboard_hint": "OK · Eingabe",
-  "ott.input_hidden_hint": "Verdeckt · OK"
+  "ott.input_hidden_hint": "Verdeckt · OK",
+  "ott.home_network.title": "Zuhause und Netzwerk",
+  "ott.home_network.detail": "Die separat installierte App OTT Home öffnen",
+  "ott.home_network.busy": "Eine Startanfrage für OTT Home wird bereits bearbeitet",
+  "ott.home_network.opening": "Start von OTT Home wird angefordert…",
+  "ott.home_network.requested": "Start von OTT Home angefordert; Bildschirmwechsel nicht bestätigt",
+  "ott.home_network.rejected": "Start von OTT Home abgelehnt; prüfen Sie, ob die zusätzliche App installiert ist",
+  "ott.home_network.unavailable": "OTT Home ist im aktuellen Kontext nicht verfügbar"
 }

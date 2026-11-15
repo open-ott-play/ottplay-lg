@@ -223,5 +223,33 @@
   "ott.input_hidden_hint": {
     "value": "Hidden · OK",
     "description": "Hint inside a populated protected text-entry field. Never contains the secret value."
+  },
+  "ott.home_network.title": {
+    "value": "Home & network",
+    "description": "Shared Classic and Modern Settings action opening the optional OTT Home companion app."
+  },
+  "ott.home_network.detail": {
+    "value": "Open the separately installed OTT Home app",
+    "description": "Optional companion application; no Home Assistant credentials are stored by the native player."
+  },
+  "ott.home_network.busy": {
+    "value": "A Home launch request is already in progress",
+    "description": "No automatic retry is performed while the earlier platform request is unresolved."
+  },
+  "ott.home_network.opening": {
+    "value": "Requesting OTT Home…",
+    "description": "One launch request is in progress; foreground display is not confirmed."
+  },
+  "ott.home_network.requested": {
+    "value": "Home launch requested; screen change is not confirmed",
+    "description": "Platform accepted the request only. Do not translate this as application startup confirmed."
+  },
+  "ott.home_network.rejected": {
+    "value": "OTT Home launch rejected; check that the companion app is installed",
+    "description": "Platform explicitly rejected the request. The optional companion must be installed separately."
+  },
+  "ott.home_network.unavailable": {
+    "value": "OTT Home is unavailable in the current context",
+    "description": "No platform acceptance is available; source/owner, kiosk, background state or platform support may prevent this action."
   }
 }

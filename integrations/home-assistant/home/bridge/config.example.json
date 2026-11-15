@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "allowPlainHttp": false,
+  "allowPackagedOrigin": false,
+  "homeAssistant": {"url": "https://ha.example.com", "token": "REPLACE_ON_SERVER_ONLY"},
+  "accessKey": "REPLACE_WITH_A_RANDOM_CLIENT_KEY_AT_LEAST_32_CHARACTERS",
+  "allowedOrigins": ["https://player.ottplay.here.now", "https://ott-home.example.com"],
+  "entities": [
+    {"id":"room","label":"Room temperature","entity":"sensor.living_room_temperature","kind":"temperature"},
+    {"id":"weather","label":"Weather","entity":"weather.home","kind":"weather"}
+  ],
+  "actions": [
+    {"id":"movie","label":"Movie scene","entity":"scene.movie","service":"scene.turn_on"},
+    {"id":"light","label":"Room light","entity":"light.living_room","service":"light.toggle"}
+  ],
+  "apps": [
+    {"id":"youtube","label":"YouTube","entity":"media_player.living_room_tv","kind":"app","source":"YouTube"},
+    {"id":"hdmi1","label":"HDMI 1","entity":"media_player.living_room_tv","kind":"hdmi","source":"HDMI 1"}
+  ]
+}

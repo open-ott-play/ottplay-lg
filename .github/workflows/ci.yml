@@ -33,6 +33,17 @@ jobs:
       - run: python3 -m unittest ci.test_gen_notices -v
       - run: python3 -m unittest discover -s scripts -p 'test_lg_*.py' -v
       - run: node scripts/check-shared-core.cjs
+      - name: Test optional Home Assistant tooling and public Home integration
+        run: |
+          python3 -m unittest discover -s integrations/home-assistant/tests -v
+          node --test integrations/home-assistant/home/dashboard/core.test.cjs integrations/home-assistant/home/dashboard/app.test.cjs integrations/home-assistant/home/dashboard/webos-host.test.cjs
+          node --test integrations/home-assistant/home/bridge/server.test.cjs
+          node --test integrations/home-assistant/home/network-service/test.cjs
+          node --test integrations/home-assistant/home/package-webos.test.cjs
+          node integrations/webos-home-helper/tests/test.cjs
+          node integrations/webos-home-helper/tests/test-controller.cjs
+          node integrations/webos-home-helper/tests/test-service.cjs
+          python3 integrations/webos-home-helper/tests/test-package.py
 
   native:
     name: Native host tests

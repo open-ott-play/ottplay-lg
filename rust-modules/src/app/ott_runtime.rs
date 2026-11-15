@@ -42,6 +42,8 @@ mod commands;
 mod guide_projection;
 #[path = "ott_hosted_epg_settings.rs"]
 mod hosted_epg_settings;
+#[path = "ott_home_integration.rs"]
+mod home_integration;
 #[path = "ott_live_hud.rs"]
 mod live_hud;
 #[path = "ott_live_label.rs"]
@@ -604,6 +606,7 @@ pub(super) struct Runtime {
     // source-policy images without invalidating them for ordinary UI changes.
     multiview_authority_epoch: u64,
     system_tv: system_tv::State,
+    home_integration: home_integration::State,
     settings_groups: settings_groups::State,
     classic_navigation: classic_navigation::State,
     auth_return: auth_return::State,
@@ -1106,6 +1109,7 @@ impl Runtime {
             multiview_effects: std::collections::VecDeque::new(),
             multiview_picture: None,
             multiview_authority_epoch: 1,
+            home_integration: home_integration::State::default(),
             settings_groups: settings_groups::State::default(),
             classic_navigation: classic_navigation::State::default(),
             auth_return: auth_return::State::default(),
@@ -2083,6 +2087,7 @@ impl Runtime {
         self.suspend_with_retry_reason(app, continuity_diagnostics::Reason::Suspend);
     }
     fn suspend_with_retry_reason(&mut self, app: &mut App, reason: continuity_diagnostics::Reason) {
+        home_integration::suspend(self);
         self.remote.suspend_notifications();
         self.failed_playback = None;
         // Reset at the actual lifecycle edge, even if no frame is rendered
@@ -3464,6 +3469,7 @@ impl Runtime {
                 }
                 item
             })
+            .chain(std::iter::once(home_integration::entry(self)))
             .collect(),
             _ => {
                 let context = ui_projection::CatalogContext::new(self.effective_profile());
@@ -6671,6 +6677,7 @@ fn tick_with_start(
     }
     runtime.refresh_plex_sources();
     companion_adapter::tick(&mut runtime, app);
+    home_integration::tick(&mut runtime, app);
     runtime.reconcile_failure(app);
     if let Err(error) = kiosk_capture::tick(&mut runtime, app) {
         runtime.status = error.message().into();
@@ -7080,6 +7087,9 @@ fn handle_action(
     app: &mut App,
     selected: OttAction,
 ) -> Result<(), &'static str> {
+    // Cancelling pending Home work is neither navigation nor a new effect.
+    // Do it before Back handlers or refusal gates can return without a tick.
+    home_integration::cancel_on_back(runtime, &selected);
     if let Some(result) = boot_resume::back(runtime, app, &selected) {
         return result;
     }
@@ -7181,6 +7191,13 @@ fn handle_action(
     if !submitted {
         parental_runtime::ui_gate(runtime, app, &selected)?;
     }
+    // A stale group command can be rejected without leaving Settings. Retire
+    // Home only after the group handler has accepted this presentation change.
+    let home_group_navigation =
+        matches!(&selected, OttAction::EditSetting(key) if key.starts_with("settings.open:"));
+    if !home_group_navigation {
+        home_integration::before_action(runtime, &selected);
+    }
     if let OttAction::VolumeStep(direction) = &selected {
         return desktop_input::volume_step(runtime, app, *direction);
     }
@@ -7207,6 +7224,9 @@ fn handle_action(
         return result;
     }
     if let Some(result) = settings_groups::action(runtime, &selected) {
+        if home_group_navigation && result.is_ok() {
+            home_integration::before_action(runtime, &selected);
+        }
         return result;
     }
     settings_groups::external_action(runtime, &selected);
@@ -7534,6 +7554,7 @@ fn handle_action(
             }
         }
         OttAction::EditSetting(key) => {
+            if let Some(result) = home_integration::action(runtime, app, &key) { return result; }
             if let Some(result) = system_tv::action(runtime, app, &key) { return result; }
             if let Some(result) = runtime.usb_action(app, &key) {
                 return result;
