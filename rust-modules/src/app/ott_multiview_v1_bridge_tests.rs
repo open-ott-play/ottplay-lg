@@ -435,6 +435,10 @@ fn bridge_setup() -> BridgeRig {
         .saved
         .settings
         .insert("nativeMultiviewService".into(), protected.clone());
+    runtime.saved.settings.insert(
+        "nativeMultiviewBackend".into(),
+        json!("service"),
+    );
     let transport = Arc::new(OwnedTransport {
         cfg: cfg.clone(),
         calls: Mutex::new(Vec::new()),
