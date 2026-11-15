@@ -193,3 +193,66 @@ fn multiple_late_receipts_preserve_fifo_and_failed_close_fences_replacement_and_
         .is_err());
     assert!(!driver.slot_drained(0));
 }
+
+#[test]
+fn rapid_channel_steps_before_first_tick_replace_queued_attempt_and_off_cancels_latest() {
+    let _serial = plx_base::testlock::serial();
+    let (app, mut runtime, _snapshot, _, _resolved) = receipt();
+    let first = runtime.catalog.entries[0].clone();
+    for number in [2, 3] {
+        let mut entry = first.clone();
+        entry.id = format!("channel-{number}");
+        entry.title = format!("Channel {number}");
+        entry.media = MediaLocator::Http {
+            url: format!("https://fixture.invalid/{number}.m3u8"),
+        };
+        runtime.catalog.entries.push(entry);
+    }
+    let mut coordinator = std::mem::take(&mut runtime.multiview);
+    let transition = coordinator.activate_local(&runtime, &app, Layout::Grid4).unwrap();
+    runtime.multiview = coordinator;
+    runtime.multiview_effects.extend(transition.effects);
+    let handles = runtime.multiview.source_rows().iter().map(|row| row.handle).collect::<Vec<_>>();
+    assert_eq!(handles.len(), 3);
+    let native_ticket = plx_media::route::play_request_ticket();
+    let mut driver = Driver::default();
+    driver.layout = Some(Layout::Grid4);
+    driver.play_source(&mut runtime, &app, SlotId::SLOT_0, handles[0]).unwrap();
+    let (ticket, cancel) = runtime.multiview_effects.iter().find_map(|effect| {
+        match effect {
+            Effect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
+            _ => None,
+        }
+    }).expect("first source queues its actual metadata preparation");
+    assert!(!cancel.load(Ordering::Acquire));
+    assert!(matches!(runtime.multiview.slot_status(SlotId::SLOT_0),
+        Ok(plx_data::ott::multiview::SlotStatus::Resolving { .. })));
+
+    // No Driver tick: the coordinator has admitted work, but no worker exists.
+    driver.step_active(&mut runtime, &app, 1).unwrap();
+    assert_eq!(driver.replacements[0], Some(handles[1]));
+    driver.step_active(&mut runtime, &app, 1).unwrap();
+    assert_eq!(driver.replacements[0], Some(handles[2]));
+    driver.step_active(&mut runtime, &app, -1).unwrap();
+    assert_eq!(driver.replacements[0], Some(handles[1]));
+    assert!(cancel.load(Ordering::Acquire));
+    assert!(matches!(runtime.multiview.slot_status(SlotId::SLOT_0),
+        Ok(plx_data::ott::multiview::SlotStatus::Empty)));
+    assert!(runtime.multiview_effects.iter().any(|effect| matches!(effect,
+        Effect::CancelResolve { ticket: current, .. } if *current == ticket)));
+    assert!(runtime.multiview_effects.iter().filter(|effect| matches!(effect,
+        Effect::PrepareMetadata { .. })).all(|effect| !runtime.multiview.effect_current(&runtime, effect)));
+    assert!(driver.workers.iter().all(Option::is_none));
+    assert!(driver.pictures.iter().all(Option::is_none));
+    assert!(driver.leases.iter().all(|leases| leases.is_empty()));
+    assert!(driver.slot_drained(0));
+
+    driver.close_restore_previous(&mut runtime, &app).unwrap();
+    assert!(driver.closing);
+    assert!(driver.replacements.iter().all(Option::is_none));
+    assert!(cancel.load(Ordering::Acquire));
+    assert!(runtime.multiview_effects.iter().filter(|effect| matches!(effect,
+        Effect::PrepareMetadata { .. } | Effect::Backend(BackendIntent::Load { .. })))
+        .all(|effect| !runtime.multiview.effect_current(&runtime, effect)));
+    assert_eq!(plx_media::route::play_request_ticket(), native_ticket);
+}

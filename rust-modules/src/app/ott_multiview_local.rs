@@ -262,6 +262,13 @@ impl Driver {
         if self.workers[index].is_some()
             || self.pictures[index].is_some()
             || !self.leases[index].is_empty()
+            // The coordinator owns a queued attempt before this frame has
+            // created its worker. Retire it through the same replacement path.
+            || matches!(runtime.multiview.slot_status(slot),
+                Ok(plx_data::ott::multiview::SlotStatus::Resolving { .. }
+                    | plx_data::ott::multiview::SlotStatus::Resolved { .. }
+                    | plx_data::ott::multiview::SlotStatus::Playing { .. }
+                    | plx_data::ott::multiview::SlotStatus::Paused { .. }))
         {
             let transition = runtime.multiview.close_slot(slot)?;
             self.replacements[index] = Some(handle);
