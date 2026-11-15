@@ -35,7 +35,11 @@ Software limits are admission limits, not a promise of nine simultaneous HD
 streams. Each slot has one decoder thread, a 1080p input-pixel ceiling, a bounded
 mailbox and a 15 fps presentation ceiling. Unsupported codecs, pixel formats or
 sources fail that slot independently. Supported output is 8-bit planar YUV420.
-HTTP progressive media and authorized local files support seek. The initial HLS
+Authorized local files and progressive HTTP media whose final response advertises
+byte ranges support seek. The decoder reports its opened transport capability to
+remote clients; HLS and unavailable windows do not advertise seek. Accepted paused
+seeks publish a landing picture and remain paused. Seeking suppresses preroll PCM
+until the target picture, and later pause changes cannot cancel an accepted seek. The initial HLS
 reader supports same-origin TS/fMP4 playlists; encrypted, byte-range,
 discontinuous and external-audio renditions are rejected. HLS seek is unavailable.
 Plex uses direct media; this path does not silently start a transcoder.
@@ -44,7 +48,10 @@ Pause/resume and supported seeks target the active slot. Backgrounding, policy
 changes and source revocation cancel local work. A replacement waits for its old
 decoder and provider lease to retire. Explicit Off may restore the captured
 ordinary item only after a fresh authorization check; background retirement must
-not restart it. Strict single-source kiosk rejects multi-view.
+not restart it. A previous Favorite is rebound through its own saved profile and
+fresh ordinary playback policy, even when a different profile is being browsed.
+Changed or removed Favorites cannot silently restore another item. Strict
+single-source kiosk rejects multi-view.
 
 The feature must be qualified in stages: pure tests, actual concurrent decoding,
 GL and audio output, ARM packaging, then sustained playback on the target TV.

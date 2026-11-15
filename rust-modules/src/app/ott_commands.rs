@@ -1388,6 +1388,27 @@ pub(super) fn policy_rejection(inv: &Invocation, error: &str) -> Value {
     settings_failure(inv, "policy_restricted").unwrap_or_else(|| rejected(error))
 }
 
+/// The local scene owns its transport independently of the retired native player.
+/// `None` means no admitted picture; `Some` carries its actual reader seekability.
+fn local_transport_capabilities(
+    owned: bool,
+    picture_seekable: Option<bool>,
+) -> (Vec<&'static str>, bool) {
+    let mut commands = Vec::new();
+    if !owned {
+        return (commands, false);
+    }
+    commands.extend(["previous_channel", "next_channel", "step_channel"]);
+    if let Some(seekable) = picture_seekable {
+        commands.extend(["pause", "resume"]);
+        if seekable {
+            commands.push("seek");
+        }
+    }
+    let relative = commands.contains(&"seek");
+    (commands, relative)
+}
+
 fn valid_capability_probe(value: &Value) -> bool {
     let allowed = [
         "local_media_session",
@@ -1627,15 +1648,20 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                     playback.push("seek");
                 }
             }
-            if super::local_multiview_enabled(runtime) && runtime.multiview_local.active() {
-                playback.clear();
-                if runtime.multiview_local.owns_ui(runtime, app) {
-                    playback.extend(["previous_channel", "next_channel", "step_channel"]);
-                    if runtime.multiview_local.active_timeline(runtime).is_some() {
-                        playback.extend(["pause", "resume"]);
-                    }
-                }
-            }
+            let local_scene = super::local_multiview_enabled(runtime)
+                && runtime.multiview_local.active();
+            let local_seek_relative = if local_scene {
+                let driver = std::mem::take(&mut runtime.multiview_local);
+                let owner = driver.owns_ui(runtime, app);
+                let window = driver.active_timeline(runtime)
+                    .map(|_| driver.active_seekable(runtime, app));
+                runtime.multiview_local = driver;
+                let (commands, relative) = local_transport_capabilities(owner, window);
+                playback = commands;
+                relative
+            } else {
+                false
+            };
             let mut data = json!({"version":1,"player":{"version":env!("PLX_VERSION"),"build_sha":env!("PLX_BUILD_SHA"),"platform":"webos-native","runtime":runtime.remote.runtime(),"standby":app.ott_standby},
                 "input":["up","down","left","right","ok","back","channel_up","channel_down"],"playback":playback,"lifecycle":["exit_app","standby","wake"],
                 "vportal_settings":{"version":1},"player_settings":{"version":1,"operations":["schema","get","set"],"max_page_size":20},
@@ -1685,7 +1711,8 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 data["categories"] =
                     json!({"version":1,"operations":["list","select"],"maxPageSize":200});
             }
-            if controls::transport_ready(app) && playback::dur() > 0 {
+            if if local_scene { local_seek_relative }
+                else { controls::transport_ready(app) && playback::dur() > 0 } {
                 data["playback_seek_relative"] = json!({"version":1});
             }
             if !super::playback_allowed(app) {
@@ -2533,6 +2560,26 @@ mod name_tests;
 #[cfg(test)]
 mod multiview_capability_probe_tests {
     use super::*;
+    #[test]
+    fn local_transport_wire_exposes_seek_and_relative_marker_only_for_seekable_pictures() {
+        let channel_commands = json!(["previous_channel", "next_channel", "step_channel"]);
+        let playable_commands = json!(["previous_channel", "next_channel", "step_channel", "pause", "resume"]);
+        let seek_commands = json!(["previous_channel", "next_channel", "step_channel", "pause", "resume", "seek"]);
+        // Reader-derived truth is checked separately with actual held, HTTP and
+        // HLS sessions. This is the controller's closed wire projection of it.
+        for (owner, picture, expected, relative) in [
+            (true, Some(true), seek_commands, true),
+            (true, Some(false), playable_commands, false),
+            (true, None, channel_commands, false),
+            (false, Some(true), json!([]), false),
+            (false, None, json!([]), false),
+        ] {
+            let (commands, marker) = local_transport_capabilities(owner, picture);
+            assert_eq!(json!(commands), expected);
+            assert_eq!(marker, relative);
+            assert_eq!(marker, commands.contains(&"seek"));
+        }
+    }
     #[test]
     fn negotiated_native_probe_is_closed_and_go_empty_projection_stays_supported() {
         for value in [
