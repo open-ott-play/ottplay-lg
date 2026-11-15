@@ -103,11 +103,30 @@ pub(crate) struct Control {
     pub audio: AtomicBool,
     pub audio_generation: AtomicU64,
     pub timeline: AtomicU64,
+    /// Seek identity survives pause-only publication/audio invalidations.
+    pub seek_generation: AtomicU64,
     pub seekable: AtomicBool,
-    pub seek: Mutex<Option<i64>>,
+    pub seek: Mutex<Option<(u64, i64)>>,
     pub mailbox: Mutex<Mailbox>,
 }
+/// One decoder iteration's publication authority. A newer seek invalidates all
+/// three epochs; no old packet may borrow a later request's audio generation.
+pub(crate) struct Iteration {
+    pub request: Option<(u64, i64)>,
+    pub timeline: u64,
+    pub audio_generation: u64,
+    pub seek_generation: u64,
+}
 impl Control {
+    pub(crate) fn take_iteration(&self) -> Iteration {
+        let mut request = self.seek.lock().unwrap_or_else(|e| e.into_inner());
+        Iteration {
+            request: request.take(),
+            timeline: self.timeline.load(Ordering::Acquire),
+            audio_generation: self.audio_generation.load(Ordering::Acquire),
+            seek_generation: self.seek_generation.load(Ordering::Acquire),
+        }
+    }
     pub(crate) fn stopped(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
             || self.held.as_ref().is_some_and(|file| !file.is_live())
@@ -173,6 +192,7 @@ impl Session {
             audio: AtomicBool::new(false),
             audio_generation: AtomicU64::new(1),
             timeline: AtomicU64::new(1),
+            seek_generation: AtomicU64::new(1),
             seekable: AtomicBool::new(false),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
@@ -192,6 +212,7 @@ impl Session {
                 crate::ff::local_video::run(off, source, limits, &worker)
             }))
             .unwrap_or(Err(Error::Decode));
+            worker.seekable.store(false, Ordering::Release);
             let mut m = worker.mailbox.lock().unwrap_or_else(|e| e.into_inner());
             if !worker.cancel.load(Ordering::Acquire) {
                 m.terminal = Some(result);
@@ -275,12 +296,16 @@ impl Session {
         if !(0..=24 * 60 * 60 * 1_000_000).contains(&position_us) {
             return Err(Error::Budget);
         }
-        if !self.control.seekable.load(Ordering::Acquire) {
+        if !self.is_seekable() {
             return Err(Error::Unsupported);
         }
+        // Serialize the request and its epoch with the worker's iteration snapshot.
+        // A pre-seek packet must never acquire the new seek's publication epoch.
+        let mut request = self.control.seek.lock().unwrap_or_else(|e| e.into_inner());
         self.control.timeline.fetch_add(1, Ordering::AcqRel);
+        let seek_generation = self.control.seek_generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.control.audio_generation.fetch_add(1, Ordering::AcqRel);
-        *self.control.seek.lock().unwrap_or_else(|e| e.into_inner()) = Some(position_us);
+        *request = Some((seek_generation, position_us));
         let mut m = self
             .control
             .mailbox
@@ -299,6 +324,13 @@ impl Session {
             .unwrap_or_else(|e| e.into_inner());
         m.video = None;
         m.audio.clear();
+    }
+    /// Available only after this reader opened a seekable transport. HLS,
+    /// unopened, withdrawn and retired readers never advertise seeking.
+    pub fn is_seekable(&self) -> bool {
+        !self.control.stopped()
+            && !self.control.retired.load(Ordering::Acquire)
+            && self.control.seekable.load(Ordering::Acquire)
     }
     pub fn is_retired(&self) -> bool {
         self.control.retired.load(Ordering::Acquire)
@@ -341,6 +373,7 @@ mod tests {
                 audio: AtomicBool::new(false),
                 audio_generation: AtomicU64::new(1),
                 timeline: AtomicU64::new(1),
+                seek_generation: AtomicU64::new(1),
                 seekable: AtomicBool::new(true),
                 seek: Mutex::new(None),
                 mailbox: Mutex::new(Mailbox::default()),
@@ -377,11 +410,74 @@ mod tests {
         assert!(s.poll().is_none());
     }
     #[test]
+    fn seekability_requires_an_open_live_reader_and_disappears_on_cancel_or_retirement() {
+        let mut s = manual_session();
+        s.control.seekable.store(false, Ordering::Release);
+        assert!(!s.is_seekable());
+        assert_eq!(s.seek(0), Err(Error::Unsupported));
+        s.control.seekable.store(true, Ordering::Release);
+        assert!(s.is_seekable());
+        s.control.retired.store(true, Ordering::Release);
+        assert!(!s.is_seekable());
+        s.control.retired.store(false, Ordering::Release);
+        s.cancel();
+        assert!(!s.is_seekable());
+        assert_eq!(s.seek(0), Err(Error::Unsupported));
+    }
+    #[test]
+    fn pause_only_epochs_cannot_retire_a_pending_seek() {
+        let mut session = manual_session();
+        session.set_paused(true);
+        session.seek(4_300_000).unwrap();
+        let control = Arc::clone(&session.control);
+        let request = control.seek.lock().unwrap();
+        let pending = *request;
+        let generation = control.seek_generation.load(Ordering::Acquire);
+        let timeline = control.timeline.load(Ordering::Acquire);
+        session.set_paused(false);
+        session.set_paused(true);
+        assert_eq!(*request, pending);
+        assert_eq!(control.seek_generation.load(Ordering::Acquire), generation);
+        assert!(control.timeline.load(Ordering::Acquire) > timeline);
+        drop(request);
+        session.seek(2_300_000).unwrap();
+        assert!(control.seek_generation.load(Ordering::Acquire) > generation);
+    }
+    #[test]
+    fn old_iteration_cannot_borrow_a_new_seeks_publication_or_audio_epoch() {
+        let mut session = manual_session();
+        let old = session.control.take_iteration();
+        assert!(old.request.is_none());
+        session.seek(4_300_000).unwrap();
+        assert_ne!(
+            old.timeline,
+            session.control.timeline.load(Ordering::Acquire)
+        );
+        assert_ne!(
+            old.audio_generation,
+            session.control.audio_generation.load(Ordering::Acquire)
+        );
+        assert_ne!(
+            old.seek_generation,
+            session.control.seek_generation.load(Ordering::Acquire)
+        );
+        let new = session.control.take_iteration();
+        assert_eq!(new.request, Some((new.seek_generation, 4_300_000)));
+        assert_eq!(
+            new.timeline,
+            session.control.timeline.load(Ordering::Acquire)
+        );
+        assert_eq!(
+            new.audio_generation,
+            session.control.audio_generation.load(Ordering::Acquire)
+        );
+    }
+    #[test]
     fn seek_withdraws_old_audio_and_cancel_is_not_retirement() {
         let mut s = manual_session();
         let old = s.control.timeline.load(Ordering::Acquire);
         s.seek(2_000_000).unwrap();
-        assert_eq!(*s.control.seek.lock().unwrap(), Some(2_000_000));
+        assert_eq!(*s.control.seek.lock().unwrap(), Some((old + 1, 2_000_000)));
         assert!(s.control.timeline.load(Ordering::Acquire) > old);
         s.cancel();
         assert!(!s.is_retired());

@@ -277,6 +277,7 @@ struct Seen {
     last: Option<i64>,
     hash: Option<u64>,
     audio: usize,
+    audio_floor: Option<i64>,
     failure: bool,
 }
 fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
@@ -322,6 +323,19 @@ fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
                     assert_eq!(chunk.samples.len() % 2, 0);
                     assert!(chunk.samples.len() <= 2048);
                     assert!(chunk.samples.iter().any(|v| *v != 0));
+                    if let Some(target) = seen[index].audio_floor {
+                        assert!(
+                            seen[index].last.is_some_and(|pts| pts >= target),
+                            "slot{index} PCM escaped before the video landing"
+                        );
+                        let tolerance =
+                            ((chunk.samples.len() / 2 * 1_000_000).div_ceil(48_000)) as i64;
+                        assert!(
+                            chunk.pts_us >= target - tolerance,
+                            "slot{index} preroll PCM escaped: {} before {target}",
+                            chunk.pts_us
+                        );
+                    }
                     seen[index].audio += 1;
                 }
                 Event::Failure(error) => {
@@ -360,6 +374,70 @@ fn until(
     }
     assert!(condition(seen), "actual decode condition timed out");
 }
+fn paused_seek_lands_without_resuming(readers: &mut Readers, seen: &mut [Seen], index: usize) {
+    readers.0[index].set_paused(true);
+    for position in [4_300_000, 2_300_000] {
+        let before = seen[index].frames;
+        let audio = seen[index].audio;
+        seen[index].last = None;
+        if position == 2_300_000 {
+            readers.0[index]
+                .seek(10_000_000)
+                .expect("first queued seek rejected");
+        }
+        // Hold a genuinely queued accepted seek while changing pause epochs.
+        // The worker cannot consume it until the guard is released; no timing
+        // sleep or decoder-only test hook creates the race precondition.
+        let control = Arc::clone(&readers.0[index].control);
+        let mut captured = false;
+        for _ in 0..64 {
+            readers.0[index]
+                .seek(position)
+                .expect("seekable paused source rejected seeking");
+            let request = control.seek.lock().unwrap();
+            if request.is_some() {
+                readers.0[index].set_paused(false);
+                readers.0[index].set_paused(true);
+                assert!(control.paused.load(Ordering::Acquire));
+                captured = true;
+                break;
+            }
+        }
+        assert!(
+            captured,
+            "could not retain a pending seek for the epoch regression"
+        );
+        until(readers, seen, Duration::from_secs(3), None, |s| {
+            s[index].frames > before
+                && s[index]
+                    .last
+                    .is_some_and(|p| p >= position && p < position + 500_000)
+        });
+        let landed = seen[index].frames;
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            pump(readers, seen, None);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            landed,
+            before + 1,
+            "paused seek published more than its landing frame"
+        );
+        assert_eq!(seen[index].frames, landed, "seek resumed paused playback");
+        assert_eq!(
+            seen[index].audio, audio,
+            "paused seek leaked old or new PCM"
+        );
+        assert!(readers.0[index].control.paused.load(Ordering::Acquire));
+    }
+    let paused = seen[index].frames;
+    readers.0[index].set_paused(false);
+    until(readers, seen, Duration::from_secs(3), None, |s| {
+        s[index].frames > paused
+    });
+}
+
 #[test]
 #[ignore = "Explicit real bundled-decoder qualification; requires generated fixtures and PLXNATIVE_APP_DIR"]
 fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
@@ -413,6 +491,19 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         "mixed real decode: HeldLocal=3 HTTP=3 HLS=3, first PTS={:?}",
         seen.iter().map(|s| s.last).collect::<Vec<_>>()
     );
+    for (index, reader) in readers.0.iter().enumerate() {
+        assert_eq!(
+            reader.is_seekable(),
+            !matches!(index, 2 | 6 | 7),
+            "seek capability did not match the opened held/HTTP/HLS reader"
+        );
+    }
+    assert_eq!(readers.0[2].seek(2_000_000), Err(Error::Unsupported));
+    paused_seek_lands_without_resuming(&mut readers, &mut seen, 0);
+    paused_seek_lands_without_resuming(&mut readers, &mut seen, 3);
+    eprintln!(
+        "paused seek: held+HTTP each landed forward/backward once without resuming; HLS rejected"
+    );
     let audio_epoch = readers.0[0]
         .control
         .audio_generation
@@ -446,12 +537,24 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
     until(&mut readers, &mut seen, Duration::from_secs(2), None, |s| {
         s[2].frames > paused
     });
-    readers.0[3].seek(2_000_000).unwrap();
-    seen[3].last = None;
-    let before_seek = seen[3].frames;
-    until(&mut readers, &mut seen, Duration::from_secs(2), None, |s| {
-        s[3].frames > before_seek && s[3].last.is_some_and(|p| p >= 1_900_000)
+    // The active unpaused HTTP audio owner must not expose keyframe preroll
+    // while exact video seeking skips to a non-keyframe destination.
+    let target = 4_300_000;
+    seen[1].last = None;
+    seen[1].audio_floor = Some(target);
+    let before_seek = seen[1].frames;
+    let before_audio = seen[1].audio;
+    readers.0[1].seek(target).unwrap();
+    until(&mut readers, &mut seen, Duration::from_secs(3), None, |s| {
+        s[1].frames > before_seek
+            && s[1].last.is_some_and(|p| p >= target)
+            && s[1].audio > before_audio
     });
+    eprintln!(
+        "unpaused non-keyframe seek: video landed before PCM; audio PTS within one chunk of target"
+    );
+    readers.0[4].set_paused(true);
+    readers.0[4].seek(10_000_000).unwrap();
     latches[4].store(true, Ordering::Release);
     until(
         &mut readers,

@@ -542,6 +542,8 @@ struct Xfer {
     /// `Content-Range`'s first byte, or -1 when there was no `Content-Range` at all. This is what
     /// makes "the server answered 206 from the wrong offset" detectable.
     range_start: i64,
+    /// Final response declaration only; reset at every response/redirect boundary.
+    accepts_ranges: bool,
     /// The `Location` of the response being read, as the server wrote it: empty when it sent none,
     /// when it was too long to keep ([`LOCATION_CAP`], so that a truncated URL is never requested) or
     /// when no response has begun. Cleared by each status line.
@@ -560,6 +562,7 @@ impl Xfer {
             body_len: -1,
             range_total: -1,
             range_start: -1,
+            accepts_ranges: false,
             location: Vec::new(),
             headers_done: false,
         }
@@ -571,8 +574,13 @@ impl Xfer {
         self.body_len = -1;
         self.range_total = -1;
         self.range_start = -1;
+        self.accepts_ranges = false;
         self.location.clear();
         self.headers_done = false;
+    }
+    fn permits_byte_ranges(&self) -> bool {
+        self.headers_done && (200..300).contains(&self.status)
+            && (self.accepts_ranges || (self.status == 206 && self.range_start >= 0))
     }
     fn pending(&self) -> usize {
         self.buf.len() - self.pos
@@ -1850,6 +1858,12 @@ impl CurlSource {
         self.heal_pending = true;
     }
 
+    /// Response-derived capability, not a promise that a future range succeeds.
+    /// A real seek still validates status and the requested Content-Range offset.
+    pub fn supports_byte_ranges(&self) -> bool {
+        self.readable && !self.poisoned && self.xfer.permits_byte_ranges()
+    }
+
     /// Total size of the resource, or -1 when the server never said. What `AVSEEK_SIZE` answers.
     pub fn size(&self) -> i64 {
         self.size
@@ -2442,6 +2456,7 @@ fn parse_header_line(x: &mut Xfer, line: &[u8]) {
         x.body_len = -1;
         x.range_total = -1;
         x.range_start = -1;
+        x.accepts_ranges = false;
         x.location.clear();
         x.headers_done = false;
         return;
@@ -2452,6 +2467,8 @@ fn parse_header_line(x: &mut Xfer, line: &[u8]) {
         let (start, total) = parse_content_range(v);
         x.range_start = start;
         x.range_total = total;
+    } else if let Some(v) = header_value(t, b"accept-ranges:") {
+        x.accepts_ranges = v.eq_ignore_ascii_case(b"bytes");
     } else if let Some(v) = header_value(t, b"location:") {
         // Too long to keep is as good as absent: the open fails rather than request a truncated URL.
         x.location = if v.len() <= LOCATION_CAP { v.to_vec() } else { Vec::new() };
@@ -3486,6 +3503,37 @@ mod tests {
                 "the aborted probe must retire its reservation"
             );
         });
+    }
+
+    #[test]
+    fn range_capability_uses_only_the_completed_final_response() {
+        let mut x = Xfer::new();
+        parse_header_line(&mut x, b"HTTP/1.1 302 Found\r\n");
+        parse_header_line(&mut x, b"Accept-Ranges: bytes\r\n");
+        parse_header_line(&mut x, b"\r\n");
+        assert!(!x.permits_byte_ranges());
+        parse_header_line(&mut x, b"HTTP/1.1 200 OK\r\n");
+        parse_header_line(&mut x, b"\r\n");
+        assert!(!x.permits_byte_ranges(), "redirect capability leaked");
+        parse_header_line(&mut x, b"HTTP/1.1 200 OK\r\n");
+        parse_header_line(&mut x, b"aCcEpT-rAnGeS:  BYTES \r\n");
+        assert!(
+            !x.permits_byte_ranges(),
+            "incomplete headers advertised seeking"
+        );
+        parse_header_line(&mut x, b"\r\n");
+        assert!(x.permits_byte_ranges());
+        x.reset();
+        assert!(!x.permits_byte_ranges());
+        parse_header_line(&mut x, b"HTTP/1.1 206 Partial Content\r\n");
+        parse_header_line(&mut x, b"Content-Range: bytes 4-7/8\r\n");
+        parse_header_line(&mut x, b"\r\n");
+        assert!(x.permits_byte_ranges());
+        parse_header_line(&mut x, b"HTTP/1.1 206 Partial Content\r\n");
+        parse_header_line(&mut x, b"Content-Range: broken\r\n");
+        parse_header_line(&mut x, b"Accept-Ranges: none\r\n");
+        parse_header_line(&mut x, b"\r\n");
+        assert!(!x.permits_byte_ranges());
     }
 
     /// The header parse itself, with no libcurl involved — so the arithmetic is graded even on a

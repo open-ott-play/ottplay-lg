@@ -613,7 +613,11 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         ExternalSource::Hls(url) => Input::Hls(Hls::open(url, limits.max_object_bytes, c)?),
         ExternalSource::Local(_) => return Err(Error::Unsupported),
     };
-    let seekable = !matches!(&input, Input::Hls(_));
+    let seekable = match &input {
+        Input::Local(_) => true,
+        Input::Http(remote) => remote.source.supports_byte_ranges(),
+        Input::Hls(_) => false,
+    };
     let mut io = Box::new(Io {
         input,
         control: c,
@@ -732,18 +736,27 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     let mut last_sent = None;
     let mut flushing = false;
     let mut fallback = 0i64;
+    let mut landing: Option<(u64, i64)> = None;
     loop {
         if c.stopped() {
             return Err(Error::Cancelled);
         }
-        while c.paused.load(Ordering::Acquire) {
+        let iteration = c.take_iteration();
+        let requested_seek = iteration.request;
+        let timeline = iteration.timeline;
+        let generation = iteration.audio_generation;
+        let seek_generation = iteration.seek_generation;
+        if landing.is_some_and(|(epoch, _)| epoch != seek_generation) {
+            landing = None;
+        }
+        if requested_seek.is_none() && landing.is_none() && c.paused.load(Ordering::Acquire) {
             if !c.wait(Duration::from_millis(20)) {
                 return Err(Error::Cancelled);
             }
             clock = None;
+            continue;
         }
-        let requested_seek = c.seek.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(position) = requested_seek {
+        if let Some((epoch, position)) = requested_seek {
             let target = av_rescale_q(
                 position,
                 AVRational {
@@ -762,13 +775,12 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
             last_sent = None;
             flushing = false;
             fallback = position;
+            landing = Some((epoch, position));
         }
-        let timeline = c.timeline.load(Ordering::Acquire);
-        let generation = c.audio_generation.load(Ordering::Acquire);
         if generation != audio_generation {
             audio = None;
             audio_generation = generation;
-            if c.audio.load(Ordering::Acquire) && ai >= 0 {
+            if c.audio.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && ai >= 0 {
                 let ast = *(*d.fmt).streams.add(ai as usize);
                 audio = SpeedDecoder::open(stream_codecpar(ast), 1000);
             }
@@ -804,7 +816,13 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
                         .map(|b| i16::from_le_bytes([b[0], b[1]]))
                         .collect();
                     if generation == c.audio_generation.load(Ordering::Acquire)
+                        && timeline == c.timeline.load(Ordering::Acquire)
+                        && seek_generation == c.seek_generation.load(Ordering::Acquire)
                         && c.audio.load(Ordering::Acquire)
+                        && !c.paused.load(Ordering::Acquire)
+                        // Decode preroll for codec continuity, but its PCM must
+                        // not outrun the first exact video landing frame.
+                        && landing.is_none()
                     {
                         let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
                         // At most a quarter-second of stereo48k PCM; expired UI consumption
@@ -830,12 +848,24 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
                 return Err(Error::Decode);
             }
             loop {
+                if c.stopped() {
+                    return Err(Error::Cancelled);
+                }
+                // A newer seek owns the next landing; do not finish decoding
+                // this packet under a retired target before servicing it.
+                if c.seek.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                    break;
+                }
                 let received = avcodec_receive_frame(d.codec, d.frame);
                 if received == AVERROR_EAGAIN || received == AVERROR_EOF {
                     break;
                 }
                 if received < 0 {
                     return Err(Error::Decode);
+                }
+                if c.paused.load(Ordering::Acquire) && landing.is_none() {
+                    av_frame_unref(d.frame);
+                    continue;
                 }
                 let f = d.frame as *const u8;
                 let format = std::ptr::read_unaligned(f.add(OFF_FRAME_FORMAT).cast::<i32>());
@@ -859,6 +889,12 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
                     )
                 };
                 fallback = pts.saturating_add(1_000_000 / i64::from(limits.max_fps));
+                // Backward keyframe seeking may decode preroll. Only the first
+                // frame at the requested position is a paused seek's landing.
+                if landing.is_some_and(|(_, target)| pts < target) {
+                    av_frame_unref(d.frame);
+                    continue;
+                }
                 let (origin, started) = *clock.get_or_insert((pts, Instant::now()));
                 let elapsed = pts.saturating_sub(origin);
                 if elapsed < 0 || elapsed > 24 * 60 * 60 * 1_000_000 {
@@ -890,6 +926,14 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
                     if timeline == c.timeline.load(Ordering::Acquire) {
                         c.mailbox.lock().unwrap_or_else(|e| e.into_inner()).video =
                             Some((timeline, frame));
+                        if landing.is_some() {
+                            landing = None;
+                            if c.paused.load(Ordering::Acquire) {
+                                // Drain any remaining frames of this packet without
+                                // publishing them; no pending output may block resume.
+                                clock = None;
+                            }
+                        }
                     }
                     last_sent = Some(pts);
                 }
