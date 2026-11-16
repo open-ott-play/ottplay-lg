@@ -9744,7 +9744,7 @@ pub fn demux(
     hs: SendPtr<HttpStream>,
     text_style: crate::player::text_style::TextStyle,
 ) {
-    demux_inner(off,native_epoch,Some(origin),path,None,None,None,acodec,abr,auto_original,aq,aqa,hs,text_style)
+    demux_inner(off,native_epoch,Some(origin),path,None,None,None,None,acodec,abr,auto_original,aq,aqa,hs,text_style)
 }
 
 /// Distinct selection namespaces: an embedded TS track is not an external
@@ -9757,7 +9757,7 @@ pub enum HlsTrackSelection {
 }
 
 pub fn demux_external(
-    off:&plx_base::task::OffFrame, native_epoch:u32, source:ExternalSource, video_codec:String, acodec:String,
+    off:&plx_base::task::OffFrame, native_epoch:u32, source:ExternalSource, duration_ns:Option<i64>, video_codec:String, acodec:String,
     audio:Option<HlsTrackSelection>, aq:SendPtr<AuQueue>,aqa:SendPtr<AuQueue>,hs:SendPtr<HttpStream>,
     text_style: crate::player::text_style::TextStyle,
 ) {
@@ -9767,12 +9767,12 @@ pub fn demux_external(
             let parsed=plx_plex::plex::StreamUrl::parse(url);(Some(parsed.origin),parsed.path)
         }
     };
-    demux_inner(off,native_epoch,origin,path,Some(source),Some(video_codec),audio,acodec,None,None,aq,aqa,hs,text_style)
+    demux_inner(off,native_epoch,origin,path,Some(source),Some(video_codec),duration_ns,audio,acodec,None,None,aq,aqa,hs,text_style)
 }
 
 fn demux_inner(
     off:&plx_base::task::OffFrame, native_epoch:u32, origin:Option<plx_plex::plex::Origin>,path:String,
-    external:Option<ExternalSource>,external_video:Option<String>,audio:Option<HlsTrackSelection>,acodec:String,
+    external:Option<ExternalSource>,external_video:Option<String>,external_duration:Option<i64>,audio:Option<HlsTrackSelection>,acodec:String,
     abr:Option<(crate::route::HlsAbrControl,crate::route::WorkerTicket)>,
     auto_original:Option<crate::route::AutoOriginalWatch>,
     aq:SendPtr<AuQueue>,aqa:SendPtr<AuQueue>,hs:SendPtr<HttpStream>,
@@ -9805,18 +9805,18 @@ fn demux_inner(
             if let Some(ExternalSource::Hls(url))=&external {
                 match audio.as_ref() {
                     Some(HlsTrackSelection::Live { playback, audio }) if playback.matches_source(url) && playback.is_live_subtitles() =>
-                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback)),
+                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, audio.as_ref(), aq_p, aqa_p, hs_p, Some(playback), external_duration),
                     Some(HlsTrackSelection::Live { .. }) => Err(HlsExit::Failed("HLS live presentation source changed")),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_renditions() =>
                         hls_presentation::live_audio::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) && playback.is_live_subtitles() =>
-                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, Some(playback)),
+                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, Some(playback), external_duration),
                     Some(HlsTrackSelection::Rendition(playback)) if playback.matches_source(url) =>
                         hls_vod::demux(playback, aq_p, aqa_p, hs_p),
                     Some(HlsTrackSelection::Rendition(_)) => Err(HlsExit::Failed("HLS presentation source changed")),
                     Some(HlsTrackSelection::Embedded(selection)) =>
-                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, Some(selection), aq_p, aqa_p, hs_p, None),
-                    None => external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, None),
+                        external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, Some(selection), aq_p, aqa_p, hs_p, None, external_duration),
+                    None => external_hls::demux_video_for_epoch(native_epoch, url, external_video.as_deref().unwrap_or("h264"), &acodec, None, aq_p, aqa_p, hs_p, None, external_duration),
                 }
             } else {
                 hls_demux(off, native_epoch, origin.as_ref().expect("HTTP HLS origin"), &path, &acodec, abr, aq_p, aqa_p, hs_p)

@@ -423,7 +423,7 @@ impl FetchTrace {
                 403 => "HLS playlist server returned HTTP 403",
                 404 => "HLS playlist server returned HTTP 404",
                 429 => "HLS playlist server returned HTTP 429",
-                500..=599 => "HLS playlist server returned a server error",
+                500 | 502 | 503 | 504 => "HLS playlist server returned a server error",
                 _ => "HLS playlist server returned an HTTP error",
             }),
             OpenErr::Transport(code) => ("transport", code, "HLS playlist network transport failed"),
@@ -632,16 +632,17 @@ pub(super) fn inspect(
     inspect_from_first(url, cancelled, None)
 }
 
-/// Continue a sniffed response without a duplicate GET. The original request's
-/// deadline, cancellation owner and final redirect URL remain authoritative.
-pub(super) fn inspect_opened(source: Box<crate::curlio::CurlSource>, prefix: Vec<u8>,
+/// Continue a sniffed response without a duplicate GET. The validated request
+/// input retains logical ownership; the final redirect URL remains the base
+/// for child resources. Neither the deadline nor cancellation owner is renewed.
+pub(super) fn inspect_opened(input: &str, source: Box<crate::curlio::CurlSource>, prefix: Vec<u8>,
     deadline: Instant, cancelled: Arc<AtomicBool>)
     -> Result<super::inspect::MediaInfo, &'static str>
 {
+    let source_url = plx_data::ott::http_url(input).ok_or("Invalid HLS address")?;
     let trace = FetchTrace { stage: PlaylistStage::Initial, depth: 0, started: Instant::now() };
     let (landed, text) = finish_playlist_response(source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)
         .map_err(FetchFailure::preparation_reason)?;
-    let source_url = landed.clone();
     inspect_from_first(&source_url, cancelled, Some((landed, text)))
 }
 
@@ -697,7 +698,6 @@ fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(
                 // This table describes one segment, not all variants/tracks in
                 // the presentation. Keep its rows for the existing manual menu.
                 info.tracks.mark_incomplete();
-                info.resolved_source = Some(ExternalSource::Hls(landed.clone()));
                 info.duration_ns = if media.ended {
                     media
                         .segments
@@ -715,11 +715,73 @@ fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(
                             &source_url, master_url, master_text, group.as_deref(), &landed, &info)?;
                     }
                 }
+                info.resolved_source = Some(ExternalSource::Hls(inspected_hls_source(
+                    &source_url, &landed, media.ended, info.hls_playback.is_some()).to_owned()));
                 return Ok(info);
             }
         }
     }
     Err("HLS playlist nesting exceeds limit")
+}
+
+/// Plain live children may carry a client session issued by the master. Keep
+/// the admitted logical input so a new playback worker can establish its own
+/// context. Existing finite and rendition/subtitle presentations keep theirs.
+fn inspected_hls_source<'a>(source: &'a str, selected: &'a str, ended: bool, presentation: bool) -> &'a str {
+    if !ended && !presentation { source } else { selected }
+}
+
+trait InitialPlaylistIo {
+    fn now(&self) -> Instant;
+    fn stopped(&self) -> bool;
+    fn fetch(&mut self, url: &str, deadline: Instant, depth: u8) -> Result<(String, String), HlsExit>;
+}
+impl InitialPlaylistIo for Owner<'_> {
+    fn now(&self) -> Instant { Instant::now() }
+    fn stopped(&self) -> bool { Owner::stopped(self) }
+    fn fetch(&mut self, url: &str, deadline: Instant, depth: u8) -> Result<(String, String), HlsExit> {
+        fetch_traced_failure(url, self, deadline, PlaylistStage::Playback, depth).map_err(FetchFailure::into_hls)
+    }
+}
+
+/// Establish a fresh plain-HLS context exactly once, before any queue or codec
+/// state is committed. One absolute allowance covers the whole master chain.
+/// The returned media response is consumed directly; its URL is frozen for all
+/// subsequent refreshes instead of creating another provider session each time.
+fn initial_playback_media(source: &str, allow_master: bool, deadline: Instant,
+    io: &mut impl InitialPlaylistIo) -> Result<(String, Media), HlsExit>
+{
+    let deadline = deadline.min(io.now() + Duration::from_secs(15));
+    let mut url = plx_data::ott::http_url(source).ok_or(HlsExit::Failed("Invalid HLS address"))?;
+    for depth in 0..4 {
+        if io.stopped() { return Err(HlsExit::Aborted); }
+        if io.now() >= deadline {
+            return Err(HlsExit::OpenFailed { reason: "HLS playlist request timed out", outcome: TraceOutcome::Deadline });
+        }
+        let (landed, text) = io.fetch(&url, deadline, depth)?;
+        if io.stopped() { return Err(HlsExit::Aborted); }
+        if io.now() >= deadline {
+            return Err(HlsExit::OpenFailed { reason: "HLS playlist request timed out", outcome: TraceOutcome::Deadline });
+        }
+        match parse(&landed, &text).map_err(HlsExit::Failed)? {
+            Playlist::Media(media) => return Ok((landed, media)),
+            Playlist::Master(mut variants) if allow_master => {
+                // The same deterministic choice used by inspection. Frozen
+                // codec/track checks still validate its real segment bytes.
+                variants.sort_by_key(|variant| variant.bandwidth);
+                url = variants[0].url.clone();
+            }
+            Playlist::Master(_) => return Err(HlsExit::Failed("HLS media address became a master playlist")),
+        }
+    }
+    Err(HlsExit::Failed("HLS playlist nesting exceeds limit"))
+}
+
+fn playback_media_refresh(landed: &str, text: &str) -> Result<Media, HlsExit> {
+    match parse(landed, text).map_err(HlsExit::Failed)? {
+        Playlist::Media(media) => Ok(media),
+        Playlist::Master(_) => Err(HlsExit::Failed("HLS media address became a master playlist")),
+    }
 }
 
 #[cfg(test)]
@@ -748,7 +810,14 @@ pub(super) fn demux_video(
     hs: *mut HttpStream,
     presentation: Option<&super::hls_presentation::HlsPlayback>,
 ) -> Result<(), HlsExit> {
-    demux_video_for_epoch(0, url, video_codec, acodec, audio, aq, aqa, hs, presentation)
+    demux_video_for_epoch(0, url, video_codec, acodec, audio, aq, aqa, hs, presentation, None)
+}
+
+/// Only the accepted plain-live descriptor may bootstrap a new master chain.
+/// Unknown and finite durations, and presentation-owned URLs, retain strict
+/// media-only semantics even before the first access unit is published.
+fn may_bootstrap_live_entry(duration_ns: Option<i64>, presentation: bool) -> bool {
+    duration_ns == Some(0) && !presentation
 }
 
 /// `native_epoch` is the Load owned by this worker, never a late-read global.
@@ -762,6 +831,7 @@ pub(super) fn demux_video_for_epoch(
     aqa: *mut AuQueue,
     hs: *mut HttpStream,
     presentation: Option<&super::hls_presentation::HlsPlayback>,
+    entry_duration_ns: Option<i64>,
 ) -> Result<(), HlsExit> {
     VideoState::fresh(video_codec).map_err(HlsExit::Failed)?;
     if video_codec == "hevc" && !matches!(acodec, "aac" | "ac3") {
@@ -778,18 +848,20 @@ pub(super) fn demux_video_for_epoch(
     let mut media_bitrate = crate::player::media_bitrate::MediaBitrate::default();
     let mut last_progress = Instant::now();
     let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
+    let (media_url, first_media) = initial_playback_media(url, may_bootstrap_live_entry(entry_duration_ns, presentation.is_some()),
+        Instant::now() + Duration::from_secs(15), &mut Owner::Playback(aq))?;
+    let mut first_media = Some((media_url.clone(), first_media));
     'refresh: loop {
         if unsafe { crate::aq::aq_is_aborted(aq) } {
             return Err(HlsExit::Aborted);
         }
         let playlist_deadline = cold_entry.as_ref().and_then(|search| search.deadline)
             .map_or(Instant::now() + Duration::from_secs(15), |at| at.min(Instant::now() + Duration::from_secs(15)));
-        let (landed, text) = fetch_traced_failure(url, &mut Owner::Playback(aq),
-            playlist_deadline, PlaylistStage::Playback, 0).map_err(FetchFailure::into_hls)?;
-        let Playlist::Media(media) = parse(&landed, &text).map_err(HlsExit::Failed)? else {
-            return Err(HlsExit::Failed(
-                "HLS media address became a master playlist",
-            ));
+        let (landed, media) = if let Some(first) = first_media.take() { first } else {
+            let (landed, text) = fetch_traced_failure(&media_url, &mut Owner::Playback(aq),
+                playlist_deadline, PlaylistStage::Playback, 0).map_err(FetchFailure::into_hls)?;
+            let media = playback_media_refresh(&landed, &text)?;
+            (landed, media)
         };
         let target = SHARED.seek_to_ns.swap(-1, Ordering::Acquire);
         if target >= 0 {

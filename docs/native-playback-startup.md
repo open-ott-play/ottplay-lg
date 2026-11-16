@@ -69,3 +69,21 @@ retains closed timeout/network/server reasons before a native session exists.
 The original remote command is completed once with its actual result. Automatic
 recovery belongs to the retained player selection; it does not replay the RPC
 or claim that playback succeeded before admission.
+
+## Logical HLS entry and temporary media sessions
+
+For plain live HLS without a separate presentation descriptor, inspection keeps
+the validated logical input, including the original input before a redirect.
+The native worker follows at most four initial playlist documents under one
+fifteen-second absolute allowance to acquire a fresh media-session address.
+The first media snapshot is consumed directly, then its landed address is fixed
+for subsequent refreshes; a later media-to-master change is still rejected.
+Relative children use the validated redirect landing as their base, while
+route and observed-track ownership remain bound to the logical source.
+
+This avoids treating a short-lived address obtained during a separate media
+inspection as the durable channel entry. Codec, track, cancellation and trust
+checks still apply. Finite playlists and subtitle/separate-audio presentation
+descriptors retain their existing source handling. A checked premature end
+before HTTP Content-Length permits same-source live recovery after discarding
+the incomplete private segment result; it does not authorize blind demux replay.

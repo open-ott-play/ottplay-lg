@@ -21,7 +21,7 @@ fn initial_open_failure(error: crate::curlio::OpenErr) -> &'static str {
     match error {
         OpenErr::Aborted | OpenErr::Stopped => "Media inspection cancelled",
         OpenErr::Status(429) => "Media source server returned HTTP 429",
-        OpenErr::Status(500..=599) => "Media source server returned a server error",
+        OpenErr::Status(500 | 502 | 503 | 504) => "Media source server returned a server error",
         _ => match super::hls_curl_open_outcome(error) {
             TraceOutcome::Deadline => "Media source request timed out",
             TraceOutcome::Transport => "Media source network transport failed",
@@ -46,6 +46,7 @@ mod initial_open_failure_tests {
     fn auth_trust_local_cancel_and_unknown_are_not_transient_open_evidence() {
         use crate::curlio::OpenErr;
         for error in [OpenErr::Status(401), OpenErr::Status(403), OpenErr::Status(404),
+            OpenErr::Status(501), OpenErr::Status(505), OpenErr::Status(511),
             OpenErr::Transport(60), OpenErr::Transport(35), OpenErr::Transport(999),
             OpenErr::Local, OpenErr::Unavailable, OpenErr::RangeIgnored] {
             assert_eq!(initial_open_failure(error), "Could not open media source");
@@ -350,7 +351,7 @@ fn raw_inner_capture(
                     .trim_start()
                     .starts_with("#EXTM3U")
                 {
-                    return super::external_hls::inspect_opened(source, prefix, deadline, cancelled);
+                    return super::external_hls::inspect_opened(&url, source, prefix, deadline, cancelled);
                 }
             }
             InputSource::Http(source)

@@ -295,6 +295,25 @@ pub(super) fn capture_pending_live_retry(runtime: &Runtime, app: &App, generatio
     anchor.retry_exact = true;
     Some(FailureContinuation { list, anchor: Some(anchor) })
 }
+/// Display-only evidence for the exact pre-admission live cooldown. This
+/// borrows the retained failed attempt; it cannot create a request or permission.
+pub(super) fn pending_live_retry_display<'a>(runtime: &'a Runtime, app: &App)
+    -> Option<(&'a PlaybackRequest, &'a ProviderProfile, &'a CatalogEntry)>
+{
+    if runtime.play_target.is_some() || !runtime.play_work_allowed() || lifecycle::viewer_paused()
+        || runtime.cancel.load(Ordering::Acquire) || runtime.play_cancel.load(Ordering::Acquire)
+        || !runtime.pending_attachment_current() || !transient::target_current(runtime) { return None; }
+    let retry = runtime.continuity.pending_retry()?;
+    let anchor = runtime.explicit_step.anchor.as_ref()?;
+    anchor.list.as_ref()?;
+    if !anchor.failed || !anchor.retry_exact || retry.generation != runtime.generation
+        || retry.after != anchor.request.id || !anchor.current(runtime, app)
+        || runtime.continuity.active_selection(runtime.generation) != Some(anchor.request.id.as_str())
+    { return None; }
+    let entry = anchor.entry.as_ref()?;
+    guide_ui::is_live(&anchor.profile, entry).then_some((&anchor.request, &anchor.profile, entry))
+}
+
 pub(super) fn with_failure_continuation(runtime: &mut Runtime, proof: Option<FailureContinuation>,
     continue_failure: impl FnOnce(&mut Runtime)) {
     let (list, anchor) = match proof {

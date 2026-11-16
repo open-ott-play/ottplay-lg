@@ -220,3 +220,65 @@ fn exact_live_startup_retry_keeps_its_source_queue_while_another_category_is_bro
     let _retry = due_retry(&mut f, &selected, 1);
     assert_eq!(f.app.ott.as_ref().unwrap().saved.category, "B");
 }
+
+
+fn failed_live_retry_on_player() -> (Fixture, String) {
+    let mut f = live_fixture();
+    mount_player(&mut f.app);
+    let request = queue_exact(&mut f);
+    let title = request.entry.as_ref().unwrap().title.clone();
+    fail(&mut f, request, "Selected HLS playlist request timed out");
+    assert!(matches!(f.app.route(), AppArg::Player));
+    let runtime = f.app.ott.as_ref().unwrap();
+    assert!(runtime.play_target.is_none());
+    assert!(runtime.continuity.pending_retry().is_some());
+    assert!(failed_playback::current(runtime, &f.app).is_none(),
+        "a pre-admission failure has no installed-native failure receipt");
+    // Retain a native terminal signal from the previous picture. The display
+    // overlay may cover it while working, but must not erase diagnostic facts.
+    plx_media::player::SHARED.demux_failed.store(true, Ordering::Release);
+    plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Error);
+    (f, title)
+}
+
+#[test]
+fn exact_preflight_retry_cooldown_keeps_player_loading_and_selected_footer_without_clearing_error() {
+    let _lock = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let (f, title) = failed_live_retry_on_player();
+    assert!(player_startup_pending(&f.app));
+    assert!(player_startup::display_stamp(&f.app).is_some());
+    let display = player_startup::display(&f.app).expect("source-owned cooldown footer");
+    assert_eq!(display.title, title);
+    let live = display.ott.unwrap().live.unwrap();
+    assert_eq!(live.channel_title, title);
+    assert_eq!(live.ordinal, Some(1), "retain the underlying channel number during cooldown");
+    assert!(f.app.bridge.metadata_view().now_playing().is_none(), "display is not installed metadata");
+    assert!(plx_media::player::SHARED.demux_failed.load(Ordering::Acquire));
+    assert_eq!(plx_media::player::state(&f.app.player.session), plx_media::player::PlaybackState::Error);
+    assert_eq!(f.app.ott.as_ref().unwrap().resolver_launches_for_test, 0);
+}
+
+#[test]
+fn preflight_retry_cooldown_display_is_revoked_by_cancel_source_change_pause_and_standby() {
+    let _lock = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    for case in ["cancel", "profile", "paused", "standby"] {
+        let (mut f, _) = failed_live_retry_on_player();
+        assert!(player_startup_pending(&f.app));
+        match case {
+            "cancel" => f.app.ott.as_mut().unwrap().cancel_play_request(),
+            "profile" => f.app.ott.as_mut().unwrap().saved.profiles.profiles[0].source
+                .push_str("/replaced"),
+            "paused" => lifecycle::set_paused(true),
+            "standby" => f.app.ott_standby = true,
+            _ => unreachable!(),
+        }
+        assert!(!player_startup_pending(&f.app), "{case}");
+        assert!(player_startup::display_stamp(&f.app).is_none(), "{case}");
+        assert!(player_startup::display(&f.app).is_none(), "{case}");
+        assert!(plx_media::player::SHARED.demux_failed.load(Ordering::Acquire));
+        assert_eq!(plx_media::player::state(&f.app.player.session), plx_media::player::PlaybackState::Error);
+        assert_eq!(f.app.ott.as_ref().unwrap().resolver_launches_for_test, 0);
+    }
+}
