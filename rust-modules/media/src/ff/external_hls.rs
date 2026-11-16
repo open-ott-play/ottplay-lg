@@ -453,7 +453,14 @@ fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: Play
 fn fetch_traced_failure(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
     -> Result<(String, String), FetchFailure>
 {
-    let mut io = PlaylistFetch { url, owner, stage, depth, started: Instant::now() };
+    fetch_in_session(url, owner, &mut None, deadline, stage, depth)
+}
+
+fn fetch_in_session(url: &str, owner: &mut Owner<'_>,
+    transport: &mut Option<Box<crate::curlio::CurlSource>>, deadline: Instant,
+    stage: PlaylistStage, depth: u8) -> Result<(String, String), FetchFailure>
+{
+    let mut io = PlaylistFetch { url, owner, transport, stage, depth, started: Instant::now() };
     fetch_with_retry(&mut io, deadline, stage)
 }
 
@@ -502,6 +509,7 @@ fn fetch_with_retry(io: &mut impl PlaylistFetchIo, deadline: Instant, stage: Pla
 struct PlaylistFetch<'a, 'b> {
     url: &'a str,
     owner: &'a mut Owner<'b>,
+    transport: &'a mut Option<Box<crate::curlio::CurlSource>>,
     stage: PlaylistStage,
     depth: u8,
     started: Instant,
@@ -510,7 +518,7 @@ impl PlaylistFetchIo for PlaylistFetch<'_, '_> {
     fn now(&self) -> Instant { Instant::now() }
     fn stopped(&self) -> bool { self.owner.stopped() }
     fn attempt(&mut self, deadline: Instant) -> Result<(String, String), FetchFailure> {
-        fetch_traced_attempt(self.url, self.owner, deadline, self.stage, self.depth)
+        fetch_traced_attempt(self.url, self.owner, self.transport, deadline, self.stage, self.depth)
     }
     fn wait_until(&mut self, deadline: Instant) {
         while !self.owner.stopped() {
@@ -525,42 +533,35 @@ impl PlaylistFetchIo for PlaylistFetch<'_, '_> {
     }
 }
 
-fn fetch_traced_attempt(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
+fn fetch_traced_attempt(url: &str, owner: &mut Owner<'_>,
+    transport: &mut Option<Box<crate::curlio::CurlSource>>, deadline: Instant, stage: PlaylistStage, depth: u8)
     -> Result<(String, String), FetchFailure>
 {
     let trace = FetchTrace { stage, depth, started: Instant::now() };
     if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
     if Instant::now() >= deadline { return Err(trace.open_error(crate::curlio::OpenErr::Deadline)); }
     let deadline = deadline.min(Instant::now() + Duration::from_secs(15));
-    let source = match owner {
-        Owner::Inspect(_) => {
-            crate::curlio::CurlSource::open_private_checked(url, 0, Some(deadline), owner)
-                .map(|(s, _)| s)
-        }
-        Owner::Playback(_) => {
-            let reserved = crate::curlio::CurlSource::reserve_open()
-                .map_err(|error| trace.open_error(error))?;
-            if owner.stopped() {
-                return Err(trace.open_error(crate::curlio::OpenErr::Stopped));
+    if transport.is_none() {
+        let source = match owner {
+            Owner::Inspect(_) => crate::curlio::CurlSource::new_hls_private(url),
+            Owner::Playback(_) => {
+                let reserved = crate::curlio::CurlSource::reserve_open().map_err(|error| trace.open_error(error))?;
+                if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
+                crate::curlio::CurlSource::new_hls_reserved(url, reserved)
             }
-            crate::curlio::CurlSource::open_reserved_checked(
-                url,
-                0,
-                reserved,
-                Some(deadline),
-                owner,
-            )
-        }
+        }.map_err(|error| trace.open_error(error))?;
+        *transport = Some(source);
     }
-    .map_err(|error| trace.open_error(error))?;
+    transport.as_mut().expect("allocated HLS transport")
+        .reopen_until(url, Some(deadline), owner).map_err(|error| trace.open_error(error))?;
     trace.record("open", "ok", 0);
-    finish_playlist_response(source, Vec::new(), owner, deadline, &trace)
+    finish_playlist_response(transport.as_mut().expect("opened HLS transport"), Vec::new(), owner, deadline, &trace)
 }
 
 /// Complete the response already admitted by the checked HTTP transport. A
 /// sniffed extensionless manifest carries its consumed prefix here; opening it
 /// again would discard the provider's admitted response and start a new session.
-fn finish_playlist_response(mut source: Box<crate::curlio::CurlSource>, mut bytes: Vec<u8>,
+fn finish_playlist_response(source: &mut crate::curlio::CurlSource, mut bytes: Vec<u8>,
     owner: &mut Owner<'_>, deadline: Instant, trace: &FetchTrace)
     -> Result<(String, String), FetchFailure>
 {
@@ -629,24 +630,25 @@ pub(super) fn inspect(
     url: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Result<super::inspect::MediaInfo, &'static str> {
-    inspect_from_first(url, cancelled, None)
+    inspect_from_first(url, cancelled, None, None)
 }
 
 /// Continue a sniffed response without a duplicate GET. The validated request
 /// input retains logical ownership; the final redirect URL remains the base
 /// for child resources. Neither the deadline nor cancellation owner is renewed.
-pub(super) fn inspect_opened(input: &str, source: Box<crate::curlio::CurlSource>, prefix: Vec<u8>,
+pub(super) fn inspect_opened(input: &str, mut source: Box<crate::curlio::CurlSource>, prefix: Vec<u8>,
     deadline: Instant, cancelled: Arc<AtomicBool>)
     -> Result<super::inspect::MediaInfo, &'static str>
 {
     let source_url = plx_data::ott::http_url(input).ok_or("Invalid HLS address")?;
     let trace = FetchTrace { stage: PlaylistStage::Initial, depth: 0, started: Instant::now() };
-    let (landed, text) = finish_playlist_response(source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)
+    let (landed, text) = finish_playlist_response(&mut source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)
         .map_err(FetchFailure::preparation_reason)?;
-    inspect_from_first(&source_url, cancelled, Some((landed, text)))
+    inspect_from_first(&source_url, cancelled, Some((landed, text)), Some(source))
 }
 
-fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(String, String)>)
+fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(String, String)>,
+    mut transport: Option<Box<crate::curlio::CurlSource>>)
     -> Result<super::inspect::MediaInfo, &'static str>
 {
     let source_url = plx_data::ott::http_url(url).ok_or("Invalid HLS address")?;
@@ -656,8 +658,9 @@ fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(
         let stage = if depth == 0 { PlaylistStage::Initial } else { PlaylistStage::Selected };
         let (landed, text) = match first.take() {
             Some(response) => response,
-            None => fetch_traced(&url, &mut Owner::Inspect(&cancelled),
-                Instant::now() + Duration::from_secs(15), stage, depth)?,
+            None => fetch_in_session(&url, &mut Owner::Inspect(&cancelled), &mut transport,
+                Instant::now() + Duration::from_secs(15), stage, depth)
+                .map_err(FetchFailure::preparation_reason)?,
         };
         if text.lines().any(|line| line.trim().strip_prefix("#EXT-X-STREAM-INF:")
             .and_then(|raw| attrs(raw).ok()).is_some_and(|a| a.contains_key("AUDIO")))
@@ -687,7 +690,11 @@ fn inspect_from_first(url: &str, cancelled: Arc<AtomicBool>, mut first: Option<(
                     segment.inner.resource.origin.base(),
                     segment.inner.resource.path
                 );
-                let mut info = super::inspect::raw(&ExternalSource::Http(url), Arc::clone(&cancelled))?;
+                let deadline = Instant::now() + Duration::from_secs(15);
+                let mut source = transport.take().ok_or("HLS transport context is unavailable")?;
+                source.reopen_until(&url, Some(deadline), &mut Owner::Inspect(&cancelled))
+                    .map_err(super::inspect::initial_open_failure)?;
+                let mut info = super::inspect::raw_opened_http(source, Arc::clone(&cancelled), deadline)?;
                 let mp2 = info.video_codec == "h264" && info.audio_codec == "mp2"
                     && info.tracks.audio.first().is_some_and(|track|
                         hls_mp2::format(&track.codec, track.channels, track.sample_rate)
@@ -736,11 +743,15 @@ trait InitialPlaylistIo {
     fn stopped(&self) -> bool;
     fn fetch(&mut self, url: &str, deadline: Instant, depth: u8) -> Result<(String, String), HlsExit>;
 }
-impl InitialPlaylistIo for Owner<'_> {
+struct PlaybackPlaylist<'a> {
+    owner: Owner<'a>,
+    transport: &'a mut Option<Box<crate::curlio::CurlSource>>,
+}
+impl InitialPlaylistIo for PlaybackPlaylist<'_> {
     fn now(&self) -> Instant { Instant::now() }
-    fn stopped(&self) -> bool { Owner::stopped(self) }
+    fn stopped(&self) -> bool { self.owner.stopped() }
     fn fetch(&mut self, url: &str, deadline: Instant, depth: u8) -> Result<(String, String), HlsExit> {
-        fetch_traced_failure(url, self, deadline, PlaylistStage::Playback, depth).map_err(FetchFailure::into_hls)
+        fetch_in_session(url, &mut self.owner, self.transport, deadline, PlaylistStage::Playback, depth).map_err(FetchFailure::into_hls)
     }
 }
 
@@ -849,7 +860,8 @@ pub(super) fn demux_video_for_epoch(
     let mut last_progress = Instant::now();
     let recovery_generation = SHARED.hls_candidate_generation.load(Ordering::Acquire);
     let (media_url, first_media) = initial_playback_media(url, may_bootstrap_live_entry(entry_duration_ns, presentation.is_some()),
-        Instant::now() + Duration::from_secs(15), &mut Owner::Playback(aq))?;
+        Instant::now() + Duration::from_secs(15),
+        &mut PlaybackPlaylist { owner: Owner::Playback(aq), transport: &mut net.curl })?;
     let mut first_media = Some((media_url.clone(), first_media));
     'refresh: loop {
         if unsafe { crate::aq::aq_is_aborted(aq) } {
@@ -858,7 +870,7 @@ pub(super) fn demux_video_for_epoch(
         let playlist_deadline = cold_entry.as_ref().and_then(|search| search.deadline)
             .map_or(Instant::now() + Duration::from_secs(15), |at| at.min(Instant::now() + Duration::from_secs(15)));
         let (landed, media) = if let Some(first) = first_media.take() { first } else {
-            let (landed, text) = fetch_traced_failure(&media_url, &mut Owner::Playback(aq),
+            let (landed, text) = fetch_in_session(&media_url, &mut Owner::Playback(aq), &mut net.curl,
                 playlist_deadline, PlaylistStage::Playback, 0).map_err(FetchFailure::into_hls)?;
             let media = playback_media_refresh(&landed, &text)?;
             (landed, media)
@@ -1375,3 +1387,7 @@ mod cold_entry_tests {
         assert!(search.begin("source", 1).is_err(), "expired search cannot issue another GET");
     }
 }
+
+#[cfg(test)]
+#[path = "external_hls_session_tests.rs"]
+mod session_tests;

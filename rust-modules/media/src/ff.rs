@@ -4524,6 +4524,26 @@ fn hls_open_curl(
                 net.curl = Some(cs);
                 return Err(classify_curl_open_err(crate::curlio::OpenErr::Status(status)));
             }
+            Err(error) if cs.has_hls_context() => {
+                // A fresh connection cache belongs to this same source context.
+                // Never discard credentials on a retry, or retry policy/setup refusals.
+                if !matches!(hls_curl_open_outcome(error), TraceOutcome::Transport | TraceOutcome::Deadline)
+                    && !matches!(error, crate::curlio::OpenErr::Multi(_))
+                {
+                    net.curl = Some(cs);
+                    return Err(classify_curl_open_err(error));
+                }
+                let redial = cs.redial_until(url, deadline, &mut *checkpoint);
+                if unsafe { crate::aq::aq_is_aborted(aq) } { return Err(HlsExit::Aborted); }
+                if let Err(error) = redial {
+                    net.curl = Some(cs);
+                    return Err(classify_curl_open_err(error));
+                }
+                let (status, size) = (cs.status(), cs.size());
+                SHARED.dg_http_status.store(status, Ordering::Relaxed);
+                SHARED.file_size.store(size, Ordering::Release);
+                return Ok((Src::Curl(cs), size));
+            }
             Err(_) => {
                 // Idle TLS session or a broken multi: drop it and dial as a first open.
             }
@@ -4922,14 +4942,23 @@ fn hls_wait(
 /// exist and makes timestamp resets/container EOF ambiguous. The custom AVIO remains transport-
 /// owned exactly as in the progressive path, but every field here is retired at the segment
 /// boundary before the next request starts.
-struct HlsInput {
+struct HlsInput<'a> {
+    // This borrow cannot outlive the segment caller. Early private decode/probe
+    // refusals must return the external HTTP context for cold-entry retries.
+    return_curl: &'a mut Option<Box<crate::curlio::CurlSource>>,
     state: Box<AvioState>,
     avio: *mut AVIOContext,
     fmt: *mut AVFormatContext,
     pkt: *mut AVPacket,
 }
 
-impl Drop for HlsInput {
+impl HlsInput<'_> {
+    fn recycle_curl(&mut self) {
+        if let Some(source) = self.state.src.take_curl() { *self.return_curl = Some(source); }
+    }
+}
+
+impl Drop for HlsInput<'_> {
     fn drop(&mut self) {
         unsafe {
             if !self.pkt.is_null() {
@@ -4940,8 +4969,11 @@ impl Drop for HlsInput {
             }
             free_avio(self.avio);
         }
-        // `state` deliberately drops last: AVIO's opaque pointer names it until `free_avio`.
-        let _ = &self.state;
+        // `state` deliberately stays alive through free_avio. Only opted-in
+        // external HTTP contexts survive early exits; ordinary PMS stays as before.
+        if matches!(&self.state.src, Src::Curl(source) if source.has_hls_context()) {
+            self.recycle_curl();
+        }
     }
 }
 
@@ -4995,10 +5027,12 @@ unsafe fn hls_input(
     mut acquisition: AcquisitionRuntime,
     single_rendition: bool,
     observe_transport: bool,
-) -> Result<HlsInput, HlsExit> {
+    return_curl: &mut Option<Box<crate::curlio::CurlSource>>,
+) -> Result<HlsInput<'_>, HlsExit> {
     let request_started = acquisition.request_started();
     acquisition.enter(Phase::Body);
     let mut input = HlsInput {
+        return_curl,
         state: Box::new(AvioState {
             hls_ts: observe_transport.then(hls_observed::TsProbe::new),
             src,
@@ -5294,7 +5328,7 @@ struct HlsSegmentRequest<'a> {
 
 /// Shared MPEG-TS decoder; callers own authentication and pass the exact request path.
 /// The PMS entry above still validates and appends its own immutable credential.
-unsafe fn hls_bound_inventory(input: &HlsInput, vi: i32) -> Result<inspect::TrackInventory, &'static str> {
+unsafe fn hls_bound_inventory(input: &HlsInput<'_>, vi: i32) -> Result<inspect::TrackInventory, &'static str> {
     let raw = inspect::collect_tracks(input.fmt)?;
     let Some(table) = input.state.hls_ts.as_ref().and_then(|probe| probe.table().ok()) else { return Ok(raw); };
     let streams = (*input.fmt).streams;
@@ -5454,7 +5488,7 @@ unsafe fn hls_demux_segment_path(
         return Err(HlsExit::Failed("HLS segment exceeds size limit"));
     }
     let body_started = std::time::Instant::now();
-    let mut input = hls_input(src, size, aq, reserve_deadline, transport_watchdog, runtime, lane.is_some(), matches!(transport, HlsSegmentTransport::External) && lane.is_none())?;
+    let mut input = hls_input(src, size, aq, reserve_deadline, transport_watchdog, runtime, lane.is_some(), matches!(transport, HlsSegmentTransport::External) && lane.is_none(), &mut net.curl)?;
     if let Some(capture) = rendition.as_mut() {
         capture.begin(input.fmt).map_err(HlsExit::Failed)?;
     }
@@ -5890,9 +5924,7 @@ unsafe fn hls_demux_segment_path(
     ));
     #[cfg(test)]
     HLS_TEST_STREAM_COUNTS.with(|counts| counts.set((counts.get().0, (*input.fmt).nb_streams)));
-    if let Some(cs) = input.state.src.take_curl() {
-        net.curl = Some(cs);
-    }
+    input.recycle_curl();
     if let Some(state) = external_state {
         state.params = Some(params);
     }

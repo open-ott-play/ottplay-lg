@@ -205,6 +205,11 @@ use plx_net::net::keypin::TLS_VERIFY_FAILED;
 const CURLOPT_WRITEDATA: c_int = 10001;
 const CURLOPT_URL: c_int = 10002;
 const CURLOPT_RANGE: c_int = 10007;
+// Empty COOKIEFILE enables only the memory engine; COOKIELIST replays solely
+// this source's libcurl-exported Netscape rows. No COOKIEJAR is ever configured.
+const CURLOPT_COOKIEFILE: c_int = 10031;
+const CURLOPT_COOKIELIST: c_int = 10135;
+const CURLINFO_COOKIELIST: c_int = 0x40_001c;
 const CURLOPT_WRITEFUNCTION: c_int = 20011;
 const CURLOPT_LOW_SPEED_LIMIT: c_int = 19;
 const CURLOPT_LOW_SPEED_TIME: c_int = 20;
@@ -388,13 +393,14 @@ fn lock_active() -> std::sync::MutexGuard<'static, Option<Arc<Abort>>> {
 /// the two operations.
 pub struct OpenReservation {
     abort: Option<Arc<Abort>>,
+    published: bool,
 }
 
 impl OpenReservation {
     fn publish() -> Option<OpenReservation> {
         let abort = Abort::new()?;
         *lock_active() = Some(Arc::clone(&abort));
-        Some(OpenReservation { abort: Some(abort) })
+        Some(OpenReservation { abort: Some(abort), published: true })
     }
 
     /// A short independent transfer which must not replace the demuxer's teardown target. Auto's
@@ -403,6 +409,7 @@ impl OpenReservation {
     fn private() -> Option<OpenReservation> {
         Some(OpenReservation {
             abort: Some(Abort::new()?),
+            published: false,
         })
     }
 
@@ -525,6 +532,7 @@ pub enum OpenErr {
 /// The bits the C callbacks write. Boxed by [`CurlSource`] so its address is stable across the
 /// source being moved (it is returned in a `Box`, and `ff.rs` stores it in an `AvioState`).
 struct Xfer {
+    cookie_headers: Option<CookieHeaderBudget>,
     /// Body bytes received and not yet handed to the reader. Only ever appended to while EMPTY —
     /// [`CurlSource::read`] performs a transfer step exclusively when it has nothing left to
     /// deliver, so this cannot grow without bound. The one other writer is a redirect's body, which
@@ -556,6 +564,7 @@ struct Xfer {
 impl Xfer {
     fn new() -> Xfer {
         Xfer {
+            cookie_headers: None,
             buf: Vec::new(),
             pos: 0,
             status: 0,
@@ -568,6 +577,7 @@ impl Xfer {
         }
     }
     fn reset(&mut self) {
+        self.cookie_headers = None;
         self.buf.clear();
         self.pos = 0;
         self.status = 0;
@@ -603,11 +613,53 @@ pub struct BodyFailure {
     pub reopen_failed: bool,
 }
 
+// Only libcurl-exported Netscape rows enter this context. In particular, never
+// accept caller-supplied rows: COOKIELIST manual insertion bypasses PSL checks,
+// so original libcurl acceptance is authoritative only with runtime PSL support.
+// Without PSL, export drops domain-scoped rows; host-only rows remain eligible.
+// FOLLOWLOCATION is disabled and every hop uses a fresh EASY after this filter:
+// an unfiltered jar can never be used to request another host.
+// No disk jar, ambient account import, serialization or Debug implementation:
+// these are credentials. Fail closed instead of silently truncating a session.
+const COOKIE_MAX_ROWS: usize = 128;
+const COOKIE_MAX_ROW_BYTES: usize = 8192;
+const COOKIE_MAX_BYTES: usize = 64 * 1024;
+#[derive(Default)]
+struct CookieHeaderBudget {
+    rows: usize,
+    bytes: usize,
+    failed: bool,
+}
+impl CookieHeaderBudget {
+    fn admit(&mut self, line: &[u8]) -> bool {
+        let line = trim_ascii(line);
+        if header_value(line, b"set-cookie:").is_some() {
+            self.rows = self.rows.saturating_add(1);
+            self.bytes = self.bytes.saturating_add(line.len());
+            self.failed |= self.rows > COOKIE_MAX_ROWS || line.len() > COOKIE_MAX_ROW_BYTES
+                || self.bytes > COOKIE_MAX_BYTES;
+        }
+        !self.failed
+    }
+}
+#[derive(Default)]
+struct EphemeralCookies {
+    rows: Vec<CString>,
+    failed: bool,
+}
+#[repr(C)]
+struct CookieNode {
+    data: *const std::ffi::c_char,
+    next: *const CookieNode,
+}
+
 /// One remote file, pulled over http(s) by byte range.
 ///
 /// Lives on the demux thread for its whole life — created there, read there, dropped there. Only
 /// [`Abort`] crosses a thread boundary, and it holds no pointer into this struct.
 pub struct CurlSource {
+    published: bool,
+    cookies: Option<EphemeralCookies>,
     owned_loopback: bool,
     multi: *mut CURLM,
     /// The easy handle for the transfer currently attached to `multi`, or null between them. A
@@ -679,7 +731,100 @@ pub struct CurlSource {
     poisoned: bool,
 }
 
+/// Bound traversal, each NUL scan and the retained aggregate before allocating.
+/// Domain/path/secure/expiry interpretation remains libcurl's; domain replay
+/// additionally requires reported PSL support. Only its own accepted cookie
+/// engine's exports are eligible. `node` must be libcurl's valid NUL-terminated
+/// list: the bounded scan does not make arbitrary pointers safe.
+unsafe fn collect_cookie_rows(mut node: *const CookieNode, has_psl: bool) -> Result<Vec<CString>, ()> {
+    let mut rows = Vec::new();
+    let mut total = 0usize;
+    let mut nodes = 0usize;
+    while !node.is_null() {
+        nodes += 1;
+        if nodes > COOKIE_MAX_ROWS || (*node).data.is_null() { return Err(()); }
+        let data = (*node).data.cast::<u8>();
+        let mut len = 0;
+        while len <= COOKIE_MAX_ROW_BYTES && *data.add(len) != 0 { len += 1; }
+        if len > COOKIE_MAX_ROW_BYTES { return Err(()); }
+        total = total.checked_add(len + 1).ok_or(())?;
+        if total > COOKIE_MAX_BYTES { return Err(()); }
+        let row = std::slice::from_raw_parts(data, len);
+        // Netscape's seven fields, optionally with libcurl's HttpOnly prefix.
+        // Refuse commands/HTTP header strings; no unscoped replay is possible.
+        let fields: Vec<_> = row.split(|b| *b == b'\t').collect();
+        if fields.len() != 7 || fields[0].is_empty() || fields[2].is_empty()
+            || !matches!(fields[1], b"TRUE" | b"FALSE")
+            || !matches!(fields[3], b"TRUE" | b"FALSE")
+            || fields[4].is_empty() || !fields[4].iter().all(u8::is_ascii_digit)
+            || row.iter().any(|b| matches!(b, b'\r' | b'\n'))
+        { return Err(()); }
+        // A no-PSL engine may have accepted a broad Domain attribute. Keep
+        // its host-only cookies, but never replay the unvalidated domain row.
+        // Count/validate dropped rows too: filtering cannot bypass the bounds.
+        if has_psl || fields[1] == b"FALSE" {
+            rows.push(CString::new(row).map_err(|_| ())?);
+        }
+        node = (*node).next;
+    }
+    Ok(rows)
+}
+
 impl CurlSource {
+    /// HLS owns this private HTTP context before the first request, including
+    /// extensionless manifest sniffing. It is never shared with playback.
+    pub fn open_hls_private_checked(url: &str, deadline: Option<std::time::Instant>,
+        checkpoint: &mut dyn Checkpoint) -> Result<Box<Self>, OpenErr>
+    {
+        if !available() { return Err(OpenErr::Unavailable); }
+        let reservation = OpenReservation::private().ok_or(OpenErr::Local)?;
+        Self::open_with_policy(url, 0, None, reservation, deadline, checkpoint, false, true)
+    }
+
+    /// Allocate the caller-owned HLS slot before starting I/O, so even a
+    /// failed first HTTP status can retain its accepted session cookies.
+    pub fn new_hls_private(url: &str) -> Result<Box<Self>, OpenErr> {
+        if !available() { return Err(OpenErr::Unavailable); }
+        Self::new_with_policy(url, OpenReservation::private().ok_or(OpenErr::Local)?, false, true)
+    }
+    pub fn new_hls_reserved(url: &str, reservation: OpenReservation) -> Result<Box<Self>, OpenErr> {
+        Self::new_with_policy(url, reservation, false, true)
+    }
+
+    pub fn has_hls_context(&self) -> bool { self.cookies.is_some() }
+
+    /// Replace a failed connection cache while retaining the source's private
+    /// cookies and abort ownership. A policy/setup failure cannot fall back.
+    pub fn redial_until(&mut self, url: &str, deadline: Option<std::time::Instant>,
+        checkpoint: &mut dyn Checkpoint) -> Result<(), OpenErr>
+    {
+        self.stop();
+        if !self.multi.is_null() { unsafe { curl_multi_cleanup(self.multi) }; }
+        self.multi = std::ptr::null_mut();
+        self.multi_failed = true;
+        self.reopen_until(url, deadline, checkpoint)
+    }
+
+    fn snapshot_cookies(&mut self) {
+        let Some(cookies) = self.cookies.as_mut() else { return };
+        if self.xfer.cookie_headers.as_ref().is_some_and(|budget| budget.failed) {
+            cookies.rows.clear();
+            cookies.failed = true;
+        }
+        if self.easy.is_null() || cookies.failed { return; }
+        let mut list: *const c_void = std::ptr::null();
+        let rc = unsafe { plx_net::net::curl_easy_getinfo_ptr(self.easy, CURLINFO_COOKIELIST, &mut list) };
+        let result = if rc == 0 { unsafe { collect_cookie_rows(list.cast(), plx_net::net::curl_has_psl()) } } else { Err(()) };
+        // CURLINFO_COOKIELIST returns a caller-owned list, even for an empty jar.
+        if !list.is_null() {
+            unsafe { plx_net::net::curl_slist_free_all(list as *mut plx_net::net::curl_slist) };
+        }
+        match result {
+            Ok(rows) => cookies.rows = rows,
+            Err(()) => { cookies.rows.clear(); cookies.failed = true; }
+        }
+    }
+
     /// Effective address of the current response, for resolving relative manifest references.
     /// May contain credentials; callers must never log it.
     pub fn effective_url(&self) -> &str {
@@ -741,7 +886,7 @@ impl CurlSource {
         if !available() { return Err(OpenErr::Unavailable); }
         let reservation = OpenReservation::private().ok_or(OpenErr::Local)?;
         let abort = reservation.abort.as_ref().map(Arc::clone).ok_or(OpenErr::Local)?;
-        let source = Self::open_with_policy(url, at, None, reservation, deadline, checkpoint, true)?;
+        let source = Self::open_with_policy(url, at, None, reservation, deadline, checkpoint, true, false)?;
         Ok((source, abort))
     }
 
@@ -750,7 +895,7 @@ impl CurlSource {
         url: &str, at: i64, reservation: OpenReservation,
         deadline: Option<std::time::Instant>, checkpoint: &mut dyn Checkpoint,
     ) -> Result<Box<CurlSource>, OpenErr> {
-        Self::open_with_policy(url, at, None, reservation, deadline, checkpoint, true)
+        Self::open_with_policy(url, at, None, reservation, deadline, checkpoint, true, false)
     }
 
     /// [`open_private`](Self::open_private) that hands the abort handle to `publish` BEFORE the
@@ -859,13 +1004,22 @@ impl CurlSource {
         deadline: Option<std::time::Instant>,
         checkpoint: &mut dyn Checkpoint,
     ) -> Result<Box<CurlSource>, OpenErr> {
-        Self::open_with_policy(url, at, range_end, reservation, deadline, checkpoint, false)
+        Self::open_with_policy(url, at, range_end, reservation, deadline, checkpoint, false, false)
     }
 
     fn open_with_policy(
         url: &str, at: i64, range_end: Option<i64>, reservation: OpenReservation,
         deadline: Option<std::time::Instant>, checkpoint: &mut dyn Checkpoint, owned_loopback: bool,
+        ephemeral_cookies: bool,
     ) -> Result<Box<CurlSource>, OpenErr> {
+        let mut src = Self::new_with_policy(url, reservation, owned_loopback, ephemeral_cookies)?;
+        src.start_range_until(at, range_end, deadline, checkpoint)?;
+        Ok(src)
+    }
+
+    fn new_with_policy(url: &str, reservation: OpenReservation, owned_loopback: bool,
+        ephemeral_cookies: bool) -> Result<Box<CurlSource>, OpenErr>
+    {
         if !(if owned_loopback { owned_media_url_allowed(url) } else { media_url_allowed(url) }) {
             return Err(OpenErr::Local);
         }
@@ -879,8 +1033,11 @@ impl CurlSource {
         if multi.is_null() {
             return Err(OpenErr::Local);
         }
+        let published = reservation.published;
         let abort = reservation.into_abort();
-        let mut src = Box::new(CurlSource {
+        let src = Box::new(CurlSource {
+            published,
+            cookies: ephemeral_cookies.then(EphemeralCookies::default),
             owned_loopback,
             multi,
             easy: std::ptr::null_mut(),
@@ -906,7 +1063,6 @@ impl CurlSource {
             readable: false,
             poisoned: false,
         });
-        src.start_range_until(at, range_end, deadline, checkpoint)?;
         Ok(src)
     }
 
@@ -932,7 +1088,7 @@ impl CurlSource {
         self.off = 0;
         self.size = -1;
         self.poisoned = false;
-        {
+        if self.published {
             let mut act = lock_active();
             *act = Some(Arc::clone(&self.abort));
         }
@@ -968,7 +1124,12 @@ impl CurlSource {
         let original = self.url.to_str().map_err(|_| OpenErr::Local)?.to_owned();
         let mut hop = Hop::first(&self.url, self.resolve_entry.clone());
         loop {
-            match self.run_hop(at, range_end, deadline, checkpoint, &original, &hop)? {
+            let result = self.run_hop(at, range_end, deadline, checkpoint, &original, &hop);
+            self.snapshot_cookies();
+            if self.cookies.as_ref().is_some_and(|cookies| cookies.failed) {
+                return Err(OpenErr::Local);
+            }
+            match result? {
                 None => return Ok(()),
                 Some(next) => hop = Hop::of(&next, hop.n + 1)?,
             }
@@ -1063,6 +1224,19 @@ impl CurlSource {
         // never use them.
         let key = hop.key.as_deref();
         self.stop();
+        // The old response is retired even when a pre-request guard below
+        // refuses the replacement. Keep stop's cookie export first, but never
+        // expose its buffered bytes or clean EOF under a renewed read allowance.
+        self.readable = false;
+        if self.cookies.as_ref().is_some_and(|cookies| cookies.failed) {
+            return Err(OpenErr::Local);
+        }
+        if self.abort.is_set() { return Err(OpenErr::Aborted); }
+        if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+            return Err(OpenErr::Deadline);
+        }
+        // Check before attaching/performing, even when DNS and headers would be immediate.
+        if self.cookies.is_some() && matches!(checkpoint.check(), plx_base::checkpoint::Flow::Stop) { return Err(OpenErr::Stopped); }
         if self.multi_failed {
             // A CURLM error describes this multi handle, not the remote byte range. Rebuild the
             // local machinery before allowing a later seek to retry; clearing the flag while
@@ -1077,10 +1251,10 @@ impl CurlSource {
             self.multi_failed = false;
         }
         self.xfer.reset();
+        self.xfer.cookie_headers = self.cookies.is_some().then(CookieHeaderBudget::default);
         self.done = false;
         self.rc = 0;
         self.failed = false;
-        self.readable = false;
         self.started = std::time::Instant::now();
         self.hop_url = hop.url.clone();
         if self.abort.is_set() {
@@ -1116,6 +1290,22 @@ impl CurlSource {
                         return Err(OpenErr::Local);
                     }
                 }};
+            }
+            if let Some(cookies) = self.cookies.as_mut() {
+                let mut rc = plx_net::net::curl_easy_setopt_ptr(easy, CURLOPT_COOKIEFILE, c"".as_ptr().cast());
+                if rc == 0 {
+                    for row in &cookies.rows {
+                        rc = plx_net::net::curl_easy_setopt_ptr(easy, CURLOPT_COOKIELIST, row.as_ptr().cast());
+                        if rc != 0 { break; }
+                    }
+                }
+                if rc != 0 {
+                    cookies.rows.clear();
+                    cookies.failed = true;
+                    plx_net::net::curl_easy_cleanup(easy);
+                    self.easy = std::ptr::null_mut();
+                    return Err(OpenErr::Local);
+                }
             }
             if self.owned_loopback {
                 // CURLOPT_PROXY="" disables environment proxies; NOPROXY=* also
@@ -1585,6 +1775,7 @@ impl CurlSource {
     /// path deliberately abandons both pointers and lets a later seek create a fresh multi. A
     /// bounded leak is safer than freeing an easy that libcurl may still reference.
     fn stop(&mut self) {
+        self.snapshot_cookies();
         if !self.easy.is_null() {
             unsafe {
                 let rc = curl_multi_remove_handle(self.multi, self.easy);
@@ -2430,6 +2621,11 @@ extern "C" fn header_cb(ptr: *mut c_char, size: usize, nmemb: usize, ud: *mut c_
     }
     let x = unsafe { &mut *(ud as *mut Xfer) };
     let line = unsafe { std::slice::from_raw_parts(ptr as *const u8, n) };
+    // This allowance spans all informational blocks and trailers in the
+    // attempt. Stop before exporting an oversized jar; libcurl may process
+    // this one header before the callback, so temporary state is also bounded
+    // by the retained jar plus this bounded response (and one rejected line).
+    if x.cookie_headers.as_mut().is_some_and(|budget| !budget.admit(line)) { return 0; }
     parse_header_line(x, line);
     n
 }
@@ -2626,6 +2822,10 @@ mod roots_tests;
 #[cfg(test)]
 #[path = "curlio_redirect_tests.rs"]
 mod redirect_tests;
+
+#[cfg(test)]
+#[path = "curlio_cookie_tests.rs"]
+pub(crate) mod cookie_tests;
 
 #[cfg(test)]
 mod tests {

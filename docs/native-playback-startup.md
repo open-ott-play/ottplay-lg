@@ -87,3 +87,47 @@ checks still apply. Finite playlists and subtitle/separate-audio presentation
 descriptors retain their existing source handling. A checked premature end
 before HTTP Content-Length permits same-source live recovery after discarding
 the incomplete private segment result; it does not authorize blind demux replay.
+
+## Inspection body failures
+
+After headers have been accepted, media probing must retain a checked HTTP body
+transport or deadline failure before libavformat cleanup. Converting that cause
+to a generic container error prevents the existing exact-source live recovery
+from recognizing a temporary interruption. Extensionless sniffing follows the
+same rule. Cancellation, the probe byte limit, malformed data, local I/O and
+trust/authentication refusals remain distinct; generic probe failures are not
+retry authority. Receiver acceptance must distinguish queue/input progression
+from actual displayed video and audible synchronization.
+
+## Passive preparation diagnostics
+
+With a matching controller and CLI, `ott PLAYER debug --preparation` reads the
+current preparation phase, a closed cause code and pending retry delay. Add
+`-j` for the bounded JSON report. The command starts no media requests and does
+not restart playback. Older players without the capability return unsupported.
+
+The separate `playback_preparation_diagnostics` version-1 capability uses the
+current runtime token from capabilities. Requests contain only `version` and
+`runtime`; replies expose no source URL, cookie, title, profile identifier or
+catalogue entry. Existing preparation version-1 status is unchanged. A missing
+pending retry projects null failure/delay counters rather than implying a stop
+reason. Source/profile/generation changes retire the captured inspection cause.
+
+## Source-owned HTTP context
+
+External HLS uses one bounded ephemeral HTTP context for the initial master and
+child traversal, segments, refreshes and connection replacement. Inspection has
+its own private context; native playback creates an independent one. Cookies
+are handled in memory by libcurl and never written to disk, logged or projected
+to remote diagnostics. Default unrelated transfers keep their existing mode.
+Domain-scoped cookies are not replayed without public-suffix validation support;
+host-only cookies and connection reuse remain available. Malformed/import or
+resource-limit failures remain closed refusals. No cookie state crosses source
+or playback-generation ownership boundaries.
+
+Legacy capture `frames` and `frame_age_ms` describe native position callbacks,
+not decoded or displayed frames. Their ages, and callback error ages, are
+computed in the media producer's monotonic clock. `callback_error_code` is the
+firmware number, not event type 18. The final matched failed-session sample is
+retained before stopping the decoder; a later retry cannot overwrite it with
+another source's counters.
