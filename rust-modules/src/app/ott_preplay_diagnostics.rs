@@ -87,7 +87,17 @@ fn inspection_cause(reason: &str) -> Cause {
             => Cause::ResourceLimit,
         "HLS initial video identity is unavailable" | "HLS video binding changed"
             => Cause::TrackIdentity,
-        "Unsupported video codec" => Cause::CodecUnsupported,
+        "Native HLS does not support HEVC video without audio"
+        | "Native HLS does not support HEVC video with E-AC-3 audio"
+        | "Native HLS does not support HEVC video with MP2 audio"
+        | "Native HLS does not support H.264 video with AC-3 audio"
+        | "Native HLS does not support H.264 video with E-AC-3 audio"
+        | "Native HLS does not support H.264 video with MP2 audio"
+        | "Native HLS does not support H.264 video with MP3 audio"
+        | "Native HLS does not support MPEG-2 video with AAC audio"
+        | "Native HLS does not support MPEG-2 video with MP2 audio"
+        | "Native HLS does not support MPEG-2 video with AC-3 audio"
+        | "Native HLS requires H.264 video and AAC audio" => Cause::CodecUnsupported,
         _ => Cause::Unknown,
     }
 }
@@ -300,7 +310,19 @@ impl Diagnostic {
     }
 }
 
-/// A completed target is removed by Job::Play, but its generation/profile remain.
+/// Favorites and kiosk pins can belong to a different source than the browsing
+/// profile. Rebind their retained canonical request using the existing PURE source
+/// binder, including enabled/full-profile and Favorite/pin validation, even after
+/// Job::Play has taken its target/profile. This never resolves media or starts IO.
+fn source_current(runtime: &Runtime, binding: &Binding) -> bool {
+    if binding.request.id.starts_with("favorite:") || binding.request.kiosk_selection.is_some() {
+        runtime.prepare_play_request(binding.request.clone()).is_ok_and(|(request, profile, _, _)|
+            request == binding.request && profile == binding.profile)
+    } else {
+        runtime.effective_profile() == Some(&binding.profile)
+    }
+}
+
 /// No successor, changed source, runtime owner or catalogue can inherit evidence.
 pub(super) fn diagnostic(runtime: &Runtime) -> Diagnostic {
     let Some(attempt) = runtime.preplay.attempt.as_ref() else { return Diagnostic::idle(); };
@@ -308,8 +330,9 @@ pub(super) fn diagnostic(runtime: &Runtime) -> Diagnostic {
     if binding.generation != runtime.play_generation
         || binding.catalog_generation != runtime.generation
         || binding.runtime_token != runtime.remote.runtime()
-        || runtime.effective_profile() != Some(&binding.profile)
-        || runtime.play_target.as_ref().is_some_and(|request| request != &binding.request)
+        || !source_current(runtime, binding)
+        || runtime.play_target.as_ref().is_some_and(|request| request != &binding.request
+            || runtime.pending_play_profile() != Some(&binding.profile))
     {
         return Diagnostic::idle();
     }

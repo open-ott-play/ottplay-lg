@@ -146,3 +146,49 @@ fn stale_invocation_is_refused_without_inspection_or_effects() {
     assert!(!runtime.remote.invocation_is_current(&inv));
     assert_eq!(command(&mut runtime, &inv), failure("fixture", "unavailable"));
 }
+
+#[test]
+fn cross_profile_favorite_keeps_pending_and_failed_diagnostics_only_for_revalidated_source() {
+    use plx_data::ott::favorites::{Favorite, Locator, Origin};
+    let _serial = plx_base::testlock::serial();
+    let mut runtime = fixture();
+    let source = ProviderProfile { id:"other-profile".into(), name:"Other source".into(),
+        kind:ProviderKind::VPortal, source:"https://other-private.invalid/portal".into(),
+        source_alias:"Other alias".into(), enabled:true };
+    runtime.saved.profiles.profiles.push(source.clone());
+    let favorite = Favorite { title:"Private favorite".into(),
+        origin:Origin { provider:"vportal".into(), profile:source.name.clone(),
+            subprofile:None, source_alias:source.source_alias.clone() },
+        locator:Locator::VPortal { id_field:"id".into(), id:"42".into() } };
+    let id = format!("favorite:{}", favorite.identity());
+    runtime.saved.favorites = serde_json::from_value(json!({"version":1,"entries":[favorite]})).unwrap();
+    let (request, bound, _, _) = runtime.prepare_play_request(PlaybackRequest::ordinary(&id, 0)).unwrap();
+    assert_eq!(bound, source);
+    runtime.play_target = Some(request);
+    runtime.play_profile = Some((7, source.clone()));
+    preplay::begin(&mut runtime, &source);
+    assert_ne!(runtime.effective_profile(), Some(&source), "browsing remains source A");
+    let mut worker = preplay::worker(&runtime, 7, &source);
+    worker.phase(preplay::Phase::Inspecting);
+    match runtime.rx.try_recv().unwrap() {
+        Job::Preplay(event) => preplay::receive(&mut runtime, event),
+        _ => panic!("only addressed observation expected"),
+    }
+    let inv = invocation(&mut runtime, json!({"version":1,"runtime":"fixture"}), 500);
+    assert_eq!(command(&mut runtime, &inv)["data"]["phase"], "inspecting");
+    fail_inspection(&mut runtime, "Media source request timed out");
+    runtime.take_completed_play_target();
+    runtime.play_profile = None; // Completion may retire this temporary pending binding too.
+    assert_eq!(command(&mut runtime, &inv)["data"]["cause"], "timeout");
+    runtime.saved.profiles.profiles[1].source.push_str("/edited");
+    assert_eq!(command(&mut runtime, &inv)["data"]["phase"], "idle");
+    runtime.saved.profiles.profiles[1] = source.clone();
+    runtime.saved.profiles.profiles[1].enabled = false;
+    assert_eq!(command(&mut runtime, &inv)["data"]["phase"], "idle");
+    runtime.saved.profiles.profiles.pop();
+    assert_eq!(command(&mut runtime, &inv)["data"]["phase"], "idle");
+    runtime.saved.profiles.profiles.push(source);
+    assert_eq!(command(&mut runtime, &inv)["data"]["cause"], "timeout");
+    runtime.saved.favorites = serde_json::from_value(json!({"version":1,"entries":[]})).unwrap();
+    assert_eq!(command(&mut runtime, &inv)["data"]["phase"], "idle");
+}

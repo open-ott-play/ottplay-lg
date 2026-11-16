@@ -289,3 +289,103 @@ fn no_or_unknown_psl_keeps_host_only_and_drops_domain_cookie_scope() {
     assert!(collect_with_psl(&vec![domain; COOKIE_MAX_ROWS + 1], false).is_err(),
         "dropped domain rows still spend the count/byte limits");
 }
+
+#[derive(Clone, Copy, Debug)]
+enum RetiredResponseRefusal {
+    ExpiredReopen,
+    ExpiredSeek,
+    StoppedReopen,
+    StoppedSeek,
+    CookieReopen,
+    CookieSeek,
+}
+
+fn park_old_response(source: &mut CurlSource, exhausted: bool) {
+    if exhausted {
+        assert_eq!(drain(source), b"retired-response");
+        assert!(source.done && source.xfer.pending() == 0);
+    } else {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut first = [0];
+        assert_eq!(source.read_until(&mut first, Some(deadline), &mut NoCheckpoint), 1);
+        assert_eq!(&first, b"r");
+        // Keep actual response bytes buffered across retirement. Receiving the
+        // rest through the real multi avoids assuming a TCP packet boundary.
+        while source.xfer.pending() == 0 {
+            assert!(Instant::now() < deadline, "fixture body must become available");
+            source.perform().unwrap();
+            if source.xfer.pending() == 0 {
+                assert!(!source.done, "old response unexpectedly had no remaining bytes");
+                let _ = multi_wait(source.multi, &source.abort, 20);
+            }
+        }
+    }
+}
+
+#[test]
+fn refused_replacement_cannot_read_retired_buffer_or_eof_under_renewed_allowance() {
+    let _serial = curl();
+    for hls in [false, true] {
+        for exhausted in [false, true] {
+            for refusal in [RetiredResponseRefusal::ExpiredReopen, RetiredResponseRefusal::ExpiredSeek,
+                RetiredResponseRefusal::StoppedReopen, RetiredResponseRefusal::StoppedSeek,
+                RetiredResponseRefusal::CookieReopen, RetiredResponseRefusal::CookieSeek]
+            {
+                // Immediate checkpoint and cookie-policy guards are opted-in
+                // HLS behavior. Both ordinary and HLS paths share expiry guards.
+                if !hls && !matches!(refusal, RetiredResponseRefusal::ExpiredReopen | RetiredResponseRefusal::ExpiredSeek) {
+                    continue;
+                }
+                let server = SessionServer::new(vec![
+                    Reply::ok("", b"retired-response"), Reply::ok("", b"fresh-response"),
+                ]);
+                let url = format!("{}/body", server.base);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut source = if hls {
+                    CurlSource::open_hls_private_checked(&url, Some(deadline), &mut NoCheckpoint).unwrap()
+                } else {
+                    CurlSource::open_private_checked(&url, 0, Some(deadline), &mut NoCheckpoint).unwrap().0
+                };
+                park_old_response(&mut source, exhausted);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut stopped = checkpoint::TestCheckpoint::stopping_after(0, Duration::from_millis(1));
+                match refusal {
+                    RetiredResponseRefusal::ExpiredReopen => assert_eq!(
+                        source.reopen_until(&url, Some(Instant::now()), &mut NoCheckpoint), Err(OpenErr::Deadline)),
+                    RetiredResponseRefusal::ExpiredSeek => assert!(
+                        !source.seek_until(0, Some(Instant::now()), &mut NoCheckpoint)),
+                    RetiredResponseRefusal::StoppedReopen => assert_eq!(
+                        source.reopen_until(&url, Some(deadline), &mut stopped), Err(OpenErr::Stopped)),
+                    RetiredResponseRefusal::StoppedSeek => assert!(
+                        !source.seek_until(0, Some(deadline), &mut stopped)),
+                    RetiredResponseRefusal::CookieReopen => {
+                        source.cookies.as_mut().unwrap().failed = true;
+                        assert_eq!(source.reopen_until(&url, Some(deadline), &mut NoCheckpoint), Err(OpenErr::Local));
+                    }
+                    RetiredResponseRefusal::CookieSeek => {
+                        source.cookies.as_mut().unwrap().failed = true;
+                        assert!(!source.seek_until(0, Some(deadline), &mut NoCheckpoint));
+                    }
+                }
+                let mut bytes = [0; 64];
+                assert!(source.read_until(&mut bytes, Some(Instant::now() + Duration::from_secs(3)), &mut NoCheckpoint) < 0,
+                    "retired response became readable: hls={hls} exhausted={exhausted} refusal={refusal:?}");
+                assert_eq!(server.heads().len(), 1, "a refused replacement and renewed read must not issue a request");
+                assert!(source.body_failure().is_none(), "a pre-request refusal must not invent a transport body failure");
+                if matches!(refusal, RetiredResponseRefusal::CookieReopen | RetiredResponseRefusal::CookieSeek) {
+                    assert_eq!(source.reopen_until(&url, Some(Instant::now() + Duration::from_secs(3)), &mut NoCheckpoint), Err(OpenErr::Local));
+                    assert_eq!(server.heads().len(), 1, "cookie policy failure remains closed");
+                    // This terminal context cannot heal. Only a separately
+                    // owned fresh source may establish another response.
+                    drop(source);
+                    source = CurlSource::open_hls_private_checked(&url,
+                        Some(Instant::now() + Duration::from_secs(3)), &mut NoCheckpoint).unwrap();
+                } else {
+                    source.reopen_until(&url, Some(Instant::now() + Duration::from_secs(3)), &mut NoCheckpoint).unwrap();
+                }
+                assert_eq!(drain(&mut source), b"fresh-response");
+                assert_eq!(server.heads().len(), 2, "only an explicit successful open restores readability");
+            }
+        }
+    }
+}

@@ -1224,6 +1224,10 @@ impl CurlSource {
         // never use them.
         let key = hop.key.as_deref();
         self.stop();
+        // The old response is retired even when a pre-request guard below
+        // refuses the replacement. Keep stop's cookie export first, but never
+        // expose its buffered bytes or clean EOF under a renewed read allowance.
+        self.readable = false;
         if self.cookies.as_ref().is_some_and(|cookies| cookies.failed) {
             return Err(OpenErr::Local);
         }
@@ -1251,7 +1255,6 @@ impl CurlSource {
         self.done = false;
         self.rc = 0;
         self.failed = false;
-        self.readable = false;
         self.started = std::time::Instant::now();
         self.hop_url = hop.url.clone();
         if self.abort.is_set() {

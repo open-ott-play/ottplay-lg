@@ -240,3 +240,25 @@ fn preparation_enums_match_the_shared_consumer_contract() {
         Cause::InspectionUnavailable, Cause::ResourceLimit, Cause::TrackIdentity,
         Cause::CodecUnsupported]).unwrap(), contract["causes"]);
 }
+
+#[test]
+fn all_actual_closed_hls_codec_refusals_map_exactly_without_matching_private_extensions() {
+    for reason in [
+        "Native HLS does not support HEVC video without audio",
+        "Native HLS does not support HEVC video with E-AC-3 audio",
+        "Native HLS does not support HEVC video with MP2 audio",
+        "Native HLS does not support H.264 video with AC-3 audio",
+        "Native HLS does not support H.264 video with E-AC-3 audio",
+        "Native HLS does not support H.264 video with MP2 audio",
+        "Native HLS does not support H.264 video with MP3 audio",
+        "Native HLS does not support MPEG-2 video with AAC audio",
+        "Native HLS does not support MPEG-2 video with MP2 audio",
+        "Native HLS does not support MPEG-2 video with AC-3 audio",
+        "Native HLS requires H.264 video and AAC audio",
+    ] {
+        assert_eq!(inspection_cause(reason), Cause::CodecUnsupported);
+        assert_eq!(inspection_cause(&format!("{reason}: https://private.invalid")), Cause::Unknown);
+    }
+    assert_eq!(inspection_cause("Unsupported video codec"), Cause::Unknown,
+        "non-producer text does not acquire a codec interpretation");
+}
