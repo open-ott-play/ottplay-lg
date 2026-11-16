@@ -321,6 +321,8 @@ mod playing_favorite;
 mod preplay;
 #[path = "ott_preplay_remote.rs"]
 mod preplay_remote;
+#[path = "ott_command_activity_remote.rs"]
+mod command_activity_remote;
 #[path = "ott_preview.rs"]
 mod preview;
 #[path = "ott_profile_edit.rs"]

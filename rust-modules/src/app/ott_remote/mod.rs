@@ -723,6 +723,12 @@ impl Remote {
     }
     pub(crate) fn command_activity(&self, now_ms: u64) -> Value { self.activity.snapshot(now_ms) }
 
+    /// V2 evidence is available only to the currently admitted control authority.
+    pub(crate) fn command_activity_v2(&self, invocation: &Invocation, now_ms: u64) -> Option<Value> {
+        (self.write_permit.is_valid() && self.invocation_is_current(invocation))
+            .then(|| self.activity.snapshot_v2(&self.runtime, now_ms))
+    }
+
     pub fn invocation_is_current(&self, invocation: &Invocation) -> bool {
         invocation.generation == self.generation
     }
