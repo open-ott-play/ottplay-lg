@@ -18,6 +18,7 @@ struct List {
     generation: u64,
     profile_epoch: u64,
     catalog_revision: u64,
+    organization: Option<Arc<catalog_organization::Projection>>,
 }
 struct AdmittedList {
     identity: plx_media::route::PlaybackIdentity,
@@ -44,7 +45,8 @@ impl List {
         Some(Arc::new(Self { ids, entries, favorites: if favorites { Some(Self::favorite_fingerprint(runtime)?) } else { None },
             profile: (!favorites).then(|| runtime.effective_profile().cloned()).flatten(),
             category: category.into(), generation: runtime.generation, profile_epoch: runtime.profile_edit_epoch,
-            catalog_revision: runtime.catalog_revision }))
+            catalog_revision: runtime.catalog_revision,
+            organization: if favorites { None } else { runtime.organization_projection() } }))
     }
     fn current(&self, runtime: &Runtime) -> bool {
         if !runtime.loaded || runtime.persistence_uncertain || self.generation != runtime.generation
@@ -66,7 +68,16 @@ impl List {
     }
     fn refreshed(self: &Arc<Self>, runtime: &Runtime) -> Option<Arc<Self>> {
         if !self.current(runtime) { return None; }
-        if self.favorites.is_some() || self.catalog_revision == runtime.catalog_revision { return Some(self.clone()); }
+        if self.favorites.is_some() { return Some(self.clone()); }
+        // The existing projection cache also versions accepted organization
+        // edits. Browsing a different category does not replace its Arc.
+        let organization = runtime.organization_projection();
+        let same_organization = match (&self.organization, &organization) {
+            (Some(before), Some(now)) => Arc::ptr_eq(before, now),
+            (None, None) => true,
+            _ => false,
+        };
+        if self.catalog_revision == runtime.catalog_revision && same_organization { return Some(self.clone()); }
         let mut ids = Vec::new();
         let mut entries = std::collections::HashMap::new();
         for (_, entry) in runtime.organization_rows(&self.category) {
@@ -76,7 +87,7 @@ impl List {
             ids.push(entry.id.clone());
         }
         Some(Arc::new(Self { ids, entries, favorites: None, profile: self.profile.clone(), category: self.category.clone(),
-            generation: self.generation, profile_epoch: self.profile_epoch, catalog_revision: runtime.catalog_revision }))
+            generation: self.generation, profile_epoch: self.profile_epoch, catalog_revision: runtime.catalog_revision, organization }))
     }
 }
 struct Chain {

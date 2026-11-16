@@ -50,6 +50,65 @@ fn accept_category(app: &mut App, category: &str) {
 }
 
 #[test]
+fn accepted_organization_growth_refreshes_only_the_admitted_category_without_a_raw_catalog_change() {
+    let _lock = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let mut app = category_queue_before_admission(false);
+    let mut runtime = app.ott.take().unwrap();
+    runtime.resolver_hold_for_test = true;
+    let profile_id = runtime.effective_profile().unwrap().id.clone();
+    let id = |index| format!("{profile_id}:{index:016x}");
+    let (a, b, c, other) = (id(1), id(2), id(3), id(4));
+    for entry in &mut runtime.catalog.entries {
+        entry.id = match entry.id.as_str() {
+            "a" => a.clone(), "b" => b.clone(), "c" => c.clone(), "other" => other.clone(),
+            _ => unreachable!("fixed synthetic catalogue"),
+        };
+    }
+    runtime.catalog_revision += 1;
+    assert!(runtime.organization_projection().is_some(), "use the real canonical-ID organization contract");
+    runtime.play_with_policy(&mut app, &a, false).unwrap();
+    app.ott = Some(runtime);
+    super::player_remote::admit_latest_channel(&mut app, &a);
+    super::player_remote::open_fullscreen_catalog(&mut app);
+    accept_category(&mut app, "Browse");
+    let runtime = app.ott.as_mut().unwrap();
+    let identity = route::playback_identity(&app.player.session);
+    let raw_revision = runtime.catalog_revision;
+    let profile_epoch = runtime.profile_edit_epoch;
+    let original = vec![c.clone(), a.clone(), b.clone()];
+    assert_eq!(runtime.ordered_ids(), original);
+    assert_eq!(commands::selected_ids(runtime), [other.clone()]);
+    let source = catalog_organization::Source::new(runtime.effective_profile().unwrap()).unwrap();
+    let projection = runtime.organization_projection().unwrap();
+    let category = projection.selection_id("Playing").unwrap().to_owned();
+    let mut document = catalog_organization::Document::read(&runtime.saved.settings).unwrap();
+    document.apply(&source, &runtime.catalog, catalog_organization::Operation::AddMember {
+        category: category.clone(), item: other.clone(),
+    }).unwrap();
+    // Model the committed Saved image, not a draft or a protected writer.
+    document.write_into(&mut runtime.saved.settings).unwrap();
+    runtime.observe_organization_context();
+    assert_eq!(runtime.catalog_revision, raw_revision, "organization does not rewrite provider rows");
+    assert_eq!(runtime.profile_edit_epoch, profile_epoch);
+    assert_eq!(commands::selected_ids(runtime), [other.clone()], "Browse keeps its own membership");
+    assert_eq!(runtime.ordered_ids(), [c.clone(), a.clone(), b.clone(), other.clone()], "compatible growth belongs to the admitted category");
+    assert_eq!(runtime.playing.as_ref().unwrap().selection_id, a);
+    assert_eq!(route::playback_identity(&app.player.session), identity);
+    document.apply(&source, &runtime.catalog, catalog_organization::Operation::MoveMember {
+        category, item: c, direction: catalog_organization::Direction::Down,
+    }).unwrap();
+    document.write_into(&mut runtime.saved.settings).unwrap();
+    runtime.observe_organization_context();
+    assert!(runtime.ordered_ids().is_empty(), "reordering an old occurrence revokes the receipt");
+    assert_eq!(commands::selected_ids(runtime), [other.clone()]);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert!(!runtime.metadata_done.load(Ordering::Acquire));
+    assert_eq!(runtime.resolver_launches_for_test, 0);
+    assert_eq!(route::playback_identity(&app.player.session), identity);
+}
+
+#[test]
 fn browsed_category_cannot_replace_the_admitted_fullscreen_channel_queue() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));

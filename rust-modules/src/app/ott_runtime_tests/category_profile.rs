@@ -235,9 +235,10 @@ fn global_favorites_projection_remains_mixed_when_the_active_profile_changes() {
         let view = r.view();
         assert!(view.page_id.starts_with("favorites:"), "the real view has a scoped identity");
         assert_eq!(view.rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), expected);
-        for (row, favorite) in view.rows.iter().zip(document.entries()) {
+        for ((row, favorite), detail) in view.rows.iter().zip(document.entries())
+            .zip(["m3u · A", "plex · Library · Server"]) {
             assert_eq!(row.content_title.as_deref(), Some(favorite.title.as_str()));
-            assert_eq!(row.detail, format!("{} · {}", favorite.origin.provider, favorite.origin.profile));
+            assert_eq!(row.detail, detail);
             assert!(matches!(&row.action, OttAction::Play(id) if id == &row.id));
         }
         assert_eq!(r.saved.favorites, document);
