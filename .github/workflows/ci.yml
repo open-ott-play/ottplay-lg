@@ -60,11 +60,31 @@ jobs:
         with:
           packages: build-essential pkg-config libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev libwayland-dev libglib2.0-dev
       - uses: ./.github/actions/rust-toolchain
+      - name: Locate the isolated host target
+        id: host-cache
+        shell: bash
+        env:
+          NATIVE_CHECK_DIR: ${{ runner.temp }}/lg-check
+        run: |
+          python3 - <<'PYCACHE'
+          import os
+          from pathlib import Path
+          workspace = Path("rust-modules").resolve()
+          target = (Path(os.environ["NATIVE_CHECK_DIR"]) / "target").resolve()
+          # The cache action joins its target argument to the workspace root.
+          relative = os.path.relpath(target, workspace)
+          assert not Path(relative).is_absolute() and (workspace / relative).resolve() == target
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("target=" + relative + "\n")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write("NATIVE_CHECK_DIR=" + os.environ["NATIVE_CHECK_DIR"] + "\n")
+          PYCACHE
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          workspaces: rust-modules
+          workspaces: rust-modules -> ${{ steps.host-cache.outputs.target }}
+          key: native-isolated-checks
       - name: Test native application and layers
-        run: python3 scripts/lg-build.py check --work-dir "$RUNNER_TEMP/lg-check" --jobs 2
+        run: python3 scripts/lg-build.py check --work-dir "$NATIVE_CHECK_DIR" --jobs 2
 
   renderer-replay:
     name: Controlled renderer replay

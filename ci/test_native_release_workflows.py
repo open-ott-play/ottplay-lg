@@ -1,7 +1,12 @@
 """Contracts joining the reusable native checks, exact candidate build, and release promotion."""
 
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import textwrap
 import shlex
 import unittest
 
@@ -26,6 +31,28 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         native = body.split("  native:", 1)[1].split("\n  arm:", 1)[0]
         self.assertLess(native.index("uses: ./.github/actions/rust-toolchain"),
                         native.index("python3 scripts/lg-build.py check"))
+
+    def test_isolated_host_cache_resolves_to_the_actual_build_target(self):
+        native = workflow("ci.yml").split("  native:\n", 1)[1].split("\n  renderer-replay:", 1)[0]
+        self.assertIn('workspaces: rust-modules -> ${{ steps.host-cache.outputs.target }}', native)
+        self.assertIn('--work-dir "$NATIVE_CHECK_DIR"', native)
+        self.assertIn('NATIVE_CHECK_DIR: ${{ runner.temp }}/lg-check', native)
+        code = textwrap.dedent(native.split("python3 - <<'PYCACHE'\n", 1)[1].split("          PYCACHE", 1)[0])
+        with tempfile.TemporaryDirectory() as temporary:
+            for name in ("checkout", "deep path/repo with spaces"):
+                checkout = Path(temporary) / name
+                workspace = checkout / "rust-modules"
+                workspace.mkdir(parents=True)
+                check_dir = Path(temporary) / "runner temp" / name / "lg-check"
+                output, environment = checkout / "outputs", checkout / "environment"
+                env = dict(os.environ, NATIVE_CHECK_DIR=str(check_dir),
+                           GITHUB_OUTPUT=str(output), GITHUB_ENV=str(environment))
+                subprocess.run([sys.executable, "-c", code], cwd=checkout, env=env, check=True)
+                key, relative = output.read_text().strip().split("=", 1)
+                self.assertEqual(key, "target")
+                self.assertFalse(Path(relative).is_absolute())
+                self.assertEqual((workspace / relative).resolve(), (check_dir / "target").resolve())
+                self.assertEqual(environment.read_text(), "NATIVE_CHECK_DIR=" + str(check_dir) + "\n")
 
     def test_release_dispatch_is_manual_serialized_and_channel_scoped(self):
         body = workflow("native-release-pipeline.yml")
