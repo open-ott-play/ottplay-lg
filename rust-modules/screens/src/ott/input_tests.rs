@@ -1016,7 +1016,7 @@ fn dispatcher_category_back_footer_and_back_key_emit_the_same_action() {
                 navigation_row("favorites", OttAction::ShowFavorites)], Some("all")));
         if pointer {
             let rect = draw_pointer_map_with_activation(&mut d, &rig, &["nav:back"],
-                plx_ui::screen::Activate::Direct)[0];
+                plx_ui::screen::Activate::Press)[0];
             click_header(&mut d, &mut rig, rect, 256);
         } else {
             frame(&mut d, &mut rig, 256, vec![key(Key::Back, tick(256))]);
@@ -1706,7 +1706,7 @@ fn classic_list_context_arrows_use_selected_live_and_finite_actions() {
                 assert!(screen.reading);
             } else {
                 let expected = if direction == Key::Right { OttAction::OpenGuide("channel-0".into()) }
-                    else if finite { OttAction::Back } else { OttAction::ShowCategories };
+                    else { OttAction::ShowCategories };
                 assert!(rig.actions.contains(&expected));
             }
             assert!(!rig.actions.iter().any(|a| matches!(a, OttAction::Play(_) | OttAction::VolumeStep(_))));
@@ -2523,4 +2523,123 @@ fn dispatcher_classic_footer_search_and_favorite_use_existing_context_actions() 
             assert!(!rig.actions.iter().any(|action| matches!(action, OttAction::Play(_) | OttAction::Random(_))));
         }
     }
+}
+
+fn native_navigation_screen(d: &Dispatcher<TestHost>) -> &OttScreen {
+    d.nav.top_page().unwrap().inst.as_ref().unwrap().screen.as_any().unwrap()
+        .downcast_ref::<OttScreen>().unwrap()
+}
+
+fn open_native_browse(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32) -> u32 {
+    focus_header(d, rig, "nav:browse", ms);
+    let completed = press_header_ok(d, rig, ms + 64);
+    let expected = navigation::page_action(&native_navigation_screen(d).snapshot.page_id);
+    assert_focus(d, expected);
+    completed
+}
+
+#[test]
+fn modern_native_provider_chain_cards_dispatch_canonical_container_actions_by_ok_and_pointer() {
+    let _guard = plx_base::testlock::serial();
+    for (page, action) in [
+        ("providers", OttAction::SelectProvider("m3u".into())),
+        ("profiles:m3u", OttAction::SelectProfile("profile-b".into())),
+        ("categories", OttAction::SelectCategoryAt { context:"category-proof".into(), category:"news".into() }),
+    ] {
+        for pointer in [false, true] {
+            let mut selected = navigation_row("container", action.clone());
+            selected.content_title = Some("Actual source title".into());
+            selected.description = "Description supplied by the current source".into();
+            let mut disabled = navigation_row("disabled", OttAction::SelectProfile("disabled".into()));
+            disabled.enabled = false;
+            let view = navigation_view(page, 1, vec![
+                navigation_row("manage", OttAction::EditSetting("profile.add".into())),
+                selected, disabled,
+            ], Some("container"));
+            let (mut d, mut rig) = mount_snapshot(view);
+            assert_focus(&d, "item:container");
+            let screen = native_navigation_screen(&d);
+            assert!(screen.grid_active());
+            assert_eq!(screen.card_presentation, Some(true), "containers use landscape collection cards");
+            assert_eq!(screen.catalog_keys, vec![screen.keys["item:container"]]);
+            assert_eq!(screen.media, Some(1));
+            let actions = navigation::available_at(&screen.snapshot, screen.media, Default::default(), None);
+            assert!(!actions.iter().any(|item| matches!(item.id, "nav:play" | "nav:favorite" | "nav:guide")));
+            assert!(actions.iter().any(|item| item.id == "nav:description"));
+            if pointer {
+                let rect = draw_pointer_map(&mut d, &rig, &["item:container"])[0];
+                click_header(&mut d, &mut rig, rect, 256);
+            } else {
+                press_navigation_ok(&mut d, &mut rig, 256, false);
+                for now in (352..=768).step_by(16) { frame(&mut d, &mut rig, now, vec![]); }
+            }
+            assert_eq!(rig.actions, vec![action.clone()], "{page}, pointer={pointer}");
+        }
+    }
+}
+
+#[test]
+fn modern_mixed_cards_keep_management_and_disabled_controls_in_browse_without_fabricated_actions() {
+    let _guard = plx_base::testlock::serial();
+    let mut disabled = navigation_row("disabled", OttAction::SelectProfile("disabled".into()));
+    disabled.enabled = false;
+    let view = navigation_view("profiles:m3u", 1, vec![
+        navigation_row("profile", OttAction::SelectProfile("profile".into())),
+        navigation_row("manage", OttAction::EditSetting("profile.add".into())), disabled,
+    ], Some("profile"));
+    let (mut d, mut rig) = mount_snapshot(view);
+    let ended = open_native_browse(&mut d, &mut rig, 256);
+    let screen = native_navigation_screen(&d);
+    assert!(screen.browse);
+    assert!(screen.form.index_of(&"item:manage".into()).is_some());
+    let disabled = screen.form.index_of(&"item:disabled".into()).unwrap();
+    assert!(screen.form.activate(disabled).is_none());
+    assert!(screen.form.index_of(&"item:profile".into()).is_none(), "content is not duplicated as management");
+    let rect = draw_pointer_map_with_activation(&mut d, &rig, &["item:manage"],
+        plx_ui::screen::Activate::Direct)[0];
+    click_header(&mut d, &mut rig, rect, ended + 16);
+    assert_eq!(rig.actions, vec![OttAction::EditSetting("profile.add".into())]);
+    assert!(!rig.actions.iter().any(|action| matches!(action,
+        OttAction::Play(_) | OttAction::Preview(_) | OttAction::PreviewAt { .. } | OttAction::ToggleFavorite(_))));
+}
+
+#[test]
+fn modern_container_details_back_refresh_and_source_replacement_keep_only_current_owner() {
+    let _guard = plx_base::testlock::serial();
+    let mut first = navigation_row("first", OttAction::SelectCategory("first".into()));
+    first.description = "First category synopsis".into();
+    let mut second = navigation_row("second", OttAction::SelectCategory("second".into()));
+    second.description = "Second category synopsis".into();
+    let view = navigation_view("categories", 1, vec![first, second], Some("second"));
+    let (mut d, mut rig) = mount_snapshot(view);
+    assert_focus(&d, "item:second");
+    let expected = d.focus();
+    let remembered = d.return_state().memory;
+    let ended = open_native_browse(&mut d, &mut rig, 256);
+    frame(&mut d, &mut rig, ended + 16, vec![key(Key::Back, tick(ended + 16)), key_up(Key::Back, tick(ended + 16))]);
+    assert_eq!(d.focus(), expected, "Browse Back restores the exact container");
+    let mut refreshed = (*rig.snapshot).clone();
+    refreshed.revision += 1;
+    refreshed.rows.reverse();
+    publish_snapshot(&mut d, &mut rig, Arc::new(refreshed), ended + 64);
+    assert_eq!(d.focus(), expected, "refresh preserves identity rather than index");
+    // The shared description control reads the same current row, never Play.
+    let rect = draw_pointer_map(&mut d, &rig, &["nav:description"])[0];
+    click_header(&mut d, &mut rig, rect, ended + 128);
+    assert!(native_navigation_screen(&d).reading);
+    frame(&mut d, &mut rig, ended + 600, vec![key(Key::Back, tick(ended + 600)), key_up(Key::Back, tick(ended + 600))]);
+    assert!(!native_navigation_screen(&d).reading);
+    let mut replacement = (*rig.snapshot).clone();
+    replacement.revision += 1;
+    replacement.preview_context = Some("replacement-source".into());
+    replacement.selected_row = Some("first".into());
+    publish_snapshot(&mut d, &mut rig, Arc::new(replacement), ended + 664);
+    assert_focus(&d, "item:first");
+    let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
+    d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
+        Delivery::Screen(ScreenEvent::RestoreMemory(remembered))));
+    frame(&mut d, &mut rig, ended + 696, vec![]);
+    assert_focus(&d, "item:first");
+    assert!(!rig.actions.iter().any(|action| matches!(action,
+        OttAction::Play(_) | OttAction::Preview(_) | OttAction::PreviewAt { .. } | OttAction::ToggleFavorite(_))));
 }

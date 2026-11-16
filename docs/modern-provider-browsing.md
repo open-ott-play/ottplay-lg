@@ -1,8 +1,20 @@
 # Modern provider browsing
 
-The Modern OTT catalogue can show a horizontal row for each real provider
-category. It uses the same catalogue, category membership and user-defined
-ordering as the Classic channel list. Native Plex Home continues to use its
+Modern presents provider, profile and category choices as native collection
+cards using the same card components as media libraries. Opening a card performs
+its existing canonical navigation action; it does not manufacture playback or
+preview authority. Add/Edit/Connect and disabled choices remain in the shared
+Browse controls, so one management row cannot turn the whole catalogue into a
+text form. Actual settings and editors retain their normal form controls.
+
+Category cards use real current membership counts and, within a bounded display
+budget, representative member artwork. A member's plot is not presented as its
+folder's synopsis, and profiles do not borrow another profile's old catalogue art.
+Containers can display explicitly supplied descriptions through the shared reader.
+
+The Modern OTT catalogue shows a presentation-only **All** row followed by a
+horizontal row for each real provider category. It uses the same catalogue,
+category membership and user-defined ordering as the Classic channel list. Native Plex Home continues to use its
 server-provided hubs; the OTT catalogue does not invent Plex recommendations.
 
 In the unfiltered **All** view, Left and Right move within a category. Up and
@@ -18,16 +30,24 @@ item. Category rows reference one shared metadata table; they do not copy each
 film's description and media locator into every row.
 
 Search, Favorites, a selected category, temporary Local sessions and Classic
-retain their existing list/grid presentation. Empty categories have no row. If
-some All items have no real category, the player keeps the flat All grid so no
-item disappears and no provider category is fabricated. Progressive discovery
-can switch to category rows once current items are fully represented.
-The presentation admits at most 50,000 total category occurrences. Deeper or
-larger overlap falls back to the complete flat All grid; it never truncates
+retain their existing list/grid presentation. Empty categories have no shelf.
+The All row contains every canonical item, including uncategorized items; it is
+not a fabricated provider category. Real category overlap references the same
+canonical rows. Progressive discovery can append to these rows without selecting
+or playing a new item.
+The presentation admits at most 50,000 total occurrences, including the All row.
+Deeper or larger overlap falls back to the complete flat All grid; it never truncates
 categories or content. Removed shelf focus keys are retired on refresh rather
 than accumulating across source replacements.
 
-Source replacement retires row memory. Catalogue appends, navigation tokens and
+Source replacement retires row memory, including provider/profile/category card
+focus and open descriptions. Returning through navigation retains the caller's
+focus only while its current source remains valid. Live M3U rows use their explicit
+live metadata for landscape cards and programme captions. Channel logos and
+collection thumbnails fit inside their card; film and episode covers retain the
+existing cover treatment.
+
+Catalogue appends, navigation tokens and
 presentation updates do not grant permission to reuse old playback requests;
 those requests still use the current source-bound command contract.
 
@@ -45,12 +65,24 @@ entire admitted text. No title/year-looking sentence is guessed or removed.
 The annotation is checked against the complete text during projection; painting
 uses a constant-time checked slice, and stale annotations fall back to full text.
 
-Native VPortal artwork already supports explicit HTTP and HTTPS addresses and
-relative paths, including inherited episode artwork. The image request does not
+Native VPortal artwork supports explicit HTTP and HTTPS addresses and relative
+paths, including inherited episode artwork. Its explicit portrait `img` is
+preferred to `imglr`; validated inherited artwork remains a fallback. The image
+request does not
 borrow VPortal or Plex authentication headers. Existing request, byte and decode
 limits remain in force; no browser artwork proxy or HTTPS downgrade was added.
 Both presentations retain the shared aspect-fit image renderer. A supplied URL
 still needs a successful fetch and sufficient space in the detail panel.
+
+## Local artwork retention
+
+Already discovered ordinary Local covers can remain visible after focus moves.
+The source-owned RAM cache retains at most 64 positive artwork proofs and 256 KiB
+of accounted model data. It retains no media-file copies or full descriptions and
+starts no extra scan. Each lookup checks the current profile, canonical item and
+locator, and authorized root receipt; stale proof cannot authorize artwork reads.
+Favorite previews retain their separate selected-item guards. The shared image
+store continues to own texture loading and eviction.
 
 ## Verification scope
 

@@ -22,7 +22,12 @@ pub(super) fn modern_footer(measure: &dyn Measure, width: f32, actions: &[Action
             let action = actions.iter().find(|action| action.id == *id)?;
             Some((*keys.get(*id)?, action.row.label.clone()))
         }).collect()
+    } else if matches!(snapshot.page_id.split(':').next(), Some("providers" | "profiles")) {
+        Vec::new()
     } else { return None; };
+    if matches!(snapshot.page_id.split(':').next(), Some("providers" | "profiles" | "categories")) {
+        if let Some(key) = keys.get("nav:back") { controls.push((*key, msg::settings_back().to_owned())); }
+    }
     controls.retain(|(key, _)| !header_keys.contains(key));
     if controls.is_empty() { return None; }
     let left = controls.iter().map(|(_, label)| HeaderItem { label: label.clone(), focusable: true, ..Default::default() }).collect();
@@ -380,8 +385,7 @@ impl super::OttScreen {
                 let finite = row.media.is_some() && !super::classic::catalogue_live(row);
                 if edge == Edge::Down {
                     if direction < 0 {
-                        if finite { self.send(OttAction::Back, fx); }
-                        else { self.activate_shortcut("nav:categories", fx); }
+                        self.activate_shortcut("nav:categories", fx);
                     } else if finite || !self.activate_shortcut("nav:guide", fx) {
                         self.activate_shortcut("nav:description", fx);
                     }
