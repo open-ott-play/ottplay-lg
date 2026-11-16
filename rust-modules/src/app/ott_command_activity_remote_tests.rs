@@ -63,7 +63,10 @@ fn strict_schema_runtime_and_expiry_rejections_are_closed_and_do_not_echo_input(
         json!({"version":2,"runtime":"https://private.invalid"}),
         json!({"version":2,"runtime":""}), json!({"version":2,"runtime":"x".repeat(97)})]
         .into_iter().enumerate() {
-        let inv = invocation(&mut runtime, ACTION, invalid, 200 + index as u64);
+        // The transport rejects non-object params before creating an invocation.
+        // Start from admitted authority, then exercise the handler's own schema fence.
+        let mut inv = invocation(&mut runtime, ACTION, params(), 200 + index as u64);
+        inv.params = invalid;
         assert_eq!(command(&mut runtime, &inv), failure("native_123", "invalid_request"));
     }
     let inv = invocation(&mut runtime, ACTION, json!({"version":2,"runtime":"other"}), 300);
