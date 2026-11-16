@@ -381,12 +381,21 @@ impl PlaylistStage {
 }
 
 /// Closed facts only. This object cannot hold a URL, header or server body.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct FetchFailure { reason: &'static str, outcome: TraceOutcome, cancelled: bool }
 impl FetchFailure {
     fn into_hls(self) -> HlsExit {
         if self.cancelled { HlsExit::Aborted }
         else { HlsExit::OpenFailed { reason: self.reason, outcome: self.outcome } }
+    }
+    fn retryable(self) -> bool {
+        !self.cancelled && matches!(self.outcome,
+            TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState)
+    }
+    fn preparation_reason(self) -> &'static str {
+        if !self.cancelled && self.outcome == TraceOutcome::Transport {
+            "HLS playlist transient transport failed"
+        } else { self.reason }
     }
 }
 
@@ -433,13 +442,90 @@ impl FetchTrace {
 fn fetch_traced(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
     -> Result<(String, String), &'static str>
 {
-    fetch_traced_failure(url, owner, deadline, stage, depth).map_err(|failure| failure.reason)
+    let inspecting = matches!(owner, Owner::Inspect(_));
+    fetch_traced_failure(url, owner, deadline, stage, depth)
+        .map_err(|failure| if inspecting { failure.preparation_reason() } else { failure.reason })
 }
 
 /// Retain checked transport evidence through a live refresh. Admission callers
 /// keep their static display errors; an active producer must not erase a
 /// deadline/server/connection cause before the source-owned retry policy sees it.
 fn fetch_traced_failure(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
+    -> Result<(String, String), FetchFailure>
+{
+    let mut io = PlaylistFetch { url, owner, stage, depth, started: Instant::now() };
+    fetch_with_retry(&mut io, deadline, stage)
+}
+
+/// The same manifest request owns every attempt. No retry selects a variant,
+/// resolves another source or changes the producer's committed A/V state.
+/// Shared VOD/caption readers keep their existing single-request policy.
+trait PlaylistFetchIo {
+    fn now(&self) -> Instant;
+    fn stopped(&self) -> bool;
+    fn attempt(&mut self, deadline: Instant) -> Result<(String, String), FetchFailure>;
+    fn wait_until(&mut self, deadline: Instant);
+    fn retrying(&mut self, number: u8);
+}
+
+fn fetch_with_retry(io: &mut impl PlaylistFetchIo, deadline: Instant, stage: PlaylistStage)
+    -> Result<(String, String), FetchFailure>
+{
+    // Preserve the caller's absolute allowance across open, body, waits and
+    // retries. A healthy cold proxy may need most of this allowance for its
+    // first response. Retry fast transient failures from what remains, never
+    // shorten that first request or grant another allowance after a timeout.
+    let deadline = deadline.min(io.now() + Duration::from_secs(15));
+    let attempts = if matches!(stage, PlaylistStage::Shared) { 1 } else { 3 };
+    let cancelled = || FetchFailure { reason: "HLS request cancelled",
+        outcome: TraceOutcome::Refused, cancelled: true };
+    for attempt in 0..attempts {
+        if io.stopped() { return Err(cancelled()); }
+        let now = io.now();
+        if now >= deadline {
+            return Err(FetchFailure { reason: stage.timeout(), outcome: TraceOutcome::Deadline, cancelled: false });
+        }
+        let failure = match io.attempt(deadline) {
+            Ok(response) => return if io.stopped() { Err(cancelled()) } else { Ok(response) },
+            Err(failure) => failure,
+        };
+        if io.stopped() { return Err(cancelled()); }
+        if !failure.retryable() || attempt + 1 == attempts { return Err(failure); }
+        let wake = io.now() + Duration::from_millis(200 * u64::from(attempt + 1));
+        if wake >= deadline { return Err(failure); }
+        io.retrying(attempt + 1);
+        io.wait_until(wake);
+    }
+    unreachable!("the final manifest attempt always settles")
+}
+
+struct PlaylistFetch<'a, 'b> {
+    url: &'a str,
+    owner: &'a mut Owner<'b>,
+    stage: PlaylistStage,
+    depth: u8,
+    started: Instant,
+}
+impl PlaylistFetchIo for PlaylistFetch<'_, '_> {
+    fn now(&self) -> Instant { Instant::now() }
+    fn stopped(&self) -> bool { self.owner.stopped() }
+    fn attempt(&mut self, deadline: Instant) -> Result<(String, String), FetchFailure> {
+        fetch_traced_attempt(self.url, self.owner, deadline, self.stage, self.depth)
+    }
+    fn wait_until(&mut self, deadline: Instant) {
+        while !self.owner.stopped() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { break; }
+            std::thread::sleep(remaining.min(Duration::from_millis(20)));
+        }
+    }
+    fn retrying(&mut self, number: u8) {
+        FetchTrace { stage: self.stage, depth: self.depth, started: self.started }
+            .record("retry", "transient", i32::from(number));
+    }
+}
+
+fn fetch_traced_attempt(url: &str, owner: &mut Owner<'_>, deadline: Instant, stage: PlaylistStage, depth: u8)
     -> Result<(String, String), FetchFailure>
 {
     let trace = FetchTrace { stage, depth, started: Instant::now() };
@@ -554,7 +640,7 @@ pub(super) fn inspect_opened(source: Box<crate::curlio::CurlSource>, prefix: Vec
 {
     let trace = FetchTrace { stage: PlaylistStage::Initial, depth: 0, started: Instant::now() };
     let (landed, text) = finish_playlist_response(source, prefix, &mut Owner::Inspect(&cancelled), deadline, &trace)
-        .map_err(|failure| failure.reason)?;
+        .map_err(FetchFailure::preparation_reason)?;
     let source_url = landed.clone();
     inspect_from_first(&source_url, cancelled, Some((landed, text)))
 }

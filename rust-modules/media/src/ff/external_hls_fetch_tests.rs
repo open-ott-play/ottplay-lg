@@ -1,7 +1,212 @@
-//! Actual loopback HTTP acquisition; no provider, FFmpeg or device is needed.
+//! Pure manifest retry policy and loopback HTTP acquisition. No provider,
+//! FFmpeg or device is needed; the pure cases use neither sockets nor sleeps.
 use super::*;
 use std::io::{Read, Write};
 use std::sync::atomic::AtomicUsize;
+
+// The production retry driver is tested without sockets, sleeps, global player
+// state or a decoder. Every attempt observes the exact same immutable request.
+type PlaylistFetchResult = Result<(String, String), FetchFailure>;
+struct FakePlaylistFetch {
+    now: Instant,
+    steps: std::collections::VecDeque<(Duration, PlaylistFetchResult)>,
+    deadlines: Vec<Instant>,
+    waits: Vec<Instant>,
+    retries: Vec<u8>,
+    cancelled: bool,
+    cancel_on_wait: bool,
+    cancel_after_attempt: bool,
+}
+impl FakePlaylistFetch {
+    fn new(steps: Vec<(Duration, PlaylistFetchResult)>) -> Self {
+        Self { now: Instant::now(), steps: steps.into(), deadlines: Vec::new(), waits: Vec::new(),
+            retries: Vec::new(), cancelled: false, cancel_on_wait: false, cancel_after_attempt: false }
+    }
+}
+impl PlaylistFetchIo for FakePlaylistFetch {
+    fn now(&self) -> Instant { self.now }
+    fn stopped(&self) -> bool { self.cancelled }
+    fn attempt(&mut self, deadline: Instant) -> Result<(String, String), FetchFailure> {
+        assert!(!self.cancelled, "a retired source cannot open another request");
+        self.deadlines.push(deadline);
+        let (elapsed, response) = self.steps.pop_front().expect("unexpected manifest attempt");
+        self.now += elapsed;
+        assert!(self.now <= deadline, "the transport must respect its assigned deadline");
+        self.cancelled |= self.cancel_after_attempt;
+        response
+    }
+    fn wait_until(&mut self, deadline: Instant) {
+        assert!(deadline >= self.now);
+        self.waits.push(deadline);
+        self.now = deadline;
+        self.cancelled |= self.cancel_on_wait;
+    }
+    fn retrying(&mut self, number: u8) { self.retries.push(number); }
+}
+fn transient_playlist_failure(outcome: TraceOutcome) -> FetchFailure {
+    FetchFailure { reason: "HLS playlist network transport failed", outcome, cancelled: false }
+}
+fn playlist_response() -> (String, String) {
+    ("https://fixture.invalid/selected".into(), "#EXTM3U\n".into())
+}
+
+#[test]
+fn pure_manifest_retry_keeps_initial_selected_and_playback_requests_within_one_budget() {
+    for stage in [PlaylistStage::Initial, PlaylistStage::Selected, PlaylistStage::Playback] {
+        for outcome in [TraceOutcome::Deadline, TraceOutcome::Transport, TraceOutcome::ServerState] {
+            let mut io = FakePlaylistFetch::new(vec![
+                (Duration::from_secs(5), Err(transient_playlist_failure(outcome))),
+                (Duration::from_millis(1), Ok(playlist_response())),
+            ]);
+            let began = io.now;
+            let response = fetch_with_retry(&mut io, began + Duration::from_secs(15), stage).unwrap();
+            assert_eq!(response, playlist_response());
+            assert_eq!(io.deadlines, vec![began + Duration::from_secs(15); 2]);
+            assert_eq!(io.retries, vec![1]);
+            assert_eq!(io.waits, vec![began + Duration::from_millis(5_200)]);
+            assert_eq!(io.now.duration_since(began), Duration::from_millis(5_201));
+        }
+    }
+}
+
+#[test]
+fn pure_manifest_retry_never_renews_the_original_absolute_deadline() {
+    let failure = transient_playlist_failure(TraceOutcome::Deadline);
+    let mut io = FakePlaylistFetch::new(vec![
+        (Duration::from_secs(5), Err(failure)),
+        (Duration::from_secs(5), Err(failure)),
+        (Duration::from_millis(4_400), Err(failure)),
+    ]);
+    let began = io.now;
+    let terminal = fetch_with_retry(&mut io, began + Duration::from_secs(90), PlaylistStage::Selected).unwrap_err();
+    assert_eq!(terminal.outcome, TraceOutcome::Deadline);
+    assert_eq!(io.deadlines, vec![began + Duration::from_secs(15); 3]);
+    assert_eq!(io.now.duration_since(began), Duration::from_secs(15));
+    assert_eq!(io.retries, vec![1, 2]);
+    assert!(io.steps.is_empty());
+}
+
+#[test]
+fn pure_manifest_retry_does_not_shorten_a_valid_cold_proxy_response() {
+    for stage in [PlaylistStage::Initial, PlaylistStage::Selected, PlaylistStage::Playback] {
+        let mut io = FakePlaylistFetch::new(vec![(Duration::from_secs(12), Ok(playlist_response()))]);
+        let began = io.now;
+        assert_eq!(fetch_with_retry(&mut io, began + Duration::from_secs(15), stage).unwrap(), playlist_response());
+        assert_eq!(io.deadlines, vec![began + Duration::from_secs(15)]);
+        assert_eq!(io.now.duration_since(began), Duration::from_secs(12));
+        assert!(io.waits.is_empty());
+        assert!(io.retries.is_empty());
+    }
+}
+
+#[test]
+fn pure_manifest_retry_stops_after_three_fast_failures_with_budget_remaining() {
+    let failure = transient_playlist_failure(TraceOutcome::ServerState);
+    let mut io = FakePlaylistFetch::new(vec![
+        (Duration::from_millis(1), Err(failure)),
+        (Duration::from_millis(1), Err(failure)),
+        (Duration::from_millis(1), Err(failure)),
+        (Duration::ZERO, Ok(playlist_response())),
+    ]);
+    let began = io.now;
+    assert!(fetch_with_retry(&mut io, began + Duration::from_secs(15), PlaylistStage::Playback).is_err());
+    assert_eq!(io.deadlines.len(), 3);
+    assert_eq!(io.retries, vec![1, 2]);
+    assert_eq!(io.now.duration_since(began), Duration::from_millis(603));
+    assert_eq!(io.steps.len(), 1, "a bounded burst cannot reach a fourth request");
+}
+
+#[test]
+fn pure_manifest_retry_keeps_short_outer_deadline_and_terminal_body_reason() {
+    let failure = FetchFailure { reason: "HLS playlist body transfer timed out",
+        outcome: TraceOutcome::Deadline, cancelled: false };
+    let mut io = FakePlaylistFetch::new(vec![(Duration::from_millis(60), Err(failure))]);
+    let began = io.now;
+    let terminal = fetch_with_retry(&mut io, began + Duration::from_millis(60), PlaylistStage::Playback).unwrap_err();
+    assert_eq!(terminal.reason, failure.reason);
+    assert_eq!(io.deadlines, vec![began + Duration::from_millis(60)]);
+    assert!(io.waits.is_empty());
+    assert!(io.retries.is_empty());
+}
+
+#[test]
+fn pure_manifest_retry_leaves_shared_readers_single_attempt() {
+    let mut io = FakePlaylistFetch::new(vec![(Duration::from_millis(1),
+        Err(transient_playlist_failure(TraceOutcome::ServerState)))]);
+    let deadline = io.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut io, deadline, PlaylistStage::Shared).is_err());
+    assert_eq!(io.deadlines, vec![deadline]);
+    assert!(io.waits.is_empty());
+}
+
+#[test]
+fn pure_manifest_retry_refuses_unknown_parse_auth_and_trust_causes() {
+    for (reason, outcome, cancelled) in [
+        ("HLS playlist server returned HTTP 401", TraceOutcome::Refused, false),
+        ("HLS playlist server returned HTTP 403", TraceOutcome::Refused, false),
+        ("HLS playlist server returned HTTP 404", TraceOutcome::Refused, false),
+        ("HLS playlist network transport failed", TraceOutcome::Refused, false),
+        ("HLS playlist is not UTF-8", TraceOutcome::Refused, false),
+        ("HLS playlist local transport failed", TraceOutcome::Inconclusive, false),
+        ("HLS request cancelled", TraceOutcome::Refused, true),
+    ] {
+        let failure = FetchFailure { reason, outcome, cancelled };
+        let mut io = FakePlaylistFetch::new(vec![(Duration::ZERO, Err(failure))]);
+        let deadline = io.now + Duration::from_secs(15);
+        let terminal = fetch_with_retry(&mut io, deadline, PlaylistStage::Selected).unwrap_err();
+        assert_eq!(terminal.reason, reason);
+        assert_eq!(io.deadlines.len(), 1);
+        assert!(io.waits.is_empty());
+        assert!(io.retries.is_empty());
+    }
+}
+
+#[test]
+fn pure_manifest_retry_cancellation_prevents_first_or_next_open_and_late_success() {
+    let failure = transient_playlist_failure(TraceOutcome::Transport);
+    let mut already_cancelled = FakePlaylistFetch::new(Vec::new());
+    already_cancelled.cancelled = true;
+    let deadline = already_cancelled.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut already_cancelled, deadline, PlaylistStage::Initial).unwrap_err().cancelled);
+    assert!(already_cancelled.deadlines.is_empty());
+
+    let mut during_wait = FakePlaylistFetch::new(vec![(Duration::ZERO, Err(failure))]);
+    during_wait.cancel_on_wait = true;
+    let deadline = during_wait.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut during_wait, deadline, PlaylistStage::Playback).unwrap_err().cancelled);
+    assert_eq!(during_wait.deadlines.len(), 1);
+    assert_eq!(during_wait.waits.len(), 1);
+
+    let mut on_response = FakePlaylistFetch::new(vec![(Duration::ZERO, Ok(playlist_response()))]);
+    on_response.cancel_after_attempt = true;
+    let deadline = on_response.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut on_response, deadline, PlaylistStage::Selected).unwrap_err().cancelled);
+    assert_eq!(on_response.deadlines.len(), 1);
+}
+
+#[test]
+fn pure_preparation_transport_reason_cannot_be_borrowed_by_trust_or_unknown_failures() {
+    use crate::curlio::OpenErr;
+    let transient = "HLS playlist transient transport failed";
+    // The same old display reason covered both checked network and TLS errors.
+    // Only the former carries the new closed retry evidence across inspection.
+    for error in [OpenErr::Transport(6), OpenErr::Transport(18), OpenErr::Transport(56)] {
+        let failure = FetchFailure { reason: "HLS playlist network transport failed",
+            outcome: super::super::hls_curl_open_outcome(error), cancelled: false };
+        assert_eq!(failure.preparation_reason(), transient);
+    }
+    for error in [OpenErr::Transport(60), OpenErr::Transport(35), OpenErr::Transport(999),
+        OpenErr::Status(401), OpenErr::Status(403), OpenErr::RangeIgnored, OpenErr::Local] {
+        let failure = FetchFailure { reason: "HLS playlist network transport failed",
+            outcome: super::super::hls_curl_open_outcome(error), cancelled: false };
+        assert_eq!(failure.preparation_reason(), failure.reason);
+        assert_ne!(failure.preparation_reason(), transient);
+    }
+    let truncated = FetchFailure { reason: "Truncated HLS response", outcome: TraceOutcome::Transport, cancelled: false };
+    assert_eq!(truncated.preparation_reason(), transient);
+    assert_eq!(FetchFailure { outcome: TraceOutcome::Inconclusive, ..truncated }.preparation_reason(), "Truncated HLS response");
+    assert_eq!(FetchFailure { cancelled: true, ..truncated }.preparation_reason(), "Truncated HLS response");
+}
 
 struct Server {
     url: String,
@@ -170,7 +375,7 @@ fn real_inspection_labels_master_then_selected_playlist_failure() {
 }
 
 #[test]
-fn playlist_http_rejections_are_distinct_static_and_not_retried() {
+fn playlist_http_rejections_keep_static_causes_and_only_transient_statuses_retry() {
     let _serial = curl();
     for (status, message) in [
         (401, "HLS playlist server returned HTTP 401"),
@@ -191,7 +396,7 @@ fn playlist_http_rejections_are_distinct_static_and_not_retried() {
             )
         });
         assert_eq!(result.unwrap_err(), message);
-        assert_eq!(server.count.load(Ordering::Acquire), 1);
+        assert_eq!(server.count.load(Ordering::Acquire), if matches!(status, 429 | 503) { 3 } else { 1 });
         assert!(lines
             .iter()
             .any(|line| line.contains("stage=selected depth=1 phase=open")
@@ -296,7 +501,7 @@ fn playlist_transport_failure_is_not_http_or_timeout_and_success_is_unchanged() 
         let cancelled = AtomicBool::new(false);
         let (result, lines) = captured(|| fetch(&server.url, &mut Owner::Inspect(&cancelled)));
         if status == 0 {
-            assert_eq!(result.unwrap_err(), "HLS playlist network transport failed");
+            assert_eq!(result.unwrap_err(), "HLS playlist transient transport failed");
             assert!(lines
                 .iter()
                 .any(|line| line.contains("phase=open") && line.contains("kind=transport code=")));
@@ -472,8 +677,9 @@ fn live_refresh_http_failure_keeps_checked_cause_through_producer_settlement() {
         }));
         assert!(SHARED.demux_io_failed.load(Ordering::Acquire));
         assert!(!SHARED.demux_failed.load(Ordering::Acquire));
-        assert_eq!(server.count.load(Ordering::Acquire), 1,
-            "one refresh; no hidden retry, segment request or alternate source");
+        assert_eq!(server.count.load(Ordering::Acquire),
+            if matches!(expected, TraceOutcome::ServerState | TraceOutcome::Transport) { 3 } else { 1 },
+            "bounded retries stay on this manifest; no segment request or alternate source");
     }
 }
 

@@ -91,3 +91,12 @@ fn shared_transport_reasons_do_not_claim_a_playlist_or_segment_origin() {
     assert_eq!(classify("HTTPS request failed").code(), "hls_transport_open_failed");
     assert_eq!(classify("HLS transport stalled").code(), "hls_transport_failed");
 }
+
+#[test]
+fn checked_short_body_retains_positive_transport_evidence() {
+    assert!(matches!(super::super::hls_short_body_failure(),
+        super::super::HlsExit::OpenFailed {
+            reason: "segment body ended before Content-Length",
+            outcome: plx_telemetry::telemetry::classes::TraceOutcome::Transport,
+        }));
+}

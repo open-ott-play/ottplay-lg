@@ -245,6 +245,8 @@ mod category_state;
 mod companion_adapter;
 #[path = "ott_continuity.rs"]
 mod continuity;
+#[path = "ott_live_health.rs"]
+mod live_health;
 #[path = "ott_continuity_diagnostics.rs"]
 mod continuity_diagnostics;
 #[path = "ott_desktop_input.rs"]
@@ -873,6 +875,7 @@ pub(super) struct Runtime {
     managed: managed::State,
     classic_source: classic_source::State,
     continuity: continuity::Continuity,
+    live_health: live_health::Tracker<plx_media::route::PlaybackIdentity>,
     continuity_retry_log: Option<continuity_diagnostics::Pending>,
     play_target: Option<PlaybackRequest>,
     classic_play_handoff: classic_play_handoff::State,
@@ -1373,6 +1376,7 @@ impl Runtime {
             managed: managed::State::default(),
             classic_source: classic_source::State::default(),
             continuity: continuity::Continuity::new(0, None),
+            live_health: Default::default(),
             continuity_retry_log: None,
             play_target: None,
             classic_play_handoff: Default::default(),
@@ -2405,6 +2409,29 @@ impl Runtime {
         if playing_superseded(playing, app) {
             self.stop_catalog(app);
         }
+    }
+    /// Renew recovery only from real progress of the exact admitted live decoder.
+    /// A loading/held/cancelled or replaced owner supplies no health evidence.
+    fn observe_live_health(&mut self, app: &App) {
+        let identity = plx_media::route::playback_identity(&app.player.session);
+        let position = plx_media::player::playpos_ns();
+        let eligible = app.running && playback_allowed(app)
+            && !self.multiview_local.active() && !self.transient.owns_playback()
+            && self.play_target.is_none() && !lifecycle::viewer_paused()
+            && !plx_media::route::play_pending()
+            && plx_media::player::state(&app.player.session) == plx_media::player::PlaybackState::Playing
+            && plx_media::player::seen_frame() && position >= 0;
+        let sample = self.playing.as_ref().filter(|playing| eligible
+            && playing.archive.is_none() && playing_matches(playing, app)
+            && guide_ui::is_live(&playing.profile, &playing.entry)
+            && playing.identity == identity).and_then(|playing| {
+                identity.as_ref().map(|identity| live_health::Sample {
+                    generation: self.generation, play_generation: self.play_generation,
+                    selection_id: &playing.selection_id, identity,
+                    position_ms: position as u64 / 1_000_000, now_ms: self.now_ms(),
+                })
+            });
+        self.continuity.observe_live_progress(&mut self.live_health, sample);
     }
     fn reconcile_failure(&mut self, app: &mut App) {
         if self.current_kiosk_pin_owned(app) && !self.archive_playback_owned(app) {
@@ -5267,6 +5294,19 @@ pub(super) fn draw_notifications(app: &mut App) {
     }
 }
 
+/// Inspection currently returns closed static producer errors rather than a
+/// native failure receipt. Retry only positively identified timeout/server
+/// conditions; generic open/TLS/codec/auth/policy failures cannot borrow it.
+fn recoverable_live_preparation(reason: &str) -> bool {
+    matches!(reason,
+        "Initial HLS playlist request timed out" | "Selected HLS playlist request timed out"
+        | "HLS playlist request timed out" | "HLS playlist body transfer timed out"
+        | "HLS playlist server returned HTTP 429" | "HLS playlist server returned a server error"
+        | "HLS playlist transient transport failed"
+        | "Media source request timed out" | "Media source network transport failed"
+        | "Media source server returned HTTP 429" | "Media source server returned a server error")
+}
+
 /// Closed, current-native evidence only. A window slip needs positive server-state
 /// attribution; unknown/malformed/refused sources and decoder failures stay terminal.
 fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
@@ -5279,6 +5319,9 @@ fn recoverable_live_transport(details: Option<plx_media::player::report::Failure
     } | IoFailureDetails::Hls {
         exit: DemuxExitClass::HlsPlaylistWindow,
         outcome: Some(TraceOutcome::ServerState),
+    } | IoFailureDetails::Hls {
+        exit: DemuxExitClass::HlsShortBody,
+        outcome: Some(TraceOutcome::Transport),
     }))
 }
 
@@ -6252,6 +6295,11 @@ fn tick_with_start(
             }
             Job::Play(generation, profile, result) if generation == runtime.play_generation => {
                 let failure_continuation = playback_step::capture_pending_failure(&runtime, app, generation);
+                let live_startup_failure = result.as_ref().err().and_then(|_|
+                    playback_step::capture_pending_live_retry(&runtime, app, generation));
+                let failed_live_selection = live_startup_failure.is_some();
+                let transient_preparation = result.as_ref().err()
+                    .is_some_and(|reason| recoverable_live_preparation(reason));
                 let resolved = result.is_ok();
                 vportal_quality::completed_resolution(&mut runtime, generation);
                 let automatic_resume = runtime.restore_play_generation == Some(generation);
@@ -6394,8 +6442,13 @@ fn tick_with_start(
                     && !expired
                     && !superseded
                     && runtime.kiosk_resolve_failed(app, generation);
+                let startup_retry = response_failed && !resolved && !expired && !superseded
+                    && failed_live_selection && transient_preparation && !pinned_retry
+                    && playback_allowed(app) && !lifecycle::viewer_paused()
+                    && commands::pending_catalog_current(&runtime)
+                    && runtime.pending_attachment_current() && transient::target_current(&runtime);
                 let catalog_failure = response_failed
-                    && !pinned_retry
+                    && !pinned_retry && !startup_retry
                     && commands::catalog_failure(&mut runtime, app);
                 let reply = match response {
                     Ok(()) => {
@@ -6406,7 +6459,7 @@ fn tick_with_start(
                         )
                     }
                     Err(error) => {
-                        let keep_previous_lease = (parental_runtime::is_pin_required(error) || catalog_failure
+                        let keep_previous_lease = (parental_runtime::is_pin_required(error) || catalog_failure || startup_retry
                             || transient::plex_remote::target_current(&runtime).is_some())
                             && runtime
                                 .active_lease
@@ -6456,8 +6509,23 @@ fn tick_with_start(
                             .retain_selection(runtime.generation, &playing.selection_id);
                     }
                 }
+                if startup_retry {
+                    if let Some(request) = target.as_ref() {
+                        playback_step::with_failure_continuation(&mut runtime, live_startup_failure, |runtime| {
+                            let decision = runtime.continuity.live_disconnected(
+                                runtime.generation, &request.id, runtime.now_ms());
+                            runtime.apply_continuity(decision);
+                            if runtime.continuity.pending_retry().is_some() {
+                                runtime.status = "Live stream unavailable; retrying the same channel".into();
+                            }
+                        });
+                    }
+                } else if failed_live_selection && response_failed && !pinned_retry && !catalog_failure {
+                    // Refused/malformed/unknown live sources cannot select a neighbor.
+                    runtime.continuity.stop(runtime.generation);
+                }
                 if response_failed
-                    && !pinned_retry
+                    && !pinned_retry && !startup_retry && !failed_live_selection
                     && !catalog_failure
                     && !expired
                     && !superseded
@@ -6873,6 +6941,7 @@ fn tick_with_start(
     runtime.refresh_plex_sources();
     companion_adapter::tick(&mut runtime, app);
     home_integration::tick(&mut runtime, app);
+    runtime.observe_live_health(app);
     if !runtime.multiview_local.active() { runtime.reconcile_failure(app); }
     if let Err(error) = kiosk_capture::tick(&mut runtime, app) {
         runtime.status = error.message().into();

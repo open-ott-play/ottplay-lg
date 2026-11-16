@@ -4361,6 +4361,16 @@ fn hls_open_status_outcome(status: c_int) -> TraceOutcome {
     }
 }
 
+/// A checked HTTP Content-Length mismatch proves an incomplete transfer.
+/// Its segment output is still private; recovery must reopen the owned source,
+/// never replay an already-mutated demux candidate in place.
+fn hls_short_body_failure() -> HlsExit {
+    HlsExit::OpenFailed {
+        reason: "segment body ended before Content-Length",
+        outcome: TraceOutcome::Transport,
+    }
+}
+
 fn hls_curl_open_outcome(error: crate::curlio::OpenErr) -> TraceOutcome {
     use crate::curlio::OpenErr;
     match error {
@@ -5746,7 +5756,7 @@ unsafe fn hls_demux_segment_path(
             "hls: short-body segment={} got={} want={}",
             segment.sequence, input.state.off, input.state.size,
         ));
-        return Err(HlsExit::Failed("segment body ended before Content-Length"));
+        return Err(hls_short_body_failure());
     }
 
     let awaiting_entry = external && (needs_entry || hevc_state.as_deref().is_some_and(hevc_ts::State::needs_entry));
