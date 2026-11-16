@@ -108,6 +108,44 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertIn("Verify published prerelease identity and bytes", publish)
         self.assertIn('cmp "$CANDIDATE_DIR/$asset" "$RUNNER_TEMP/published-candidate/$asset"', publish)
 
+    def test_publisher_credential_is_confined_to_actual_release_creation_steps(self):
+        release_workflow = workflow("native-release-pipeline.yml")
+        secret_ref = "secrets.BOT_PAT"
+        self.assertEqual(release_workflow.count(secret_ref), 2)
+
+        candidate = release_workflow.split("  publish-candidate:", 1)[1].split(
+            "  promote-stable:", 1
+        )[0]
+        candidate_create = candidate.split("      - name: Publish immutable prerelease", 1)[1].split(
+            "      - name: Verify published prerelease identity and bytes", 1
+        )[0]
+        candidate_verify = candidate.split(
+            "      - name: Verify published prerelease identity and bytes", 1
+        )[1]
+        self.assertIn(secret_ref, candidate_create)
+        self.assertIn("|| github.token", candidate_create)
+        self.assertIn("gh release create", candidate_create)
+        self.assertNotIn(secret_ref, candidate_verify)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", candidate_verify)
+
+        stable = release_workflow.split("  promote-stable:", 1)[1]
+        stable_create = stable.split("      - name: Publish stable from the exact RC package bytes", 1)[1].split(
+            "      - name: Verify published stable release identity and bytes", 1
+        )[0]
+        stable_verify = stable.split(
+            "      - name: Verify published stable release identity and bytes", 1
+        )[1]
+        self.assertIn(secret_ref, stable_create)
+        self.assertIn("|| github.token", stable_create)
+        self.assertIn("gh release create", stable_create)
+        self.assertNotIn(secret_ref, stable_verify)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", stable_verify)
+
+        for name in ("ci.yml", "native-candidate.yml"):
+            self.assertNotIn(secret_ref, workflow(name))
+        self.assertNotIn(secret_ref, release_workflow.split("  preflight:", 1)[1].split("  quality:", 1)[0])
+        self.assertNotIn(secret_ref, release_workflow.split("  quality:", 1)[1].split("  candidate:", 1)[0])
+
     def test_stable_requires_protected_environment_and_exact_rc_evidence(self):
         body = workflow("native-release-pipeline.yml")
         stable = body.split("  promote-stable:", 1)[1]

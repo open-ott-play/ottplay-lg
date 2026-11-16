@@ -366,7 +366,9 @@ jobs:
 
       - name: Publish immutable prerelease
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Organization publishing credential is scoped to this create step.
+          # Forks without the organization secret use GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.BOT_PAT || github.token }}
           TAG: ${{ needs.preflight.outputs.tag }}
           CHANNEL: ${{ needs.preflight.outputs.channel }}
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -575,7 +577,8 @@ jobs:
 
       - name: Publish stable from the exact RC package bytes
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Keep the workflow-authorized credential limited to release creation.
+          GH_TOKEN: ${{ secrets.BOT_PAT || github.token }}
           VERSION: ${{ needs.preflight.outputs.version }}
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
           CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
@@ -598,6 +601,15 @@ jobs:
             "$CANDIDATE_DIR/link-evidence.tar.gz" \
             "ci/ottplay-integration/release/qualifications/v${VERSION}.json" \
             "$RUNNER_TEMP/com.openottplay.player.native.manifest.json" "${companion_assets[@]}"
+
+      - name: Verify published stable release identity and bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          CANDIDATE_DIR: ${{ runner.temp }}/rc-assets
+        run: |
+          set -euo pipefail
           git fetch --no-tags origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
           test "$(git rev-parse "v$VERSION^{commit}")" = "$SOURCE_SHA"
           gh release download "v$VERSION" --dir "$RUNNER_TEMP/stable-public"
