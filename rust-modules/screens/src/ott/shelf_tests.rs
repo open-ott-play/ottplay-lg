@@ -430,3 +430,77 @@ fn invalid_empty_classic_and_filtered_layouts_retire_all_shelf_keys() {
         for (id, key) in canonical { assert_eq!(screen.keys[&id], key); }
     }
 }
+
+#[test]
+fn modern_browse_settings_two_backs_restore_exact_occurrence_and_each_shelf_viewport() {
+    let _guard = plx_base::testlock::serial();
+    for scenario in ["same-source", "replacement-source", "unbound-memory", "owned-intervening-page"] {
+        let mut original = (*fixture(OttMediaKind::Movie)).clone();
+        // Both shelves can scroll, and the selected leaf occurs in both. A
+        // canonical item restore alone would incorrectly choose category-a.
+        original.shelves[1].rows = (12..16).chain(0..12).collect();
+        let original = Arc::new(original);
+        let (mut d, mut rig) = mount_snapshot(original.clone());
+        let mut now = 256;
+        for _ in 0..8 { step(&mut d, &mut rig, &mut now, Key::Right); }
+        step(&mut d, &mut rig, &mut now, Key::Down);
+        for _ in 0..8 { step(&mut d, &mut rig, &mut now, Key::Right); }
+        settle(&mut d, &mut rig, &mut now);
+        assert_item(&d, "category-b", "entry-4");
+        let expected = d.focus().unwrap();
+        let destination = selected_shelf_destination(&d);
+        let scroll = screen(&d).card_stack.memory().shelves;
+        assert_eq!(scroll.len(), 2);
+        assert!(scroll.iter().all(|(_, value)| *value > 0.0));
+        now = open_browse(&mut d, &mut rig, now) + 16;
+        let mut settings = (*navigation_view("settings", 2,
+            vec![navigation_row("setting", OttAction::EditSetting("uiFontScale".into()))],
+            Some("setting"))).clone();
+        settings.preview_context = (scenario == "owned-intervening-page").then(|| "different-owner".into());
+        settings.shelf_context = None;
+        rig.transition = Some((OttAction::ShowSettings, Arc::new(settings)));
+        let rect = draw_pointer_map_with_activation(&mut d, &rig, &["nav:settings"],
+            plx_ui::screen::Activate::Direct)[0];
+        click_header(&mut d, &mut rig, rect, now);
+        now += 416;
+        assert_eq!(screen(&d).snapshot.page_id, "settings");
+        assert_eq!(media::source(&screen(&d).snapshot).is_none(), scenario != "owned-intervening-page");
+        let mut memory = rig.browse_settings_memory.take().expect("real Browse Settings captured memory");
+        let occurrence = media::occurrence_id("presentation-source", "category-b", "entry-4");
+        assert_eq!(memory.focus.as_deref(), Some(occurrence.as_str()));
+        assert_scroll_positions_retained(&memory.shelves, &scroll);
+        // The app owns the addressed return. First drive its real Back request,
+        // then deliver exactly the captured memory with the destination snapshot.
+        step(&mut d, &mut rig, &mut now, Key::Back);
+        assert_eq!(rig.actions.last(), Some(&OttAction::Back));
+        let mut returned = (*original).clone();
+        returned.revision = 3;
+        if scenario == "replacement-source" { returned.shelf_context = Some("replacement-source".into()); }
+        if scenario == "unbound-memory" { memory.source = None; }
+        let returned = Arc::new(returned);
+        rig.snapshot = returned.clone();
+        let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
+        d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
+            Delivery::Screen(ScreenEvent::App(AppMsg::OttBrowseReturn {
+                snapshot:returned, memory, classic:false,
+            }))));
+        frame(&mut d, &mut rig, now, vec![]);
+        now += 16;
+        assert!(screen(&d).browse);
+        assert_focus(&d, "nav:settings");
+        step(&mut d, &mut rig, &mut now, Key::Back);
+        assert!(!screen(&d).browse);
+        if scenario == "same-source" {
+            assert_eq!(d.focus(), Some(expected));
+            assert_item(&d, "category-b", "entry-4");
+            let restored_destination = selected_shelf_destination(&d);
+            assert_eq!((restored_destination.0, restored_destination.1), (destination.0, destination.1));
+            assert!((restored_destination.2 - destination.2).abs() <= 0.01);
+            assert_scroll_positions_retained(&screen(&d).card_stack.memory().shelves, &scroll);
+        } else {
+            assert_ne!(d.focus(), Some(expected), "{scenario} cannot reuse the old occurrence");
+            assert!(screen(&d).card_stack.memory().shelves.iter().all(|(_, value)| *value == 0.0),
+                "{scenario} cannot reuse either old row viewport");
+        }
+    }
+}

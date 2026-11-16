@@ -551,7 +551,13 @@ impl OttScreen {
         };
         let restore = self.restore_memory.take().filter(|memory| memory.page_id == snapshot.page_id
             && memory.source.as_ref().is_none_or(|source| media::source(&snapshot) == Some(source))
-            && !changed_source)
+            && (!changed_source || (!self.classic_mode
+                // Settings has no source identity. An explicitly returned,
+                // addressed memory can bridge it only to its exact destination.
+                // Replacing an existing source still retires old memory.
+                && media::source(&self.snapshot).is_none()
+                && memory.source.as_ref().is_some_and(|source|
+                    media::source(&snapshot) == Some(source)))))
             .or_else(|| {
                 let changed_source = self.snapshot.page_id != snapshot.page_id || changed_source
                     || (self.snapshot.shelf_context.is_none() && self.snapshot.preview_context != snapshot.preview_context);
@@ -830,6 +836,8 @@ impl OttScreen {
             if self.card_presentation.is_some() && !awaiting_restore {
                 self.card_stack.restore(&plx_ui::cards::StackMemory { scroll: memory.scroll, shelves: memory.shelves.clone() });
             }
+            self.card_focus = memory.focus.as_ref().and_then(|id| self.keys.get(id)).copied()
+                .filter(|key| self.shelves.iter().any(|shelf| shelf.index.contains_key(key)));
             self.focus_request = memory.focus.as_ref().filter(|id|
                 (id.starts_with("nav:") && visible.navigation(id)) || id.starts_with("shelf-item:"))
                 .and_then(|id| self.keys.get(id)).copied()
@@ -1240,7 +1248,7 @@ impl OttScreen {
             || !matches!(self.snapshot.page_id.split(':').next(), Some("channels" | "categories" | "favorites"))
         { return false; }
         self.close_browse(fx);
-        let focus = self.form.selected_key().map(|key| FocusKey { entry: self.entry, elem: key.0 });
+        let focus = self.form.selected_key().map(|key| FocusKey { entry: self.entry, elem: self.card_target(key.0) });
         fx.push(Fx::App(AppFx::Ott(OttOut::BrowseSettings { reply: self.instance,
             revision: self.snapshot.revision, memory: Memory::capture(self, focus) })));
         true

@@ -105,6 +105,7 @@ struct TestRig {
     snapshot: Arc<OttView>,
     actions: Vec<OttAction>,
     transition: Option<(OttAction, Arc<OttView>)>,
+    browse_settings_memory: Option<Memory>,
 }
 impl Rig<TestHost> for TestRig {
     fn split(&mut self) -> Split<'_, TestHost> {
@@ -116,8 +117,10 @@ impl Rig<TestHost> for TestRig {
     fn app_fx(&mut self, _: MachineId, effect: AppFx, _: &CxParts<u32>, out: &mut Effects<'_, TestHost>) {
         // This presentation rig records semantics; runtime tests exercise the typed owner gate.
         let effect = match effect {
-            AppFx::Ott(OttOut::BrowseSettings { reply, .. }) =>
-                AppFx::Ott(OttOut::Action { reply, action: OttAction::ShowSettings }),
+            AppFx::Ott(OttOut::BrowseSettings { reply, memory, .. }) => {
+                self.browse_settings_memory = Some(memory);
+                AppFx::Ott(OttOut::Action { reply, action: OttAction::ShowSettings })
+            },
             effect => effect,
         };
         match effect {
@@ -175,7 +178,7 @@ fn mount_snapshot(snapshot: Arc<OttView>) -> (Dispatcher<TestHost>, TestRig) {
 
 fn mount_snapshot_in_mode(snapshot: Arc<OttView>, mode: UiMode) -> (Dispatcher<TestHost>, TestRig) {
     let mut rig = TestRig { mount: Mount, mode, measure: TypographyMeasure::new(FixtureMeasure), snapshot,
-        actions: Vec::new(), transition: None };
+        actions: Vec::new(), transition: None, browse_settings_memory: None };
     let mut d = Dispatcher::new();
     d.nav.tabs.stack.transition = Box::new(plx_ui::containers::transition::Immediate);
     d.request(MachineId::Nav, NavOp::Root(crate::registry::AppArg::Ott));

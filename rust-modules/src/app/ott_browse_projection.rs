@@ -31,8 +31,22 @@ impl Budget {
         entries: impl Iterator<Item = &'a CatalogEntry>) -> Option<OttPoster>
     {
         for entry in entries {
-            if self.visits == 0 { break; }
+            if self.visits == 0 || self.bytes == 0 { break; }
             self.visits -= 1;
+            // Reserve before parsing/cloning a candidate. Native HTTP URL
+            // canonicalization can add an explicit port and a root slash;
+            // the allowance also covers that bounded serialization overhead.
+            let reserved = if matches!(entry.media, MediaLocator::Local { .. }) {
+                std::mem::size_of::<OttPoster>()
+            } else {
+                if entry.poster.is_empty() { continue; }
+                let Some(bytes) = entry.poster.len().checked_add(32) else { continue; };
+                bytes
+            };
+            if reserved > self.bytes { continue; }
+            // Failed candidates also consume their reservation, so refused
+            // URLs cannot keep cloning after the aggregate work budget expires.
+            self.bytes -= reserved;
             let art = if matches!(entry.media, MediaLocator::Local { .. }) {
                 runtime.local_entry_art(entry)
             } else { entry_poster(entry) };
@@ -42,8 +56,7 @@ impl Budget {
                 OttPoster::Plex { key, .. } => key.len(),
                 OttPoster::Local { .. } => std::mem::size_of::<OttPoster>(),
             };
-            if bytes > self.bytes { continue; }
-            self.bytes -= bytes;
+            if bytes > reserved { return None; }
             return Some(art);
         }
         None
@@ -78,7 +91,7 @@ fn categories(runtime: &Runtime) -> HashMap<String, Summary> {
 
 pub(super) fn decorate(runtime: &Runtime, rows: &mut [plx_screens::ott::OttRow]) {
     if !eligible(runtime) { return; }
-    let summaries = (runtime.page == "categories").then(|| categories(runtime));
+    let mut summaries = (runtime.page == "categories").then(|| categories(runtime));
     for item in rows {
         match &item.action {
             OttAction::SelectProvider(id) => {
@@ -98,11 +111,11 @@ pub(super) fn decorate(runtime: &Runtime, rows: &mut [plx_screens::ott::OttRow])
                 item.content_title = Some(if category.is_empty() {
                     msg::browse_library_all().into()
                 } else { item.title.clone() });
-                if let Some(summary) = summaries.as_ref().and_then(|map| map.get(category)) {
+                if let Some(summary) = summaries.as_mut().and_then(|map| map.remove(category)) {
                     item.detail = msg::browse_search_items(summary.count.min(i64::MAX as usize) as i64);
                     // Representative member artwork is a collection thumbnail,
                     // not an invented folder synopsis or new playable locator.
-                    item.poster = summary.poster.clone();
+                    item.poster = summary.poster;
                 }
             }
             OttAction::ShowFavorites if runtime.page == "categories" => {

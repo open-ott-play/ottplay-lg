@@ -96,7 +96,7 @@ fn classic_category_projection_and_actions_stay_unchanged() {
 }
 
 #[test]
-fn representative_artwork_work_and_cloned_bytes_are_bounded_without_hiding_categories() {
+fn representative_artwork_visits_and_admitted_payload_are_bounded_without_hiding_categories() {
     let _lock = plx_base::testlock::serial();
     let mut app = fixture();
     let runtime = app.ott.as_mut().unwrap();

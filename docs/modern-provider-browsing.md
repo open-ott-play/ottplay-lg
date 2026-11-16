@@ -71,8 +71,8 @@ preferred to `imglr`; validated inherited artwork remains a fallback. The image
 request does not
 borrow VPortal or Plex authentication headers. Existing request, byte and decode
 limits remain in force; no browser artwork proxy or HTTPS downgrade was added.
-Both presentations retain the shared aspect-fit image renderer. A supplied URL
-still needs a successful fetch and sufficient space in the detail panel.
+The selected-item detail panel retains its shared aspect-fit image renderer. A
+supplied URL still needs a successful fetch and sufficient panel space.
 
 ## Local artwork retention
 
