@@ -1453,6 +1453,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
         runtime.multiview_driver = driver;
         return response;
     }
+    if inv.action == super::command_activity_remote::ACTION {
+        return Some(super::command_activity_remote::command(runtime, inv));
+    }
     if inv.action == super::preplay_remote::ACTION {
         return Some(super::preplay_remote::command(runtime, inv));
     }
@@ -1686,6 +1689,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             data["multiview"] = admission;
             data["multiview_recovery"] = recovery;
             data[super::preplay_remote::ACTION] = super::preplay_remote::capability();
+            data[super::command_activity_remote::ACTION] = super::command_activity_remote::capability();
             data["native_playback_capture"] = json!({"version":1,"operations":["start","status","read","stop"],
                 "default_duration_s":30,"min_duration_s":5,"max_duration_s":60,
                 "sample_interval_ms":1000,"max_records":64});
