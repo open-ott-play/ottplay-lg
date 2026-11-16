@@ -4,6 +4,9 @@ use super::*;
 #[path = "progressive_playback.rs"]
 mod progressive_playback;
 
+#[path = "live_startup_recovery.rs"]
+mod live_startup_recovery;
+
 #[path = "catalog_snapshot_progressive.rs"]
 mod catalog_snapshot_progressive;
 

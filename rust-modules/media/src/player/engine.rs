@@ -2205,8 +2205,12 @@ fn start_bufferfeed_inner(
         let origin = su.origin;
         Some((origin,path))
         };
-        if external.is_some() {
-            SHARED.duration_ns.store(crate::route::external_duration_ns(ps),Ordering::Relaxed);
+        // Freeze the admitted duration with this source/worker. HLS inspection
+        // uses exactly zero for live media and a positive sum for finite media.
+        // Later callback/global duration changes cannot grant master traversal.
+        let external_duration = external.as_ref().map(|_| crate::route::external_duration_ns(ps));
+        if let Some(duration) = external_duration {
+            SHARED.duration_ns.store(duration,Ordering::Relaxed);
         }
         // Two-lane feed: the demuxer routes es=1 video to aq_video and es=2 audio to
         // aq_audio, each with its own cap + feeder.
@@ -2266,9 +2270,9 @@ fn start_bufferfeed_inner(
                 if let Some(source)=external {
                     if let Some(playback) = observed_playback {
                         crate::ff::with_observed_hls_worker(native_epoch, playback, ||
-                            crate::ff::demux_external(off,native_epoch,source,video_codec,acodec,hls_audio,aqp,aqap,hsp,text_style))
+                            crate::ff::demux_external(off,native_epoch,source,external_duration,video_codec,acodec,hls_audio,aqp,aqap,hsp,text_style))
                     } else {
-                        crate::ff::demux_external(off,native_epoch,source,video_codec,acodec,hls_audio,aqp,aqap,hsp,text_style)
+                        crate::ff::demux_external(off,native_epoch,source,external_duration,video_codec,acodec,hls_audio,aqp,aqap,hsp,text_style)
                     }
                 } else if let Some((origin,path))=transport {
                     crate::ff::demux(off, native_epoch, origin, path, acodec, abr, auto_original, aqp, aqap, hsp, text_style)

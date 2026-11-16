@@ -3546,6 +3546,14 @@ impl Spinner {
         spinner.dot_r = Self::OTT_BOX * 0.10;
         spinner
     }
+    /// Fullscreen OTT playback/loading mark, matching the desktop buffering box:
+    /// 10px from the top/left of a 1280-wide design, with a 30px square. This
+    /// 1920-wide surface scales both by 1.5. Modal and inline waits keep their
+    /// caller-owned placement through `ott_orbit` or the ordinary spinner.
+    pub fn ott_playback() -> Self {
+        let centre = Self::OTT_BOX / 3.0 + Self::OTT_BOX * 0.5;
+        Self::ott_orbit(centre, centre)
+    }
     /// The **page** radius — a wait that owns a whole surface: the [`StatusOverlay`] read-out, and
     /// any screen whose content is simply not there yet. Sized to be read from the couch.
     ///
@@ -3701,6 +3709,24 @@ mod ott_orbit_tests {
                     let distance = ((dot.cx() - other.cx()).powi(2) + (dot.cy() - other.cy()).powi(2)).sqrt();
                     assert!(distance > (dot.w + other.w) * 0.5, "dots must retain a clear centre and gaps");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn playback_orbit_stays_in_the_desktop_top_left_buffering_box() {
+        let _serial = plx_base::testlock::serial();
+        // Desktop #buffering: left/top 10px, width/height 30px on 1280x720.
+        // Every animated dot, including its rim, must fit the corresponding
+        // 15,15..60,60 box on the native 1920x1080 canvas.
+        let mark = Spinner::ott_playback();
+        assert_eq!((mark.cx, mark.cy), (37.5, 37.5));
+        for ms in (0..Spinner::OTT_PERIOD_MS).step_by(50) {
+            let dots = rectangles(Spinner::ott_playback().phase(ms));
+            assert_eq!(dots.len(), 4);
+            for (_, dot) in dots {
+                assert!(dot.x >= 15.0 && dot.y >= 15.0);
+                assert!(dot.x + dot.w <= 60.0 && dot.y + dot.h <= 60.0);
             }
         }
     }

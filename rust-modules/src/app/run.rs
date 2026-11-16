@@ -3168,8 +3168,7 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                         plx_ui::placeholder::note(plx_ui::Painter::root(),
                             plx_ui::placeholder::Reason::WorkingReadout,
                             plx_platform::i18n::msg::browse_library_loading());
-                        plx_ui::widgets::Spinner::ott_orbit(plx_ui::Rect::FULL.w * 0.5,
-                            plx_ui::Rect::FULL.h * 0.5).phase(fr.now)
+                        plx_ui::widgets::Spinner::ott_playback().phase(fr.now)
                             .draw(&plx_ui::Env::inert(), plx_ui::Painter::root());
                         return;
                     }

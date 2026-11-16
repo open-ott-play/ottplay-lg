@@ -50,7 +50,7 @@ impl OttScreen {
                 else { plx_machine::machine::UiMode::Modern }, frame.measure);
         }
         plx_ui::placeholder::note(frame.painter, plx_ui::placeholder::Reason::WorkingReadout, msg::browse_library_loading());
-        plx_ui::widgets::Spinner::ott_orbit(Rect::FULL.w * 0.5, Rect::FULL.h * 0.5)
+        plx_ui::widgets::Spinner::ott_playback()
             .phase(frame.cx.tick.ms).draw(&plx_ui::Env::inert(), frame.painter);
     }
 }

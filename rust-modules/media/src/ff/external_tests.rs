@@ -70,7 +70,7 @@ fn decode(source: ExternalSource, seek: i64) -> Vec<i64> {
     let th = std::thread::spawn(move || {
         plx_base::eventlog::with_private_log(|| {
             let off = plx_base::task::OffFrame::for_test();
-            demux_external(&off, 0, source, "h264".into(), String::new(), None, v, a, h, crate::player::text_style::TextStyle::current(Default::default()));
+            demux_external(&off, 0, source, None, "h264".into(), String::new(), None, v, a, h, crate::player::text_style::TextStyle::current(Default::default()));
             std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default()
         })
     });
@@ -822,7 +822,7 @@ fn check_external_hls_audio_presentation(with_subtitles: bool, exercise_subtitle
         let source = ExternalSource::Hls(plx_data::ott::http_url(&url).unwrap());
         let worker = std::thread::spawn(move || {
             let off = plx_base::task::OffFrame::for_test();
-            demux_external(&off, 0, source, "h264".into(), "aac".into(), Some(HlsTrackSelection::Rendition(selected)),
+            demux_external(&off, 0, source, Some(info.duration_ns), "h264".into(), "aac".into(), Some(HlsTrackSelection::Rendition(selected)),
                 v, a, h, crate::player::text_style::TextStyle::current(Default::default()));
         });
         let mut video_pts = Vec::new();
@@ -1323,7 +1323,7 @@ fn external_live_hls_subtitles_use_committed_mux_video_clock_and_route_selection
     let selected = playback.clone();
     let worker = std::thread::spawn(move || {
         let off = plx_base::task::OffFrame::for_test();
-        demux_external(&off, 0, source, "h264".into(), "aac".into(), Some(HlsTrackSelection::Rendition(selected)),
+        demux_external(&off, 0, source, Some(info.duration_ns), "h264".into(), "aac".into(), Some(HlsTrackSelection::Rendition(selected)),
             v, a, h, TextStyle::current(Default::default()));
     });
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -979,3 +979,19 @@ fn live_retry_after_actual_catalog_rpc_and_back_keeps_the_rpc_selected_channel()
     let decision = runtime.retry_continuity(due, &["first", "second"], true);
     assert!(matches!(decision, continuity::Decision::Start { ref entry_id, reason: continuity::Reason::LiveRetry, .. } if entry_id == "second"));
 }
+
+#[test]
+fn only_checked_live_short_body_transport_evidence_reopens_the_same_source() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    for outcome in [Some(TraceOutcome::Transport), None, Some(TraceOutcome::Refused),
+        Some(TraceOutcome::Inconclusive)] {
+        let app = live_failure_with(IoFailureDetails::Hls {
+            exit: DemuxExitClass::HlsShortBody, outcome,
+        });
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(runtime.continuity.pending_retry().is_some(), outcome == Some(TraceOutcome::Transport));
+        if let Some(retry) = runtime.continuity.pending_retry() { assert_eq!(retry.after, "first"); }
+        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    }
+}
