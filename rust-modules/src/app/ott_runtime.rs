@@ -325,6 +325,8 @@ mod preplay_remote;
 mod command_activity_remote;
 #[path = "ott_preview.rs"]
 mod preview;
+#[path = "ott_browse_projection.rs"]
+mod browse_projection;
 #[path = "ott_profile_edit.rs"]
 mod profile_edit;
 #[path = "ott_profile_setup.rs"]
@@ -3850,6 +3852,7 @@ impl Runtime {
                 _ => true,
             });
         }
+        browse_projection::decorate(self, &mut rows);
         let selected_row = match self.page {
             "profile-setup" => self.setup.as_ref().map(|setup| setup.selected_key.clone()),
             "providers" => Some(self.provider.canonical_id().into()),
@@ -3934,7 +3937,7 @@ impl Runtime {
             classic_preferences: self.classic_preferences(),
             volume_available: self.playing.is_some(),
             category_label: self.category_label(),
-            preview_context: preview::context(self),
+            preview_context: preview::context(self).or_else(|| browse_projection::context(self)),
             order_context: self.local_order_key(),
             random_context: random::context(self, &rows),
             catalog_progress,
@@ -7447,18 +7450,8 @@ fn handle_action(
     // retaining the same policy gates without cancelling the current source.
     let selected = match selected {
         OttAction::Back
-            if matches!(
-                runtime.page,
-                "menu-items"
-                    | "interface-mode"
-                    | "sleep-timer"
-                    | "osd-opacity"
-                    | "permanent-clock"
-                    | "classic-page-size"
-                    | "classic-list-position"
-                    | "classic-list-arrows"
-                    | "numeric-seek-step"
-            ) =>
+            if osd_ui::is_picker_page(runtime.page)
+                || matches!(runtime.page, "menu-items" | "interface-mode" | "sleep-timer") =>
         {
             OttAction::ShowSettings
         }

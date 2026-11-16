@@ -61,12 +61,10 @@ fn addressed_source_editor_and_cancel_preserve_current_source_in_both_modes() {
             let identity = route::playback_identity(&app.player.session);
             let generation = app.ott.as_ref().unwrap().generation;
             let view = app.ott.as_ref().unwrap().view();
-            let start = view.rows.iter().position(|row| row.id == "a").unwrap();
             let target = view.rows.iter().position(|row| matches!(&row.action,
                 OttAction::EditProfile { target, .. } if target == "b"))
                 .expect("every editable saved kind exposes its addressed edit row");
-            for _ in start..target { press(&mut app, Key::Down); }
-            press(&mut app, Key::Ok);
+            super::super::super::profile_setup::open_body_row(&mut app, &view.rows[target].action);
             let runtime = app.ott.as_ref().unwrap();
             let expected = source_profile(kind, "b");
             if matches!(kind, ProviderKind::Xtream | ProviderKind::Stalker) {

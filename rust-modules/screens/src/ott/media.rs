@@ -170,15 +170,40 @@ fn valid_shelves(snapshot: &OttView) -> bool {
     covered.into_iter().all(|covered| covered)
 }
 
-pub(super) fn presentation(view: &OttView) -> Option<bool> {
-    if view.rows.is_empty() { return None; }
-    let mut landscape = true;
-    for row in &view.rows {
-        let media = row.media.as_ref()?;
-        if !row.enabled || !matches!(row.action, OttAction::Play(_)) { return None; }
-        landscape &= matches!(media.kind, OttMediaKind::LiveChannel | OttMediaKind::Episode);
+pub(super) fn source(view: &OttView) -> Option<&String> {
+    view.shelf_context.as_ref().or(view.preview_context.as_ref())
+}
+
+/// A presentation role never grants another action or manufactures a Play ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Role { Playable, Container, Action }
+
+pub(super) fn role(row: &super::OttRow) -> Role {
+    match &row.action {
+        OttAction::Play(_) if row.media.is_some() => Role::Playable,
+        OttAction::SelectProvider(_) | OttAction::SelectProfile(_)
+        | OttAction::SelectManagedPlex { .. } | OttAction::SelectCategory(_)
+        | OttAction::SelectCategoryAt { .. } | OttAction::ShowProviders
+        | OttAction::ShowProfiles | OttAction::ShowCategories
+        | OttAction::ShowFavorites | OttAction::ShowCatalog => Role::Container,
+        _ => Role::Action,
     }
-    Some(landscape)
+}
+
+pub(super) fn card(row: &super::OttRow) -> bool {
+    row.enabled && role(row) != Role::Action
+}
+
+pub(super) fn presentation(view: &OttView) -> Option<bool> {
+    // Settings, editors and owner-built forms keep their existing input model.
+    let navigation = matches!(view.page_id.split(':').next(),
+        Some("providers" | "profiles" | "categories" | "channels" | "favorites"));
+    let mut cards = view.rows.iter().filter(|row| card(row)
+        && (navigation || role(row) == Role::Playable)).peekable();
+    if cards.peek().is_none() { return None; }
+    if !navigation && view.rows.iter().any(|row| role(row) != Role::Playable) { return None; }
+    Some(cards.all(|row| role(row) == Role::Container || row.media.as_ref()
+        .is_some_and(|media| matches!(media.kind, OttMediaKind::LiveChannel | OttMediaKind::Episode))))
 }
 
 pub(super) fn style(landscape: bool) -> cards::RowStyle {
@@ -216,24 +241,34 @@ pub(super) struct Cards<'a> {
 
 impl Cards<'_> {
     fn row(&self, i: usize) -> &super::OttRow {
-        &self.snapshot.rows[self.rows.map_or(i, |rows| rows[i])]
+        &self.snapshot.rows[self.rows.map_or_else(|| self.index[&self.keys[i]], |rows| rows[i])]
     }
 }
 
 impl<H: AppLike<Memory = PageMemory>> CardSource<H> for Cards<'_> {
     fn len(&self) -> usize { self.keys.len() }
     fn elem(&self, i: usize) -> u32 { self.keys[i] }
-    fn index_of(&self, elem: &u32) -> Option<usize> { self.index.get(elem).copied() }
-    fn art(&self, i: usize) -> Art<'_> {
-        let landscape = matches!(self.row(i).media.as_ref().map(|media| media.kind), Some(OttMediaKind::LiveChannel | OttMediaKind::Episode));
-        let res = if landscape { (640, 360) } else { (420, 630) };
-        match &self.row(i).poster {
-            Some(OttPoster::Plex { server, key }) => Art::Thumb { sid: *server, key, res },
-            Some(OttPoster::Http { url }) => Art::Http { url, res },
-            Some(OttPoster::Local { key }) => Art::Local { key },
-            None => Art::Poster(None),
+    fn index_of(&self, elem: &u32) -> Option<usize> {
+        if self.rows.is_some() || self.keys.len() == self.snapshot.rows.len() {
+            self.index.get(elem).copied()
+        } else {
+            // Canonical row order is monotonic even when restored focus keys
+            // are not. Management gaps must not turn each focus lookup into
+            // a full catalogue scan.
+            let row = *self.index.get(elem)?;
+            self.keys.binary_search_by_key(&row, |key| self.index[key]).ok()
         }
     }
+    fn art(&self, i: usize) -> Art<'_> {
+        let landscape = role(self.row(i)) == Role::Container || matches!(self.row(i).media.as_ref().map(|media| media.kind), Some(OttMediaKind::LiveChannel | OttMediaKind::Episode));
+        let res = if landscape { (640, 360) } else { (420, 630) };
+        // Live logos are painted contained in overlay; film/episode covers keep
+        // the shared card stack's existing crop and focus treatment.
+        if contained(self.row(i)) {
+            Art::Poster(None)
+        } else { poster_art(self.row(i), res) }
+    }
+
     fn label(&self, i: usize) -> TileLabel {
         label(self.row(i), self.landscape, &crate::registry::captions::policy())
     }
@@ -247,6 +282,9 @@ impl<H: AppLike<Memory = PageMemory>> CardSource<H> for Cards<'_> {
     fn overlay(&self, painter: plx_ui::Painter, i: usize, tile: &cards::Tile,
         measure: &dyn plx_machine::machine::Measure) {
         let row = self.row(i);
+        if row.poster.is_some() && contained(row) {
+            plx_ui::widgets::card_contained(painter, tile.rect, poster_art(row, (640, 360)), tile.radius);
+        }
         if row.poster.is_none() {
             // An absent image cannot identify the tile. Keep its canonical name
             // on the empty face even when the focused caption is elsewhere.
@@ -373,10 +411,23 @@ impl<H: AppLike<Memory = PageMemory>> Part<H> for View<'_> {
     }
 }
 
+fn contained(row: &super::OttRow) -> bool {
+    role(row) == Role::Container || matches!(row.media.as_ref().map(|media| media.kind), Some(OttMediaKind::LiveChannel))
+}
+
+fn poster_art(row: &super::OttRow, res: (i32, i32)) -> Art<'_> {
+    match &row.poster {
+        Some(OttPoster::Plex { server, key }) => Art::Thumb { sid: *server, key, res },
+        Some(OttPoster::Http { url }) => Art::Http { url, res },
+        Some(OttPoster::Local { key }) => Art::Local { key },
+        None => Art::Poster(None),
+    }
+}
+
 /// Preserve the file identity when the poster policy leaves only a details line.
 /// A provider/kind label is not a per-file state, so it must not replace that identity.
 fn card_title(row: &super::OttRow) -> &str {
-    if row.id.starts_with("favorite:") {
+    if role(row) == Role::Container || row.id.starts_with("favorite:") {
         row.content_title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or(&row.title)
     } else { &row.title }
 }
@@ -450,6 +501,49 @@ mod label_tests {
     fn text(label: &TileLabel) -> Vec<String> {
         [&label.title, &label.caption].into_iter().flatten().map(|s| s.to_string_lossy().into_owned()).collect()
     }
+    #[test]
+    fn navigation_roles_keep_canonical_actions_and_live_or_container_art_is_contained() {
+        let mut row = file();
+        assert_eq!(role(&row), Role::Playable);
+        assert!(!contained(&row));
+        row.media.as_mut().unwrap().kind = OttMediaKind::LiveChannel;
+        assert!(contained(&row));
+        row.media.as_mut().unwrap().kind = OttMediaKind::Movie;
+        assert!(!contained(&row), "movie covers keep their existing crop");
+        row.media = None;
+        row.action = OttAction::SelectCategoryAt { context:"current-source".into(), category:"films".into() };
+        assert_eq!(role(&row), Role::Container);
+        assert!(contained(&row));
+        assert_eq!(card_title(&row), "Fixture One.mp4");
+        assert!(card(&row));
+        row.enabled = false;
+        assert!(!card(&row), "disabled navigation remains an inert management row");
+        row.enabled = true;
+        row.action = OttAction::EditSetting("profile.add".into());
+        assert_eq!(role(&row), Role::Action);
+        assert!(!card(&row));
+    }
+
+    #[test]
+    fn filtered_grid_rows_reference_the_canonical_table_instead_of_card_positions() {
+        let mut view = OttView::default();
+        view.page_id = "profiles:m3u".into();
+        let mut control = file(); control.id = "manage".into();
+        control.action = OttAction::EditSetting("profile.add".into());
+        let mut container = file(); container.id = "profile".into(); container.media = None;
+        container.action = OttAction::SelectProfile("profile".into());
+        let mut disabled = container.clone(); disabled.id = "disabled".into(); disabled.enabled = false;
+        view.rows = vec![control, container, disabled];
+        assert_eq!(presentation(&view), Some(true));
+        let keys = vec![17];
+        let index = [(17, 1)].into_iter().collect();
+        let cards = Cards { landscape:true, snapshot:&view, keys:&keys, index:&index, rows:None };
+        assert_eq!(cards.row(0).id, "profile");
+        assert!(matches!(&cards.row(0).action, OttAction::SelectProfile(id) if id == "profile"));
+        view.page_id = "settings".into();
+        assert_eq!(presentation(&view), None, "settings remain forms despite supplied artwork");
+    }
+
     #[test]
     fn local_card_keeps_file_name_in_the_only_enabled_caption_line() {
         let _locale = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);

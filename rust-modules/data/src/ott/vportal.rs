@@ -393,10 +393,10 @@ fn walk(
             let synopsis = SynopsisSpan::new(&description, synopsis_start);
             // Prefer an item's portrait to inherited fanart when it supplies its own artwork.
             let poster = [
-                item.get("imglr").and_then(Value::as_str),
                 item.get("img").and_then(Value::as_str),
-                Some(parent.landscape.as_str()),
+                item.get("imglr").and_then(Value::as_str),
                 Some(parent.poster.as_str()),
+                Some(parent.landscape.as_str()),
             ]
             .into_iter()
             .flatten()
@@ -797,7 +797,7 @@ mod tests {
         let root = PortalRequest::root().parse_response(r#"{"type":"videoportal","items":[{"type":"multistream","title":"Series","year":2026,"duration":"45 мин","description":"<p>История &amp; рассказ.</p><p>&lt;b&gt;literal&lt;/b&gt; &amp;lt;b&amp;gt;escaped&amp;lt;/b&amp;gt;\nПоследний абзац.</p>","img":"/posters/h/series.jpg","imglr":"/posters/l/series.jpg","request":{"id":"series"}}]}"#, &profile()).unwrap();
         let page = root.pending[0].parse_response(r#"{"type":"multistream","items":[{"type":"stream","title":"One","request":{"id":"one"}},{"type":"next","request":{}}]}"#, &profile()).unwrap();
         let first = &page.catalog.entries[0];
-        assert_eq!(first.poster, "https://portal.invalid:443/posters/l/series.jpg");
+        assert_eq!(first.poster, "https://portal.invalid:443/posters/h/series.jpg");
         assert_eq!(first.description, "2026\n45 мин\nИстория & рассказ.\n\nliteral &lt;b&gt;escaped&lt;/b&gt;\nПоследний абзац.");
         let next = page.pending[0].parse_response(r#"{"type":"multistream","items":[{"type":"stream","title":"Two","img":"/posters/h/two.jpg","request":{"id":"two"}}]}"#, &profile()).unwrap();
         let second = &next.catalog.entries[0];
@@ -906,6 +906,45 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn portrait_art_precedes_landscape_with_validated_relative_fallbacks() {
+        for (portrait, landscape, expected) in [
+            ("covers/portrait.jpg", "/landscape.jpg", "https://portal.invalid:443/covers/portrait.jpg"),
+            ("javascript:bad", "/landscape.jpg", "https://portal.invalid:443/landscape.jpg"),
+            ("", "/landscape.jpg", "https://portal.invalid:443/landscape.jpg"),
+            ("/portrait.jpg", "javascript:bad", "https://portal.invalid:443/portrait.jpg"),
+            ("javascript:bad", "data:bad", ""),
+        ] {
+            let body = serde_json::json!({"type":"stream", "title":"Film", "url":"/play",
+                "img":portrait, "imglr":landscape});
+            let page = parse_vportal_response(&body.to_string(), &profile(), "").unwrap();
+            assert_eq!(page.catalog.entries[0].poster, expected);
+        }
+    }
+
+    #[test]
+    fn inherited_portrait_is_preferred_but_own_landscape_still_overrides_parent_art() {
+        for (parent_art, own_art, expected) in [
+            (serde_json::json!({"img":"/parent.jpg", "imglr":"/parent-wide.jpg"}), serde_json::json!({}), "/parent.jpg"),
+            (serde_json::json!({"imglr":"/parent-wide.jpg"}), serde_json::json!({}), "/parent-wide.jpg"),
+            (serde_json::json!({"img":"/parent.jpg", "imglr":"/parent-wide.jpg"}), serde_json::json!({"imglr":"/own-wide.jpg"}), "/own-wide.jpg"),
+        ] {
+            let mut parent = parent_art;
+            parent["type"] = "multistream".into();
+            parent["title"] = "Series".into();
+            parent["request"] = serde_json::json!({"id":"series"});
+            let root = PortalRequest::root().parse_response(
+                &serde_json::json!({"type":"videoportal", "items":[parent]}).to_string(), &profile()).unwrap();
+            let mut leaf = own_art;
+            leaf["type"] = "stream".into();
+            leaf["title"] = "Episode".into();
+            leaf["request"] = serde_json::json!({"id":"episode"});
+            let page = root.pending[0].parse_response(
+                &serde_json::json!({"type":"multistream", "items":[leaf]}).to_string(), &profile()).unwrap();
+            assert_eq!(page.catalog.entries[0].poster, format!("https://portal.invalid:443{expected}"));
+        }
+    }
+
     #[test]
     fn art_fallback_and_request_resolution_do_not_reuse_expired_urls() {
         let page = parse_vportal_response(r#"{"type":"category","items":[{"type":"stream","title":"A","url":"/expired","request":{"id":1},"imglr":"javascript:bad","img":"/poster.jpg"},{"type":"stream","title":"B","url":"/play"}]}"#, &profile(), "").unwrap();

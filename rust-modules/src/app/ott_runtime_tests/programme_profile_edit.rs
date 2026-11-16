@@ -54,11 +54,9 @@ fn edit(app: &App, target: &str) -> OttAction {
     }).expect("each enabled Stalker profile has an explicit Edit row")
 }
 fn press(app: &mut App, key: Key) {
-    let tick = next_tick(app);
-    bridge::frame(&mut app.pages, &mut app.bridge, tick, bridge::script_key(key, tick));
-    runtime_tick(app);
-    settle_pages(app);
+    super::super::profile_setup::browse_key(app, key);
 }
+
 fn action(app: &mut App, action: OttAction) {
     let reply = app.pages.top_page().unwrap();
     app.pages.emit(MachineId::Nav, Fx::App(AppFx::Ott(OttOut::Action { reply, action })));
@@ -95,13 +93,11 @@ fn profile_edit_row_keyboard_and_cancel_preserve_active_source_and_playback_in_b
         let view = app.ott.as_ref().unwrap().view();
         assert_eq!(app.ott.as_ref().unwrap().interface_mode().index(), mode);
         assert_eq!(app.bridge.ui_mode().index(), mode);
-        let start = view.rows.iter().position(|row| row.id == "a").unwrap();
         let target = view.rows.iter().position(|row| matches!(&row.action,
             OttAction::EditProfile { target, .. } if target == "b")).unwrap();
         assert_eq!(view.rows[target].title, "Edit Portal b");
         assert_eq!(view.rows[target].content_title.as_deref(), Some("Portal b"));
-        for _ in start..target { press(&mut app, Key::Down); }
-        press(&mut app, Key::Ok);
+        super::super::profile_setup::open_body_row(&mut app, &view.rows[target].action);
         let runtime = app.ott.as_ref().unwrap();
         assert_eq!(runtime.setup.as_ref().unwrap().original.as_ref(), Some(&portal("b")));
         assert_eq!(runtime.generation, generation, "opening must not retire the catalogue");

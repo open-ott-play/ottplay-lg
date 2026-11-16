@@ -700,3 +700,153 @@ fn real_catalog_replacement_rejects_old_discovery_without_suppressing_a_valid_ow
         assert!(!app.ott.as_ref().unwrap().metadata_done.load(Ordering::Acquire));
     }
 }
+
+// These state fixtures accept already-completed authorized metadata. Registering
+// a local PosterKey performs no IO/decode; the ordinary texture store still owns it.
+fn cover_context(app: &App, id: &str) -> Context {
+    let runtime = app.ott.as_ref().unwrap();
+    let profile = runtime.effective_profile().unwrap().clone();
+    let mut entry = runtime.catalog.entries[0].clone();
+    entry.id = id.into();
+    entry.media = MediaLocator::Local { relative_path: format!("{id}.mp4") };
+    let selection = runtime.local_profile_selection(&profile).unwrap();
+    bound_context(runtime, profile, entry, id.into(), &selection, None, None).unwrap()
+}
+fn accept_cover(app: &mut App, context: Context, poster: Option<&str>) -> Option<PosterKey> {
+    let generation = {
+        let runtime = app.ott.as_mut().unwrap();
+        if let Some(entry) = runtime.catalog.entries.iter_mut().find(|entry| entry.id == context.entry.id) {
+            *entry = context.entry.clone();
+        } else { runtime.catalog.entries.push(context.entry.clone()); }
+        runtime.page = "channels";
+        runtime.metadata_target = Some((context.profile.id.clone(), context.selection_id.clone()));
+        runtime.metadata_generation
+    };
+    let data = Discovered { entry: context.entry.clone(), poster: poster.map(str::to_owned),
+        subtitles: Vec::new(), complete: true };
+    accept(app, generation, Completion { context, result: Outcome::Preview(Ok(data)) });
+    app.ott.as_ref().unwrap().local_assets.preview.as_ref().unwrap().art
+}
+fn only_cached_art(runtime: &mut Runtime) {
+    runtime.local_assets.preview = None;
+    runtime.local_assets.installed = None;
+}
+
+#[test]
+fn ordinary_local_cover_survives_another_successful_preview_without_copying_descriptions() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset;
+    let (_guard, mut app, _root) = fixture();
+    let mut first = cover_context(&app, "first");
+    first.entry.description = "Large synopsis. ".repeat(8000);
+    let entry = first.entry.clone();
+    let key = accept_cover(&mut app, first, Some("first.jpg")).expect("validated local art");
+    let second = cover_context(&app, "second");
+    assert!(accept_cover(&mut app, second, Some("second.jpg")).is_some());
+    let runtime = app.ott.as_ref().unwrap();
+    assert_eq!(runtime.local_entry_art(&entry), Some(OttPoster::Local { key }));
+    let cache = runtime.local_assets.art_cache.borrow();
+    assert_eq!(cache.rows.len(), 2);
+    assert!(cache.bytes < entry.description.len(), "cache retains proofs, not synopsis bytes");
+}
+
+#[test]
+fn local_cached_art_rechecks_replaced_profile_root_generation_id_and_locator() {
+    let _serial = plx_base::testlock::serial();
+    for change in ["profile", "root", "generation", "authority", "id", "locator"] {
+        let _reset = Reset;
+        let (_guard, mut app, root) = fixture();
+        let context = cover_context(&app, "first");
+        let entry = context.entry.clone();
+        assert!(accept_cover(&mut app, context, Some("first.jpg")).is_some());
+        let runtime = app.ott.as_mut().unwrap();
+        only_cached_art(runtime);
+        assert!(runtime.local_entry_art(&entry).is_some());
+        match change {
+            "profile" => {
+                let Some(transient::TransientMedia::Local(session)) = runtime.transient.accepted.as_mut() else { panic!("local owner") };
+                session.profile.name.push_str(" replacement");
+            }
+            "root" | "generation" | "authority" => {
+                let mut replacement = root.clone();
+                if change == "generation" { replacement.generation += 1; }
+                if change == "authority" { replacement.authority_ref = AuthorityRef(2); }
+                runtime.local_inventory.install(vec![local_fixture::acquire_root(replacement)], 7);
+            }
+            "id" => runtime.catalog.entries[0].id = "replacement".into(),
+            "locator" => runtime.catalog.entries[0].media = MediaLocator::Local { relative_path: "replacement.mp4".into() },
+            _ => unreachable!(),
+        }
+        assert!(runtime.local_entry_art(&entry).is_none(), "old artwork survived {change} replacement");
+        assert!(runtime.local_assets.art_cache.borrow().rows.is_empty());
+    }
+}
+
+#[test]
+fn local_art_cache_bounds_count_bytes_and_evicts_the_least_recently_used_proof() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset;
+    let (_guard, mut app, _root) = fixture();
+    let base = cover_context(&app, "first");
+    let key = accept_cover(&mut app, base.clone(), Some("first.jpg")).unwrap();
+    let mut cache = ArtCache::default();
+    let runtime = app.ott.as_mut().unwrap();
+    for index in 0..ART_CACHE_ITEMS {
+        let mut context = base.clone();
+        context.entry.id = format!("item-{index:02}");
+        context.selection_id = context.entry.id.clone();
+        runtime.catalog.entries.push(context.entry.clone());
+        cache.remember(&context, key);
+    }
+    assert_eq!(cache.rows.len(), ART_CACHE_ITEMS);
+    let first = runtime.catalog.entries.iter().find(|entry| entry.id == "item-00").unwrap();
+    assert_eq!(cache.get(runtime, first), Some(key));
+    let mut newest = base.clone();
+    newest.entry.id = "newest".into(); newest.selection_id = newest.entry.id.clone();
+    cache.remember(&newest, key);
+    assert!(cache.rows.contains_key("item-00"));
+    assert!(!cache.rows.contains_key("item-01"));
+    assert_eq!(cache.rows.len(), ART_CACHE_ITEMS);
+    assert!(cache.bytes <= ART_CACHE_BYTES);
+
+    let mut byte_limited = ArtCache::default();
+    let mut wide = base.clone();
+    // This is a source-owned profile label, not copied catalogue prose.
+    wide.profile.name = "x".repeat(40 * 1024);
+    for index in 0..10 {
+        wide.entry.id = format!("wide-{index}"); wide.selection_id = wide.entry.id.clone();
+        byte_limited.remember(&wide, key);
+        assert!(byte_limited.bytes <= ART_CACHE_BYTES);
+    }
+    assert!(byte_limited.rows.len() < 10);
+    assert!(!byte_limited.rows.contains_key("wide-0"));
+    assert!(byte_limited.rows.contains_key("wide-9"));
+    let before = byte_limited.bytes;
+    wide.profile.name = "x".repeat(ART_CACHE_BYTES);
+    wide.entry.id = "oversize".into(); wide.selection_id = wide.entry.id.clone();
+    byte_limited.remember(&wide, key);
+    assert!(!byte_limited.rows.contains_key("oversize"));
+    assert_eq!(byte_limited.bytes, before, "one oversized proof cannot evict valid cached artwork");
+}
+
+#[test]
+fn missing_art_is_not_cached_absence_and_favorites_keep_selected_target_authority() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = Reset;
+    let (_guard, mut app, _root) = fixture();
+    let context = cover_context(&app, "first");
+    assert!(accept_cover(&mut app, context.clone(), None).is_none());
+    assert!(app.ott.as_ref().unwrap().local_assets.art_cache.borrow().rows.is_empty());
+    let key = accept_cover(&mut app, context.clone(), Some("first.jpg")).unwrap();
+    assert!(accept_cover(&mut app, context.clone(), None).is_none());
+    assert_eq!(app.ott.as_ref().unwrap().local_entry_art(&context.entry), Some(OttPoster::Local { key }));
+    let mut favorite = context.clone();
+    favorite.selection_id = "favorite:only-selected".into();
+    let favorite_key = accept_cover(&mut app, favorite.clone(), Some("favorite.jpg")).unwrap();
+    let runtime = app.ott.as_mut().unwrap();
+    runtime.page = "favorites";
+    assert_eq!(runtime.local_assets.art_cache.borrow().rows.len(), 1, "favorite result adds no ordinary cache authority");
+    assert_eq!(runtime.local_entry_art(&context.entry), Some(OttPoster::Local { key: favorite_key }));
+    runtime.metadata_target = Some((favorite.profile.id, "favorite:different".into()));
+    assert!(runtime.local_entry_art(&context.entry).is_none(), "ordinary cached cover must not bypass selected-favorite guard");
+}

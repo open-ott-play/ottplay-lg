@@ -83,7 +83,7 @@ impl Drop for TempDir {
         plx_base::testscratch::remove_tree(&self.0);
     }
 }
-pub(super) fn acquire_root(descriptor: local::BoundSource) -> LocalSource {
+pub(in crate::app::ott_runtime) fn acquire_root(descriptor: local::BoundSource) -> LocalSource {
     let source = LocalSource::acquire_authorized(
         &plx_base::task::OffFrame::for_test(),
         descriptor,

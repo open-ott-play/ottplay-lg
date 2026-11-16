@@ -7,7 +7,7 @@ fn typed(revision: u64, ids: &[&str], kind: OttMediaKind) -> Arc<OttView> {
 }
 
 #[test]
-fn cards_require_typed_enabled_media_and_keep_unknown_or_action_rows_in_the_list() {
+fn mixed_media_keeps_cards_and_exposes_unknown_disabled_or_management_rows_in_browse() {
     let mut screen = OttScreen::new(EntryId(1), InstanceId(1));
     screen.install(typed(1, &["one", "two"], OttMediaKind::Movie));
     assert!(screen.grid_active());
@@ -16,9 +16,24 @@ fn cards_require_typed_enabled_media_and_keep_unknown_or_action_rows_in_the_list
         match change { 0 => view.rows[1].media = None, 1 => view.rows[1].enabled = false,
             _ => view.rows[1].action = OttAction::ShowSettings }
         screen.install(Arc::new(view));
-        assert!(!screen.grid_active());
-        assert!(screen.form.index_of(&"item:one".into()).is_some());
-        assert!(screen.form.index_of(&"item:two".into()).is_some());
+        assert!(screen.grid_active());
+        assert_eq!(screen.catalog_keys, vec![screen.keys["item:one"]]);
+        let _ = effects(|fx| screen.open_browse(fx));
+        assert!(screen.browse);
+        assert!(screen.form.index_of(&"item:one".into()).is_none(), "card content is not duplicated as controls");
+        let index = screen.form.index_of(&"item:two".into()).unwrap();
+        if change == 1 { assert!(screen.form.activate(index).is_none(), "disabled stays inert"); }
+        else if change == 0 {
+            assert!(matches!(screen.form.activate(index), Some(Activation::Action(
+                FormAction::Forward(OttAction::Play(id)))) if id == "two"),
+                "missing display metadata never rewrites the canonical runtime action");
+        } else {
+            assert!(matches!(screen.form.activate(index), Some(Activation::Action(
+                FormAction::Forward(OttAction::ShowSettings)))),
+                "a management action is never converted to Play by its supplied media facts");
+        }
+        let _ = effects(|fx| screen.close_browse(fx));
+        assert!(screen.grid_active());
     }
 }
 

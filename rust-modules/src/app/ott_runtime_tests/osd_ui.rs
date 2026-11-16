@@ -381,3 +381,50 @@ fn progress_group_draft_provider_navigation_aba_retires_the_original_save() {
     assert!(!r.saving);
     assert!(r.rx.try_recv().is_err());
 }
+
+#[test]
+fn all_typed_osd_picker_back_actions_preserve_source_pending_play_and_admitted_write() {
+    let _serial = plx_base::testlock::serial();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut app = mounted(mode);
+        for (id, page) in [
+            ("osdOpacity", "osd-opacity"), ("permanentTime", "permanent-clock"),
+            ("pageSize", "classic-page-size"), ("listPosition", "classic-list-position"),
+            ("arrowFun", "classic-list-arrows"), ("seek13Duration", "numeric-seek-step"),
+            ("showNumber", "classic-show-number"), ("showName", "classic-show-name"),
+            ("showProgram", "classic-show-program"), ("showDescription", "classic-show-description"),
+            ("showProgress", "classic-show-progress"),
+        ] {
+            act(&mut app, OttAction::EditSetting(id.into())).unwrap();
+            let mut runtime = app.ott.take().unwrap();
+            assert_eq!(runtime.page, page);
+            assert!(osd_ui::is_picker_page(page));
+            assert!(runtime.view().rows.iter().any(|row| row.id == "osd:back"
+                && row.action == OttAction::ShowSettings));
+            runtime.play_target = Some(PlaybackRequest::ordinary("retained-source", 123));
+            runtime.catalog_loading = true;
+            runtime.saving = true; // Model an already admitted save; do not start a worker.
+            let before = (runtime.generation, runtime.play_generation, runtime.playback_epoch,
+                runtime.play_target.clone(), runtime.cancel.load(Ordering::Acquire),
+                runtime.catalog_loading, runtime.save_playback_epoch);
+            let saved = serde_json::to_value(&runtime.saved).unwrap();
+            handle_action(&mut runtime, &mut app, OttAction::Back).unwrap();
+            assert_eq!(runtime.page, "settings", "{mode:?}/{page}");
+            assert_eq!((runtime.generation, runtime.play_generation, runtime.playback_epoch,
+                runtime.play_target.clone(), runtime.cancel.load(Ordering::Acquire),
+                runtime.catalog_loading, runtime.save_playback_epoch), before);
+            assert!(runtime.saving);
+            assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+            runtime.saving = false;
+            runtime.play_target = None;
+            app.ott = Some(runtime);
+        }
+        assert!(!osd_ui::is_picker_page("settings"), "group drafts retain their existing Back owner");
+        assert!(!osd_ui::is_picker_page("unknown-picker"));
+        for page in ["settings", "unknown-picker"] {
+            app.ott.as_mut().unwrap().page = page;
+            act(&mut app, OttAction::Back).unwrap();
+            assert_eq!(app.ott.as_ref().unwrap().page, "providers", "ordinary {page} Back is unchanged");
+        }
+    }
+}

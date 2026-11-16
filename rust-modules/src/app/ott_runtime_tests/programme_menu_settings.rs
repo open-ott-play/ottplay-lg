@@ -308,3 +308,58 @@ fn more_settings_language_returns_to_its_group_then_the_same_menu() {
     assert_eq!(route::playback_identity(&app.player.session), identity);
     assert!(!runtime.saving && runtime.play_target.is_none());
 }
+
+#[test]
+fn every_osd_picker_back_stays_in_player_settings_then_returns_to_same_menu() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for mode in [plx_machine::machine::UiMode::Classic, plx_machine::machine::UiMode::Modern] {
+        let mut app = catalog_app();
+        prepare(&mut app);
+        app.bridge.apply_ui_mode(mode);
+        let saved = serde_json::to_value(&app.ott.as_ref().unwrap().saved).unwrap();
+        let identity = route::playback_identity(&app.player.session);
+        let generation = app.ott.as_ref().unwrap().generation;
+        let epoch = app.ott.as_ref().unwrap().playback_epoch;
+        open_more(&mut app);
+        let menu = input_owner(&app);
+        choose_settings(&mut app);
+        let settings = input_owner(&app);
+        for id in ["osdOpacity", "permanentTime", "pageSize", "listPosition", "arrowFun",
+            "seek13Duration", "showNumber", "showName", "showProgram", "showDescription", "showProgress"] {
+            surface_action(&mut app, OttAction::EditSetting(id.into()));
+            assert!(osd_ui::is_picker_page(app.ott.as_ref().unwrap().page));
+            key(&mut app, Key::Back);
+            assert_eq!(app.ott.as_ref().unwrap().page, "settings", "{mode:?}/{id}");
+            assert_eq!(input_owner(&app), settings, "inner Back must keep the exact Settings surface");
+            assert_eq!(route::playback_identity(&app.player.session), identity);
+            assert_eq!(app.ott.as_ref().unwrap().generation, generation);
+            assert_eq!(app.ott.as_ref().unwrap().playback_epoch, epoch);
+            assert!(app.adapters.player.is_live());
+        }
+        // Existing grouped drafts retain their own Back hierarchy and unsaved value.
+        let group = action_ending(&app, "settings.open:lists");
+        surface_action(&mut app, group);
+        let pick = action_ending(&app, ":pick:pageSize");
+        surface_action(&mut app, pick);
+        let selected = action_ending(&app, ":choose:pageSize:10");
+        surface_action(&mut app, selected);
+        let draft_detail = app.ott.as_ref().unwrap().view().rows.into_iter()
+            .find(|row| row.id.ends_with(":pick:pageSize")).unwrap().detail;
+        let pick = action_ending(&app, ":pick:pageSize");
+        surface_action(&mut app, pick);
+        key(&mut app, Key::Back);
+        let view = app.ott.as_ref().unwrap().view();
+        assert_eq!(view.title, "Lists");
+        assert_eq!(view.rows.iter().find(|row| row.id.ends_with(":pick:pageSize")).unwrap().detail,
+            draft_detail, "inner group Back must preserve its uncommitted choice");
+        assert_eq!(input_owner(&app), settings);
+        key(&mut app, Key::Back); // Discard the group draft and return to root Settings.
+        assert_eq!(app.ott.as_ref().unwrap().view().selected_row.as_deref(), Some("settings.open:lists"));
+        key(&mut app, Key::Back);
+        assert_eq!(input_owner(&app), menu, "only the outer Settings Back returns to Menu");
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+        assert!(!runtime.saving && runtime.play_target.is_none());
+    }
+}
