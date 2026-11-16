@@ -1016,7 +1016,7 @@ fn modeled_successful_save_settles_classic_category_digits_and_global_favorites(
                 assert_eq!(runtime.saved.category, old_category);
                 assert_eq!(ids, favorite_ids, "include both active M3U and foreign Plex origin");
                 assert_eq!(view.rows[0].detail, "m3u · Numeric");
-                assert_eq!(view.rows[1].detail, "plex · Library");
+                assert_eq!(view.rows[1].detail, "plex · Library · Server");
             }
             _ => {
                 assert_eq!(runtime.page, "channels");

@@ -1082,7 +1082,7 @@ fn edited_all_uses_raw_add_picker_and_matches_remote_catalog_receipt() {
         },
     );
     assert_eq!(
-        app.ott.as_ref().unwrap().ordered_ids(),
+        commands::selected_ids(app.ott.as_ref().unwrap()),
         [beta.clone(), gamma.clone()]
     );
     let runtime_id = app.ott.as_ref().unwrap().remote.runtime().to_owned();
@@ -1131,7 +1131,12 @@ fn edited_all_uses_raw_add_picker_and_matches_remote_catalog_receipt() {
             item: alpha.clone(),
         },
     );
-    assert!(app.ott.as_ref().unwrap().ordered_ids().contains(&alpha));
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(commands::selected_ids(runtime).contains(&alpha));
+    // The editor changed navigation after startup was queued. A visible row
+    // does not renew that older pending continuation's input capability.
+    assert!(runtime.play_target.is_some());
+    assert!(runtime.ordered_ids().is_empty());
     assert_eq!(app.ott.as_ref().unwrap().catalog, raw_catalog());
 }
 

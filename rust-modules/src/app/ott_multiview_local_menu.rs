@@ -19,8 +19,10 @@ struct Pending {
     authority_epoch: u64,
     scene: Option<Fence>,
     return_page: &'static str,
+    page: Page,
     title: String,
     choices: Vec<(String, String, Choice)>,
+    selected: Option<usize>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fence {
@@ -43,11 +45,33 @@ fn fence(scene: multiview::SceneStatus) -> Fence {
             .collect(),
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Root,
     Slots,
     Sources(SlotId, usize),
+}
+
+impl State {
+    fn focus_parent(&mut self, from: Page) {
+        let Some(pending) = self.pending.as_mut() else { return; };
+        pending.selected = pending.choices.iter().position(|(_, _, choice)| match (from, choice) {
+            (Page::Slots, Choice::Page(Page::Slots)) => true,
+            (Page::Sources(slot, _), Choice::Page(Page::Sources(target, _))) => slot == *target,
+            _ => false,
+        });
+    }
+    fn back_destination(&mut self) -> (Option<Page>, &'static str) {
+        let Some(pending) = self.pending.take() else {
+            return (None, "menu");
+        };
+        let parent = match pending.page {
+            Page::Root => None,
+            Page::Slots => Some(Page::Root),
+            Page::Sources(..) => Some(Page::Slots),
+        };
+        (parent, pending.return_page)
+    }
 }
 #[derive(Clone, Copy)]
 enum Choice {
@@ -55,6 +79,7 @@ enum Choice {
     Layout(Layout),
     Source(SlotId, multiview_sources::SourceHandle),
     Focus(SlotId),
+    Stop(SlotId),
     Audio(AudioPolicy),
     Off,
 }
@@ -159,6 +184,13 @@ fn issue(
                     String::new(),
                     Choice::Audio(AudioPolicy::Explicit(Some(slot.slot))),
                 ));
+                if slot.status != "empty" || slot.source.is_some() {
+                    choices.push((
+                        format!("{name}: stop"),
+                        "Keep the other videos playing".into(),
+                        Choice::Stop(slot.slot),
+                    ));
+                }
             }
             choices.push((
                 "Layouts and audio".into(),
@@ -220,8 +252,10 @@ fn issue(
         authority_epoch: runtime.multiview_authority_epoch,
         scene: runtime.multiview.scene_status(runtime).map(fence),
         return_page,
+        page,
         title,
         choices,
+        selected: None,
     });
     runtime.page = PAGE;
     runtime.status.clear();
@@ -269,6 +303,8 @@ pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
             "Selection changed; reopen Multiview".into()
         },
         rows,
+        selected_row: pending.selected.filter(|index| *index < pending.choices.len())
+            .map(|index| format!("localmv.select:{}:{index}", pending.serial)),
         ..OttView::default()
     })
 }
@@ -283,11 +319,18 @@ fn current(runtime: &Runtime, pending: &Pending) -> bool {
 
 pub(super) fn action(runtime: &mut Runtime, app: &mut App, action: &OttAction) -> bool {
     if runtime.page == PAGE && matches!(action, OttAction::Back) {
-        if let Some(pending) = runtime.multiview_menu.pending.take() {
-            runtime.page = pending.return_page;
-        } else {
-            runtime.page = "menu";
+        let from = runtime.multiview_menu.pending.as_ref().map(|pending| pending.page);
+        let (parent, return_page) = runtime.multiview_menu.back_destination();
+        runtime.page = return_page;
+        if let Some(parent) = parent {
+            // Reissue the parent through the ordinary ownership/policy gate.
+            // A retired source can still leave the menu without reviving it.
+            if issue(runtime, app, parent, return_page).is_ok() {
+                if let Some(from) = from { runtime.multiview_menu.focus_parent(from); }
+                return true;
+            }
         }
+        if return_page == "settings" { runtime.settings_focus = Some(KEY); }
         runtime.changed();
         return true;
     }
@@ -363,6 +406,14 @@ fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static st
                 result.map(|t| runtime.multiview_effects.extend(t.effects))
             }
         }
+        Choice::Stop(slot) => {
+            if !driver.owns_ui(runtime, app) {
+                Err(multiview::Error::NotReady)
+            } else {
+                runtime.multiview.close_slot(slot)
+                    .map(|transition| runtime.multiview_effects.extend(transition.effects))
+            }
+        }
         Choice::Audio(policy) => {
             if !driver.owns_ui(runtime, app) {
                 Err(multiview::Error::NotReady)
@@ -385,6 +436,113 @@ fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pending(page: Page) -> Pending {
+        Pending {
+            serial: 7,
+            until: u64::MAX,
+            profile_epoch: 0,
+            authority_epoch: 0,
+            scene: None,
+            return_page: "settings",
+            page,
+            title: "Fixture".into(),
+            choices: vec![("Stop".into(), String::new(), Choice::Stop(SlotId::SLOT_0))],
+            selected: None,
+        }
+    }
+
+    #[test]
+    fn back_pops_one_level_and_retires_the_old_selection_receipt() {
+        for (page, parent) in [
+            (Page::Root, None),
+            (Page::Slots, Some(Page::Root)),
+            (Page::Sources(SlotId::SLOT_0, 0), Some(Page::Slots)),
+            (Page::Sources(SlotId::new(8).unwrap(), PAGE_SIZE), Some(Page::Slots)),
+        ] {
+            let mut state = State { serial: 7, pending: Some(pending(page)) };
+            assert_eq!(state.back_destination(), (parent, "settings"));
+            assert!(state.pending.is_none());
+            assert_eq!(state.serial, 7, "Back must not reuse old action serials");
+            assert_eq!(state.back_destination(), (None, "menu"));
+        }
+    }
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn parent_focus_returns_to_the_same_window_or_video_controls() {
+        let _serial = plx_base::testlock::serial();
+        let app = crate::app::run::lifecycle_regression_tests::app();
+        let ninth = SlotId::new(8).unwrap();
+        for (from, expected) in [(Page::Sources(ninth, PAGE_SIZE), 1), (Page::Slots, 2)] {
+            let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+            runtime.clock_sample = Some(plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap());
+            runtime.page = PAGE;
+            let mut offered = pending(Page::Root);
+            offered.profile_epoch = runtime.multiview_local_profile_epoch;
+            offered.authority_epoch = runtime.multiview_authority_epoch;
+            offered.choices = vec![
+                ("First".into(), String::new(), Choice::Page(Page::Sources(SlotId::SLOT_0, 0))),
+                ("Ninth".into(), String::new(), Choice::Page(Page::Sources(ninth, 0))),
+                ("Videos".into(), String::new(), Choice::Page(Page::Slots)),
+            ];
+            runtime.multiview_menu.pending = Some(offered);
+            runtime.multiview_menu.focus_parent(from);
+            let projected = view(&runtime).unwrap();
+            assert_eq!(projected.selected_row.as_deref(), Some(projected.rows[expected].id.as_str()));
+            assert!(runtime.multiview_effects.is_empty());
+        }
+    }
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn stale_stop_rows_cannot_queue_transport_or_change_the_ordinary_source() {
+        let _serial = plx_base::testlock::serial();
+        let app = crate::app::run::lifecycle_regression_tests::app();
+        for stale in ["expired", "profile", "authority", "scene", "serial"] {
+            let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+            runtime.clock_sample = Some(plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap());
+            runtime.page = PAGE;
+            let mut offered = pending(Page::Slots);
+            offered.profile_epoch = runtime.multiview_local_profile_epoch;
+            offered.authority_epoch = runtime.multiview_authority_epoch;
+            match stale {
+                "expired" => offered.until = 0,
+                "profile" => offered.profile_epoch = runtime.multiview_local_profile_epoch.wrapping_add(1),
+                "authority" => offered.authority_epoch = runtime.multiview_authority_epoch.wrapping_add(1),
+                "scene" => offered.scene = Some(fence(scene())),
+                _ => {},
+            }
+            runtime.multiview_menu.pending = Some(offered);
+            let saved = serde_json::to_value(&runtime.saved).unwrap();
+            let key = if stale == "serial" { "localmv.select:6:0" } else { "localmv.select:7:0" };
+            assert!(select(&mut runtime, &app, key).is_err(), "{stale}");
+            assert!(runtime.multiview_effects.is_empty(), "{stale}");
+            assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved, "{stale}");
+            assert_eq!(runtime.page, PAGE, "{stale}");
+            assert!(runtime.multiview_menu.pending.is_some(), "{stale}");
+        }
+    }
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn back_leaves_a_retired_parent_without_starting_or_restoring_video() {
+        let _serial = plx_base::testlock::serial();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        for page in [Page::Slots, Page::Sources(SlotId::SLOT_0, PAGE_SIZE)] {
+            let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+            runtime.page = PAGE;
+            runtime.multiview_menu = State { serial: 7, pending: Some(pending(page)) };
+            let saved = serde_json::to_value(&runtime.saved).unwrap();
+            assert!(action(&mut runtime, &mut app, &OttAction::Back));
+            assert_eq!(runtime.page, "settings");
+            assert!(runtime.multiview_menu.pending.is_none());
+            assert_eq!(runtime.multiview_menu.serial, 7);
+            assert!(runtime.multiview_effects.is_empty());
+            assert!(runtime.multiview.layout().is_none());
+            assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+        }
+    }
+
     fn scene() -> multiview::SceneStatus {
         multiview::SceneStatus {
             runtime: "runtime".into(),

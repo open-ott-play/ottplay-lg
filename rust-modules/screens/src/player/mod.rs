@@ -1455,7 +1455,7 @@ impl PlayerScreen {
             // remains an ordinary player or desktop event.
             return (direction_or_ok || matches!(remote, Some(RemoteButton::ChannelUp
                 | RemoteButton::ChannelDown | RemoteButton::Red
-                | RemoteButton::Yellow | RemoteButton::Blue))).then_some(Handled::Yes);
+                | RemoteButton::Yellow | RemoteButton::Blue | RemoteButton::Green))).then_some(Handled::Yes);
         }
         // A generic arrow may only have revealed an unmoved preview. Blue still
         // opens categories; accepted panel ownership cancels that preview through
@@ -1506,8 +1506,8 @@ impl PlayerScreen {
                 RemoteButton::Red => return Some(Handled::Yes),
                 RemoteButton::Yellow => Action::OpenMenu,
                 RemoteButton::Blue => Action::OpenCategories,
-                // No native recordings backend or verified physical Info code.
-                RemoteButton::Green => return None,
+                RemoteButton::Green if offer.records => Action::OpenRecords,
+                RemoteButton::Green => return Some(Handled::Yes),
             },
             _ => return None,
         };

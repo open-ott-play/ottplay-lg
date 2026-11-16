@@ -114,6 +114,12 @@ impl Rig<TestHost> for TestRig {
         _: &mut Effects<'_, TestHost>) -> Handled { Handled::No }
     fn timer(&mut self, _: MachineId, _: TimerId, _: &CxParts<u32>, _: &mut Effects<'_, TestHost>) {}
     fn app_fx(&mut self, _: MachineId, effect: AppFx, _: &CxParts<u32>, out: &mut Effects<'_, TestHost>) {
+        // This presentation rig records semantics; runtime tests exercise the typed owner gate.
+        let effect = match effect {
+            AppFx::Ott(OttOut::BrowseSettings { reply, .. }) =>
+                AppFx::Ott(OttOut::Action { reply, action: OttAction::ShowSettings }),
+            effect => effect,
+        };
         match effect {
             AppFx::Ott(OttOut::Refresh { reply }) => out.push(Fx::Deliver(
                 MachineId::Instance(reply), Delivery::Screen(ScreenEvent::App(
@@ -1685,10 +1691,13 @@ fn classic_list_volume_arrows_require_capability_and_do_not_move_focus() {
 #[test]
 fn classic_list_context_arrows_use_selected_live_and_finite_actions() {
     let _guard = plx_base::testlock::serial();
-    for finite in [false, true] {
+    for (kind, guide, finite) in [(OttMediaKind::LiveChannel, true, false),
+        (OttMediaKind::Video, true, false), (OttMediaKind::Movie, false, true),
+        (OttMediaKind::Video, false, true)] {
         for direction in [Key::Left, Key::Right] {
             let mut view = (*classic_arrow_view(2, true)).clone();
-            if finite { view.rows[0].media.as_mut().unwrap().kind = OttMediaKind::Movie; }
+            view.rows[0].media.as_mut().unwrap().kind = kind;
+            view.rows[0].guide_available = guide;
             let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(view), UiMode::Classic);
             frame(&mut d, &mut rig, 256, vec![key(direction, tick(256))]);
             let screen = d.nav.top_page().unwrap().inst.as_ref().unwrap().screen
@@ -1705,17 +1714,123 @@ fn classic_list_context_arrows_use_selected_live_and_finite_actions() {
     }
 }
 
-#[test]
-fn classic_context_categories_still_page_and_header_browse_keep_focus_navigation() {
-    let _guard = plx_base::testlock::serial();
-    let mut view = (*classic_arrow_view(2, true)).clone();
+fn context_categories_view(mode: u8) -> Arc<OttView> {
+    let mut view = (*classic_arrow_view(mode, true)).clone();
     view.page_id = "categories".into();
-    for row in &mut view.rows { row.action = OttAction::SelectCategory(row.id.clone()); }
+    view.preview_context = None;
+    for row in &mut view.rows {
+        row.action = OttAction::SelectCategory(row.id.clone());
+        row.media = None;
+        row.guide_available = false;
+    }
+    Arc::new(view)
+}
+
+#[test]
+fn classic_context_category_right_uses_the_current_enabled_form_action() {
+    let _guard = plx_base::testlock::serial();
+    for action in [OttAction::SelectCategory("captured-category".into()),
+        OttAction::SelectCategoryAt { context: "captured-owner".into(), category: "captured-category".into() },
+        OttAction::ShowFavorites] {
+        let mut view = (*context_categories_view(2)).clone();
+        view.rows[0].action = action.clone();
+        let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(view), UiMode::Classic);
+        let before = d.focus();
+        frame(&mut d, &mut rig, 256, vec![key(Key::Right, tick(256))]);
+        frame(&mut d, &mut rig, 272, vec![key_up(Key::Right, tick(272))]);
+        assert_eq!(rig.actions, vec![action]);
+        assert_eq!(d.focus(), before);
+    }
+}
+
+#[test]
+fn classic_context_category_left_opens_the_existing_filtered_menu_and_back_restores_row() {
+    use plx_appkit::menu_visibility::{self, Item, Visibility};
+    let _guard = plx_base::testlock::serial();
+    struct Reset(Visibility);
+    impl Drop for Reset { fn drop(&mut self) { menu_visibility::project(self.0); } }
+    let _reset = Reset(menu_visibility::projected());
+    let mut hidden = Visibility::default();
+    hidden.hide(Item::Providers);
+    hidden.hide(Item::Favorites);
+    menu_visibility::project(hidden);
+    let (mut d, mut rig) = mount_snapshot_in_mode(context_categories_view(2), UiMode::Classic);
+    frame(&mut d, &mut rig, 256, vec![key(Key::Down, tick(256))]);
+    frame(&mut d, &mut rig, 272, vec![key_up(Key::Down, tick(272))]);
+    assert_focus(&d, "item:channel-1");
+    frame(&mut d, &mut rig, 304, vec![key(Key::Left, tick(304))]);
+    frame(&mut d, &mut rig, 320, vec![key_up(Key::Left, tick(320))]);
+    let screen = d.nav.top_page().unwrap().inst.as_ref().unwrap().screen
+        .as_any().unwrap().downcast_ref::<OttScreen>().unwrap();
+    assert!(screen.browse);
+    for id in ["nav:providers", "nav:favorites"] {
+        assert!(screen.keys.get(id).is_none_or(|key|
+            screen.form.index_of_key(RowKey(*key)).is_none()));
+    }
+    assert!(rig.actions.is_empty());
+    frame(&mut d, &mut rig, 352, vec![key(Key::Back, tick(352))]);
+    frame(&mut d, &mut rig, 368, vec![key_up(Key::Back, tick(368))]);
+    assert_focus(&d, "item:channel-1");
+    assert!(!d.nav.top_page().unwrap().inst.as_ref().unwrap().screen
+        .as_any().unwrap().downcast_ref::<OttScreen>().unwrap().browse);
+    assert!(rig.actions.is_empty());
+}
+
+#[test]
+fn classic_context_category_arrows_refuse_repeats_edges_and_disabled_rows() {
+    let _guard = plx_base::testlock::serial();
+    for direction in [Key::Left, Key::Right] {
+        for edge in [Edge::Repeat, Edge::Up] {
+            let (mut d, mut rig) = mount_snapshot_in_mode(context_categories_view(2), UiMode::Classic);
+            let before = d.focus();
+            let mut event = key(direction, tick(256));
+            if let InputKind::Key { edge: actual, .. } = &mut event.kind { *actual = edge; }
+            frame(&mut d, &mut rig, 256, vec![event]);
+            assert_eq!(d.focus(), before);
+            assert!(rig.actions.is_empty());
+            assert!(!d.nav.top_page().unwrap().inst.as_ref().unwrap().screen
+                .as_any().unwrap().downcast_ref::<OttScreen>().unwrap().browse);
+        }
+        let (mut d, mut rig) = mount_snapshot_in_mode(context_categories_view(2), UiMode::Classic);
+        let before = d.focus();
+        let mut event = key(direction, tick(256));
+        if let InputKind::Key { at_edge, .. } = &mut event.kind { *at_edge = true; }
+        frame(&mut d, &mut rig, 256, vec![event]);
+        assert_eq!(d.focus(), before);
+        assert!(rig.actions.is_empty());
+    }
+    let mut view = (*context_categories_view(2)).clone();
+    view.rows[1].enabled = false;
     let (mut d, mut rig) = mount_snapshot_in_mode(Arc::new(view), UiMode::Classic);
-    let wanted = arrow_page_target(&d, 1);
-    frame(&mut d, &mut rig, 256, vec![key(Key::Right, tick(256))]);
-    assert_eq!(d.focus().unwrap().elem, wanted);
-    assert!(!rig.actions.iter().any(|a| matches!(a, OttAction::Back | OttAction::SelectCategory(_))));
+    frame(&mut d, &mut rig, 256, vec![key(Key::Down, tick(256))]);
+    frame(&mut d, &mut rig, 272, vec![key_up(Key::Down, tick(272))]);
+    assert_focus(&d, "item:channel-1");
+    frame(&mut d, &mut rig, 304, vec![key(Key::Right, tick(304))]);
+    assert_focus(&d, "item:channel-1");
+    assert!(rig.actions.is_empty());
+}
+
+#[test]
+fn classic_categories_paging_and_volume_modes_keep_their_existing_policy() {
+    let _guard = plx_base::testlock::serial();
+    for mode in [0, 1, 3] {
+        let (mut d, mut rig) = mount_snapshot_in_mode(context_categories_view(mode), UiMode::Classic);
+        let before = d.focus();
+        let wanted = arrow_page_target(&d, 1);
+        frame(&mut d, &mut rig, 256, vec![key(Key::Right, tick(256))]);
+        if mode == 1 {
+            assert_eq!(d.focus(), before);
+            assert_eq!(rig.actions, vec![OttAction::VolumeStep(1)]);
+        } else {
+            assert_eq!(d.focus().unwrap().elem, wanted);
+            assert!(rig.actions.is_empty());
+        }
+    }
+}
+
+#[test]
+fn classic_context_header_browse_keeps_focus_navigation() {
+    let _guard = plx_base::testlock::serial();
     let (mut d, mut rig) = mount_snapshot_in_mode(classic_arrow_view(1, true), UiMode::Classic);
     // Classic puts these controls below the list, unlike focus_header's Modern route.
     // Enter through the real drawn Browse stop, then exercise keyboard navigation.

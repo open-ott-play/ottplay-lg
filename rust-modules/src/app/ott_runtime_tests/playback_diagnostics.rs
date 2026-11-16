@@ -70,6 +70,7 @@ fn fixture() -> Box<App> {
     runtime.catalog_done.store(false, Ordering::Release);
     runtime.metadata_done.store(false, Ordering::Release);
     runtime.resolver_busy = true;
+    runtime.resolver_hold_for_test = true;
     runtime.plex_refresh_pending = true;
     runtime.write_permit.revoke();
     runtime.continuity.suppress_unrequested_start();
@@ -92,11 +93,24 @@ fn queue(app: &mut App, id: &str) -> u64 {
 
 fn admit(app: &mut App, id: &str) -> u64 {
     let generation = queue(app, id);
+    let runtime = app.ott.as_ref().unwrap();
+    let admitted_profile = runtime.effective_profile().unwrap().clone();
+    let visible_preplay = admitted_profile.kind == ProviderKind::VPortal;
+    assert!(matches!(admitted_profile.kind, ProviderKind::VPortal | ProviderKind::M3u));
+    let preplay_before = json!(runtime.preplay.snapshot(runtime.now_ms()));
+    assert_eq!(preplay_before["phase"], if visible_preplay { "resolving" } else { "idle" });
+    assert_eq!(preplay_before["attempt_generation"],
+        if visible_preplay { json!(generation) } else { Value::Null });
+    let admitted_entry = runtime.catalog.entries.iter().find(|entry| entry.id == id).unwrap().clone();
+    let url = match &admitted_entry.media {
+        MediaLocator::Http { url } => url.clone(),
+        _ => PRIVATE_URL.into(),
+    };
     let mut info = unsupported_info();
     info.video_codec = "h264".into(); info.audio_codec = "aac".into();
     info.audio_channels = 2; info.audio_sample_rate = 48_000; info.audio_bit_depth = 16;
-    app.ott.as_ref().unwrap().tx.send(Job::Play(generation, profile(), Ok((entry(id),
-        ReadySource::External(plx_media::ff::ExternalSource::Http(PRIVATE_URL.into()), info, None)))))
+    app.ott.as_ref().unwrap().tx.send(Job::Play(generation, admitted_profile, Ok((admitted_entry,
+        ReadySource::External(plx_media::ff::ExternalSource::Http(url), info, None)))))
         .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
     let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
     let mut resources = AcceptedResources::default();
@@ -104,12 +118,22 @@ fn admit(app: &mut App, id: &str) -> u64 {
         start_resolved_with(runtime, app, profile, entry, source, &mut resources));
     assert_eq!(resources.starts, 1, "real admission must reach only the injected resource seam");
     let runtime = app.ott.as_ref().unwrap();
+    assert!(runtime.resolver_hold_for_test);
+    assert_eq!(runtime.resolver_launches_for_test, 0, "diagnostic observations never start a media resolver");
     assert!(runtime.play_target.is_none());
     let playing = runtime.playing.as_ref().expect("real start committed Playing");
     assert!(playing.identity.is_some());
     assert!(playing_matches(playing, app));
     assert!(!app.adapters.player.is_live(), "no native Engine is started by this fixture");
-    assert_eq!(json!(runtime.preplay.snapshot(runtime.now_ms()))["phase"], "admitted");
+    let preplay_after = json!(runtime.preplay.snapshot(runtime.now_ms()));
+    if visible_preplay {
+        assert_eq!(preplay_after["phase"], "admitted");
+        assert_eq!(preplay_after["attempt_generation"], generation);
+    } else {
+        // M3U diagnostics stay hidden until a real worker confirms HLS. The
+        // held-worker fixture must not invent that event merely to admit video.
+        assert_eq!(preplay_after, preplay_before);
+    }
     generation
 }
 
@@ -600,18 +624,18 @@ fn make_live(app: &mut App) {
     let mut profile = profile();
     profile.kind = ProviderKind::M3u;
     profile.source = "https://diag.invalid/list.m3u".into();
-    let mut channel = entry("first");
-    channel.duration_ms = None;
-    channel.live = Some(Default::default());
-    channel.media = MediaLocator::Http { url: PRIVATE_URL.into() };
     runtime.saved.profiles.profiles = vec![profile.clone()];
     runtime.saved.profiles.active_profile = Some(profile.id.clone());
     runtime.provider = ProviderKind::M3u;
-    runtime.catalog.entries[0] = channel.clone();
-    let playing = runtime.playing.as_mut().unwrap();
-    playing.profile = profile;
-    playing.entry = channel;
-    playing.advance_on_failure = false;
+    // Configure both possible destinations before admission: advancing to the
+    // next channel must fail the retry-policy oracle, not a malformed locator.
+    for channel in &mut runtime.catalog.entries {
+        channel.duration_ms = None;
+        channel.live = Some(Default::default());
+        channel.media = MediaLocator::Http { url: if channel.id == "first" {
+            PRIVATE_URL.into()
+        } else { format!("https://diag.invalid/{}?token=diag-token", channel.id) } };
+    }
 }
 fn transient_hls() -> IoFailureDetails {
     IoFailureDetails::Hls { exit: DemuxExitClass::HlsTransportOpenFailed,
@@ -623,8 +647,8 @@ fn live_failure() -> Box<App> {
 fn live_failure_with(cause: IoFailureDetails) -> Box<App> {
     let mut app = fixture();
     app.ott.as_mut().unwrap().saving = true;
-    admit(&mut app, "first");
     make_live(&mut app);
+    admit(&mut app, "first");
     let epoch = install_owned_engine(&mut app);
     assert!(plx_media::player::SHARED.note_io_failure_for(epoch, cause));
     signal_error(&app, FailureKind::PlaybackInterrupted);
@@ -671,8 +695,8 @@ fn owned_live_playlist_refresh_failure_retains_bounded_same_channel_recovery() {
     for outcome in [TraceOutcome::Transport, TraceOutcome::Deadline, TraceOutcome::ServerState] {
         let mut app = fixture();
         app.ott.as_mut().unwrap().saving = true;
-        admit(&mut app, "first");
         make_live(&mut app);
+        admit(&mut app, "first");
         let epoch = install_owned_engine(&mut app);
         assert!(plx_media::player::SHARED.note_io_failure_for(epoch, IoFailureDetails::Hls {
             exit: DemuxExitClass::HlsPlaylistFetchFailed, outcome: Some(outcome),
@@ -785,8 +809,8 @@ fn live_failure_cannot_borrow_unowned_cause_or_recover_finite_video() {
     for live in [false, true] {
         let mut app = fixture();
         app.ott.as_mut().unwrap().saving = true;
-        admit(&mut app, "first");
         if live { make_live(&mut app); }
+        admit(&mut app, "first");
         if !live {
             let epoch = install_owned_engine(&mut app);
             assert!(plx_media::player::SHARED.note_io_failure_for(epoch, transient_hls()));

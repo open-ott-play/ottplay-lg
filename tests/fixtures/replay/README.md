@@ -131,6 +131,27 @@ reviewed exception for a census-only change in an unused type is documented belo
 every recorded payload and still requires full replay validation. The D1 results below describe
 that earlier build, not current all-domain acceptance.
 
+The standalone `Native checks` workflow runs the `Controlled renderer replay`
+job on macOS. It builds the pinned host renderer directly for this controlled
+no-Play scope, proves OS-level outbound denial, and invokes this same driver with
+one process at a time. `CI gate` requires its success in pull requests and in the
+main-only release workflow. Complete per-process evidence is retained even on
+failure; source tests alone do not qualify renderer replay.
+
+**Unused More capability census migration (2026-11-15, source-only).**
+The PlayerOverlay More capability canon grows from 9 to 11 entries for Description
+and Favorites. The observed screen census is `7325516116693834611`; the product
+census changes from `3202398292000993197` to `14925684815365515301`.
+Only the same three controlled anchor headers migrate. Their controlled bootstrap
+accepts Home/Content and the recorded navigation stays at Home; the controlled
+codec rejects Player and PlayerOverlay, rejects full Play, and stops recording on
+unsupported effects. More cannot be instantiated in these anchors. Every initial
+payload/hash, segment byte, measurement and frame hash stays unchanged.
+`pre_ott_startup_footer_recording_headers_remain_refused` checks both prior
+contracts are rejected before malformed segment parsing. Full hosted controlled
+replay validation remains required; the source migration alone is not a fresh
+visual replay result.
+
 **Unused OTT startup/footer census migration (2026-11-14, source-only).**
 The OTT declaration gains startup and pending-target presentation facts,
 canonical channel ordinal, and OSD opacity. The host-observed screen census is

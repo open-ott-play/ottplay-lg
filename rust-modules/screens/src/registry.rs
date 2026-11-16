@@ -231,9 +231,10 @@ pub enum OttPlayerAction {
     OpenCategories,
     OpenMenu,
     ShowInfo,
-    /// A fresh Classic live Right sampled an already visible HUD at ingress.
+    /// Open accepted playing-source information without changing transport.
     ShowDescription,
     OpenGuide,
+    OpenRecords,
     SeekBackward,
     SeekForward,
     TogglePause,
@@ -267,6 +268,7 @@ pub struct OttPlayerOffer {
     pub seek_arrows: bool,
     pub accept: OttPlayerAction,
     pub guide: bool,
+    pub records: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1579,6 +1581,8 @@ pub enum AppMsg {
     /// The *Play Version* surface committed a row: play that version of the page's item, as its
     /// Play pill would (resuming). The surface names the version and the page plays it.
     PlayVersion(plx_plex::plex::MediaId),
+    /// One addressed, fresh caller snapshot after an admitted Browse Settings return.
+    OttBrowseReturn { snapshot: std::sync::Arc<crate::ott::OttView>, memory: crate::ott::Memory, classic: bool },
 }
 
 /// What the consent machine is told (§2.3): a person's answer to both questions at once.
@@ -2904,7 +2908,11 @@ pub const SCREEN_SHAPES: &[&str] = &[
 /// pin is the actual host inventory result. Only the three reviewed controlled
 /// anchors that cannot mount OTT migrate their census headers; OTT recordings
 /// and arbitrary predecessor headers remain incompatible.
-const SCREEN_SHAPES_PIN: u64 = 10036921293367296087;
+/// **More action census**: the capability array grows from 9 to 11 entries.
+/// The value below is the observed host inventory. Only the three controlled
+/// anchors unable to instantiate Player/More migrate their unused census header;
+/// their initial state and every segment byte remain unchanged.
+const SCREEN_SHAPES_PIN: u64 = 7325516116693834611;
 
 #[cfg(test)]
 mod arg_tests {

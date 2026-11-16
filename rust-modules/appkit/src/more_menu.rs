@@ -181,15 +181,16 @@ type MoreTable = FormTable<MoreRow, Action, MorePage>;
 /// Source-dependent actions offered by the application to the current More panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackMenuAction { Categories, Guide, Records, TogglePause, ReloadStream, ReturnLive,
-    Chapters, FromBeginning, GoToDetail }
+    Chapters, FromBeginning, GoToDetail, Description, Favorites }
 impl PlaybackMenuAction {
-    pub const ALL: [Self; 9] = [Self::Categories, Self::Guide, Self::Records,
+    pub const ALL: [Self; 11] = [Self::Categories, Self::Guide, Self::Records,
         Self::TogglePause, Self::ReloadStream, Self::ReturnLive,
-        Self::Chapters, Self::FromBeginning, Self::GoToDetail];
+        Self::Chapters, Self::FromBeginning, Self::GoToDetail, Self::Description, Self::Favorites];
     pub fn key(self) -> u32 { match self {
         Self::Categories => 40, Self::Guide => 41, Self::Records => 42,
         Self::TogglePause => 43, Self::ReloadStream => 44, Self::ReturnLive => 45,
         Self::Chapters => 46, Self::FromBeginning => 47, Self::GoToDetail => 48,
+        Self::Description => 49, Self::Favorites => 50,
     }}
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -204,6 +205,8 @@ pub struct PlaybackMenuCapabilities {
     pub chapters: bool,
     pub from_beginning: bool,
     pub go_to_detail: bool,
+    pub description: bool,
+    pub favorites: bool,
 }
 impl PlaybackMenuCapabilities {
     pub fn contains(self, action: PlaybackMenuAction) -> bool { match action {
@@ -216,6 +219,8 @@ impl PlaybackMenuCapabilities {
         PlaybackMenuAction::Chapters => self.chapters,
         PlaybackMenuAction::FromBeginning => self.from_beginning,
         PlaybackMenuAction::GoToDetail => self.go_to_detail,
+        PlaybackMenuAction::Description => self.description,
+        PlaybackMenuAction::Favorites => self.favorites,
     }}
     fn canon(self, c: &mut plx_machine::machine::Canon) {
         for action in PlaybackMenuAction::ALL { c.bool(self.contains(action)); }
@@ -461,6 +466,8 @@ fn root_form_with_feedback(
     for a in rows.iter().copied().filter(|a| !matches!(a, Action::SetQuality(_))) {
         let item = match a {
             Action::Playback(PlaybackMenuAction::Categories) => Some(crate::menu_visibility::Item::Categories),
+            Action::Playback(PlaybackMenuAction::Description) => Some(crate::menu_visibility::Item::Description),
+            Action::Playback(PlaybackMenuAction::Favorites) => Some(crate::menu_visibility::Item::Favorites),
             Action::ToggleStats => Some(crate::menu_visibility::Item::Stats),
             Action::OpenTracks(crate::player_hud::command::TrackTab::Audio) => Some(crate::menu_visibility::Item::Audio),
             Action::OpenTracks(crate::player_hud::command::TrackTab::Subtitles) => Some(crate::menu_visibility::Item::Subtitles),
@@ -1211,6 +1218,8 @@ fn label(a: Action) -> std::borrow::Cow<'static, str> {
             PlaybackMenuAction::Chapters => plx_platform::i18n::msg::widgets_player_chapters(),
             PlaybackMenuAction::FromBeginning => plx_platform::i18n::msg::widgets_info_from_beginning(),
             PlaybackMenuAction::GoToDetail => plx_platform::i18n::msg::settings_playback_deck_press_details(),
+            PlaybackMenuAction::Description => plx_platform::i18n::msg::ott_description(),
+            PlaybackMenuAction::Favorites => plx_platform::i18n::msg::ott_favorites(),
         }.into(),
         Action::OpenTracks(crate::player_hud::command::TrackTab::Audio) => plx_platform::i18n::msg::widgets_tracks_audio().into(),
         Action::OpenTracks(crate::player_hud::command::TrackTab::Subtitles) => plx_platform::i18n::msg::widgets_tracks_subtitles().into(),

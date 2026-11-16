@@ -232,6 +232,11 @@ pub(super) fn paint_left(p: Painter, layout: Layout, row: &OttRow, status: &str,
     let mut flow = VFlow::new(area.y, theme::space::SM);
     let description = super::metadata::preview_description(row, now);
     if let Some(programme) = current_live {
+        // Mixed Favorites retain their source labels even when programme metadata
+        // replaces the channel details. Empty labels consume no layout space.
+        if row.id.starts_with("favorite:") {
+            line(p, &mut flow, area.w, content_bottom, row.detail.trim(), theme::size::CAPTION, false, measure);
+        }
         // Classic TV details describe the selected programme. Repeating the
         // channel name and category here needlessly crowds out its synopsis.
         line(p, &mut flow, area.w, content_bottom, programme.title, theme::size::BODY, true, measure);

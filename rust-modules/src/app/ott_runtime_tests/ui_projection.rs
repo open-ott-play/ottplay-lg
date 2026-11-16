@@ -462,3 +462,30 @@ fn catalog_runtime_context_preserves_filtered_ordinals_metadata_and_favorite_sta
     assert_eq!((runtime.generation, runtime.catalog_revision, runtime.navigation_epoch, runtime.play_generation), state);
     assert!(runtime.resolver_next.is_none() && !runtime.catalog_loading && !runtime.saving);
 }
+
+#[test]
+fn mixed_favorite_origin_labels_keep_subprofile_and_alias_without_changing_identity() {
+    use plx_data::ott::favorites::{Locator, Origin};
+    let _serial = plx_base::testlock::serial();
+    let mut runtime = listed(Vec::new());
+    let favorite = Favorite { title: "Same title".into(), origin: Origin {
+        provider: "m3u".into(), profile: "Home".into(), subprofile: Some("Slot B".into()),
+        source_alias: "Living room".into(),
+    }, locator: Locator::Channel { channel_id: "private-channel-id".into() } };
+    runtime.saved.favorites.toggle(favorite.clone()).unwrap();
+    runtime.page = "favorites";
+    let view = runtime.view();
+    assert_eq!(view.rows.len(), 1);
+    let row = &view.rows[0];
+    assert_eq!(row.detail, "m3u · Home · Slot B · Living room");
+    let id = format!("favorite:{}", favorite.identity());
+    assert_eq!(row.id, id);
+    assert_eq!(row.action, OttAction::Play(id));
+    assert!(!row.detail.contains("private-channel-id"));
+    runtime.saved.favorites.toggle(favorite.clone()).unwrap();
+    let mut duplicate = favorite;
+    duplicate.origin.subprofile = None;
+    duplicate.origin.source_alias = "Home".into();
+    runtime.saved.favorites.toggle(duplicate).unwrap();
+    assert_eq!(runtime.view().rows[0].detail, "m3u · Home");
+}

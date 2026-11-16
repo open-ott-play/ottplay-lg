@@ -39,7 +39,90 @@ pub(super) fn open_fullscreen_catalog(app: &mut App) -> plx_machine::machine::In
     ott_surface(app).expect("fullscreen OK mounts the catalogue panel")
 }
 
-fn admit_latest_channel(app: &mut App, wanted: &str) {
+#[test]
+fn browsed_category_focus_preview_and_kiosk_designation_do_not_borrow_the_playing_queue() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    let mut app = forty_channels(UiMode::Classic);
+    {
+        let runtime = app.ott.as_mut().unwrap();
+        runtime.resolver_hold_for_test = true;
+        runtime.metadata_done.store(false, Ordering::Release);
+        for (index, entry) in runtime.catalog.entries.iter_mut().enumerate() {
+            entry.category = if index < 20 { "Playing" } else { "Browse" }.into();
+        }
+        runtime.playing.as_mut().unwrap().entry = runtime.catalog.entries[0].clone();
+        runtime.saved.category = "Playing".into();
+        runtime.catalog_revision += 1;
+    }
+    publish(&mut app);
+    native_edge(&mut app, 0, 480, Edge::Down);
+    native_edge(&mut app, 0, 480, Edge::Up);
+    admit_latest_channel(&mut app, "2");
+    open_fullscreen_catalog(&mut app);
+    surface_action(&mut app, OttAction::ShowCategories);
+    let mut runtime = app.ott.take().unwrap();
+    let candidate = runtime.category_choice_candidate(Some("Browse")).unwrap();
+    runtime.pending_category_choice = Some(category_state::Pending::capture(&runtime, Some("Browse")));
+    runtime.saved = candidate;
+    assert!(runtime.finish_category_choice(&app, true));
+    assert!(runtime.ordered_ids().iter().all(|id| id.parse::<usize>().unwrap() <= 20));
+    assert!(commands::selected_ids(&runtime).iter().all(|id| id.parse::<usize>().unwrap() > 20));
+    let identity = route::playback_identity(&app.player.session);
+    let generation = runtime.play_generation;
+    let selected = runtime.selected.clone();
+    let context = runtime.view().preview_context.unwrap();
+    let focus = OttAction::FocusAt { context: context.clone(), id: "21".into() };
+    assert_eq!(preview::resolve(&runtime, focus.clone()).unwrap(), focus);
+    handle_action(&mut runtime, &mut app, focus).unwrap();
+    assert_eq!(runtime.view().selected_row.as_deref(), Some("21"));
+    let metadata = OttAction::PreviewAt { context: context.clone(), id: "22".into() };
+    assert_eq!(preview::resolve(&runtime, metadata.clone()).unwrap(), OttAction::Preview("22".into()));
+    handle_action(&mut runtime, &mut app, metadata).unwrap();
+    assert_eq!(runtime.metadata_target, Some((runtime.effective_profile().unwrap().id.clone(), "22".into())));
+    assert!(runtime.metadata_next.is_some(), "the existing held metadata worker remains unstarted");
+    assert!(!runtime.metadata_done.load(Ordering::Acquire));
+    assert_eq!(runtime.view().selected_row.as_deref(), Some("21"), "dwell metadata cannot change browse intent");
+    for action in [OttAction::FocusAt { context: context.clone(), id: "2".into() },
+        OttAction::PreviewAt { context, id: "2".into() }] {
+        assert!(preview::resolve(&runtime, action).is_err(), "an admitted queue row outside Browse is not visible");
+    }
+    assert_eq!(runtime.selected, selected);
+    assert_eq!(runtime.play_generation, generation);
+    assert_eq!(runtime.playing.as_ref().unwrap().selection_id, "2");
+    assert_eq!(route::playback_identity(&app.player.session), identity);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert_eq!(runtime.resolver_launches_for_test, 0);
+
+    // Preparation is pure: neither designation nor bare arming activates a
+    // source or writes settings. The displayed category owns its ordinals.
+    runtime.saving = false;
+    let saved = serde_json::to_value(&runtime.saved).unwrap();
+    for (query, wanted) in [("1", "21"), ("Channel 22", "22")] {
+        let prepared = kiosk_source::prepare(&runtime, &app, Some(query), false).unwrap();
+        let entry = runtime.catalog.entries.iter().find(|entry| entry.id == wanted).unwrap();
+        let expected = selection::capture(runtime.effective_profile().unwrap(), entry).unwrap();
+        assert!(matches!(prepared.stored().target(), crate::app::ott_kiosk_stored::TargetRef::Item(pin)
+            if pin.identity() == expected.identity()), "designation retains the displayed item's exact source");
+        assert!(kiosk_source::still_current(&runtime, &app, &prepared));
+    }
+    assert!(matches!(kiosk_source::prepare(&runtime, &app, Some("Channel 1"), false),
+        Err(kiosk_source::SourceError::NotFound)), "a playing-list title outside Browse cannot become a pin");
+    runtime.catalog.entries[0].media = MediaLocator::Http { url: "https://changed.invalid/1.m3u8".into() };
+    runtime.catalog_revision += 1;
+    assert!(runtime.ordered_ids().is_empty(), "the outgoing queue's receipt is now stale");
+    let armed = kiosk_source::prepare(&runtime, &app, None, false).unwrap();
+    assert!(matches!(armed.stored().target(), crate::app::ott_kiosk_stored::TargetRef::Armed));
+    assert!(kiosk_source::still_current(&runtime, &app, &armed));
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+    assert_eq!(runtime.metadata_target.as_ref().map(|(_, id)| id.as_str()), Some("22"));
+    assert!(!runtime.metadata_done.load(Ordering::Acquire));
+    assert_eq!(runtime.resolver_launches_for_test, 0);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    assert_eq!(route::playback_identity(&app.player.session), identity);
+}
+
+pub(super) fn admit_latest_channel(app: &mut App, wanted: &str) {
     let queued = app.ott.as_mut().unwrap().resolver_next.take()
         .expect("physical channel input queued its ordinary resolver");
     assert_eq!(queued.entry.as_ref().unwrap().id, wanted);

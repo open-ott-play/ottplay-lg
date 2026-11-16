@@ -391,6 +391,17 @@ pub(super) fn back(runtime: &mut Runtime, app: &mut App, action: &OttAction)
     -> Option<Result<(), &'static str>>
 {
     if !matches!(action, OttAction::Back) { return None; }
+    if runtime.page == "settings" && runtime.browse_settings.is_some() {
+        if let Err(error) = input_policy::navigation(runtime) { return Some(Err(error)); }
+        if !runtime.browse_settings.as_ref().is_some_and(|origin| settings_origin_current(origin, runtime, app, false)) {
+            runtime.browse_settings = None;
+            return Some(Err(CHANGED));
+        }
+        let origin = runtime.browse_settings.as_mut().unwrap();
+        runtime.page = origin.page;
+        origin.returning = true;
+        return Some(Ok(()));
+    }
     let entry = bridge::ott_catalog_surface(&app.pages)?;
     if matches!(runtime.page, "guide" | "guide-programme" | "organization") {
         return None;
@@ -421,4 +432,89 @@ pub(super) fn back(runtime: &mut Runtime, app: &mut App, action: &OttAction)
         runtime.page = "providers";
     }
     Some(Ok(()))
+}
+
+/// One presentation caller, never a source grant or persisted navigation state.
+pub(super) struct SettingsOrigin {
+    entry: plx_machine::machine::EntryId,
+    owner: InstanceId,
+    player: Option<(InstanceId, plx_media::route::PlaybackIdentity)>,
+    session: u64,
+    mode: plx_machine::machine::UiMode,
+    source: String,
+    page: &'static str,
+    memory: plx_screens::ott::Memory,
+    returning: bool,
+}
+
+fn settings_source(runtime: &Runtime) -> String {
+    // Flat Classic memory has no shelf source. Keep the actual catalogue descriptor separate.
+    serde_json::to_string(&json!([runtime.provider, runtime.saved.profiles.active_profile,
+        runtime.provider_profile(), runtime.effective_profile(), runtime.generation,
+        runtime.saved.settings.get("selectedProvider")])).expect("source descriptor serializes")
+}
+
+fn settings_origin_current(origin: &SettingsOrigin, runtime: &Runtime, app: &App, observe: bool) -> bool {
+    let owner = current_ui_owner(app).or_else(|| observe.then(||
+        settings_groups::retained_language_owner(runtime, app)).flatten());
+    // Observation may keep memory until queued modal navigation settles; it grants no action.
+    // Back/publication must not overtake any queued Present or Dismiss. A mounted foreign
+    // cover then fails the exact owner check; only the owned Language child may retain it.
+    owner == Some(origin.owner) && app.pages.nav.entry_of_instance(origin.owner) == Some(origin.entry)
+        && !app.pages.has_pending_navigation()
+        && (observe || !app.pages.has_pending_surface_navigation())
+        && app.bridge.auth_read().0.flow_epoch == origin.session
+        && app.bridge.ui_mode() == origin.mode && runtime.interface_mode() == origin.mode
+        && settings_source(runtime) == origin.source
+        && match &origin.player {
+            Some((player, source)) => app.pages.top_page() == Some(*player)
+                && matches!(app.route(), AppArg::Player)
+                && plx_media::route::playback_identity_matches(&app.player.session, source)
+                && runtime.play_target.is_none() && runtime.pending_play.is_none()
+                && !app.player.lifecycle.awaiting_load() && !app.decoder_parked
+                && app.adapters.player.is_live(),
+            None => app.pages.top_page() == Some(origin.owner) && matches!(app.route(), AppArg::Ott),
+        }
+}
+
+pub(super) fn capture_settings(runtime: &Runtime, app: &App, owner: InstanceId, revision: u64,
+    memory: plx_screens::ott::Memory) -> Option<SettingsOrigin> {
+    if current_ui_owner(app) != Some(owner) || runtime.revision != revision
+        || !matches!(runtime.page, "channels" | "categories" | "favorites")
+        || app.pages.has_pending_navigation() || app.pages.has_pending_surface_navigation()
+        || runtime.browse_settings.is_some() || input_policy::navigation(runtime).is_err()
+    { return None; }
+    let entry = app.pages.nav.entry_of_instance(owner)?;
+    let player = if matches!(app.route(), AppArg::Player) {
+        Some((app.pages.top_page()?, plx_media::route::playback_identity(&app.player.session)?))
+    } else if matches!(app.route(), AppArg::Ott) { None } else { return None; };
+    let origin = SettingsOrigin { entry, owner, player, session: app.bridge.auth_read().0.flow_epoch,
+        mode: app.bridge.ui_mode(), source: settings_source(runtime), page: runtime.page,
+        memory, returning: false };
+    settings_origin_current(&origin, runtime, app, false).then_some(origin)
+}
+
+pub(super) fn reconcile_settings(runtime: &mut Runtime, app: &App) {
+    let Some(origin) = runtime.browse_settings.as_ref() else { return; };
+    let settings = matches!(runtime.page, "settings" | "menu-items" | "interface-mode" | "sleep-timer"
+        | "osd-opacity" | "permanent-clock" | "classic-page-size" | "classic-list-position"
+        | "classic-list-arrows" | "numeric-seek-step" | "classic-show-number" | "classic-show-name"
+        | "classic-show-program" | "classic-show-progress" | "classic-show-description");
+    if (!settings && !(origin.returning && runtime.page == origin.page))
+        || !settings_origin_current(origin, runtime, app, true)
+    { runtime.browse_settings = None; }
+}
+
+pub(super) fn publish_settings_return(runtime: &mut Runtime, app: &mut App) -> bool {
+    if !runtime.browse_settings.as_ref().is_some_and(|origin| origin.returning) { return false; }
+    // Take even an undeliverable return: an old origin must never revive on a later visit.
+    let origin = runtime.browse_settings.take().unwrap();
+    if runtime.page != origin.page || !settings_origin_current(&origin, runtime, app, false) { return false; }
+    app.pages.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(origin.owner),
+        Delivery::Screen(plx_ui::screen::ScreenEvent::App(AppMsg::OttBrowseReturn {
+            snapshot: Arc::new(runtime.view()), memory: origin.memory,
+            classic: origin.mode == plx_machine::machine::UiMode::Classic,
+        }))));
+    runtime.catalog_diagnostics.view_published(runtime.generation);
+    true
 }

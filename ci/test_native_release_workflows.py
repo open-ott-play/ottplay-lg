@@ -1,7 +1,12 @@
 """Contracts joining the reusable native checks, exact candidate build, and release promotion."""
 
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import textwrap
 import shlex
 import unittest
 
@@ -22,10 +27,32 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertNotIn("--verify-graph", source)
         self.assertNotIn("continue-on-error:", source)
         self.assertNotRegex(source, r"(?m)^    if:")
-        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
         native = body.split("  native:", 1)[1].split("\n  arm:", 1)[0]
         self.assertLess(native.index("uses: ./.github/actions/rust-toolchain"),
                         native.index("python3 scripts/lg-build.py check"))
+
+    def test_isolated_host_cache_resolves_to_the_actual_build_target(self):
+        native = workflow("ci.yml").split("  native:\n", 1)[1].split("\n  renderer-replay:", 1)[0]
+        self.assertIn('workspaces: rust-modules -> ${{ steps.host-cache.outputs.target }}', native)
+        self.assertIn('--work-dir "$NATIVE_CHECK_DIR"', native)
+        self.assertIn('NATIVE_CHECK_DIR: ${{ runner.temp }}/lg-check', native)
+        code = textwrap.dedent(native.split("python3 - <<'PYCACHE'\n", 1)[1].split("          PYCACHE", 1)[0])
+        with tempfile.TemporaryDirectory() as temporary:
+            for name in ("checkout", "deep path/repo with spaces"):
+                checkout = Path(temporary) / name
+                workspace = checkout / "rust-modules"
+                workspace.mkdir(parents=True)
+                check_dir = Path(temporary) / "runner temp" / name / "lg-check"
+                output, environment = checkout / "outputs", checkout / "environment"
+                env = dict(os.environ, NATIVE_CHECK_DIR=str(check_dir),
+                           GITHUB_OUTPUT=str(output), GITHUB_ENV=str(environment))
+                subprocess.run([sys.executable, "-c", code], cwd=checkout, env=env, check=True)
+                key, relative = output.read_text().strip().split("=", 1)
+                self.assertEqual(key, "target")
+                self.assertFalse(Path(relative).is_absolute())
+                self.assertEqual((workspace / relative).resolve(), (check_dir / "target").resolve())
+                self.assertEqual(environment.read_text(), "NATIVE_CHECK_DIR=" + str(check_dir) + "\n")
 
     def test_release_dispatch_is_manual_serialized_and_channel_scoped(self):
         body = workflow("native-release-pipeline.yml")
@@ -101,8 +128,26 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertRegex(body, r"(?m)^  workflow_call:")
         self.assertIn("name: Release contracts", body)
         self.assertIn("ci.test_native_release_workflows", body)
-        self.assertIn("needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
         self.assertIn('test "$RELEASE" = success', body)
+
+    def test_renderer_replay_is_network_denied_complete_and_required(self):
+        body = workflow("ci.yml")
+        replay = body.split("  renderer-replay:\n", 1)[1].split("\n  local-decoder-build:", 1)[0]
+        self.assertIn("runs-on: macos-15", replay)
+        self.assertIn('cargo +"$RUST_TOOLCHAIN" build --locked', replay)
+        self.assertIn("--features hostsim --bin plxnative-sim", replay)
+        self.assertIn("(deny network-outbound)", replay)
+        self.assertIn("errno.EPERM, errno.EACCES", replay)
+        self.assertIn("tests/replay_fixtures.py", replay)
+        self.assertIn("--fixtures tests/fixtures/replay --assets pkg", replay)
+        self.assertIn("--window 960x540 --jobs 1 --timeout 300", replay)
+        self.assertNotIn("continue-on-error", replay)
+        self.assertNotRegex(replay, r"(?m)^    if:")
+        self.assertIn("if: always()", replay)
+        self.assertIn("if-no-files-found: error", replay)
+        self.assertIn('RENDERER_REPLAY: ${{ needs.renderer-replay.result }}', body)
+        self.assertIn('test "$RENDERER_REPLAY" = success', body)
 
     def test_real_decoder_qualification_is_separate_dependent_and_required(self):
         body = workflow("ci.yml")

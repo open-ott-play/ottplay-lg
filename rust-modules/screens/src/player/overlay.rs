@@ -78,7 +78,7 @@ use crate::registry::{RepeatGate, PANEL_REPEAT_MS};
 /// Info writes its accepted opacity/UTC sample followed by the panel's focus, content reset key,
 /// measured paging bounds and reader motion. Every field affecting a later Tick is represented.
 pub const SHAPE: &str =
-    "PlayerOverlayScreen{kind:str,track:{closed:bool,next:Option<u32>,pending:Option<{request:u32,keep:bool,same_source:bool,focus:u32,commit:payload}>},menu:{source:bool,captured:bool,offered:bool,next:Option<u32>,pending:Option<{request:u32,owner:u32,action:u32,same_offer:bool}>},catalog:{captured:bool,offered:bool},geometry:{identity:bool,captured:bool,offered:bool,accepted:Option<{mode:u32,zoom:u32}>,next:Option<u32>,pending:Option<{request:u32,same_offer:bool,transform:{mode:u32,zoom:u32}}>,failed:bool},sel:u32|Tracks:{tab:u32,depth:u32,pages:[{page:u32,return_key:u32}],feedback:{rollback:Option<{before:PlexUi,after:PlexUi}>,uncertain:bool,failure:u32,retry:Option<{keep:bool,commit:payload}>},key:u32}|More:{capabilities:[bool;9],failure:Option<{action:u32,note:str}>,depth:u32,pages:[{page:u32,return_key:u32}],key:u32}|Info:{presentation:Option<{opacity:u32,wall_now_s:Option<i64>}>,sel:u32,content:Option<{title:str,summary:str,duration:i64}>,max_scroll:f32,pages:u64,step:f32,reader:{page:u64,scroll:f32,velocity:f32}}}";
+    "PlayerOverlayScreen{kind:str,track:{closed:bool,next:Option<u32>,pending:Option<{request:u32,keep:bool,same_source:bool,focus:u32,commit:payload}>},menu:{source:bool,captured:bool,offered:bool,next:Option<u32>,pending:Option<{request:u32,owner:u32,action:u32,same_offer:bool}>},catalog:{captured:bool,offered:bool},geometry:{identity:bool,captured:bool,offered:bool,accepted:Option<{mode:u32,zoom:u32}>,next:Option<u32>,pending:Option<{request:u32,same_offer:bool,transform:{mode:u32,zoom:u32}}>,failed:bool},sel:u32|Tracks:{tab:u32,depth:u32,pages:[{page:u32,return_key:u32}],feedback:{rollback:Option<{before:PlexUi,after:PlexUi}>,uncertain:bool,failure:u32,retry:Option<{keep:bool,commit:payload}>},key:u32}|More:{capabilities:[bool;11],failure:Option<{action:u32,note:str}>,depth:u32,pages:[{page:u32,return_key:u32}],key:u32}|Info:{presentation:Option<{opacity:u32,wall_now_s:Option<i64>}>,sel:u32,content:Option<{title:str,summary:str,duration:i64}>,max_scroll:f32,pages:u64,step:f32,reader:{page:u64,scroll:f32,velocity:f32}}}";
 
 /// Which panel a [`PlayerOverlayArg`] names, and — since the argument is what the container holds
 /// for the whole life of the entry — the identity `ScreenArg::same_instance` compares.
@@ -1526,3 +1526,14 @@ mod catalog_tests;
 #[cfg(test)]
 #[path = "overlay_menu_actions_tests.rs"]
 mod menu_actions_tests;
+
+/// Keep the declared recorder shape tied to the production capability canon.
+/// Adding a More action must change both contracts, not silently append state.
+#[cfg(test)]
+#[test]
+fn more_capability_shape_width_matches_the_canonical_action_inventory() {
+    let width: usize = SHAPE.split("More:{capabilities:[bool;").nth(1)
+        .expect("More capability shape").split(']').next().unwrap()
+        .parse().expect("numeric capability width");
+    assert_eq!(width, plx_appkit::more_menu::PlaybackMenuAction::ALL.len());
+}
