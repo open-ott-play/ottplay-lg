@@ -1,0 +1,96 @@
+{
+  "version": 2,
+  "synthetic": true,
+  "action": "command_activity_diagnostics",
+  "capability": {
+    "command_activity_diagnostics": {
+      "version": 2
+    }
+  },
+  "request": {
+    "version": 2,
+    "runtime": "native_123"
+  },
+  "actions": [
+    "play",
+    "play_catalog",
+    "playback",
+    "restart",
+    "provider",
+    "profile",
+    "input",
+    "command",
+    "local_media",
+    "plex_queue",
+    "plex_library",
+    "lifecycle",
+    "kiosk"
+  ],
+  "results": [
+    "pending",
+    "ok",
+    "rejected",
+    "unsupported",
+    "failed"
+  ],
+  "errors": [
+    "invalid_request",
+    "runtime_mismatch",
+    "unavailable",
+    "policy_denied"
+  ],
+  "limits": {
+    "entries": 8,
+    "integer": 9007199254740991,
+    "receipt_bytes": 8192
+  },
+  "example": {
+    "version": 2,
+    "runtime": "native_123",
+    "scope": "remote_ingress",
+    "entries": [
+      {
+        "sequence": 1,
+        "action": "plex_library",
+        "age_ms": 1000,
+        "result": "ok",
+        "request_id": "11111111111111111111111111111111"
+      }
+    ]
+  },
+  "legacy_example": {
+    "version": 2,
+    "runtime": "native_123",
+    "scope": "remote_ingress",
+    "entries": [
+      {
+        "sequence": 2,
+        "action": "input",
+        "age_ms": 0,
+        "result": "pending",
+        "request_id": null
+      }
+    ]
+  },
+  "clamped_example": {
+    "version": 2,
+    "runtime": "native_123",
+    "scope": "remote_ingress",
+    "entries": [
+      {
+        "sequence": 9007199254740991,
+        "action": "input",
+        "age_ms": 1,
+        "result": "ok",
+        "request_id": "33333333333333333333333333333333"
+      },
+      {
+        "sequence": 9007199254740991,
+        "action": "play",
+        "age_ms": 0,
+        "result": "pending",
+        "request_id": "44444444444444444444444444444444"
+      }
+    ]
+  }
+}
