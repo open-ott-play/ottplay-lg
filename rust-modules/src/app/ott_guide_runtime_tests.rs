@@ -213,14 +213,33 @@ fn changed_resolved_media_is_visible_failure_not_authority_for_old_archive() {
 }
 
 #[test]
-fn catalogue_capability_exposes_m3u_guide_without_guessing_movie_subtype() {
+fn catalogue_capability_uses_explicit_m3u_live_witness() {
     let runtime = fixture();
+    assert!(runtime.catalog.entries[0].live.is_some());
     let view = runtime.view();
     assert!(view.rows[0].guide_available);
-    assert_eq!(
-        view.rows[0].media.as_ref().unwrap().kind,
-        plx_screens::ott::OttMediaKind::Video
-    );
+    let media = view.rows[0].media.as_ref().unwrap();
+    assert_eq!(media.kind, plx_screens::ott::OttMediaKind::LiveChannel);
+    assert!(media.duration_ms.is_none());
+    assert!(media.progress.is_none());
+}
+
+#[test]
+fn m3u_guide_capability_does_not_invent_live_subtype_without_a_witness() {
+    for duration_ms in [None, Some(90_000)] {
+        let mut runtime = fixture();
+        let entry = &mut runtime.catalog.entries[0];
+        entry.live = None;
+        entry.duration_ms = duration_ms;
+        // Retain the fixture's live-looking title and .m3u8 URL: neither is a
+        // catalogue subtype witness, even when Guide remains an available action.
+        let view = runtime.view();
+        assert_eq!(view.rows[0].guide_available, duration_ms.is_none());
+        let media = view.rows[0].media.as_ref().unwrap();
+        assert_eq!(media.kind, plx_screens::ott::OttMediaKind::Video);
+        assert_eq!(media.duration_ms, duration_ms);
+        assert!(media.progress.is_none());
+    }
 }
 
 #[test]

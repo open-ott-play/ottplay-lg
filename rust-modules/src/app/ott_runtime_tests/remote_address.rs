@@ -110,27 +110,13 @@ fn deliver(app: &mut App, job: Job) {
     settle_pages(app);
 }
 
-// First-run Settings is a content action, so reaching Remote control does not
-// require discovering Browse first. These fixtures use the real screen/key path.
+// First-run management uses the real Classic body or Modern Browse section.
 fn first_run_key(app: &mut App, key: Key) {
-    let tick = next_tick(app);
-    bridge::frame(&mut app.pages, &mut app.bridge, tick, bridge::script_key(key, tick));
-    runtime_tick(app);
-    settle_pages(app);
+    super::profile_setup::browse_key(app, key);
 }
 
 fn first_run_open_body_action(app: &mut App, action: OttAction) {
-    let view = app.ott.as_ref().unwrap().view();
-    // Count the complete body order. Without an explicit selection the real
-    // screen starts on its first enabled metadata row, not a read-only heading.
-    let start = view.selected_row.as_ref()
-        .and_then(|id| view.rows.iter().position(|row| row.id == *id))
-        .unwrap_or_else(|| view.rows.iter().position(|row| row.enabled).unwrap_or(0));
-    let target = view.rows.iter().position(|row| row.enabled && row.action == action)
-        .expect("first-run body must expose the requested enabled action");
-    let direction = if target >= start { Key::Down } else { Key::Up };
-    for _ in 0..target.abs_diff(start) { first_run_key(app, direction); }
-    first_run_key(app, Key::Ok);
+    super::profile_setup::open_body_row(app, &action);
 }
 
 #[test]

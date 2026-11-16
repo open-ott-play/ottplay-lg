@@ -291,8 +291,9 @@ impl std::fmt::Debug for OttSearch {
     }
 }
 
-/// A real provider category, referencing the one canonical row table. Repeated
-/// membership does not duplicate metadata or create another playback identity.
+/// A presentation shelf (system All or a real provider category), referencing
+/// the one canonical row table. Repeated membership does not duplicate metadata
+/// or create another playback identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttShelf {
     pub id: String,
@@ -528,6 +529,7 @@ impl OttScreen {
     // another adapter. This admits display/reading only, never a Play or preview.
     fn metadata_row(&self, row: &OttRow) -> bool {
         matches!(row.action, OttAction::Play(_) | OttAction::GuideProgramme { .. })
+            || (!self.classic_mode && media::role(row) == media::Role::Container)
             || (self.classic_mode && row.content_title.as_deref().is_some_and(|title| !title.trim().is_empty()))
     }
 
@@ -541,15 +543,21 @@ impl OttScreen {
     }
 
     fn install_restoring_measured(&mut self, snapshot: Arc<OttView>, return_to: Option<(&str, Option<&String>)>) {
-        let changed_source = if self.snapshot.shelf_context.is_some() && !self.classic_mode {
-            self.snapshot.shelf_context != snapshot.shelf_context
+        let changed_source = if !self.classic_mode {
+            media::source(&self.snapshot) != media::source(&snapshot)
         } else {
             // Existing flat/Classic source admission stays independent of shelf memory.
             self.snapshot.preview_context.is_some() && self.snapshot.preview_context != snapshot.preview_context
         };
         let restore = self.restore_memory.take().filter(|memory| memory.page_id == snapshot.page_id
-            && memory.source.as_ref().is_none_or(|source| snapshot.shelf_context.as_ref() == Some(source))
-            && !changed_source)
+            && memory.source.as_ref().is_none_or(|source| media::source(&snapshot) == Some(source))
+            && (!changed_source || (!self.classic_mode
+                // Settings has no source identity. An explicitly returned,
+                // addressed memory can bridge it only to its exact destination.
+                // Replacing an existing source still retires old memory.
+                && media::source(&self.snapshot).is_none()
+                && memory.source.as_ref().is_some_and(|source|
+                    media::source(&snapshot) == Some(source)))))
             .or_else(|| {
                 let changed_source = self.snapshot.page_id != snapshot.page_id || changed_source
                     || (self.snapshot.shelf_context.is_none() && self.snapshot.preview_context != snapshot.preview_context);
@@ -558,7 +566,7 @@ impl OttScreen {
                     || snapshot.rows.iter().any(|row| row.id == *id) { return None; }
                 // Reuse navigation memory's progressive restore and explicit-input
                 // cancellation; the temporary first row is not a new user choice.
-                Some(Memory { page_id: snapshot.page_id.clone(), source: (!self.classic_mode).then(|| snapshot.shelf_context.clone()).flatten(), shelves: Vec::new(), focus: Some(format!("item:{id}")),
+                Some(Memory { page_id: snapshot.page_id.clone(), source: (!self.classic_mode).then(|| media::source(&snapshot).cloned()).flatten(), shelves: Vec::new(), focus: Some(format!("item:{id}")),
                     selected: Some(id.clone()), table_scroll: 0.0, scroll: 0.0, keys: self.keys.clone(), next_key: self.next_key })
             });
         if let Some(memory) = &restore {
@@ -621,6 +629,17 @@ impl OttScreen {
         self.media_keys.clear();
         self.catalog_keys.clear();
         self.card_presentation = media::presentation(&snapshot);
+        // An addressed return to a management operation must remain reachable,
+        // even when the surrounding source content now has a card presentation.
+        let management_target = (!self.classic_mode && !same_page && self.card_presentation.is_some())
+            .then(|| snapshot.selected_row.as_ref().and_then(|id| snapshot.rows.iter()
+                .find(|row| &row.id == id && row.enabled && !media::card(row)))
+                .map(|row| format!("item:{}", row.id))).flatten();
+        if management_target.is_some() {
+            self.browse = true;
+            self.browse_return = snapshot.rows.iter().find(|row| media::card(row))
+                .map(|row| format!("item:{}", row.id));
+        }
         self.install_shelves(&snapshot);
         let reset_cards = (restore.is_some() && !awaiting_restore) || !same_page || self.card_presentation != previous_presentation || previous_shelves != !self.shelves.is_empty();
         if reset_cards {
@@ -655,13 +674,17 @@ impl OttScreen {
         // The full-width Classic caption already names either compact list.
         let mut content = FormSection::new(if classic_catalogue || classic_choices { String::new() } else { snapshot.title.clone() });
         let mut torrent_controls = FormSection::new("");
+        let mut modern_controls = FormSection::new(snapshot.title.clone());
         let mut catalogue_number = 0usize;
         let mut category_number = 0u32;
         for (i, row) in snapshot.rows.iter().enumerate() {
             let id = format!("item:{}", row.id);
             let key = self.row_key(&id);
             let torrent_item = torrent_catalogue && torrent_catalogue_row(&snapshot.page_id, row);
-            if !torrent_catalogue || torrent_item { self.catalog_keys.push(key.0); }
+            if (!torrent_catalogue || torrent_item)
+                && (self.classic_mode || self.card_presentation.is_none() || media::card(row)) {
+                self.catalog_keys.push(key.0);
+            }
             if self.metadata_row(row) { self.media_keys.insert(key.0, i); }
             let catalogue_item = classic_catalogue && matches!(row.action, OttAction::Play(_));
             let channel_item = catalogue_item && classic::catalogue_live(row);
@@ -725,7 +748,10 @@ impl OttScreen {
                     presentation = presentation.catalogue_number(category_number.to_string());
                 }
             }
-            if torrent_catalogue && !torrent_item {
+            if self.browse && !self.classic_mode && self.card_presentation.is_some() && !media::card(row) {
+                modern_controls = modern_controls.item_keyed(id, key, RowKind::Button,
+                    FormAction::Forward(row.action.clone()), presentation).disabled(!row.enabled);
+            } else if torrent_catalogue && !torrent_item {
                 torrent_controls = torrent_controls.item_keyed(id, key, RowKind::Button,
                     FormAction::Forward(row.action.clone()), presentation).disabled(!row.enabled);
             } else {
@@ -770,12 +796,12 @@ impl OttScreen {
                     action, Row::new(msg::settings_back()));
             }
         }
-        let form = if self.browse || snapshot.rows.is_empty() { Form::new().section(navigation).section(footer) }
+        let form = if self.browse || snapshot.rows.is_empty() { Form::new().section(navigation).section(modern_controls).section(footer) }
             else if torrent_catalogue { Form::new().section(content).section(torrent_controls) }
             else if classic_catalogue || classic_choices { Form::new().section(content) }
             else { Form::new().section(content).section(footer) };
         let page_action = navigation::page_action(&snapshot.page_id);
-        let selected = if self.browse { page_action.to_owned() } else { snapshot.rows.iter()
+        let selected = if self.browse { management_target.unwrap_or_else(|| page_action.to_owned()) } else { snapshot.rows.iter()
             .find(|row| row.enabled && snapshot.selected_row.as_ref() == Some(&row.id))
             .or_else(|| snapshot.rows.iter().find(|row| row.enabled))
             .map(|row| format!("item:{}", row.id))
@@ -789,10 +815,11 @@ impl OttScreen {
                 "settings" => "nav:settings",
                 _ => "nav:providers",
             }.to_owned() }) };
-        // Header focus and selected media are independent. Keep the body selection
-        // available beneath that header instead of substituting its first row.
+        // Header/shelf occurrence focus and the canonical form row are distinct.
+        // Keep the selected item beneath that focus: an occurrence ID is not a
+        // form row and Form::restore would otherwise fall back to the first item.
         let restored_body = restore.as_ref().filter(|memory| memory.focus.as_deref().is_some_and(|id|
-            id == "nav:browse" || id == "nav:search" || id == "nav:favorite" || id == "nav:description" || (self.classic_mode && navigation::is_context_control(id))))
+            id.starts_with("shelf-item:") || id == "nav:browse" || id == "nav:search" || id == "nav:favorite" || id == "nav:description" || (self.classic_mode && navigation::is_context_control(id))))
             .and_then(|_| self.media.and_then(|index| snapshot.rows.get(index)))
             .map(|row| format!("item:{}", row.id));
         plx_base::diag::spans::span("ott_table", || {
@@ -810,6 +837,8 @@ impl OttScreen {
             if self.card_presentation.is_some() && !awaiting_restore {
                 self.card_stack.restore(&plx_ui::cards::StackMemory { scroll: memory.scroll, shelves: memory.shelves.clone() });
             }
+            self.card_focus = memory.focus.as_ref().and_then(|id| self.keys.get(id)).copied()
+                .filter(|key| self.shelves.iter().any(|shelf| shelf.index.contains_key(key)));
             self.focus_request = memory.focus.as_ref().filter(|id|
                 (id.starts_with("nav:") && visible.navigation(id)) || id.starts_with("shelf-item:"))
                 .and_then(|id| self.keys.get(id)).copied()
@@ -1220,7 +1249,7 @@ impl OttScreen {
             || !matches!(self.snapshot.page_id.split(':').next(), Some("channels" | "categories" | "favorites"))
         { return false; }
         self.close_browse(fx);
-        let focus = self.form.selected_key().map(|key| FocusKey { entry: self.entry, elem: key.0 });
+        let focus = self.form.selected_key().map(|key| FocusKey { entry: self.entry, elem: self.card_target(key.0) });
         fx.push(Fx::App(AppFx::Ott(OttOut::BrowseSettings { reply: self.instance,
             revision: self.snapshot.revision, memory: Memory::capture(self, focus) })));
         true

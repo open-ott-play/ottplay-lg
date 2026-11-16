@@ -70,6 +70,92 @@ struct BoundSubtitle { target: LocalSubtitleTarget, path: String }
 struct Installed { context: Context, subtitles: Vec<BoundSubtitle>, art: Option<PosterKey> }
 struct Preview { context: Context, art: Option<PosterKey> }
 
+// Only successful ordinary-Local discoveries enter this presentation cache.
+// It never retains descriptions, subtitle data, media bytes or an untrusted path.
+const ART_CACHE_ITEMS: usize = 64;
+const ART_CACHE_BYTES: usize = 256 * 1024;
+struct CachedArt {
+    profile: ProviderProfile,
+    relative_path: String,
+    read: transient::LocalRootRead,
+    art: PosterKey,
+    touched: u64,
+    bytes: usize,
+}
+#[derive(Default)]
+struct ArtCache {
+    rows: std::collections::HashMap<String, CachedArt>,
+    clock: u64,
+    bytes: usize,
+}
+impl CachedArt {
+    fn current(&self, runtime: &Runtime, id: &str) -> bool {
+        runtime.effective_profile() == Some(&self.profile)
+            && runtime.local_root_read_is_current(&self.read)
+            && runtime.catalog.entries.iter().any(|entry| entry.id == id
+                && matches!(&entry.media, MediaLocator::Local { relative_path } if relative_path == &self.relative_path))
+    }
+    fn model_bytes(context: &Context) -> Option<usize> {
+        // LocalBindingReceipt retains another source ID and canonical root
+        // pathname. bound_context proved that pathname equals profile.source.
+        // Count those copies, the map key, fixed proof storage and bucket slack.
+        let profile = &context.profile;
+        [profile.id.len(), profile.name.len(), profile.source.len(), profile.source_alias.len(),
+            context.entry.id.len(), context.path().len(), context.read.selection.source_id.len(),
+            context.read.selection.source_id.len(), profile.source.len()]
+            .into_iter().try_fold(std::mem::size_of::<Self>() + std::mem::size_of::<String>() + 64,
+                |total, bytes| total.checked_add(bytes))
+    }
+}
+impl ArtCache {
+    fn tick(&mut self) -> u64 {
+        self.clock = self.clock.checked_add(1).unwrap_or_else(|| {
+            for row in self.rows.values_mut() { row.touched = 0; }
+            1
+        });
+        self.clock
+    }
+    fn remove(&mut self, id: &str) {
+        if let Some(row) = self.rows.remove(id) { self.bytes -= row.bytes; }
+    }
+    fn retain_current(&mut self, runtime: &Runtime) {
+        self.rows.retain(|id, row| row.current(runtime, id));
+        self.bytes = self.rows.values().map(|row| row.bytes).sum();
+    }
+    fn remember(&mut self, context: &Context, art: PosterKey) {
+        if context.profile.kind != ProviderKind::Local || context.selection_id != context.entry.id
+            || context.selection_id.starts_with("favorite:")
+            || !matches!(&context.entry.media, MediaLocator::Local { .. }) || !context.read.root.is_live()
+        { return; }
+        let Some(bytes) = CachedArt::model_bytes(context).filter(|bytes| *bytes <= ART_CACHE_BYTES) else { return; };
+        self.remove(&context.entry.id);
+        while self.rows.len() >= ART_CACHE_ITEMS || self.bytes + bytes > ART_CACHE_BYTES {
+            let Some(oldest) = self.rows.iter().min_by(|(a_id, a), (b_id, b)|
+                a.touched.cmp(&b.touched).then_with(|| a_id.cmp(b_id))).map(|(id, _)| id.clone()) else { return; };
+            self.remove(&oldest);
+        }
+        let touched = self.tick();
+        self.rows.insert(context.entry.id.clone(), CachedArt {
+            profile: context.profile.clone(), relative_path: context.path().to_owned(),
+            read: context.read.clone(), art, touched, bytes,
+        });
+        self.bytes += bytes;
+    }
+    fn get(&mut self, runtime: &Runtime, entry: &CatalogEntry) -> Option<PosterKey> {
+        let row = self.rows.get(&entry.id)?;
+        if !row.current(runtime, &entry.id)
+            || !matches!(&entry.media, MediaLocator::Local { relative_path } if relative_path == &row.relative_path)
+        {
+            self.remove(&entry.id);
+            return None;
+        }
+        let touched = self.tick();
+        let row = self.rows.get_mut(&entry.id)?;
+        row.touched = touched;
+        Some(row.art)
+    }
+}
+
 #[derive(Default)]
 enum Purpose {
     #[default] Preview,
@@ -88,6 +174,9 @@ pub(super) struct State {
     purpose: Purpose,
     installed: Option<Installed>,
     preview: Option<Preview>,
+    // Interior mutation is limited to cache recency/retirement. Catalogue and
+    // source policy remain immutable during the renderer's borrowed projection.
+    art_cache: std::cell::RefCell<ArtCache>,
 }
 
 impl Work {
@@ -403,6 +492,16 @@ impl Runtime {
             playing.entry.description = data.entry.description.clone();
             playing.entry.duration_ms = data.entry.duration_ms;
         }
+        if let Some(art) = art.filter(|_| context.selection_id == context.entry.id
+            && !context.selection_id.starts_with("favorite:")
+            && self.effective_profile() == Some(&context.profile)
+            && self.local_root_read_is_current(&context.read)
+            && self.catalog.entries.iter().any(|entry| entry.id == context.entry.id && entry.media == context.entry.media))
+        {
+            let mut cache = self.local_assets.art_cache.borrow_mut();
+            cache.retain_current(self);
+            cache.remember(context, art);
+        }
         self.changed();
         art
     }
@@ -440,6 +539,10 @@ impl Runtime {
             .and_then(|value| value.art)
             .or_else(|| self.local_assets.installed.as_ref().filter(|value| valid(&value.context))
                 .and_then(|value| value.art))
+            // Favorite previews keep their selected metadata_target authority;
+            // an ordinary catalogue cache must never authorize another favorite.
+            .or_else(|| (self.page != "favorites").then(||
+                self.local_assets.art_cache.borrow_mut().get(self, entry)).flatten())
             .map(|key| OttPoster::Local { key })
     }
 }

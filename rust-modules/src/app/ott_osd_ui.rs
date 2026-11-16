@@ -111,6 +111,12 @@ impl Setting {
     }
 }
 
+/// Physical Back follows the same parent as each owner-built OSD picker row.
+/// Keep this typed list shared with view()/action(), before outer modal Back.
+pub(super) fn is_picker_page(page: &str) -> bool {
+    Setting::from_page(page).is_some()
+}
+
 pub(super) fn detail(runtime: &Runtime, key: &str) -> Option<String> {
     let setting = Setting::from_key(key)?;
     Some(setting.label(&runtime.osd_setting_value(key)?).into())

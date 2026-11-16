@@ -13,16 +13,62 @@ fn mount_setup(app: &mut App) {
     assert!(matches!(app.route(), AppArg::Ott));
 }
 
-fn setup_key(app: &mut App, key: Key) {
+/// Complete one physical gesture before draining the app's committed request.
+/// Native cards use the ordinary press spring, unlike immediate form rows.
+pub(super) fn browse_key(app: &mut App, key: Key) {
     let tick = next_tick(app);
-    bridge::frame(
-        &mut app.pages,
-        &mut app.bridge,
-        tick,
-        bridge::script_key(key, tick),
-    );
+    bridge::frame(&mut app.pages, &mut app.bridge, tick, bridge::script_key(key, tick));
+    for _ in 0..128 {
+        if !app.pages.input.press.is_active() && app.pages.input.arm.is_none() { break; }
+        let tick = next_tick(app);
+        bridge::frame(&mut app.pages, &mut app.bridge, tick, Vec::new());
+    }
+    assert!(!app.pages.input.press.is_active() && app.pages.input.arm.is_none(),
+        "one native gesture must finish within bounded dispatcher frames");
     runtime_tick(app);
     settle_pages(app);
+}
+
+fn setup_key(app: &mut App, key: Key) { browse_key(app, key); }
+
+/// Reach an existing management row through the presentation actually drawn.
+/// This never emits an OTT action or assigns focus behind the dispatcher's back.
+pub(super) fn open_body_row(app: &mut App, action: &OttAction) {
+    let view = app.ott.as_ref().unwrap().view();
+    let target = view.rows.iter().position(|row| row.enabled && &row.action == action)
+        .expect("current published view exposes the requested enabled body action");
+    let container = |row: &plx_screens::ott::OttRow| matches!(&row.action,
+        OttAction::SelectProvider(_) | OttAction::SelectProfile(_) | OttAction::SelectManagedPlex { .. });
+    let cards = app.bridge.ui_mode() == plx_machine::machine::UiMode::Modern
+        && matches!(view.page_id.split(':').next(), Some("providers" | "profiles"))
+        && view.rows.iter().any(|row| row.enabled && container(row));
+    if cards {
+        assert!(view.search.is_none() && view.order_context.is_none() && view.random_context.is_none(),
+            "these navigation fixtures expose the six global Browse routes without list-only controls");
+        assert!(view.rows.iter().filter(|row| container(row)).all(|row| row.description.is_empty()),
+            "container descriptions would add a separate Browse reader control");
+        assert!(!container(&view.rows[target]), "this helper opens management, not source cards");
+        // These fixtures start on the first card row. The leftmost native
+        // header stop is Browse; Left at its boundary never navigates a parent.
+        browse_key(app, Key::Up);
+        for _ in 0..4 { browse_key(app, Key::Left); }
+        browse_key(app, Key::Ok);
+        let screen = app.pages.nav.top_page().unwrap().inst.as_ref().unwrap().screen
+            .as_any().unwrap().downcast_ref::<plx_screens::ott::OttScreen>().unwrap();
+        assert_eq!(screen.guide_presentation_diagnostics()["browse"], true,
+            "management must be entered through the visible Browse control");
+        // Browse starts at this page's global navigation row: Providers=0,
+        // Profiles=1. Six existing global routes precede its management section.
+        let start = usize::from(view.page_id.split(':').next() == Some("profiles"));
+        let ordinal = view.rows[..target].iter().filter(|row| !row.enabled || !container(row)).count();
+        for _ in start..6 + ordinal { browse_key(app, Key::Down); }
+    } else {
+        let start = view.selected_row.as_ref().and_then(|id| view.rows.iter().position(|row| &row.id == id))
+            .unwrap_or_else(|| view.rows.iter().position(|row| row.enabled).unwrap_or(0));
+        let direction = if target >= start { Key::Down } else { Key::Up };
+        for _ in 0..target.abs_diff(start) { browse_key(app, direction); }
+    }
+    browse_key(app, Key::Ok);
 }
 
 fn setup_action(app: &mut App, action: OttAction) {

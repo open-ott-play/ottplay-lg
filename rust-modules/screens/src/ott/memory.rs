@@ -18,7 +18,7 @@ impl Memory {
     pub(super) fn capture(screen: &OttScreen, focus: Option<FocusKey<u32>>) -> Self {
         let focus = focus.filter(|key| key.entry == screen.entry).and_then(|key|
             screen.keys.iter().find(|(_, elem)| **elem == key.elem).map(|(id, _)| id.clone()));
-        Self { page_id: screen.snapshot.page_id.clone(), source: (!screen.shelves.is_empty()).then(|| screen.snapshot.shelf_context.clone()).flatten(),
+        Self { page_id: screen.snapshot.page_id.clone(), source: (!screen.classic_mode).then(|| media::source(&screen.snapshot).cloned()).flatten(),
             shelves: screen.card_stack.memory().shelves, focus,
             selected: screen.media.and_then(|index| screen.snapshot.rows.get(index)).map(|row| row.id.clone()),
             table_scroll: screen.form.table.scroll_pos(), scroll: screen.card_stack.scroll(), keys: screen.keys.clone(), next_key: screen.next_key }

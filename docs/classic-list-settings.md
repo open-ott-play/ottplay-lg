@@ -22,7 +22,8 @@ Opening Settings from the list's Menu remembers that caller. Back from the
 Settings root reopens the same Menu with Settings focused; the next Back closes
 Menu to the retained list. A list covering fullscreen video then returns to
 that video through its ordinary Back. Inner setting pickers return to Settings
-first. A replaced source, authentication session, interface mode or screen
+first, including all list-display pickers when Settings was opened over video;
+they do not close that caller or cancel the active catalogue. A replaced source, authentication session, interface mode or screen
 owner retires the caller receipt. Direct Settings entry keeps its existing root
 return, and the fullscreen player's own Menu keeps its separate return path.
 
@@ -58,8 +59,9 @@ picker, covered editor or a stale draft.
   viewport use the same layout as the visible content.
 - **Classic list arrows** (`arrowFun`): paging (`0`, default), volume (`1`) or
   contextual navigation (`2`). Volume uses the current playback volume controls
-  when available. Contextual navigation opens categories and programme details
-  for channels, or the existing Back and description actions for media. In
+  when available. Contextual Left opens Categories for both channels and finite
+  media. Right opens programme details for channels or Description for finite
+  media. In
   Categories, contextual Left opens the existing Menu and Right selects the
   focused category, just like OK. Paging mode retains category paging. These choices affect the Classic catalogue body, not
   editors, the Modern grid or fullscreen controls.

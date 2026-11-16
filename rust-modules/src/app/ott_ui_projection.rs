@@ -62,6 +62,16 @@ fn kind(locator: &MediaLocator) -> Option<OttMediaKind> {
     })
 }
 
+/// Only the admitted HTTP catalogue's explicit live witness upgrades a
+/// generic leaf. Neither its URL/title nor an absent duration proves live TV.
+fn entry_kind(entry: &CatalogEntry) -> Option<OttMediaKind> {
+    if matches!(&entry.media, MediaLocator::Http { .. }) && entry.live.is_some() {
+        Some(OttMediaKind::LiveChannel)
+    } else {
+        kind(&entry.media)
+    }
+}
+
 fn facts(kind: OttMediaKind, duration: Option<u64>, id: &str, resume: Option<(&str, u64)>) -> OttMedia {
     // A live catalogue duration may describe a programme rather than the stream.
     let duration_ms = duration.filter(|duration| *duration > 0 && kind != OttMediaKind::LiveChannel);
@@ -74,7 +84,7 @@ fn facts(kind: OttMediaKind, duration: Option<u64>, id: &str, resume: Option<(&s
 }
 
 pub(super) fn entry(entry: &CatalogEntry, id: &str, resume: Option<(&str, u64)>) -> Option<OttMedia> {
-    let mut media = facts(kind(&entry.media)?, entry.duration_ms, id, resume);
+    let mut media = facts(entry_kind(entry)?, entry.duration_ms, id, resume);
     media.synopsis = entry.synopsis.as_ref().and_then(|span| span.validated_for(&entry.description));
     Some(media)
 }
@@ -88,7 +98,7 @@ pub(super) fn favorite(favorite: &Favorite, preview: Option<&CatalogEntry>, id: 
         Locator::Local { .. } => OttMediaKind::LocalVideo,
         _ => OttMediaKind::Video,
     };
-    let mut media = facts(preview.and_then(|entry| kind(&entry.media)).unwrap_or(fallback),
+    let mut media = facts(preview.and_then(entry_kind).unwrap_or(fallback),
         preview.and_then(|entry| entry.duration_ms), id, resume);
     media.synopsis = preview.and_then(|entry| entry.synopsis.as_ref()
         .and_then(|span| span.validated_for(&entry.description)));
@@ -134,4 +144,59 @@ mod guide_compat_tests {
         assert!(projected.duration_ms.is_none());
         assert!(projected.progress.is_none());
     }
+
+    fn m3u_entries() -> Vec<CatalogEntry> {
+        let profile = ProviderProfile { id: "m3u-fixture".into(), name: "Fixture".into(),
+            kind: ProviderKind::M3u, source: "https://fixture.invalid/list.m3u".into(),
+            source_alias: String::new(), enabled: true };
+        plx_data::ott::parse_m3u(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"live\",Station\nhttps://fixture.invalid/live\n#EXTINF:90,Live TV S01E01.m3u8\nhttps://fixture.invalid/film.m3u8\n",
+            &profile).unwrap().entries
+    }
+
+    #[test]
+    fn http_live_witness_selects_channel_cards_and_suppresses_finite_facts() {
+        let rows = m3u_entries();
+        assert!(rows[0].live.is_some());
+        assert!(rows[1].live.is_none());
+        let mut live = rows[0].clone();
+        // A duration attached to an explicitly live entry can describe its
+        // programme. It must not create a finite resume bar on the stream.
+        live.duration_ms = Some(60_000);
+        let projected = entry(&live, "selected", Some(("selected", 5_000))).unwrap();
+        assert_eq!(projected.kind, OttMediaKind::LiveChannel);
+        assert!(projected.duration_ms.is_none());
+        assert!(projected.progress.is_none());
+        let finite = entry(&rows[1], "selected", Some(("selected", 5_000))).unwrap();
+        assert_eq!(finite.kind, OttMediaKind::Video);
+        assert_eq!(finite.duration_ms, Some(90_000));
+        assert!(finite.progress.is_some());
+        let mut unknown = rows[1].clone();
+        unknown.duration_ms = None;
+        let projected = entry(&unknown, "selected", None).unwrap();
+        assert_eq!(projected.kind, OttMediaKind::Video,
+            "a live-looking title/URL and missing duration are not a live witness");
+        assert!(projected.duration_ms.is_none());
+        assert!(projected.progress.is_none());
+    }
+
+    #[test]
+    fn favorite_uses_only_its_actual_preview_live_witness() {
+        let rows = m3u_entries();
+        let favorite = Favorite { title: "Station or finite video".into(),
+            origin: plx_data::ott::favorites::Origin { provider: "m3u".into(), profile: "Fixture".into(),
+                subprofile: None, source_alias: "Fixture".into() },
+            locator: Locator::Channel { channel_id: "live".into() } };
+        let live = super::favorite(&favorite, Some(&rows[0]), "favorite:one", Some(("favorite:one", 5_000)));
+        assert_eq!(live.kind, OttMediaKind::LiveChannel);
+        assert!(live.duration_ms.is_none() && live.progress.is_none());
+        let finite = super::favorite(&favorite, Some(&rows[1]), "favorite:one", Some(("favorite:one", 5_000)));
+        assert_eq!(finite.kind, OttMediaKind::Video);
+        assert_eq!(finite.duration_ms, Some(90_000));
+        assert!(finite.progress.is_some());
+        let unknown = super::favorite(&favorite, None, "favorite:one", Some(("favorite:one", 5_000)));
+        assert_eq!(unknown.kind, OttMediaKind::Video);
+        assert!(unknown.duration_ms.is_none() && unknown.progress.is_none());
+    }
+
 }

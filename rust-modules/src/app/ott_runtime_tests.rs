@@ -9,6 +9,8 @@ mod boot_resume;
 mod notifications;
 #[path = "ott_runtime_tests/modern_shelves.rs"]
 mod modern_shelves;
+#[path = "ott_runtime_tests/browse_projection.rs"]
+mod browse_projection_tests;
 
 #[path = "ott_runtime_tests/multiview_authorization.rs"]
 mod multiview_authorization;
