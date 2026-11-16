@@ -284,7 +284,7 @@ fn action_context_rotation_keeps_shelf_memory_but_source_replacement_retires_it(
 }
 
 #[test]
-fn flat_grid_and_classic_memory_keep_their_existing_restore_contract() {
+fn flat_modern_memory_is_source_fenced_while_classic_keeps_its_existing_restore_contract() {
     let _guard = plx_base::testlock::serial();
     for mode in [UiMode::Classic, UiMode::Modern] {
         let mut snapshot = (*fixture(OttMediaKind::Movie)).clone();
@@ -295,17 +295,20 @@ fn flat_grid_and_classic_memory_keep_their_existing_restore_contract() {
         step(&mut d, &mut rig, &mut now, if mode == UiMode::Classic { Key::Down } else { Key::Right });
         assert_focus(&d, "item:entry-1");
         let memory = Memory::capture(screen(&d), d.focus());
-        assert_eq!(memory.source, None);
-        let mut returned = (*rig.snapshot).clone();
-        returned.revision += 1;
-        returned.preview_context = Some("new-action-token-after-navigation".into());
-        returned.selected_row = Some("entry-0".into());
-        let mut restored = OttScreen::new(d.focus().unwrap().entry, InstanceId(300));
-        restored.classic_mode = mode == UiMode::Classic;
-        restored.restore_memory = Some(memory);
-        restored.install(Arc::new(returned));
-        assert_eq!(restored.form.selected_id().map(String::as_str), Some("item:entry-1"));
-        assert!(restored.shelves.is_empty());
+        assert_eq!(memory.source.as_deref(), if mode == UiMode::Modern { Some("source-fixture") } else { None });
+        for replacement in [false, true] {
+            let mut returned = (*rig.snapshot).clone();
+            returned.revision += 1;
+            if replacement { returned.preview_context = Some("replacement-source".into()); }
+            returned.selected_row = Some("entry-0".into());
+            let mut restored = OttScreen::new(d.focus().unwrap().entry, InstanceId(300));
+            restored.classic_mode = mode == UiMode::Classic;
+            restored.restore_memory = Some(memory.clone());
+            restored.install(Arc::new(returned));
+            let expected = if mode == UiMode::Modern && replacement { "item:entry-0" } else { "item:entry-1" };
+            assert_eq!(restored.form.selected_id().map(String::as_str), Some(expected));
+            assert!(restored.shelves.is_empty());
+        }
     }
 }
 
@@ -452,7 +455,13 @@ fn modern_browse_settings_two_backs_restore_exact_occurrence_and_each_shelf_view
         let scroll = screen(&d).card_stack.memory().shelves;
         assert_eq!(scroll.len(), 2);
         assert!(scroll.iter().all(|(_, value)| *value > 0.0));
-        now = open_browse(&mut d, &mut rig, now) + 16;
+        // The second shelf's Up neighbour is the first shelf, not the header.
+        // Click the real Browse stop without changing the selected occurrence.
+        let browse = draw_pointer_map(&mut d, &rig, &["nav:browse"])[0];
+        click_header(&mut d, &mut rig, browse, now);
+        now += 416;
+        assert!(screen(&d).browse);
+        assert_focus(&d, "nav:catalog");
         let mut settings = (*navigation_view("settings", 2,
             vec![navigation_row("setting", OttAction::EditSetting("uiFontScale".into()))],
             Some("setting"))).clone();

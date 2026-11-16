@@ -307,6 +307,19 @@ fn press_navigation_ok(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32,
     frame(d, rig, ms + 80, vec![]);
 }
 
+// Card activation commits through the shared press spring; a page transition
+// may happen before it settles, but release must never activate the new page.
+fn press_navigation_until_settled(d: &mut Dispatcher<TestHost>, rig: &mut TestRig,
+    ms: u32, same_batch: bool) -> u32 {
+    press_navigation_ok(d, rig, ms, same_batch);
+    for elapsed in (96..=2000).step_by(16) {
+        let now = ms + elapsed;
+        frame(d, rig, now, vec![]);
+        if !d.input.press.is_active() && d.input.arm.is_none() { return now; }
+    }
+    panic!("navigation press did not settle within bounded dispatcher ticks");
+}
+
 // Header pills are Control elements, unlike immediate Bare table/editor rows.
 // Drive the shipping press through its commit and release spring; callers continue
 // after the returned tick so no later input moves the fixture clock backwards.
@@ -433,7 +446,7 @@ fn dispatcher_provider_to_profiles_focuses_setup_or_profile_without_bouncing() {
             rows.push(navigation_row("profile.add", OttAction::EditSetting("profile.add".into())));
             rig.transition = Some((OttAction::SelectProvider("m3u".into()),
                 navigation_view("profiles:m3u", 2, rows, Some("obsolete-playing-channel"))));
-            press_navigation_ok(&mut d, &mut rig, 256, same_batch);
+            let settled = press_navigation_until_settled(&mut d, &mut rig, 256, same_batch);
             let expected = if configured { "item:m3u-home" } else { "item:profile.add" };
             assert_focus(&d, expected);
             assert_eq!(rig.actions, vec![OttAction::SelectProvider("m3u".into())],
@@ -443,9 +456,9 @@ fn dispatcher_provider_to_profiles_focuses_setup_or_profile_without_bouncing() {
             let mut pending = (*rig.snapshot).clone();
             pending.revision += 1;
             pending.status = "Profile operation pending".into();
-            publish_snapshot(&mut d, &mut rig, Arc::new(pending), 400);
+            publish_snapshot(&mut d, &mut rig, Arc::new(pending), settled + 32);
             assert_focus(&d, expected);
-            press_navigation_ok(&mut d, &mut rig, 480, same_batch);
+            press_navigation_until_settled(&mut d, &mut rig, settled + 112, same_batch);
             let action = if configured { OttAction::SelectProfile("m3u-home".into()) }
                 else { OttAction::EditSetting("profile.add".into()) };
             assert_eq!(rig.actions, vec![OttAction::SelectProvider("m3u".into()), action]);
@@ -1000,10 +1013,10 @@ fn dispatcher_provider_profile_rows_match_pointer_and_keyboard_activation() {
             if pointer {
                 let item = format!("item:{id}");
                 let rect = draw_pointer_map_with_activation(&mut d, &rig, &[&item],
-                    plx_ui::screen::Activate::Direct)[0];
+                    plx_ui::screen::Activate::Press)[0];
                 click_header(&mut d, &mut rig, rect, 256);
             } else {
-                press_navigation_ok(&mut d, &mut rig, 256, false);
+                press_navigation_until_settled(&mut d, &mut rig, 256, false);
             }
             assert_eq!(rig.actions, vec![action], "{page}: one activation, pointer={pointer}");
         }

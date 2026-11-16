@@ -150,17 +150,24 @@ fn modern_open_reader_uses_rolled_guide_body_instead_of_snapshot_synopsis() {
 }
 
 #[test]
-fn modern_table_pages_keep_their_existing_title_without_duplicate_header_caption() {
+fn modern_browse_cards_have_header_captions_while_actual_settings_keep_the_form_title() {
     let mut screen = catalog();
-    for page in ["providers", "profiles:m3u", "settings"] {
-        let mut view = (*snapshot(2, &["one"])).clone();
+    for (index, page) in ["providers", "profiles:m3u", "settings"].into_iter().enumerate() {
+        let mut view = (*snapshot(2 + index as u64, &["one"])).clone();
         view.page_id = page.into();
         view.title = page.into();
-        view.rows[0].action = OttAction::ShowProfiles;
+        view.rows[0].action = match page {
+            "providers" => OttAction::SelectProvider("m3u".into()),
+            "profiles:m3u" => OttAction::SelectProfile("one".into()),
+            _ => OttAction::EditSetting("uiFontScale".into()),
+        };
         screen.install(Arc::new(view));
-        assert!(!screen.grid_active());
-        assert!(!screen.header(&plx_ui::fixture::FixtureMeasure).unwrap().page.spec().left
-            .iter().any(|item| item.title));
+        assert_eq!(screen.grid_active(), page != "settings");
+        let header = screen.header(&plx_ui::fixture::FixtureMeasure).unwrap();
+        assert_eq!(header.page.spec().left.iter().filter(|item| item.title).count(), usize::from(page != "settings"));
+        if page != "settings" {
+            assert!(header.page.spec().left.iter().any(|item| item.title && item.label.starts_with(page)));
+        }
     }
 }
 
