@@ -243,7 +243,7 @@ fn pure_redirect_landing_resolves_children_without_replacing_the_logical_input()
         panic!("master fixture");
     };
     let selected = &variants[0].url;
-    assert_eq!(selected, "https://fixture.invalid/ephemeral-client/selected");
+    assert_eq!(selected, "https://fixture.invalid:443/ephemeral-client/selected");
     assert_eq!(inspected_hls_source(input, selected, false, false), input,
         "plain live replay returns to the admitted entry, never an ephemeral redirect");
     assert_eq!(inspected_hls_source(input, selected, true, false), selected);
@@ -254,7 +254,7 @@ fn pure_redirect_landing_resolves_children_without_replacing_the_logical_input()
 fn pure_plain_live_bootstrap_uses_fresh_master_child_and_freezes_its_landed_media_url() {
     let master = "https://fixture.invalid/channel/master.m3u8";
     let stale = "https://fixture.invalid/old-session/media.m3u8";
-    let selected = "https://fixture.invalid/new-session/media.m3u8";
+    let selected = "https://fixture.invalid:443/new-session/media.m3u8";
     let landed = "https://cdn.fixture.invalid/new-session/index.m3u8";
     let mut io = FakePlaylistFetch::new(vec![
         (Duration::from_secs(1), Ok((master.into(), concat!(
@@ -266,7 +266,7 @@ fn pure_plain_live_bootstrap_uses_fresh_master_child_and_freezes_its_landed_medi
     let source = inspected_hls_source(master, stale, false, false);
     let (media_url, media) = initial_playback_media(source, true, began + Duration::from_secs(15), &mut io).unwrap();
     assert_eq!(media_url, landed);
-    assert_eq!(io.requests, vec![(master.into(), began + Duration::from_secs(15), 0),
+    assert_eq!(io.requests, vec![("https://fixture.invalid:443/channel/master.m3u8".into(), began + Duration::from_secs(15), 0),
         (selected.into(), began + Duration::from_secs(15), 1)]);
     assert_eq!(media.segments.len(), 1);
     assert_eq!(media.segments[0].inner.resource.path, "/new-session/part.ts");
