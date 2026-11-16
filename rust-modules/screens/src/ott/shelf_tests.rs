@@ -497,6 +497,11 @@ fn modern_browse_settings_two_backs_restore_exact_occurrence_and_each_shelf_view
         now += 16;
         assert!(screen(&d).browse);
         assert_focus(&d, "nav:settings");
+        if scenario == "same-source" {
+            assert_eq!(screen(&d).browse_return.as_deref(), Some("item:entry-4"),
+                "Browse must retain the canonical form item beneath the restored shelf occurrence");
+            assert_eq!(screen(&d).card_focus, Some(expected.elem));
+        }
         step(&mut d, &mut rig, &mut now, Key::Back);
         assert!(!screen(&d).browse);
         if scenario == "same-source" {

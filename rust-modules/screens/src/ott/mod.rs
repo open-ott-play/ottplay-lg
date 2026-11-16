@@ -815,10 +815,11 @@ impl OttScreen {
                 "settings" => "nav:settings",
                 _ => "nav:providers",
             }.to_owned() }) };
-        // Header focus and selected media are independent. Keep the body selection
-        // available beneath that header instead of substituting its first row.
+        // Header/shelf occurrence focus and the canonical form row are distinct.
+        // Keep the selected item beneath that focus: an occurrence ID is not a
+        // form row and Form::restore would otherwise fall back to the first item.
         let restored_body = restore.as_ref().filter(|memory| memory.focus.as_deref().is_some_and(|id|
-            id == "nav:browse" || id == "nav:search" || id == "nav:favorite" || id == "nav:description" || (self.classic_mode && navigation::is_context_control(id))))
+            id.starts_with("shelf-item:") || id == "nav:browse" || id == "nav:search" || id == "nav:favorite" || id == "nav:description" || (self.classic_mode && navigation::is_context_control(id))))
             .and_then(|_| self.media.and_then(|index| snapshot.rows.get(index)))
             .map(|row| format!("item:{}", row.id));
         plx_base::diag::spans::span("ott_table", || {
