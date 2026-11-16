@@ -10,6 +10,13 @@ displayed number; a visible information banner does not block number entry.
 Multi-digit entry waits for the existing two-second input window before opening
 the selected channel. Finite-video seek shortcuts keep their separate rules.
 
+Browsing a different category does not replace the list admitted for the
+currently playing item. Fullscreen CH+/CH− continue that admitted list until a
+new item is explicitly opened. Source replacement, removal or changed media
+authority invalidates the old list; browsing alone does not. An explicit
+category selection focuses the playing item when its unique occurrence is
+present in that category.
+
 After a live-channel playback failure, CH+/CH− and number entry remain available
 only while the original profile, source and list are still current. Switching
 sources, stopping or suspending playback retires that recovery context. These
@@ -90,6 +97,19 @@ Each handoff reads the existing window around the target item ID using
 `GET /playQueues/{playQueueId}` with `center`, `window`, `includeBefore`, `includeAfter` and
 `own=0`, as specified in `docs/plex-openapi.json`. Expired, unavailable or mismatched windows
 retain the known snapshot. The queue-window behavior is shared with automatic advance.
+
+## OTT fullscreen menu
+
+The source-bound Menu offers **Description** when the accepted playing metadata
+contains a synopsis or current programme information. This includes finite
+VPortal and local videos; missing metadata does not invent an EPG. **Favorites**
+uses the normal durable category choice before opening the mixed list. Changing
+the source or navigating away invalidates a delayed selection result.
+
+The remote's Green key opens **Records** only when the current channel advertises
+an available archive. Failed/loading playback does not borrow this capability
+from a retained channel. Audio and subtitle menus continue to use the actual
+current track inventory and its supported operations.
 
 The D-pad option serves remotes without dedicated FF/REW keys. It can also make frequent jumps
 through filler sections in anime more convenient while preserving the ordinary D-pad default.

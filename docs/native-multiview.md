@@ -65,6 +65,12 @@ a source for each window. The slot menu also selects the active video and audio 
 video surface, the shared focus controls and Magic Remote pointer use the same
 rectangles as rendering. Back opens the Multiview controls; Close restores the
 previous ordinary source only after retirement and fresh authorization.
+Inside those controls, Back returns from source selection to Videos, then to
+Layouts and audio, then to the initiating menu. Each return retires the old
+selection receipt and focuses the same window or the Videos control in its
+parent. If its source is no longer authorized, Back safely leaves
+the controls. A nonempty window also offers **Stop**, which retires only that
+window and leaves the other videos and the saved ordinary provider alone.
 
 On a build that advertises these capabilities, the existing CLI uses windows
 1–9 (the wire protocol uses 0–8):

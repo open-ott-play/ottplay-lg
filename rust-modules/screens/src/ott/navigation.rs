@@ -340,7 +340,7 @@ impl super::OttScreen {
     pub(super) fn classic_arrow_input<H: super::AppLike<Memory = super::PageMemory>>(&mut self,
         input: &plx_machine::machine::InputEvent<u32>, cx: &super::Cx<'_, H>,
         fx: &mut super::Effects<'_, H>) -> Option<super::Handled> {
-        use super::{Edge, InputKind, Key, OttMediaKind};
+        use super::{Edge, InputKind, Key};
         use plx_machine::machine::{Delivery, FocusKey, Fx, MachineId};
         use plx_ui::screen::{Enter, FocusTarget, ScreenEvent};
         let InputKind::Key { key, edge, at_edge, .. } = input.kind else { return None; };
@@ -357,11 +357,27 @@ impl super::OttScreen {
             return Some(super::Handled::Yes);
         }
         if mode == 2 {
+            if self.snapshot.page_id.split(':').next() == Some("categories") {
+                if edge == Edge::Down {
+                    if direction < 0 {
+                        // Use the same Menu owner as its drawn Browse control;
+                        // its rows retain ordinary visibility and return focus.
+                        if let Some(key) = self.keys.get("nav:browse").copied() {
+                            self.activate(key, false, fx);
+                        }
+                    } else {
+                        // Exactly OK on the current form row: disabled rows and
+                        // captured category/Favorites addresses keep their owner.
+                        self.activate(current.elem, false, fx);
+                    }
+                }
+                return Some(super::Handled::Yes);
+            }
             let selected = self.media_keys.get(&current.elem).and_then(|index| self.snapshot.rows.get(*index));
             if let Some(row) = selected.filter(|row| row.enabled && matches!(&row.action, OttAction::Play(_))) {
-                // Only typed finite metadata selects media Back. Missing metadata
-                // does not turn a channel into an invented folder/media owner.
-                let finite = row.media.as_ref().is_some_and(|media| !matches!(media.kind, OttMediaKind::LiveChannel));
+                // Reuse the rendered catalogue's accepted live/guide facts:
+                // M3U streams may retain the coarse Video media subtype.
+                let finite = row.media.is_some() && !super::classic::catalogue_live(row);
                 if edge == Edge::Down {
                     if direction < 0 {
                         if finite { self.send(OttAction::Back, fx); }
@@ -373,8 +389,8 @@ impl super::OttScreen {
                 return Some(super::Handled::Yes);
             }
         }
-        // Legacy 3 has the same paging fallback as Classic 0. Category rows also
-        // page in contextual mode; only their explicit OK selects a category.
+        // Legacy 3 has the same paging fallback as Classic 0. Contextual
+        // category actions above do not alter paging or volume modes.
         if let Some(target) = self.remote_page_key(current.elem, i32::from(direction)) {
             self.restore_memory = None;
             if target != current.elem {

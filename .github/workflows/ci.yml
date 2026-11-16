@@ -31,6 +31,7 @@ jobs:
       - run: python3 ci/check-package.py --tracked --product-config ci/ottplay-integration/release/product.json
       - run: python3 ci/gen-third-party-notices.py --check
       - run: python3 -m unittest ci.test_gen_notices -v
+      - run: python3 -m unittest discover -s tests -p test_replay_fixtures.py -v
       - run: python3 -m unittest discover -s scripts -p 'test_lg_*.py' -v
       - run: node scripts/check-shared-core.cjs
       - name: Test optional Home Assistant tooling and public Home integration
@@ -59,11 +60,95 @@ jobs:
         with:
           packages: build-essential pkg-config libsdl2-dev libsdl2-ttf-dev libgl1-mesa-dev libwayland-dev libglib2.0-dev
       - uses: ./.github/actions/rust-toolchain
+      - name: Locate the isolated host target
+        id: host-cache
+        shell: bash
+        env:
+          NATIVE_CHECK_DIR: ${{ runner.temp }}/lg-check
+        run: |
+          python3 - <<'PYCACHE'
+          import os
+          from pathlib import Path
+          workspace = Path("rust-modules").resolve()
+          target = (Path(os.environ["NATIVE_CHECK_DIR"]) / "target").resolve()
+          # The cache action joins its target argument to the workspace root.
+          relative = os.path.relpath(target, workspace)
+          assert not Path(relative).is_absolute() and (workspace / relative).resolve() == target
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("target=" + relative + "\n")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write("NATIVE_CHECK_DIR=" + os.environ["NATIVE_CHECK_DIR"] + "\n")
+          PYCACHE
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: rust-modules -> ${{ steps.host-cache.outputs.target }}
+          key: native-isolated-checks
+      - name: Test native application and layers
+        run: python3 scripts/lg-build.py check --work-dir "$NATIVE_CHECK_DIR" --jobs 2
+
+  renderer-replay:
+    name: Controlled renderer replay
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - name: Prepare replay evidence
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/renderer-replay"
+          git rev-parse HEAD > "$RUNNER_TEMP/renderer-replay/source-sha.txt"
+          uname -sm > "$RUNNER_TEMP/renderer-replay/platform.txt"
+      - name: Install renderer development libraries
+        run: brew install sdl2 sdl2_ttf pkg-config
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           workspaces: rust-modules
-      - name: Test native application and layers
-        run: python3 scripts/lg-build.py check --work-dir "$RUNNER_TEMP/lg-check" --jobs 2
+          key: controlled-renderer-replay
+      - name: Build the controlled host renderer
+        run: >-
+          cargo +"$RUST_TOOLCHAIN" build --locked
+          --manifest-path rust-modules/Cargo.toml
+          --features hostsim --bin plxnative-sim
+      - name: Prove outbound network denial and replay every controlled anchor
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/renderer-replay"
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound)' \
+            python3 - <<'PYPROBE'
+          import errno, json, os, socket
+          from pathlib import Path
+          with socket.socket() as connection:
+              connection.settimeout(2)
+              result = connection.connect_ex(("1.1.1.1", 443))
+          if result not in (errno.EPERM, errno.EACCES):
+              raise SystemExit("Outbound sandbox denial not proven: " + str(result))
+          Path(os.environ["RUNNER_TEMP"], "renderer-replay", "network-denial.json").write_text(
+              json.dumps({"outbound_denied": True, "errno": result}) + "\n")
+          PYPROBE
+          python3 tests/replay_fixtures.py \
+            --sim rust-modules/target/debug/plxnative-sim \
+            --fixtures tests/fixtures/replay --assets pkg \
+            --output "$RUNNER_TEMP/renderer-replay" \
+            --window 960x540 --jobs 1 --timeout 300 \
+            | tee "$RUNNER_TEMP/renderer-replay/driver.log"
+      - name: Retain complete replay ledgers and process results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: controlled-renderer-replay-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/renderer-replay/
 
   local-decoder-build:
     name: Bundled local decoder and C ABI
@@ -229,7 +314,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [source, native, arm, release-contracts, local-decoder-build, local-decoder-sessions, local-virtual-output]
+    needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -237,6 +322,7 @@ jobs:
         env:
           SOURCE: ${{ needs.source.result }}
           NATIVE: ${{ needs.native.result }}
+          RENDERER_REPLAY: ${{ needs.renderer-replay.result }}
           ARM: ${{ needs.arm.result }}
           RELEASE: ${{ needs.release-contracts.result }}
           DECODER_BUILD: ${{ needs.local-decoder-build.result }}
@@ -244,6 +330,7 @@ jobs:
           VIRTUAL_OUTPUT: ${{ needs.local-virtual-output.result }}
         run: >-
           test "$SOURCE" = success && test "$NATIVE" = success &&
+          test "$RENDERER_REPLAY" = success &&
           test "$ARM" = success && test "$RELEASE" = success &&
           test "$DECODER_BUILD" = success && test "$DECODER_SESSIONS" = success &&
           test "$VIRTUAL_OUTPUT" = success

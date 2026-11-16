@@ -70,7 +70,7 @@ impl OttScreen {
         if self.classic_mode && self.snapshot.page_id == "settings" {
             let classified = classify_input(key, sym, wcode);
             // Digits use their ASCII sym, not the unrelated SDL scancode.
-            let save = matches!(classified, RemoteKey::Play | RemoteKey::Pause)
+            let save = matches!(classified, RemoteKey::Play | RemoteKey::Pause | RemoteKey::PlayPause)
                 || (classified == RemoteKey::Other && (sym == u32::from(b'0')
                     || remote_button(sym, wcode) == Some(RemoteButton::Green)));
             if save {

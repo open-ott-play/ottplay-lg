@@ -330,7 +330,7 @@ pub(super) fn prepare(
         .effective_profile()
         .ok_or(SourceError::Unavailable)?;
     let Some(query) = query else {
-        if runtime.ordered_ids().is_empty() {
+        if commands::selected_ids(runtime).is_empty() {
             return Err(SourceError::NotReady);
         }
         return Ok(Prepared {
@@ -399,7 +399,7 @@ pub(super) fn prepare(
     if query.is_empty() {
         return Err(SourceError::NotFound);
     }
-    let ids = runtime.ordered_ids();
+    let ids = commands::selected_ids(runtime);
     let selected = if query.bytes().all(|b| b.is_ascii_digit()) {
         query
             .parse::<usize>()

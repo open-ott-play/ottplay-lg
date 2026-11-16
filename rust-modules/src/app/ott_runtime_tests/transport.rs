@@ -643,6 +643,8 @@ fn automatic_resume_admit_with_duration(app: &mut App, duration_ns: i64) -> i64 
     let runtime = app.ott.as_ref().unwrap();
     assert!(runtime.play_target.is_none() && runtime.restore_play_generation.is_none());
     assert!(playing_matches(runtime.playing.as_ref().unwrap(), app));
+    assert!(runtime.resolver_hold_for_test);
+    assert_eq!(runtime.resolver_launches_for_test, 0);
     // The actual completed job released its resolver slot. Hold it again so a
     // following test's selected successor remains a request, not a new worker.
     app.ott.as_mut().unwrap().resolver_busy = true;
@@ -703,6 +705,7 @@ fn automatic_resume_queued_fixture(automatic: bool) -> Box<App> {
         runtime.catalog_done.store(false, Ordering::Release);
         runtime.metadata_done.store(false, Ordering::Release);
         runtime.catalog_complete = true;
+        runtime.resolver_hold_for_test = true;
         assert!(runtime.resolver_busy && runtime.saving);
     }
     automatic_resume_select(&mut app, "first", 42_000);
@@ -1045,7 +1048,12 @@ fn automatic_resume_eof_zero_and_next_are_not_clamped() {
     let _serial = plx_base::testlock::serial();
     let _reset = ResetMedia;
     let mut app = automatic_resume_fixture();
-    app.ott.as_mut().unwrap().catalog.entries.push(local_entry("second"));
+    {
+        let runtime = app.ott.as_mut().unwrap();
+        runtime.catalog.entries.push(local_entry("second"));
+        // Real successful catalogue publication advances this discovery version.
+        runtime.catalog_revision = runtime.catalog_revision.wrapping_add(1);
+    }
     assert!(finish_catalog_playback(&mut app));
     assert_eq!(automatic_resume_point(&app).position_ms, 0, "accepted EOF retains its reset semantics");
     assert_eq!(app.ott.as_ref().unwrap().play_target, Some(PlaybackRequest::ordinary("second", 0)));
@@ -1088,7 +1096,12 @@ fn automatic_resume_stale_exit_receipt_cannot_clear_a_new_restore_floor() {
         rating_key: String::new(),
         source: old.source.clone(),
     };
-    app.ott.as_mut().unwrap().catalog.entries.push(local_entry("second"));
+    {
+        let runtime = app.ott.as_mut().unwrap();
+        runtime.catalog.entries.push(local_entry("second"));
+        // Real successful catalogue publication advances this discovery version.
+        runtime.catalog_revision = runtime.catalog_revision.wrapping_add(1);
+    }
     automatic_resume_select(&mut app, "second", 50_000);
     assert_eq!(automatic_resume_admit(&mut app), 50_000_000_000);
     let before = automatic_resume_point(&app);

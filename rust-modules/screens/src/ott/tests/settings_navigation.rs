@@ -211,3 +211,103 @@ fn sleep_selector_keeps_one_settings_return_and_no_catalog_refresh() {
         assert!(action(&screen, "nav:refresh").is_none());
     }
 }
+
+#[test]
+fn browse_settings_emits_a_causal_request_with_original_list_memory() {
+    let _serial = plx_base::testlock::serial();
+    let _visibility = VisibilityReset::all_visible();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for page in ["channels", "channels:context-a", "favorites", "favorites:context-a", "categories"] {
+            let mut screen = screen(mode);
+            screen.classic_visible = true;
+            let mut caller = snapshot(7, &["first", "second"]);
+            Arc::make_mut(&mut caller).page_id = page.into();
+            screen.install(caller);
+            let original = screen.form.selected_id().cloned();
+            effects(|fx| screen.open_browse(fx));
+            let key = screen.keys["nav:settings"];
+            let sent = effects(|fx| screen.activate(key, false, fx));
+            let requests: Vec<_> = sent.iter().filter_map(|item| match &item.fx {
+                Fx::App(AppFx::Ott(OttOut::BrowseSettings { reply, revision, memory })) => Some((reply, revision, memory)),
+                _ => None,
+            }).collect();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(*requests[0].0, InstanceId(1));
+            assert_eq!(*requests[0].1, 7);
+            assert_eq!(requests[0].2.page_id, page);
+            assert_eq!(requests[0].2.focus, original);
+            assert!(!sent.iter().any(|item| matches!(&item.fx,
+                Fx::App(AppFx::Ott(OttOut::Action { action: OttAction::ShowSettings, .. })))));
+        }
+    }
+}
+
+#[test]
+fn browse_return_is_fresh_idempotent_and_back_restores_the_original_list() {
+    let _serial = plx_base::testlock::serial();
+    let _visibility = VisibilityReset::all_visible();
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        for page in ["channels", "channels:context-a", "favorites", "favorites:context-a", "categories"] {
+            let mut screen = screen(mode);
+            screen.classic_visible = true;
+            let mut initial = snapshot(3, &["first", "second"]);
+            Arc::make_mut(&mut initial).page_id = page.into();
+            screen.install(initial);
+            let original = screen.form.selected_id().cloned();
+            let memory = Memory::capture(&screen, screen.form.selected_key().map(|key|
+                FocusKey { entry: screen.entry, elem: key.0 }));
+            screen.install(static_page("settings", None, 4));
+            screen.install(static_page("settings", None, 8)); // ordinary status updates
+            let mut caller = snapshot(9, &["first", "second"]);
+            Arc::make_mut(&mut caller).page_id = page.into();
+            let sent = effects(|fx| assert!(screen.return_to_browse(caller.clone(), memory.clone(), mode == UiMode::Classic, fx)));
+            assert!(screen.browse);
+            assert_eq!(screen.form.selected_id().map(String::as_str), Some("nav:settings"));
+            assert_eq!(sent.iter().filter(|item| matches!(&item.fx,
+                Fx::Deliver(MachineId::Instance(owner), Delivery::Screen(ScreenEvent::Enter(
+                    plx_ui::screen::Enter::Fresh { focus: plx_ui::screen::FocusTarget::Elem(key) })))
+                    if *owner == screen.instance && key.entry == screen.entry && key.elem == screen.keys["nav:settings"])).count(), 1);
+            assert!(!sent.iter().any(|item| matches!(&item.fx, Fx::App(_))));
+            let repeated = effects(|fx| assert!(!screen.return_to_browse(caller.clone(), memory.clone(), mode == UiMode::Classic, fx)));
+            assert!(repeated.is_empty(), "replayed return cannot move the input cursor");
+            assert!(screen.browse, "duplicate return cannot toggle Menu closed");
+            effects(|fx| screen.close_browse(fx));
+            assert_eq!(screen.snapshot.page_id, page);
+            assert_eq!(screen.form.selected_id().cloned(), original);
+            screen.install(static_page("settings", None, 10));
+            effects(|fx| assert!(!screen.return_to_browse(caller.clone(), memory.clone(), mode == UiMode::Classic, fx)));
+            assert_eq!(screen.snapshot.page_id, "settings", "old return cannot replace reopened Settings");
+            assert!(!screen.browse);
+        }
+    }
+}
+
+#[test]
+fn browse_return_rejects_covered_changed_mode_and_wrong_caller() {
+    let _serial = plx_base::testlock::serial();
+    let _visibility = VisibilityReset::all_visible();
+    for page in ["channels", "channels:context-a", "favorites", "favorites:context-a"] {
+        for changed in ["cover", "mode", "caller", "context"] {
+            let mut screen = screen(UiMode::Classic);
+            screen.classic_visible = true;
+            let mut initial = snapshot(1, &["first"]);
+            Arc::make_mut(&mut initial).page_id = page.into();
+            screen.install(initial);
+            let mut memory = Memory::capture(&screen, None);
+            screen.install(static_page("settings", None, 2));
+            let mut classic = true;
+            match changed {
+                "cover" => screen.classic_visible = false,
+                "mode" => classic = false,
+                "caller" => memory.page_id = "categories".into(),
+                _ => memory.page_id = format!("{}:context-b", page.split(':').next().unwrap()),
+            }
+            let mut caller = snapshot(3, &["first"]);
+            Arc::make_mut(&mut caller).page_id = page.into();
+            let sent = effects(|fx| assert!(!screen.return_to_browse(caller, memory, classic, fx)));
+            assert!(sent.is_empty(), "rejected context cannot deliver focus or an action");
+            assert_eq!(screen.snapshot.page_id, "settings");
+            assert!(!screen.browse);
+        }
+    }
+}

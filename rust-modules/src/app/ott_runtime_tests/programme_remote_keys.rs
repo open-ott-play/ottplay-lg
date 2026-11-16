@@ -720,7 +720,14 @@ fn explicit_failed_step_anchor_rejects_profile_media_catalog_and_navigation_chan
             "profile" => runtime.saved.profiles.profiles[0].source.push_str("?replacement"),
             "media" => runtime.catalog.entries.iter_mut().find(|row|row.id=="a").unwrap().media =
                 MediaLocator::Http { url:"https://replacement.invalid/other.m3u8".into() },
-            "catalog" => runtime.catalog_revision += 1,
+            "catalog" => {
+                // Compatible publication/append retains the captured queue;
+                // replacing its actual order must retire the failed intent.
+                assert_eq!(runtime.catalog.entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+                    ["c", "a", "b"]);
+                runtime.catalog.entries.rotate_left(1);
+                runtime.catalog_revision += 1;
+            },
             "navigation" => runtime.navigation_epoch += 1,
             "playback" => runtime.playback_epoch += 1,
             "choice" => { runtime.play_with_policy(&mut app, "b", false).unwrap(); },
@@ -728,6 +735,10 @@ fn explicit_failed_step_anchor_rejects_profile_media_catalog_and_navigation_chan
             _ => unreachable!(),
         }
         let next = playback_step::target(&runtime, &app, 1);
+        if change == "catalog" {
+            assert_eq!(next.as_ref().ok().map(String::as_str), Some("a"),
+                "retired failed a cannot override the still-playing c's normal successor");
+        }
         assert_ne!(next.ok().as_deref(), Some("b"), "retired failed intent cannot steer {change}");
         app.ott = Some(runtime);
     }

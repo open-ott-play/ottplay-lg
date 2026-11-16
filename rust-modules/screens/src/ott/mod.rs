@@ -134,6 +134,8 @@ impl std::fmt::Debug for OttAction {
 pub enum OttOut {
     Refresh { reply: InstanceId },
     Action { reply: InstanceId, action: OttAction },
+    /// Presentation-only caller memory, emitted only by the actual Browse row.
+    BrowseSettings { reply: InstanceId, revision: u64, memory: Memory },
 }
 
 /// Distinguishes a durable setting from a temporary catalogue filter. Both use
@@ -1213,6 +1215,43 @@ impl OttScreen {
         }
     }
 
+    fn settings_from_browse<H: AppLike>(&mut self, action: &OttAction, fx: &mut Effects<'_, H>) -> bool {
+        if !self.browse || !matches!(action, OttAction::ShowSettings)
+            || !matches!(self.snapshot.page_id.split(':').next(), Some("channels" | "categories" | "favorites"))
+        { return false; }
+        self.close_browse(fx);
+        let focus = self.form.selected_key().map(|key| FocusKey { entry: self.entry, elem: key.0 });
+        fx.push(Fx::App(AppFx::Ott(OttOut::BrowseSettings { reply: self.instance,
+            revision: self.snapshot.revision, memory: Memory::capture(self, focus) })));
+        true
+    }
+
+    fn return_to_browse<H: AppLike>(&mut self, snapshot: Arc<OttView>, memory: Memory,
+        classic: bool, fx: &mut Effects<'_, H>) -> bool {
+        // A delayed return cannot replace a newer Settings visit or a foreign cover.
+        if !self.classic_visible || self.classic_mode != classic || self.editor.is_some()
+            || self.snapshot.page_id != "settings" || snapshot.revision <= self.snapshot.revision
+            || !matches!(snapshot.page_id.split(':').next(), Some("channels" | "categories" | "favorites"))
+            || memory.page_id != snapshot.page_id
+        { return false; }
+        self.restore_memory = Some(memory);
+        self.install(snapshot);
+        // Explicitly ensure open: duplicate delivery must never toggle the Menu closed.
+        if !self.browse { self.open_browse(fx); }
+        let key = self.keys["nav:settings"];
+        if let Some(index) = self.form.index_of_key(RowKey(key)) {
+            self.form.table.sel = index as i32;
+            self.form.note_engine_key(Some(RowKey(key)));
+            self.focus_request = Some(key);
+            // Seat the real input cursor, not only the form's selected row.
+            fx.push(Fx::Deliver(MachineId::Instance(self.instance), Delivery::Screen(
+                ScreenEvent::Enter(plx_ui::screen::Enter::Fresh {
+                    focus: plx_ui::screen::FocusTarget::Elem(FocusKey { entry: self.entry, elem: key })
+                }))));
+        }
+        true
+    }
+
     fn send<H: AppLike>(&self, action: OttAction, fx: &mut Effects<'_, H>) {
         fx.push(Fx::App(AppFx::Ott(OttOut::Action { reply: self.instance, action })));
     }
@@ -1263,6 +1302,7 @@ impl OttScreen {
         self.restore_memory = None;
         match item.action {
             FormAction::Forward(action) => {
+                if self.settings_from_browse(&action, fx) { return true; }
                 if matches!(action, OttAction::ShowCategories) {
                     // Category navigation retires the old row's dwell. The
                     // asynchronous response may arrive after another Tick;
@@ -1335,6 +1375,7 @@ impl OttScreen {
                     if !self.back_from_search(fx) { self.send(OttAction::Back, fx); }
                 },
                 FormAction::Forward(action) if !favorite => {
+                    if self.settings_from_browse(&action, fx) { return; }
                     if self.browse && !matches!(action, OttAction::BeginSearch | OttAction::Refresh) { self.close_browse(fx); }
                     self.send(action, fx);
                 },
@@ -1500,6 +1541,10 @@ impl OttScreen {
             ScreenEvent::Enter(_) => {
                 self.classic_visible = true;
                 fx.push(Fx::App(AppFx::Ott(OttOut::Refresh { reply: self.instance })));
+                Handled::Yes
+            }
+            ScreenEvent::App(AppMsg::OttBrowseReturn { snapshot, memory, classic }) => {
+                self.return_to_browse(snapshot.clone(), memory.clone(), *classic, fx);
                 Handled::Yes
             }
             ScreenEvent::App(AppMsg::OttSnapshot(snapshot)) => {

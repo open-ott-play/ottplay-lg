@@ -746,6 +746,7 @@ pub(super) struct Runtime {
     auth_return: auth_return::State,
     native_catalog: Option<player_browse::NativeCatalog>,
     menu_settings: menu_settings::State,
+    browse_settings: Option<player_browse::SettingsOrigin>,
     desktop_input: desktop_input::State,
     numeric_input: numeric_input::State,
     sleep_timer: sleep_timer::State,
@@ -841,6 +842,10 @@ pub(super) struct Runtime {
     m3u_media_editor: Option<m3u_media_editor::Editor>,
     play_generation: u64,
     resolver_busy: bool,
+    #[cfg(all(test, feature = "hostsim"))]
+    resolver_hold_for_test: bool,
+    #[cfg(all(test, feature = "hostsim"))]
+    resolver_launches_for_test: u64,
     resolver_next: Option<ResolveRequest>,
     play_cancel: Arc<AtomicBool>,
     play_ticket: Option<plx_media::route::PlayRequestTicket>,
@@ -1253,6 +1258,7 @@ impl Runtime {
             auth_return: auth_return::State::default(),
             native_catalog: None,
             menu_settings: menu_settings::State::default(),
+            browse_settings: None,
             desktop_input: desktop_input::State::default(),
             numeric_input: numeric_input::State::default(),
             sleep_timer: sleep_timer::State::default(),
@@ -1339,6 +1345,10 @@ impl Runtime {
             system_tv: Default::default(),
             play_generation: 0,
             resolver_busy: false,
+            #[cfg(all(test, feature = "hostsim"))]
+            resolver_hold_for_test: false,
+            #[cfg(all(test, feature = "hostsim"))]
+            resolver_launches_for_test: 0,
             resolver_next: None,
             play_cancel: Arc::new(AtomicBool::new(false)),
             play_ticket: None,
@@ -1662,6 +1672,9 @@ impl Runtime {
         self.catalog_complete = false;
     }
     fn selection_complete(&self) -> bool {
+        if !kiosk_source::strict_folder_traversal(self) {
+            if let Some(complete) = playback_step::continuation_complete(self) { return complete; }
+        }
         self.catalog_complete
             || (!kiosk_source::strict_folder_traversal(self) && self.view_selection().1)
     }
@@ -1685,6 +1698,7 @@ impl Runtime {
                 .map(|(_, entry)| entry.id.clone())
                 .collect();
         }
+        if let Some(ids) = playback_step::continuation_ids(self) { return ids; }
         let (_, favorites) = self.view_selection();
         let category = self.effective_category();
         if favorites {
@@ -2430,6 +2444,7 @@ impl Runtime {
         let live_retry = live && !lifecycle::viewer_paused()
             && recoverable_live_transport(details);
         self.failed_playback = failed_playback::capture(self, app);
+        let failure_continuation = playback_step::capture_failure(self, app);
         let plex_failure = transient::plex_remote::failure_event(self, app);
         self.checkpoint(app, false);
         self.playing = None;
@@ -2457,10 +2472,12 @@ impl Runtime {
             self.changed();
             return;
         }
-        let ids = self.ordered_ids();
-        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let decision = self.continuity_failed(&current, &refs, self.selection_complete(), None);
-        self.apply_continuity(decision);
+        playback_step::with_failure_continuation(self, failure_continuation, |runtime| {
+            let ids = runtime.ordered_ids();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            let decision = runtime.continuity_failed(&current, &refs, runtime.selection_complete(), None);
+            runtime.apply_continuity(decision);
+        });
         self.changed();
     }
     fn log_retry_cancelled(&mut self, reason: continuity_diagnostics::Reason) {
@@ -2567,6 +2584,10 @@ impl Runtime {
         decision
     }
     fn apply_continuity(&mut self, mut decision: continuity::Decision) {
+        if playback_step::continuation_denied(self) {
+            self.continuity.stop(self.generation);
+            return;
+        }
         // Admission failures skip an item once; no tight retry of a bad source.
         let ids = self.ordered_ids();
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
@@ -2592,7 +2613,7 @@ impl Runtime {
                         .defer_start(self.generation, &entry_id, position_ms, reason);
                     break;
                 }
-                Ok(true) => self.play_at(&entry_id, position_ms),
+                Ok(true) => playback_step::continue_at(self, &entry_id, position_ms),
                 Err(error) => Err(error),
             };
             match result {
@@ -3474,7 +3495,16 @@ impl Runtime {
                     let mut item = row(
                         id.clone(),
                         format!("{}  {}", index + 1, f.title),
-                        format!("{} · {}", f.origin.provider, f.origin.profile),
+                        {
+                            let mut labels = Vec::new();
+                            for label in [Some(f.origin.provider.as_str()), Some(f.origin.profile.as_str()),
+                                f.origin.subprofile.as_deref(), Some(f.origin.source_alias.as_str())]
+                                .into_iter().flatten().map(str::trim).filter(|label| !label.is_empty())
+                            {
+                                if !labels.contains(&label) { labels.push(label); }
+                            }
+                            labels.join(" · ")
+                        },
                         OttAction::Play(id.clone()),
                         true,
                     );
@@ -4882,6 +4912,10 @@ impl Runtime {
         }) {
             return Ok(());
         }
+        // A held scheduler boundary keeps policy/ownership checks real while
+        // event tests supply terminal observations without starting media IO.
+        #[cfg(all(test, feature = "hostsim"))]
+        if self.resolver_hold_for_test { return Ok(()); }
         let Some(request) = self.resolver_next.take() else {
             return Ok(());
         };
@@ -4917,6 +4951,8 @@ impl Runtime {
             None
         }));
         let worker_lease = previous_lease.clone();
+        #[cfg(all(test, feature = "hostsim"))]
+        { self.resolver_launches_for_test += 1; }
         let started = plx_base::task::spawn_off_frame("ott-media", move |worker| {
             reporter.phase(preplay::Phase::Resolving);
             if let Some(work) = plex {
@@ -6215,6 +6251,7 @@ fn tick_with_start(
                 runtime.changed();
             }
             Job::Play(generation, profile, result) if generation == runtime.play_generation => {
+                let failure_continuation = playback_step::capture_pending_failure(&runtime, app, generation);
                 let resolved = result.is_ok();
                 vportal_quality::completed_resolution(&mut runtime, generation);
                 let automatic_resume = runtime.restore_play_generation == Some(generation);
@@ -6428,15 +6465,12 @@ fn tick_with_start(
                 {
                     if let Some(request) = target.filter(|request| request.advance_on_failure) {
                         let id = request.id;
-                        let ids = runtime.ordered_ids();
-                        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-                        let decision = runtime.continuity_failed(
-                            &id,
-                            &refs,
-                            runtime.selection_complete(),
-                            Some(generation),
-                        );
-                        runtime.apply_continuity(decision);
+                        playback_step::with_failure_continuation(&mut runtime, failure_continuation, |runtime| {
+                            let ids = runtime.ordered_ids();
+                            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                            let decision = runtime.continuity_failed(&id, &refs, runtime.selection_complete(), Some(generation));
+                            runtime.apply_continuity(decision);
+                        });
                     }
                 }
                 runtime.changed();
@@ -6456,6 +6490,7 @@ fn tick_with_start(
     runtime.reconcile_m3u_attachment(app);
     let resolver_generation = runtime.play_generation;
     if let Err(error) = runtime.launch_resolver_from_app(app) {
+        let failure_continuation = playback_step::capture_pending_failure(&runtime, app, resolver_generation);
         preplay::failed(
             &mut runtime,
             resolver_generation,
@@ -6479,17 +6514,12 @@ fn tick_with_start(
             .filter(|request| !pinned_retry && !catalog_failure && request.advance_on_failure)
         {
             let id = request.id;
-            let ids = runtime.ordered_ids();
-            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-            let decision = runtime.continuity_failed(
-                &id,
-                &refs,
-                runtime.selection_complete(),
-                Some(resolver_generation),
-            );
-            if playback_allowed(app) {
-                runtime.apply_continuity(decision);
-            }
+            playback_step::with_failure_continuation(&mut runtime, failure_continuation, |runtime| {
+                let ids = runtime.ordered_ids();
+                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+                let decision = runtime.continuity_failed(&id, &refs, runtime.selection_complete(), Some(resolver_generation));
+                if playback_allowed(app) { runtime.apply_continuity(decision); }
+            });
         }
         runtime.changed();
     }
@@ -6913,6 +6943,7 @@ fn tick_with_start(
         runtime.checkpoint(app, false);
     }
     menu_settings::reconcile(&mut runtime, app);
+    player_browse::reconcile_settings(&mut runtime, app);
     let current_ott = current_ui_owner(app);
     // Keep only the owned draft while its Language surface has input. Commands
     // below still require current_ott, not this retained presentation owner.
@@ -6927,7 +6958,8 @@ fn tick_with_start(
     }
     for request in app.bridge.take_ott_reqs() {
         let source = match &request {
-            OttOut::Refresh { reply } | OttOut::Action { reply, .. } => *reply,
+            OttOut::Refresh { reply } | OttOut::Action { reply, .. }
+                | OttOut::BrowseSettings { reply, .. } => *reply,
         };
         // Fullscreen reminder answers carry the actual PlayerScreen instance.
         // They cannot turn its page into an OTT catalogue reply target.
@@ -6951,7 +6983,16 @@ fn tick_with_start(
         if Some(source) != current_ott || app.pages.has_pending_navigation() {
             continue;
         }
+        // Specialized presentation requests still cross the ordinary owner/navigation gate above.
+        let (request, browse_origin) = match request {
+            OttOut::BrowseSettings { reply, revision, memory } => {
+                let Some(origin) = player_browse::capture_settings(&runtime, app, reply, revision, memory) else { continue; };
+                (OttOut::Action { reply, action: OttAction::ShowSettings }, Some(origin))
+            }
+            request => (request, None),
+        };
         match request {
+            OttOut::BrowseSettings { .. } => unreachable!("normalized Browse Settings request"),
             OttOut::Refresh { reply } => {
                 player_browse::bind_native_panel(&mut runtime, app, reply);
                 runtime.reply = Some(reply);
@@ -7031,6 +7072,12 @@ fn tick_with_start(
                     explicit_play,
                     search_submission,
                 );
+                if let Some(origin) = browse_origin {
+                    // Only successful normal admission changes the caller page to Settings.
+                    if runtime.page == "settings" && runtime.reply == Some(reply) {
+                        runtime.browse_settings = Some(origin);
+                    }
+                }
                 if runtime.reply.is_none() {
                     break;
                 }
@@ -7194,6 +7241,7 @@ fn tick_with_start(
     }
     local_profile::drain(&mut runtime, app);
     menu_settings::reconcile(&mut runtime, app);
+    player_browse::reconcile_settings(&mut runtime, app);
     settings_groups::reconcile_owned(&mut runtime, app);
     classic_bookmark::tick(&mut runtime, app);
     browse_focus::flush(&mut runtime);
@@ -7207,7 +7255,7 @@ fn tick_with_start(
     boot_resume::reconcile(&mut runtime, app);
     let programme_dirty = programme_changed || runtime.revision != before;
     publish_programme(&mut runtime, app, programme_dirty);
-    if runtime.revision != before {
+    if runtime.revision != before && !player_browse::publish_settings_return(&mut runtime, app) {
         runtime.publish(app);
     }
     menu_settings::restore(&mut runtime, app);
@@ -8571,6 +8619,7 @@ fn start_resolved_with<R: playback::PlaybackResources>(
         advance_on_failure,
         requires_server_lease,
     });
+    playback_step::admitted(runtime);
     let identity = runtime
         .playing
         .as_ref()

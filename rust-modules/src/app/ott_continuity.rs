@@ -505,6 +505,11 @@ impl Continuity {
     fn accepts(&self, generation: u64) -> bool {
         self.enabled && !self.suspended && generation == self.generation
     }
+    /// Read-only witness of this existing domain's current activation intent.
+    /// Stop, viewer Pause, standby and a different generation withdraw it.
+    pub fn active_selection(&self, generation: u64) -> Option<&str> {
+        self.accepts(generation).then_some(self.current.as_deref()).flatten()
+    }
 
     fn start(&mut self, id: &str, position_ms: u64, reason: Reason) -> Decision {
         self.deferred = None;
@@ -572,6 +577,32 @@ impl Continuity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_selection_witness_tracks_existing_owner_and_withdraws_at_viewer_boundaries() {
+        let mut c = Continuity::new(7, None);
+        assert_eq!(c.active_selection(7), None);
+        c.user_selected(7, "a");
+        assert_eq!(c.active_selection(7), Some("a"));
+        assert_eq!(c.active_selection(8), None);
+        c.pause(7);
+        assert_eq!(c.active_selection(7), None);
+        c.resume(7);
+        assert_eq!(c.active_selection(7), Some("a"));
+        c.suspend(7);
+        assert_eq!(c.active_selection(7), None);
+        c.resume_after_suspend(7);
+        assert_eq!(c.active_selection(7), Some("a"));
+        assert!(matches!(c.start_failed(7, "a", &["a", "b"], false, 0), Decision::Start { .. }));
+        assert_eq!(c.active_selection(7), Some("b"));
+        assert_eq!(c.start_failed(7, "b", &["a", "b"], false, 1), Decision::Wait);
+        assert_eq!(c.active_selection(7), Some("b"));
+        let due = c.pending_retry().unwrap().not_before_ms;
+        assert_eq!(c.tick(7, due, &["a", "b"], false), Decision::Wait);
+        assert_eq!(c.active_selection(7), Some("b"), "discovery retains the existing failed owner");
+        c.stop(7);
+        assert_eq!(c.active_selection(7), None);
+        assert_eq!(Continuity::new(8, None).active_selection(8), None);
+    }
     #[test]
     fn resume_floor_keeps_this_checkpoint_when_a_later_sample_releases_it() {
         let mut floor = ResumeFloor::new(30_000).unwrap();

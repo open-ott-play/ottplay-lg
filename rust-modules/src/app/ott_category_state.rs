@@ -227,6 +227,7 @@ impl Runtime {
         // durable, current choice is accepted; a failed/stale choice keeps Search.
         self.search = search::Search::default();
         self.page = if pending.favorites { "favorites" } else { "channels" };
+        playback_step::focus_category_current(self, app);
         self.changed();
         true
     }

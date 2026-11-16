@@ -112,6 +112,14 @@ fn permit_detail(runtime: &mut Runtime, app: &App) -> Result<(), &'static str> {
     }
 }
 
+/// Read only the accepted playing metadata used by the existing Info panel.
+/// Callers retain their source-bound offer and revalidate it before opening.
+pub(super) fn description_available(runtime: &Runtime, app: &App) -> bool {
+    let meta = app.bridge.metadata_view();
+    plx_appkit::info_panel::live_information_available(meta, (runtime.wall_clock_ms / 1000) as i64)
+        || !plx_appkit::info_panel::description(meta).trim().is_empty()
+}
+
 fn capabilities(runtime: &Runtime, app: &App) -> PlaybackMenuCapabilities {
     let mut actions = PlaybackMenuCapabilities {
         categories: menu_visibility::visibility(runtime).visible(plx_appkit::menu_visibility::Item::Categories),
@@ -122,6 +130,10 @@ fn capabilities(runtime: &Runtime, app: &App) -> PlaybackMenuCapabilities {
     actions.chapters = actions.from_beginning
         && installed_leaf(app).is_some_and(|leaf| !leaf.chapters.is_empty());
     actions.go_to_detail = detail_target(app).is_some();
+    actions.description = menu_visibility::visibility(runtime).visible(plx_appkit::menu_visibility::Item::Description)
+        && description_available(runtime, app);
+    actions.favorites = menu_visibility::visibility(runtime).visible(plx_appkit::menu_visibility::Item::Favorites)
+        && runtime.settings_write_refusal().is_none();
     if let Some(playing) = runtime.playing.as_ref() {
         let live = guide_ui::is_live(&playing.profile, &playing.entry);
         // Ordinary live pause is not a catch-up capability. Only known finite
@@ -218,6 +230,19 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, request: &PlayerMenu
         }
         Action::FromBeginning => {
             Some(PlayerReq::Info(plx_appkit::info_panel::InfoAction::FromBeginning))
+        }
+        Action::Description => Some(PlayerReq::OpenOverlay(
+            plx_screens::player::overlay::OverlayKind::Info)),
+        Action::Favorites => {
+            // Admit the ordinary durable selection before retiring this menu.
+            // Start it AFTER presentation so its navigation/screen receipt is
+            // captured for the new catalogue, never weakened across a handoff.
+            input_policy::ui(runtime, &OttAction::ShowFavorites)?;
+            if let Some(reason) = runtime.settings_write_refusal() { return Err(reason); }
+            runtime.category_choice_candidate(None)?.validate()?;
+            player_browse::present(runtime, app, Some(entry), "categories");
+            handle_action(runtime, app, OttAction::ShowFavorites)?;
+            return Ok(None);
         }
         Action::GoToDetail => {
             let target = detail_target(app).ok_or(UNAVAILABLE)?;
