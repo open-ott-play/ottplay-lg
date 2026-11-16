@@ -1621,6 +1621,9 @@ pub struct Diag {
 
     pub cb_err: i32,
     pub cb_err_at: u32,
+    pub cb_err_num: i32,
+    /// Age measured entirely in the media clock domain; None means no error callback.
+    pub cb_err_age_ms: Option<u32>,
     pub http_status: i32,
     pub net_rx: i64,
     /// Playable content-time reserve derived from the elementary-stream tails and the displayed
@@ -1630,6 +1633,8 @@ pub struct Diag {
     pub playable_buffer_ms: Option<i64>,
     pub load_at: u32,
     pub frame_at: u32,
+    /// Age of the native POSITION callback in its media clock; no displayed-frame assertion.
+    pub position_callback_age_ms: Option<u32>,
     pub video_w: i32,
     pub video_h: i32,
     pub video_fps_milli: i64,
@@ -1751,6 +1756,16 @@ impl Diag {
     }
 }
 
+fn callback_error_age_ms(error_type: i32, stamped_ms: u32, now_ms: u32) -> Option<u32> {
+    (error_type != 0).then(|| now_ms.wrapping_sub(stamped_ms).min(60_000))
+}
+
+fn position_callback_age_ms(stamped_ms: u32, now_ms: u32) -> Option<u32> {
+    // Session and seek reset this native callback stamp. The observer's own
+    // dg_frame_at can still be zero during capture warmup and is not a clock source.
+    (stamped_ms != 0).then(|| now_ms.wrapping_sub(stamped_ms).min(60_000))
+}
+
 pub fn diag(ps: &crate::route::PlaybackSession) -> Diag {
     let (fed_v, fed_a) = engine::fed_totals();
     // The sink hands back the seam's own static buffer — never NULL, "" when no window was
@@ -1765,6 +1780,14 @@ pub fn diag(ps: &crate::route::PlaybackSession) -> Diag {
         SHARED.playpos_ns.load(Relaxed),
     );
     let (video_w, video_h) = SHARED.video_raster();
+    // The type is the release/acquire presence flag for the numeric error tuple.
+    let cb_err = SHARED.dg_cb_err.load(std::sync::atomic::Ordering::Acquire);
+    let cb_err_num = SHARED.dg_cb_err_num.load(Relaxed);
+    let now_ms = vclock_ms();
+    let cb_err_age_ms = callback_error_age_ms(cb_err,
+        SHARED.dg_cb_err_time_ms.load(Relaxed), now_ms);
+    let position_callback_age_ms = position_callback_age_ms(
+        SHARED.dg_vpres_at.load(Relaxed), now_ms);
     Diag {
         vp_mode: sink().window_mode(),
         window_id,
@@ -1798,13 +1821,16 @@ pub fn diag(ps: &crate::route::PlaybackSession) -> Diag {
         prime_external_lease: SHARED.dg_prime_external_lease.load(Relaxed),
         prime_audio_expected: SHARED.dg_prime_audio_expected.load(Relaxed),
 
-        cb_err: SHARED.dg_cb_err.load(Relaxed),
+        cb_err,
         cb_err_at: SHARED.dg_cb_err_at.load(Relaxed),
+        cb_err_num,
+        cb_err_age_ms,
         http_status: SHARED.dg_http_status.load(Relaxed),
         net_rx: SHARED.dg_net_rx.load(Relaxed),
         playable_buffer_ms,
         load_at: SHARED.dg_load_at.load(Relaxed),
         frame_at: SHARED.dg_frame_at.load(Relaxed),
+        position_callback_age_ms,
         video_w,
         video_h,
         video_fps_milli: SHARED.video_fps_milli.load(Relaxed),
@@ -2640,11 +2666,12 @@ fn sf_on_event_inner(ty: c_int, num: i64, s: *const c_char, scope: shared::Event
         // about the refusal. The callback's STRING (`s`, logged below) is never kept: it is free
         // text and can hold a URI or a path.
         if ty == 18 && SHARED.dg_cb_err.load(Relaxed) == 0 {
-            SHARED.dg_cb_err.store(ty, Relaxed);
             SHARED.dg_cb_err_at.store(n, Relaxed);
+            SHARED.dg_cb_err_time_ms.store(vclock_ms(), Relaxed);
             SHARED
                 .dg_cb_err_num
                 .store(num.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32, Relaxed);
+            SHARED.dg_cb_err.store(ty, std::sync::atomic::Ordering::Release);
         }
         let preview = if s.is_null() {
             String::new()
@@ -3374,6 +3401,49 @@ mod tests {
         assert!(!take_decoder_revoked());
         SHARED.retire_native_session(epoch);
         SHARED.reset_session();
+    }
+
+    #[test]
+    fn position_age_is_absent_until_callback_and_resets_with_session_or_seek() {
+        assert_eq!(position_callback_age_ms(0, 20_000), None, "new epoch has no callback");
+        assert_eq!(position_callback_age_ms(3_000, 3_123), Some(123));
+        assert_eq!(position_callback_age_ms(3_000, 73_001), Some(60_000));
+        assert_eq!(position_callback_age_ms(u32::MAX - 9, 10), Some(20));
+        assert_eq!(position_callback_age_ms(0, 73_001), None, "seek clears callback stamp");
+        assert_eq!(position_callback_age_ms(73_002, 73_003), Some(1), "first post-seek callback");
+    }
+
+    #[test]
+    fn callback_error_age_uses_media_clock_presence_and_wrapping_not_callback_index() {
+        assert_eq!(callback_error_age_ms(0, 10, 99), None);
+        assert_eq!(callback_error_age_ms(18, 0, 25), Some(25));
+        assert_eq!(callback_error_age_ms(18, u32::MAX - 9, 10), Some(20));
+        assert_eq!(callback_error_age_ms(18, 1, 100_000), Some(60_000));
+    }
+
+    #[test]
+    fn error_time_is_first_error_owned_and_retired_callbacks_cannot_stamp_successor() {
+        let _guard = plx_base::testlock::serial();
+        SHARED.reset_session();
+        let old = SHARED.begin_native_session().expect("session");
+        SHARED.retire_native_session(old);
+        SHARED.reset_session();
+        let current = SHARED.begin_native_session().expect("session");
+        sf_on_event(old, 18, 601, std::ptr::null());
+        assert_eq!(SHARED.dg_cb_err.load(Relaxed), 0);
+        assert_eq!(SHARED.dg_cb_err_time_ms.load(Relaxed), 0);
+        sf_on_event(current, 18, 0, std::ptr::null());
+        assert_eq!(SHARED.dg_cb_err.load(std::sync::atomic::Ordering::Acquire), 18);
+        assert_eq!(SHARED.dg_cb_err_num.load(Relaxed), 0, "zero can be an observed firmware number");
+        assert_eq!(SHARED.dg_cb_err_at.load(Relaxed), 1, "the old field remains a callback index");
+        let stamp = SHARED.dg_cb_err_time_ms.load(Relaxed);
+        sf_on_event(current, 18, 999, std::ptr::null());
+        assert_eq!(SHARED.dg_cb_err_time_ms.load(Relaxed), stamp);
+        assert_eq!(SHARED.dg_cb_err_num.load(Relaxed), 0);
+        SHARED.retire_native_session(current);
+        SHARED.reset_session();
+        assert_eq!(SHARED.dg_cb_err_time_ms.load(Relaxed), 0);
+        assert_eq!(SHARED.dg_cb_err.load(Relaxed), 0);
     }
 
     /// **The firmware's error number is latched beside the type, once.** `type=18 num=601

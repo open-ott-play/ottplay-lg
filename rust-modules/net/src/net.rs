@@ -210,6 +210,7 @@ const CURLINFO_CERTINFO: c_int = 0x40_0000 + 34;
 const CURL_GLOBAL_ALL: c_long = 3;
 const CURLVERSION_FIRST: c_int = 0;
 const CURL_VERSION_ASYNCHDNS: c_int = 1 << 7;
+const CURL_VERSION_PSL: c_int = 1 << 20;
 
 /// Is libcurl resolved? False on a device with no libcurl this app can bind, which means no
 /// plex.tv account calls or HTTPS PMS control — but a running app, and a log line saying why.
@@ -222,10 +223,31 @@ static CURL_THREADED_TLS_OK: AtomicBool = AtomicBool::new(false);
 /// `curl_version_info().version_num` (`0xXXYYZZ`), captured once by [`global_init`]; `0` until then
 /// or when the struct could not be read. Read by [`resolve`] to pick the entry syntax.
 static CURL_VERSION_NUM: AtomicU32 = AtomicU32::new(0);
+/// False until the bound library explicitly reports its PSL feature. HLS must
+/// not replay domain-scoped cookies when original acceptance lacked PSL checks.
+static CURL_HAS_PSL: AtomicBool = AtomicBool::new(false);
 
 /// The bound libcurl's numeric version, `0xXXYYZZ`, or `0` before [`global_init`].
 pub fn curl_version_num() -> u32 {
     CURL_VERSION_NUM.load(Ordering::Acquire)
+}
+/// Whether the initialized, bound libcurl reports Public Suffix List support.
+/// Missing version information and pre-initialization are a closed false.
+pub fn curl_has_psl() -> bool {
+    CURL_HAS_PSL.load(Ordering::Acquire)
+}
+fn psl_feature(features: Option<c_int>) -> bool {
+    features.is_some_and(|features| features & CURL_VERSION_PSL != 0)
+}
+#[cfg(test)]
+mod cookie_psl_tests {
+    #[test]
+    fn unknown_and_absent_psl_features_are_closed() {
+        assert!(!super::psl_feature(None));
+        assert!(!super::psl_feature(Some(0)));
+        assert!(!super::psl_feature(Some(super::CURL_VERSION_ASYNCHDNS)));
+        assert!(super::psl_feature(Some(super::CURL_VERSION_PSL | super::CURL_VERSION_ASYNCHDNS)));
+    }
 }
 /// Only used on the abnormal old-OpenSSL/no-callback fallback. Normal devices never take it.
 static CURL_FALLBACK_SERIAL: Mutex<()> = Mutex::new(());
@@ -547,6 +569,8 @@ fn global_init_once() -> bool {
             if !vi.is_null() {
                 CURL_VERSION_NUM.store(unsafe { (*vi).version_num } as u32, Ordering::Release);
             }
+            let features = if vi.is_null() { None } else { Some(unsafe { (*vi).features }) };
+            CURL_HAS_PSL.store(psl_feature(features), Ordering::Release);
             let async_dns = if vi.is_null() {
                 "unknown"
             } else if unsafe { (*vi).features } & CURL_VERSION_ASYNCHDNS != 0 {

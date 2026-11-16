@@ -102,7 +102,8 @@ fn operation(inv: &Invocation) -> &str {
 }
 pub(super) fn read_only(inv: &Invocation) -> bool {
     match inv.action.as_str() {
-        "state" | "status" | "capabilities" | "providers" | "channels" | "settings_compare" => true,
+        "state" | "status" | "capabilities" | "providers" | "channels" | "settings_compare"
+        | "playback_preparation_diagnostics" => true,
         "categories" => inv.params["op"] == "list",
         "multiview" => inv.params["op"] == "status",
         "kiosk" => inv.params.get("mode").and_then(Value::as_str) == Some("status"),
