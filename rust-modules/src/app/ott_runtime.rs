@@ -319,6 +319,8 @@ mod player_remote;
 mod playing_favorite;
 #[path = "ott_preplay_diagnostics.rs"]
 mod preplay;
+#[path = "ott_preplay_remote.rs"]
+mod preplay_remote;
 #[path = "ott_preview.rs"]
 mod preview;
 #[path = "ott_profile_edit.rs"]
@@ -2468,6 +2470,7 @@ impl Runtime {
             kind,
             details,
         );
+        native_playback_diagnostics::freeze_failure(self, app, crate::app::clock::now());
         let live_retry = live && !lifecycle::viewer_paused()
             && recoverable_live_transport(details);
         self.failed_playback = failed_playback::capture(self, app);

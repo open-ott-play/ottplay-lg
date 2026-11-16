@@ -921,6 +921,8 @@ pub struct Shared {
     /// session, and the index says whether it was immediate or after a long healthy run.
     pub dg_cb_err: AtomicI32,
     pub dg_cb_err_at: AtomicU32,
+    /// Same first error, stamped in player::vclock_ms monotonic time, never a callback index.
+    pub dg_cb_err_time_ms: AtomicU32,
     /// The firmware's own error NUMBER (`num`) of that same first `ty == 18` callback — the
     /// `601` of `type=18 num=601 Resource Allocation Error`. Latched together with `dg_cb_err`
     /// (first one wins, so a later callback cannot overwrite the explanation) and cleared where
@@ -1192,6 +1194,7 @@ impl Shared {
 
             dg_cb_err: AtomicI32::new(0),
             dg_cb_err_at: AtomicU32::new(0),
+            dg_cb_err_time_ms: AtomicU32::new(0),
             dg_cb_err_num: AtomicI32::new(0),
             refusal_path: AtomicU8::new(RefusalPath::None as u8),
             dg_http_status: AtomicI32::new(0),
@@ -1942,6 +1945,7 @@ impl Shared {
         // playback red for the life of the process.
         self.dg_cb_err.store(0, Ordering::Relaxed);
         self.dg_cb_err_at.store(0, Ordering::Relaxed);
+        self.dg_cb_err_time_ms.store(0, Ordering::Relaxed);
         self.dg_cb_err_num.store(0, Ordering::Relaxed);
         self.refusal_path.store(RefusalPath::None as u8, Ordering::Relaxed);
         self.dg_http_status.store(0, Ordering::Relaxed);

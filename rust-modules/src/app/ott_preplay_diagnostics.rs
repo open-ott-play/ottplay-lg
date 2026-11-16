@@ -41,6 +41,67 @@ pub(super) enum Failure {
     QualitySaveFailed,
 }
 
+/// Closed producer categories only. Never store the producer text itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Cause {
+    Unknown, Timeout, Transport,
+    #[serde(rename = "http_401")] Http401,
+    #[serde(rename = "http_403")] Http403,
+    #[serde(rename = "http_404")] Http404,
+    #[serde(rename = "http_429")] Http429,
+    HttpServer,
+    HlsInvalidHeader, HlsInvalidUtf8, MediaOpenRefused, MediaReadFailed,
+    MediaContainerUnavailable, MediaStreamProbeFailed, MediaNoVideo,
+    InspectionStopped, InspectionCancelled, InspectionUnavailable,
+    ResourceLimit, TrackIdentity, CodecUnsupported,
+}
+
+fn inspection_cause(reason: &str) -> Cause {
+    match reason {
+        "Initial HLS playlist request timed out" | "Selected HLS playlist request timed out"
+        | "HLS playlist request timed out" | "HLS playlist body transfer timed out"
+        | "Media source request timed out" => Cause::Timeout,
+        "HLS playlist transient transport failed" | "Media source network transport failed"
+            => Cause::Transport,
+        "HLS playlist server returned HTTP 401" => Cause::Http401,
+        "HLS playlist server returned HTTP 403" => Cause::Http403,
+        "HLS playlist server returned HTTP 404" => Cause::Http404,
+        "HLS playlist server returned HTTP 429" | "Media source server returned HTTP 429"
+            => Cause::Http429,
+        "HLS playlist server returned a server error" | "Media source server returned a server error"
+            => Cause::HttpServer,
+        "Invalid HLS playlist header" => Cause::HlsInvalidHeader,
+        "HLS playlist is not UTF-8" => Cause::HlsInvalidUtf8,
+        "Could not open media source" => Cause::MediaOpenRefused,
+        "Could not read media source" => Cause::MediaReadFailed,
+        "Unsupported or unavailable media container" => Cause::MediaContainerUnavailable,
+        "Could not identify media streams" => Cause::MediaStreamProbeFailed,
+        "No supported video stream found" => Cause::MediaNoVideo,
+        "Media inspection cancelled or exceeded its limit" => Cause::InspectionStopped,
+        "Media inspection cancelled" => Cause::InspectionCancelled,
+        "Bundled media demuxer is unavailable" | "MPEG-TS demuxer is unavailable"
+            => Cause::InspectionUnavailable,
+        "Media inspection allocation failed" | "HLS playlist exceeds size limit"
+        | "HLS playlist line exceeds limit" | "HLS playlist nesting exceeds limit"
+            => Cause::ResourceLimit,
+        "HLS initial video identity is unavailable" | "HLS video binding changed"
+            => Cause::TrackIdentity,
+        "Native HLS does not support HEVC video without audio"
+        | "Native HLS does not support HEVC video with E-AC-3 audio"
+        | "Native HLS does not support HEVC video with MP2 audio"
+        | "Native HLS does not support H.264 video with AC-3 audio"
+        | "Native HLS does not support H.264 video with E-AC-3 audio"
+        | "Native HLS does not support H.264 video with MP2 audio"
+        | "Native HLS does not support H.264 video with MP3 audio"
+        | "Native HLS does not support MPEG-2 video with AAC audio"
+        | "Native HLS does not support MPEG-2 video with MP2 audio"
+        | "Native HLS does not support MPEG-2 video with AC-3 audio"
+        | "Native HLS requires H.264 video and AAC audio" => Cause::CodecUnsupported,
+        _ => Cause::Unknown,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum CancelReason {
@@ -55,6 +116,8 @@ pub(super) enum CancelReason {
 #[derive(Clone)]
 struct Binding {
     generation: u64,
+    catalog_generation: u64,
+    runtime_token: String,
     profile: ProviderProfile,
     request: PlaybackRequest,
     scope: Scope,
@@ -76,6 +139,7 @@ enum Update {
     Phase(Phase),
     LiveHls,
     Failed(Failure),
+    InspectionFailed(Cause),
     Cancelled(CancelReason),
 }
 
@@ -94,6 +158,7 @@ struct Attempt {
     finished_ms: Option<u64>,
     phase_durations_ms: PhaseDurations,
     last_failure: Option<Failure>,
+    cause: Option<Cause>,
     cancel_reason: Option<CancelReason>,
 }
 
@@ -140,7 +205,7 @@ impl State {
         let visible = binding.scope == Scope::VPortal;
         self.attempt = Some(Attempt { binding, phase: Phase::Resolving, visible,
             phase_started_ms: now_ms, total_started_ms: now_ms, finished_ms: None,
-            phase_durations_ms: PhaseDurations::default(), last_failure: None,
+            phase_durations_ms: PhaseDurations::default(), last_failure: None, cause: None,
             cancel_reason: None });
     }
 
@@ -170,6 +235,14 @@ impl State {
                 if attempt.phase == Phase::AwaitingQuality => {
                 // The existing picker permits retry after a rejected write.
                 attempt.last_failure = Some(Failure::QualitySaveFailed);
+            }
+            Update::InspectionFailed(cause) => {
+                attempt.phase_durations_ms.add(attempt.phase,
+                    now_ms.saturating_sub(attempt.phase_started_ms));
+                attempt.phase = Phase::Failed;
+                attempt.finished_ms = Some(now_ms);
+                attempt.last_failure = Some(Failure::InspectFailed);
+                attempt.cause = Some(cause);
             }
             Update::Failed(failure) => {
                 attempt.phase_durations_ms.add(attempt.phase,
@@ -224,8 +297,54 @@ impl State {
     }
 }
 
+#[derive(Serialize)]
+pub(super) struct Diagnostic {
+    pub phase: Phase,
+    pub attempt_generation: Option<u64>,
+    pub last_failure: Option<Failure>,
+    pub cause: Option<Cause>,
+}
+impl Diagnostic {
+    fn idle() -> Self {
+        Self { phase: Phase::Idle, attempt_generation: None, last_failure: None, cause: None }
+    }
+}
+
+/// Favorites and kiosk pins can belong to a different source than the browsing
+/// profile. Rebind their retained canonical request using the existing PURE source
+/// binder, including enabled/full-profile and Favorite/pin validation, even after
+/// Job::Play has taken its target/profile. This never resolves media or starts IO.
+fn source_current(runtime: &Runtime, binding: &Binding) -> bool {
+    if binding.request.id.starts_with("favorite:") || binding.request.kiosk_selection.is_some() {
+        runtime.prepare_play_request(binding.request.clone()).is_ok_and(|(request, profile, _, _)|
+            request == binding.request && profile == binding.profile)
+    } else {
+        runtime.effective_profile() == Some(&binding.profile)
+    }
+}
+
+/// No successor, changed source, runtime owner or catalogue can inherit evidence.
+pub(super) fn diagnostic(runtime: &Runtime) -> Diagnostic {
+    let Some(attempt) = runtime.preplay.attempt.as_ref() else { return Diagnostic::idle(); };
+    let binding = &attempt.binding;
+    if binding.generation != runtime.play_generation
+        || binding.catalog_generation != runtime.generation
+        || binding.runtime_token != runtime.remote.runtime()
+        || !source_current(runtime, binding)
+        || runtime.play_target.as_ref().is_some_and(|request| request != &binding.request
+            || runtime.pending_play_profile() != Some(&binding.profile))
+    {
+        return Diagnostic::idle();
+    }
+    Diagnostic { phase: attempt.phase,
+        attempt_generation: Some(binding.generation.min(9_007_199_254_740_991)),
+        last_failure: attempt.last_failure, cause: attempt.cause }
+}
+
 fn current(runtime: &Runtime, binding: &Binding) -> bool {
-    binding.matches(runtime.play_generation, runtime.pending_play_profile(),
+    binding.catalog_generation == runtime.generation
+        && binding.runtime_token == runtime.remote.runtime()
+        && binding.matches(runtime.play_generation, runtime.pending_play_profile(),
         runtime.play_target.as_ref())
 }
 
@@ -245,7 +364,9 @@ pub(super) fn begin(runtime: &mut Runtime, profile: &ProviderProfile) {
     };
     let binding = runtime.play_target.as_ref().filter(|_| scope.is_some()
         && runtime.pending_play_profile() == Some(profile)).map(|request| Arc::new(Binding {
-            generation: runtime.play_generation, profile: profile.clone(), request: request.clone(),
+            generation: runtime.play_generation, catalog_generation: runtime.generation,
+            runtime_token: runtime.remote.runtime().to_owned(),
+            profile: profile.clone(), request: request.clone(),
             scope: scope.expect("filtered pre-play provider"),
         }));
     let now_ms = runtime.now_ms();
@@ -344,7 +465,9 @@ impl Worker {
         -> Result<T, &'static str> {
         self.phase(Phase::Inspecting);
         let result = operation();
-        if result.is_err() { self.failed(); }
+        if let Err(reason) = &result {
+            self.send(Update::InspectionFailed(inspection_cause(reason)));
+        }
         result
     }
 }

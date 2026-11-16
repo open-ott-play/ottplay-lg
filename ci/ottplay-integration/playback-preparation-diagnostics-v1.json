@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "action": "playback_preparation_diagnostics",
+  "capability": {
+    "playback_preparation_diagnostics": {
+      "version": 1
+    }
+  },
+  "runtime_pattern": "[A-Za-z0-9_.-]{1,96}",
+  "request": {
+    "version": 1,
+    "runtime": "native_prepare.1"
+  },
+  "phases": [
+    "idle",
+    "resolving",
+    "inspecting",
+    "awaiting_quality",
+    "admitting",
+    "admitted",
+    "failed",
+    "cancelled"
+  ],
+  "failures": [
+    "resolve_failed",
+    "inspect_failed",
+    "worker_unavailable",
+    "admission_failed",
+    "quality_save_failed"
+  ],
+  "causes": [
+    "unknown",
+    "timeout",
+    "transport",
+    "http_401",
+    "http_403",
+    "http_404",
+    "http_429",
+    "http_server",
+    "hls_invalid_header",
+    "hls_invalid_utf8",
+    "media_open_refused",
+    "media_read_failed",
+    "media_container_unavailable",
+    "media_stream_probe_failed",
+    "media_no_video",
+    "inspection_stopped",
+    "inspection_cancelled",
+    "inspection_unavailable",
+    "resource_limit",
+    "track_identity",
+    "codec_unsupported"
+  ],
+  "errors": [
+    "invalid_request",
+    "runtime_mismatch",
+    "unavailable",
+    "unsupported",
+    "policy_denied"
+  ],
+  "limits": {
+    "receipt_bytes": 4096,
+    "attempt_generation": 9007199254740991,
+    "failures": 4294967295,
+    "retry_after_ms": 30000
+  },
+  "example": {
+    "version": 1,
+    "runtime": "native_prepare.1",
+    "phase": "failed",
+    "attempt_generation": 5,
+    "last_failure": "inspect_failed",
+    "cause": "timeout",
+    "retry": {
+      "pending": true,
+      "failures": 2,
+      "retry_after_ms": 1500
+    }
+  }
+}

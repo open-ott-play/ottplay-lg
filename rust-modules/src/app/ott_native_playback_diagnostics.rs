@@ -90,7 +90,9 @@ struct Record {
     t_ms: u32,
     stage: &'static str,
     load_state: &'static str,
+    // Legacy v1 spelling: native position callbacks, NOT displayed video frames.
     frames: u32,
+    // Legacy v1 spelling: age of last native position callback, not a displayed frame.
     frame_age_ms: Option<u32>,
     video_queue_bytes: u32,
     audio_queue_bytes: u32,
@@ -157,12 +159,11 @@ pub(super) fn playback_owner(
     (expected == &current).then_some(current)
 }
 
-fn sample(session: &mut Session, app: &App, now: u32) {
-    let d = plx_media::player::diag(&app.player.session);
+fn observation(d: &plx_media::player::Diag, session: &Session, now: u32) -> Record {
     let skew = (d.fed_v > 0 && d.fed_a > 0 && d.fed_v_pts >= 0 && d.fed_a_pts >= 0)
         .then(|| d.fed_v_pts.saturating_sub(d.fed_a_pts) / 1_000_000)
         .map(|value| value.clamp(-600_000, 600_000) as i32);
-    let record = Record {
+    Record {
         t_ms: age(now, session.started_at),
         stage: match d.stage {
             0 => "loading",
@@ -178,7 +179,7 @@ fn sample(session: &mut Session, app: &App, now: u32) {
             "pending"
         },
         frames: d.frames.max(0) as u32,
-        frame_age_ms: d.seen_frame.then(|| age(now, d.frame_at)),
+        frame_age_ms: d.position_callback_age_ms.map(|age| age.min(MAX_DURATION_MS)),
         video_queue_bytes: clamp_u32(d.aq_video),
         audio_queue_bytes: clamp_u32(d.aq_audio),
         fed_video_units: clamp_u64(d.fed_v),
@@ -210,8 +211,9 @@ fn sample(session: &mut Session, app: &App, now: u32) {
         prime_external_lease: d.prime_external_lease,
         prime_audio_expected: d.prime_audio_expected,
         callback_count: d.cb_count,
-        callback_error_code: (d.cb_err != 0).then_some(d.cb_err),
-        callback_error_age_ms: (d.cb_err != 0).then(|| age(now, d.cb_err_at)),
+        callback_error_code: (d.cb_err != 0).then_some(d.cb_err_num),
+        callback_error_age_ms: d.cb_err_age_ms.filter(|_| d.cb_err != 0)
+            .map(|age| age.min(MAX_DURATION_MS)),
         http_status: (100..=599)
             .contains(&d.http_status)
             .then_some(d.http_status as u16),
@@ -219,12 +221,47 @@ fn sample(session: &mut Session, app: &App, now: u32) {
         video_width: clamp_u16(d.video_w),
         video_height: clamp_u16(d.video_h),
         fps_milli: clamp_u32(d.video_fps_milli),
-    };
+    }
+}
+
+fn push_record(session: &mut Session, record: Record) {
     if session.records.len() == MAX_RECORDS {
         session.records.pop_front();
         session.dropped = session.dropped.saturating_add(1);
     }
     session.records.push_back(record);
+}
+
+fn sample(session: &mut Session, app: &App, now: u32) {
+    let d = plx_media::player::diag(&app.player.session);
+    let record = observation(&d, session, now);
+    push_record(session, record);
+}
+
+/// Freeze the matching capture before failure cleanup or an automatic retry can
+/// replace its owner. A known native failure supplies the failed load state;
+/// it supplies no invented HTTP status or callback error.
+fn freeze_record(session: &mut Session, owner: &plx_media::route::PlaybackIdentity,
+    mut record: Record, now: u32) -> bool {
+    if session.state != State::Capturing || &session.playback != owner
+        || age(now, session.started_at) >= session.duration_ms { return false; }
+    record.load_state = "failed";
+    push_record(session, record);
+    session.state = State::SessionChanged;
+    session.ended_at = Some(now);
+    true
+}
+
+pub(super) fn freeze_failure(runtime: &mut Runtime, app: &App, now: u32) {
+    let Some(owner) = runtime.playing.as_ref().filter(|playing| super::playing_matches(playing, app))
+        .and_then(|playing| playing.identity.as_ref()) else { return; };
+    if plx_media::route::playback_identity(&app.player.session).as_ref() != Some(owner) { return; }
+    let Some(session) = runtime.native_playback_capture.capture.as_mut() else { return; };
+    if session.state != State::Capturing || &session.playback != owner
+        || age(now, session.started_at) >= session.duration_ms { return; }
+    let d = plx_media::player::diag(&app.player.session);
+    let record = observation(&d, session, now);
+    if freeze_record(session, owner, record, now) { turn_capture_readout_on(false); }
 }
 
 fn record_json(record: &Record) -> Value {
@@ -568,6 +605,90 @@ mod tests {
         let completed: Value = serde_json::from_str(&runtime.native_input_probe()).unwrap();
         assert_eq!(completed["state"], "session_changed");
         assert_eq!(completed["events"], data["events"], "source change must preserve captured evidence without adding new input");
+    }
+
+    #[cfg(feature = "hostsim")]
+    fn capture_fixture() -> Session {
+        let mut playback = plx_media::route::PlaybackSession::default();
+        plx_media::route::reset_player_control_for_test(&playback);
+        plx_media::route::install_plex_playback_for_test(&mut playback,
+            plx_plex::plex::ServerId::from_raw(0), "capture-fixture");
+        Session { id:"fixture".into(), state:State::Capturing,
+            started_at:1_000, ended_at:None, duration_ms:5_000, next_sample_at:1_000,
+            playback:plx_media::route::playback_identity(&playback).unwrap(),
+            records:VecDeque::new(), input:VecDeque::new(), dropped:0 }
+    }
+
+    #[test]
+    #[cfg(feature = "hostsim")]
+    fn capture_position_age_uses_native_clock_and_never_observer_warmup_zero() {
+        let _lock = plx_base::testlock::serial();
+        let session = capture_fixture();
+        let mut d = plx_media::player::Diag { frames:5, seen_frame:true, frame_at:0,
+            position_callback_age_ms:Some(123), ..Default::default() };
+        assert_eq!(observation(&d, &session, 50_000).frame_age_ms, Some(123));
+        d.position_callback_age_ms = None;
+        assert_eq!(observation(&d, &session, 50_000).frame_age_ms, None,
+            "seek/new epoch has no native callback, even if observer retains old evidence");
+        d.position_callback_age_ms = Some(u32::MAX);
+        assert_eq!(observation(&d, &session, 50_000).frame_age_ms, Some(60_000));
+    }
+
+    #[test]
+    #[cfg(feature = "hostsim")]
+    fn capture_error_number_and_age_use_published_presence_and_media_clock_age() {
+        let _lock = plx_base::testlock::serial();
+        let session = capture_fixture();
+        let mut d = plx_media::player::Diag { cb_err:18, cb_err_at:999,
+            cb_err_num:601, cb_err_age_ms:Some(123), ..Default::default() };
+        let record = observation(&d, &session, 5_000);
+        assert_eq!(record.callback_error_code, Some(601));
+        assert_eq!(record.callback_error_age_ms, Some(123), "no SDL/media clock mixing or callback-index age");
+        d.cb_err_num = 0;
+        assert_eq!(observation(&d, &session, 5_000).callback_error_code, Some(0));
+        d.cb_err = 0;
+        d.cb_err_num = 601;
+        let absent = observation(&d, &session, 5_000);
+        assert_eq!(absent.callback_error_code, None);
+        assert_eq!(absent.callback_error_age_ms, None);
+    }
+
+    #[test]
+    #[cfg(feature = "hostsim")]
+    fn terminal_capture_freezes_exactly_one_bounded_record_before_owner_replacement() {
+        let _lock = plx_base::testlock::serial();
+        let mut session = capture_fixture();
+        let owner = session.playback.clone();
+        for _ in 0..MAX_RECORDS { push_record(&mut session, Record::default()); }
+        let d = plx_media::player::Diag { fed_v:44, load_completed:true,
+            ..Default::default() };
+        let final_record = observation(&d, &session, 1_234);
+        assert!(freeze_record(&mut session, &owner, final_record, 1_234));
+        assert_eq!(session.records.len(), MAX_RECORDS);
+        assert_eq!(session.dropped, 1);
+        let wire = record_json(session.records.back().unwrap());
+        assert_eq!(wire["load_state"], "failed");
+        assert_eq!(wire["fed_video_units"], 44);
+        assert_eq!(wire["callback_error_code"], Value::Null);
+        assert_eq!(wire["http_status"], Value::Null);
+        assert_eq!(session.ended_at, Some(1_234));
+        assert!(session.state == State::SessionChanged);
+        assert!(!freeze_record(&mut session, &owner, Record::default(), 1_235));
+        assert_eq!(record_json(session.records.back().unwrap()), wire);
+    }
+
+    #[test]
+    #[cfg(feature = "hostsim")]
+    fn terminal_capture_refuses_other_owner_expired_or_stopped_capture() {
+        let _lock = plx_base::testlock::serial();
+        let mut session = capture_fixture();
+        let other = capture_fixture().playback;
+        assert!(!freeze_record(&mut session, &other, Record::default(), 1_200));
+        let owner = session.playback.clone();
+        assert!(!freeze_record(&mut session, &owner, Record::default(), 6_000));
+        session.state = State::Stopped;
+        assert!(!freeze_record(&mut session, &owner, Record::default(), 1_200));
+        assert!(session.records.is_empty());
     }
 
 }

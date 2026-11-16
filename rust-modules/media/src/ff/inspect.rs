@@ -16,7 +16,7 @@ pub(super) unsafe fn collect_tracks(context: *mut AVFormatContext) -> Result<Tra
 
 /// Preserve closed transport evidence before inspection has a native session.
 /// TLS, auth, malformed addresses and unknown failures never become retry proof.
-fn initial_open_failure(error: crate::curlio::OpenErr) -> &'static str {
+pub(super) fn initial_open_failure(error: crate::curlio::OpenErr) -> &'static str {
     use crate::curlio::OpenErr;
     match error {
         OpenErr::Aborted | OpenErr::Stopped => "Media inspection cancelled",
@@ -28,6 +28,62 @@ fn initial_open_failure(error: crate::curlio::OpenErr) -> &'static str {
             _ => "Could not open media source",
         },
     }
+}
+
+const INSPECTION_BYTES: usize = 8 * 1024 * 1024;
+
+/// Evidence from this HTTP reader, not an inference from a demuxer error code.
+/// A refused physical reopen cannot borrow an earlier transient body failure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ReadEvidence {
+    #[default]
+    None,
+    Deadline,
+    Transport,
+    Refused,
+}
+impl ReadEvidence {
+    fn observe(&mut self, result: i32, failure: Option<crate::curlio::BodyFailure>, checked_http: bool) {
+        if result >= 0 {
+            *self = Self::None;
+        } else if *self != Self::Refused {
+            *self = if !checked_http || result == crate::curlio::READ_STOPPED {
+                Self::Refused
+            } else if result == crate::curlio::READ_DEADLINE {
+                Self::Deadline
+            } else {
+                match failure.filter(|failure| !failure.reopen_failed)
+                    .map(|failure| super::hls_curl_open_outcome(crate::curlio::OpenErr::Transport(failure.rc)))
+                {
+                    Some(TraceOutcome::Deadline) => Self::Deadline,
+                    Some(TraceOutcome::Transport) => Self::Transport,
+                    _ => Self::Refused,
+                }
+            };
+        }
+    }
+    fn stopped(&mut self, checked_http: bool, cancelled: bool, capped: bool, deadline: bool) {
+        if cancelled || capped || !checked_http {
+            *self = Self::Refused;
+        } else if deadline && *self != Self::Refused {
+            *self = Self::Deadline;
+        }
+    }
+    fn failure_reason(self, failed: bool, cancelled: bool, capped: bool) -> Option<&'static str> {
+        if !failed || cancelled || capped { return None; }
+        match self {
+            Self::Deadline => Some("Media source request timed out"),
+            Self::Transport => Some("Media source network transport failed"),
+            Self::None | Self::Refused => None,
+        }
+    }
+}
+
+/// The header sniff uses the same checked read evidence as the AVIO reader.
+fn initial_read_failure(result: i32, failure: Option<crate::curlio::BodyFailure>, cancelled: bool) -> &'static str {
+    let mut evidence = ReadEvidence::None;
+    evidence.observe(result, failure, true);
+    evidence.failure_reason(true, cancelled, false).unwrap_or("Could not read media source")
 }
 
 #[cfg(test)]
@@ -124,6 +180,8 @@ struct Input {
     prefix: Vec<u8>,
     prefix_at: usize,
     initial_transport: Option<InitialTransport>,
+    checked_http: bool,
+    read_evidence: ReadEvidence,
 }
 enum InputSource {
     Http(Box<crate::curlio::CurlSource>),
@@ -140,6 +198,9 @@ impl InputSource {
             Self::Http(source) => source.size(),
             Self::Local(source) => source.size(),
         }
+    }
+    fn body_failure(&self) -> Option<crate::curlio::BodyFailure> {
+        match self { Self::Http(source) => source.body_failure(), Self::Local(_) => None }
     }
     fn read(&mut self, bytes: &mut [u8], deadline: Instant, cancelled: &AtomicBool) -> i32 {
         match self {
@@ -163,10 +224,19 @@ impl InputSource {
     }
 }
 impl Input {
+    fn stopped_read(&mut self) {
+        self.read_evidence.stopped(self.checked_http, self.cancelled.load(Ordering::Relaxed),
+            self.bytes >= INSPECTION_BYTES, Instant::now() >= self.deadline);
+        self.source.abort();
+    }
+    fn primary_read_failure(&self, failed: bool) -> Option<&'static str> {
+        self.read_evidence.failure_reason(failed, self.cancelled.load(Ordering::Relaxed),
+            self.bytes >= INSPECTION_BYTES)
+    }
     fn stopped(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
             || Instant::now() >= self.deadline
-            || self.bytes >= 8 * 1024 * 1024
+            || self.bytes >= INSPECTION_BYTES
     }
 }
 extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, size: c_int) -> c_int {
@@ -176,13 +246,13 @@ extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, size: c_int) -> c_int {
     // The owned Input and AVIO buffer outlive every synchronous libavformat call.
     let input = unsafe { &mut *opaque.cast::<Input>() };
     if input.stopped() {
-        input.source.abort();
+        input.stopped_read();
         return AVERROR_IO;
     }
     if input.parked_at_end {
         return AVERROR_EOF;
     }
-    let count = (size as usize).min(8 * 1024 * 1024 - input.bytes);
+    let count = (size as usize).min(INSPECTION_BYTES - input.bytes);
     let buffer = unsafe { std::slice::from_raw_parts_mut(buffer, count) };
     if input.prefix_at < input.prefix.len() {
         let n = buffer.len().min(input.prefix.len() - input.prefix_at);
@@ -194,6 +264,7 @@ extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, size: c_int) -> c_int {
         return n as i32;
     }
     let n = input.source.read(buffer, input.deadline, &input.cancelled);
+    input.read_evidence.observe(n, input.source.body_failure(), input.checked_http);
     if n > 0 {
         if let Some(transport) = &mut input.initial_transport { transport.read(input.offset, &buffer[..n as usize]); }
         input.bytes += n as usize;
@@ -211,7 +282,7 @@ extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
     }
     let input = unsafe { &mut *opaque.cast::<Input>() };
     if input.stopped() {
-        input.source.abort();
+        input.stopped_read();
         return -1;
     }
     if whence == AVSEEK_SIZE {
@@ -236,6 +307,7 @@ extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
         .source
         .seek(position, input.deadline, &input.cancelled)
     {
+        input.read_evidence = ReadEvidence::None;
         if let Some(transport) = &mut input.initial_transport { transport.seek(input.offset, position); }
         input.prefix.clear();
         input.prefix_at = 0;
@@ -243,6 +315,9 @@ extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
         input.parked_at_end = false;
         position
     } else {
+        // This API returns only bool: a failed reopen may be authentication,
+        // trust, range or policy refusal. It cannot reuse an old read's cause.
+        input.read_evidence = ReadEvidence::Refused;
         -1
     }
 }
@@ -293,7 +368,7 @@ pub(super) fn raw_video_timed(source: &ExternalSource, cancelled: Arc<AtomicBool
 {
     let mut timing = None;
     let info = raw_inner_capture(source, cancelled, false,
-        Some(super::hls_rendition::Lane::Video), Some(&mut timing))?;
+        Some(super::hls_rendition::Lane::Video), Some(&mut timing), None)?;
     Ok((info, timing.unwrap_or(Err("HLS subtitle video clock is unavailable"))))
 }
 fn raw_inner(
@@ -302,14 +377,25 @@ fn raw_inner(
     recognize_hls: bool,
     lane: Option<super::hls_rendition::Lane>,
 ) -> Result<MediaInfo, &'static str> {
-    raw_inner_capture(source, cancelled, recognize_hls, lane, None)
+    raw_inner_capture(source, cancelled, recognize_hls, lane, None, None)
 }
+/// Feed the selected HLS segment through the existing bounded Input/AVIO path.
+/// The private HTTP session was established by the manifest chain; do not issue
+/// a duplicate segment GET or import its state into a playback generation.
+pub(super) fn raw_opened_http(source: Box<crate::curlio::CurlSource>,
+    cancelled: Arc<AtomicBool>, deadline: Instant) -> Result<MediaInfo, &'static str>
+{
+    raw_inner_capture(&ExternalSource::Http(String::new()), cancelled, false, None, None,
+        Some((source, deadline)))
+}
+
 fn raw_inner_capture(
     source: &ExternalSource,
     cancelled: Arc<AtomicBool>,
     recognize_hls: bool,
     lane: Option<super::hls_rendition::Lane>,
     mut timing: Option<&mut Option<VideoTiming>>,
+    opened: Option<(Box<crate::curlio::CurlSource>, Instant)>,
 ) -> Result<MediaInfo, &'static str> {
     if !ABI_OK.load(Ordering::Relaxed) {
         return Err("Bundled media demuxer is unavailable");
@@ -318,18 +404,18 @@ fn raw_inner_capture(
         return Err("Media inspection cancelled");
     }
     ensure_registered();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = opened.as_ref().map_or_else(|| Instant::now() + Duration::from_secs(15), |(_, at)| *at);
     let mut prefix = Vec::new();
-    let source = match source {
+    let checked_http = matches!(source, ExternalSource::Http(_));
+    let source = if let Some((source, _)) = opened { InputSource::Http(source) } else { match source {
         ExternalSource::Http(url) => {
             let url = plx_data::ott::http_url(url).ok_or("Invalid HTTP media address")?;
-            let (mut source, _abort) = crate::curlio::CurlSource::open_private_checked(
-                &url,
-                0,
-                Some(deadline),
-                &mut InspectCheckpoint(&cancelled),
-            )
-            .map_err(initial_open_failure)?;
+            let mut source = if recognize_hls {
+                crate::curlio::CurlSource::open_hls_private_checked(&url, Some(deadline), &mut InspectCheckpoint(&cancelled))
+            } else {
+                crate::curlio::CurlSource::open_private_checked(&url, 0, Some(deadline), &mut InspectCheckpoint(&cancelled))
+                    .map(|(source, _)| source)
+            }.map_err(initial_open_failure)?;
             if recognize_hls {
                 let mut head = [0u8; 512];
                 while prefix.len() < 16 {
@@ -339,7 +425,8 @@ fn raw_inner_capture(
                         &mut InspectCheckpoint(&cancelled),
                     );
                     if n < 0 {
-                        return Err("Could not read media source");
+                        return Err(initial_read_failure(n, source.body_failure(),
+                            cancelled.load(Ordering::Relaxed)));
                     }
                     if n == 0 {
                         break;
@@ -377,7 +464,7 @@ fn raw_inner_capture(
         ExternalSource::HeldLocal(file) => InputSource::Local(
             file_source::FileSource::held(file).map_err(|_| "Local media source was withdrawn")?),
         ExternalSource::Hls(_) => return Err("Segmented media needs playlist inspection"),
-    };
+    }};
     let observe_initial_transport = !recognize_hls && lane.is_none() && timing.is_none();
     let mut input = Input {
         source,
@@ -389,6 +476,8 @@ fn raw_inner_capture(
         prefix,
         prefix_at: 0,
         initial_transport: observe_initial_transport.then(InitialTransport::new),
+        checked_http,
+        read_evidence: ReadEvidence::None,
     };
     unsafe {
         let format = if lane.is_some() {
@@ -440,9 +529,13 @@ fn raw_inner_capture(
             format,
             std::ptr::null_mut(),
         );
-        let result = if opened < 0 || context.is_null() {
+        let open_failed = opened < 0 || context.is_null();
+        let identified = if open_failed { -1 }
+            else { avformat_find_stream_info(context, std::ptr::null_mut()) };
+        let demux_failed = open_failed || identified < 0;
+        let result = if open_failed {
             Err("Unsupported or unavailable media container")
-        } else if avformat_find_stream_info(context, std::ptr::null_mut()) < 0 {
+        } else if identified < 0 {
             Err("Could not identify media streams")
         } else if let Some(lane) = lane {
             describe_lane(context, lane)
@@ -454,6 +547,11 @@ fn raw_inner_capture(
             })
         };
         let inspection_stopped = input.stopped();
+        // Snapshot the primary inspection before optional timing work or close
+        // callbacks can consume/replace its evidence. Successful prefix probes
+        // do not become failures merely because a later body read was partial.
+        // Codec/track policy refusals from describe also remain their own cause.
+        let read_failure = input.primary_read_failure(demux_failed || (result.is_ok() && inspection_stopped));
         if result.is_ok() && !inspection_stopped {
             if let Some(out) = timing.as_mut() {
                 **out = Some(capture_video_timing(context, input_ptr));
@@ -463,8 +561,11 @@ fn raw_inner_capture(
             avformat_close_input(&mut context);
         }
         free_avio(io);
-        if inspection_stopped || input.cancelled.load(Ordering::Relaxed)
-            || (timing.is_none() && input.stopped()) {
+        if input.cancelled.load(Ordering::Relaxed) {
+            Err("Media inspection cancelled or exceeded its limit")
+        } else if let Some(reason) = read_failure {
+            Err(reason)
+        } else if inspection_stopped || (timing.is_none() && input.stopped()) {
             Err("Media inspection cancelled or exceeded its limit")
         } else {
             result
@@ -629,6 +730,8 @@ mod tests {
             prefix: Vec::new(),
             prefix_at: 0,
             initial_transport: None,
+            checked_http: false,
+            read_evidence: ReadEvidence::None,
         };
         let ptr = (&mut input as *mut Input).cast();
         let mut bytes = [0; 4];
@@ -750,3 +853,7 @@ unsafe fn describe_lane(context: *mut AVFormatContext, lane: super::hls_renditio
         audio_bit_depth: track.bit_depth, dovi: plx_data::metadata::Dovi::NONE,
     })
 }
+
+#[cfg(test)]
+#[path = "inspect_failure_tests.rs"]
+mod read_failure_tests;
