@@ -1232,7 +1232,7 @@ impl CurlSource {
             return Err(OpenErr::Deadline);
         }
         // Check before attaching/performing, even when DNS and headers would be immediate.
-        if self.cookies.is_some() && matches!(checkpoint.check(), Flow::Stop) { return Err(OpenErr::Stopped); }
+        if self.cookies.is_some() && matches!(checkpoint.check(), plx_base::checkpoint::Flow::Stop) { return Err(OpenErr::Stopped); }
         if self.multi_failed {
             // A CURLM error describes this multi handle, not the remote byte range. Rebuild the
             // local machinery before allowing a later seek to retry; clearing the flag while
