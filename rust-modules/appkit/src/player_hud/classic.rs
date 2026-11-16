@@ -182,15 +182,10 @@ impl ControlSlot {
 /// package format bounds a scrim's `extra` and `height` by it (`hud_format::schema`), the same const.
 pub(crate) const SCRIM_H: f32 = 470.0;
 
-/// The read-out's frame: **the whole panel**, because the wait is about the whole picture.
-///
-/// It is deliberately NOT carved down to dodge the transport. The block [`StatusOverlay`] builds is
-/// only ~91 px tall, so centred on the panel it spans y≈482…573 — clear of the scrim's top edge at
-/// `SCR_H - SCRIM_H` (610) and of the transport's highest ink (the Up Next still at ≈597). The
-/// carve-out this replaces (`SCR_H - 340`) centred it at y=370, visibly high, and bought nothing:
-/// at 370 the block was already 200 px above a scrim that is fully TRANSPARENT at its top edge
-/// anyway. Every "sit above the transport" framing pushes it UP — the un-scrimmed band's own centre
-/// is 305 — which is the opposite of the fix the report asked for.
+/// Non-loading status overlays retain the whole-panel frame. Their existing
+/// centred layout stays clear of the transport scrim. The fullscreen working
+/// indicator has its own desktop-aligned top-left placement instead; see
+/// [`Spinner::ott_playback`].
 pub(super) fn readout_frame() -> Rect {
     Rect::FULL
 }
@@ -226,8 +221,7 @@ pub fn draw_readout(
     if kind == StatusKind::Working {
         // This is our SDL overlay, not firmware player chrome. Channel identity
         // belongs in the ordinary footer, never in a second central caption.
-        let frame = readout_frame();
-        Spinner::ott_orbit(frame.cx(), frame.cy()).phase(now)
+        Spinner::ott_playback().phase(now)
             .draw(&hud_env(), Painter::root());
     } else {
         StatusOverlay::new(readout_frame(), caption, kind)

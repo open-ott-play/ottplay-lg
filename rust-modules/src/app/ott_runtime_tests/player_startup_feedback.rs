@@ -110,7 +110,7 @@ fn startup_pending_covers_only_the_exact_bounded_live_retry() {
     app.ott.as_mut().unwrap().continuity.stop(generation);
     assert!(
         !player_startup_pending(&app),
-        "no indefinite working notice after cancellation/exhaustion"
+        "no working notice after explicit cancellation"
     );
 }
 
@@ -173,42 +173,48 @@ fn viewer_pause_stops_retry_feedback_before_the_next_policy_tick() {
 }
 
 #[test]
-fn exhausted_live_retry_budget_releases_the_working_feedback() {
+fn paced_live_retries_keep_working_feedback_until_explicit_cancellation() {
     let _serial = plx_base::testlock::serial();
     let _reset = ResetMedia;
     let mut app = live_failure();
     mount_player(&mut app);
     app.running = true;
     assert!(player_startup_pending(&app));
-    let runtime = app.ott.as_mut().unwrap();
-    let generation = runtime.generation;
-    for _ in 0..4 {
-        let due = runtime
-            .continuity
-            .pending_retry()
-            .expect("bounded retry")
-            .not_before_ms;
-        assert!(matches!(
-            runtime
-                .continuity
-                .tick(generation, due, &["first", "second"], true),
-            continuity::Decision::Start { .. }
-        ));
-        runtime
-            .continuity
-            .live_disconnected(generation, "first", due + 1);
+    let generation = app.ott.as_ref().unwrap().generation;
+    for attempt in 0..24 {
+        {
+            let runtime = app.ott.as_mut().unwrap();
+            let pending = runtime.continuity.pending_retry().expect("paced same-source retry");
+            assert_eq!(pending.after, "first");
+            let due = pending.not_before_ms;
+            assert!(matches!(
+                runtime.continuity.tick(generation, due, &["first", "second"], true),
+                continuity::Decision::Start { entry_id, reason: continuity::Reason::LiveRetry, .. }
+                    if entry_id == "first"
+            ));
+            assert_eq!(runtime.continuity.live_disconnected(generation, "first", due + 1),
+                continuity::Decision::Wait);
+            let pending = runtime.continuity.pending_retry().unwrap();
+            assert_eq!(pending.after, "first");
+            assert_eq!(pending.failures, attempt + 2);
+            assert_eq!(pending.not_before_ms - (due + 1),
+                [1_000, 2_000, 4_000, 8_000, 15_000, 30_000][(attempt + 1).min(5)]);
+            assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none(),
+                "pure cooldown checks must not start a resolver worker");
+        }
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(failed_playback::current(runtime, &app).unwrap().selection_id, "first");
+        assert!(player_startup_pending(&app), "attempt {} must remain cancellable working feedback", attempt + 2);
     }
-    assert!(runtime.continuity.pending_retry().is_none());
+    app.ott.as_mut().unwrap().continuity.stop(generation);
     let runtime = app.ott.as_ref().unwrap();
+    assert!(runtime.continuity.pending_retry().is_none());
     assert!(failed_playback::current(runtime, &app).is_some());
-    assert!(!player_startup_pending(&app));
-    // Recovery cleanup retired the native decoder, but its source-bound
-    // failure receipt remains available. Presentation must not keep claiming
-    // another attempt exists after the bounded policy has exhausted it.
-    assert!(app.ott.as_ref().unwrap().play_target.is_none());
+    assert!(!player_startup_pending(&app), "explicit Stop releases the working feedback immediately");
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
     assert_eq!(
         state(&app, runtime)["playback"]["state"],
         "error",
-        "the source-bound failure remains reported after recovery exhausts"
+        "the source-bound failure remains reported after retry cancellation"
     );
 }

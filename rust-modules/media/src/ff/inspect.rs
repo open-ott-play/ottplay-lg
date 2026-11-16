@@ -14,6 +14,48 @@ pub(super) unsafe fn collect_tracks(context: *mut AVFormatContext) -> Result<Tra
     tracks::collect(context)
 }
 
+/// Preserve closed transport evidence before inspection has a native session.
+/// TLS, auth, malformed addresses and unknown failures never become retry proof.
+fn initial_open_failure(error: crate::curlio::OpenErr) -> &'static str {
+    use crate::curlio::OpenErr;
+    match error {
+        OpenErr::Aborted | OpenErr::Stopped => "Media inspection cancelled",
+        OpenErr::Status(429) => "Media source server returned HTTP 429",
+        OpenErr::Status(500 | 502 | 503 | 504) => "Media source server returned a server error",
+        _ => match super::hls_curl_open_outcome(error) {
+            TraceOutcome::Deadline => "Media source request timed out",
+            TraceOutcome::Transport => "Media source network transport failed",
+            _ => "Could not open media source",
+        },
+    }
+}
+
+#[cfg(test)]
+mod initial_open_failure_tests {
+    use super::*;
+    #[test]
+    fn checked_transient_transport_keeps_its_closed_preparation_reason() {
+        use crate::curlio::OpenErr;
+        assert_eq!(initial_open_failure(OpenErr::Deadline), "Media source request timed out");
+        assert_eq!(initial_open_failure(OpenErr::Transport(28)), "Media source request timed out");
+        assert_eq!(initial_open_failure(OpenErr::Transport(56)), "Media source network transport failed");
+        assert_eq!(initial_open_failure(OpenErr::Status(503)), "Media source server returned a server error");
+        assert_eq!(initial_open_failure(OpenErr::Status(429)), "Media source server returned HTTP 429");
+    }
+    #[test]
+    fn auth_trust_local_cancel_and_unknown_are_not_transient_open_evidence() {
+        use crate::curlio::OpenErr;
+        for error in [OpenErr::Status(401), OpenErr::Status(403), OpenErr::Status(404),
+            OpenErr::Status(501), OpenErr::Status(505), OpenErr::Status(511),
+            OpenErr::Transport(60), OpenErr::Transport(35), OpenErr::Transport(999),
+            OpenErr::Local, OpenErr::Unavailable, OpenErr::RangeIgnored] {
+            assert_eq!(initial_open_failure(error), "Could not open media source");
+        }
+        assert_eq!(initial_open_failure(OpenErr::Aborted), "Media inspection cancelled");
+        assert_eq!(initial_open_failure(OpenErr::Stopped), "Media inspection cancelled");
+    }
+}
+
 struct InspectCheckpoint<'a>(&'a AtomicBool);
 impl Checkpoint for InspectCheckpoint<'_> {
     fn check(&mut self) -> Flow {
@@ -287,7 +329,7 @@ fn raw_inner_capture(
                 Some(deadline),
                 &mut InspectCheckpoint(&cancelled),
             )
-            .map_err(|_| "Could not open media source")?;
+            .map_err(initial_open_failure)?;
             if recognize_hls {
                 let mut head = [0u8; 512];
                 while prefix.len() < 16 {
@@ -309,7 +351,7 @@ fn raw_inner_capture(
                     .trim_start()
                     .starts_with("#EXTM3U")
                 {
-                    return super::external_hls::inspect_opened(source, prefix, deadline, cancelled);
+                    return super::external_hls::inspect_opened(&url, source, prefix, deadline, cancelled);
                 }
             }
             InputSource::Http(source)

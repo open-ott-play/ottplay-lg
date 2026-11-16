@@ -76,6 +76,7 @@ pub(super) fn pending(app: &App) -> bool {
     if lifecycle::viewer_paused() {
         return false;
     }
+    if playback_step::pending_live_retry_display(runtime, app).is_some() { return true; }
     let Some(retry) = runtime.continuity.pending_retry() else {
         return false;
     };
@@ -94,7 +95,8 @@ pub(super) fn pending(app: &App) -> bool {
 pub(super) fn display_stamp(app: &App) -> Option<(u64, u64, u64, bool)> {
     if !pending(app) { return None; }
     let runtime = app.ott.as_ref()?;
-    runtime.play_target.as_ref()?;
+    runtime.play_target.as_ref().or_else(||
+        playback_step::pending_live_retry_display(runtime, app).map(|(request, _, _)| request))?;
     Some((runtime.generation, runtime.play_generation, runtime.revision, runtime.wall_now_s().is_some()))
 }
 
@@ -128,12 +130,20 @@ pub(super) fn pending_ordinal(runtime: &Runtime) -> Option<u32> {
 pub(super) fn display(app: &App) -> Option<plx_data::metadata::NowPlaying> {
     display_stamp(app)?;
     let runtime = app.ott.as_ref()?;
-    let request = runtime.play_target.as_ref()?;
+    let retry = playback_step::pending_live_retry_display(runtime, app);
+    let request = runtime.play_target.as_ref().or_else(|| retry.map(|(request, _, _)| request))?;
     if request.archive.is_some() { return None; }
     let (_, profile, entry, _) = runtime.prepare_play_request(request.clone()).ok()?;
-    if runtime.pending_play_profile() != Some(&profile) { return None; }
+    if runtime.pending_play_profile().or_else(|| retry.map(|(_, profile, _)| profile)) != Some(&profile) { return None; }
     let entry = entry?;
     if !guide_ui::is_live(&profile, &entry) { return None; }
+    let ordinal = pending_ordinal(runtime).or_else(|| {
+        let (request, profile, entry) = retry?;
+        live_label::captured_ordinal(entry, profile, request.transient_owner,
+            live_label::CatalogSource { profile: runtime.effective_profile()?, entries: &runtime.catalog.entries,
+                transient_owner: runtime.transient.accepted.as_ref().map(transient::TransientMedia::owner),
+                source_current: true })
+    });
     let guide = runtime.wall_now_s().and_then(|now_s|
         runtime.selected_row_guide(&request.id, Some(&entry)).or_else(|| {
             if runtime.effective_profile() != Some(&profile) { return None; }
@@ -148,7 +158,7 @@ pub(super) fn display(app: &App) -> Option<plx_data::metadata::NowPlaying> {
     let title = entry.title.clone();
     Some(plx_data::metadata::NowPlaying {
         ott: Some(plx_data::metadata::OttNowPlaying {
-            live: Some(plx_data::metadata::OttLivePlaying { channel_title: title.clone(), ordinal: pending_ordinal(runtime), guide }),
+            live: Some(plx_data::metadata::OttLivePlaying { channel_title: title.clone(), ordinal, guide }),
             archive: None, collection_label: title.clone(), confirmed_start_unix_ms: None,
             next: None, art: entry_poster(&entry),
         }), title, summary, is_episode: false, is_real_episode: false,

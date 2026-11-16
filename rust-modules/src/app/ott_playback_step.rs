@@ -8,6 +8,7 @@ pub(super) struct State {
     anchor: Option<Anchor>, chain: Option<Chain>, admitted: Option<AdmittedList>,
     step_list: Option<Arc<List>>,
     failure_scope: Option<Arc<List>>,
+    retry_exact_scope: Option<String>,
 }
 struct List {
     ids: Vec<String>,
@@ -113,6 +114,7 @@ struct Anchor {
     category: String,
     favorites: bool,
     failed: bool,
+    retry_exact: bool,
     list: Option<Arc<List>>,
 }
 impl State {
@@ -128,6 +130,21 @@ fn same_entry(a: Option<&CatalogEntry>, b: Option<&CatalogEntry>) -> bool {
     }
 }
 impl Anchor {
+    fn same_attempt(&self, other: &Self) -> bool {
+        self.request == other.request && self.profile == other.profile
+            && same_entry(self.entry.as_ref(), other.entry.as_ref()) && self.favorite == other.favorite
+            && self.outgoing == other.outgoing && self.outgoing_id == other.outgoing_id
+            && self.ticket == other.ticket && self.generation == other.generation
+            && self.catalog_revision == other.catalog_revision
+            && self.navigation_epoch == other.navigation_epoch && self.playback_epoch == other.playback_epoch
+            && self.play_generation == other.play_generation
+            && self.category == other.category && self.favorites == other.favorites
+            && match (&self.list, &other.list) {
+                (Some(before), Some(now)) => Arc::ptr_eq(before, now),
+                (None, None) => true,
+                _ => false,
+            }
+    }
     fn binding_current(&self, runtime: &Runtime) -> bool {
         let Ok((request, profile, entry, favorite)) = runtime.prepare_play_request(self.request.clone()) else { return false; };
         request == self.request && profile == self.profile && favorite == self.favorite
@@ -180,7 +197,7 @@ pub(super) fn bind_pending(runtime: &mut Runtime) {
     runtime.explicit_step.anchor = Some(Anchor { request, profile, entry, favorite, outgoing, outgoing_id, ticket, list,
         generation: runtime.generation, catalog_revision: runtime.catalog_revision,
         navigation_epoch: runtime.navigation_epoch, playback_epoch: runtime.playback_epoch,
-        play_generation: runtime.play_generation, category: category.into(), favorites, failed: false });
+        play_generation: runtime.play_generation, category: category.into(), favorites, failed: false, retry_exact: false });
 }
 
 /// Only actual ordinary playback admission binds an immutable list to the new
@@ -218,10 +235,13 @@ fn continuation_list(runtime: &Runtime) -> Result<Option<Arc<List>>, ()> {
         return list.refreshed(runtime).map(Some).ok_or(());
     }
     if let Some(anchor) = runtime.explicit_step.anchor.as_ref().filter(|anchor|
-        anchor.failed && anchor.request.advance_on_failure && anchor.generation == runtime.generation
+        anchor.failed && (anchor.request.advance_on_failure || anchor.retry_exact) && anchor.generation == runtime.generation
             && runtime.continuity.active_selection(runtime.generation).is_some()) {
         if anchor.navigation_epoch != runtime.navigation_epoch || anchor.play_generation != runtime.play_generation
             || anchor.playback_epoch != runtime.playback_epoch || !anchor.binding_current(runtime)
+        { return Err(()); }
+        if anchor.retry_exact
+            && runtime.continuity.active_selection(runtime.generation) != Some(anchor.request.id.as_str())
         { return Err(()); }
         let list = anchor.list.as_ref().map(|list| list.refreshed(runtime).ok_or(())).transpose()?;
         return match (list, runtime.continuity.active_selection(runtime.generation)) {
@@ -258,6 +278,42 @@ pub(super) fn capture_pending_failure(runtime: &Runtime, app: &App, generation: 
     let list = anchor.current(runtime, app).then(|| anchor.list.as_ref().and_then(|list| list.refreshed(runtime))).flatten();
     Some(FailureContinuation { list, anchor: Some(anchor.clone()) })
 }
+
+/// Only a current ordinary live request can retain its exact target after a
+/// typed transient preflight failure. The caller owns that classification;
+/// this receipt supplies no transport, decoder or alternative-item authority.
+pub(super) fn capture_pending_live_retry(runtime: &Runtime, app: &App, generation: u64) -> Option<FailureContinuation> {
+    let anchor = runtime.explicit_step.anchor.as_ref().filter(|anchor|
+        anchor.play_generation == generation && anchor.request.archive.is_none()
+            && anchor.request.transient_owner.is_none() && anchor.request.local_selection.is_none()
+            && anchor.request.kiosk_selection.is_none() && anchor.request.continuation.is_none()
+            && anchor.list.is_some()
+            && anchor.entry.as_ref().is_some_and(|entry| guide_ui::is_live(&anchor.profile, entry)))?;
+    if pending_id(runtime, app) != Some(anchor.request.id.as_str()) { return None; }
+    let list = anchor.list.as_ref().and_then(|list| list.refreshed(runtime));
+    let mut anchor = anchor.clone();
+    anchor.retry_exact = true;
+    Some(FailureContinuation { list, anchor: Some(anchor) })
+}
+/// Display-only evidence for the exact pre-admission live cooldown. This
+/// borrows the retained failed attempt; it cannot create a request or permission.
+pub(super) fn pending_live_retry_display<'a>(runtime: &'a Runtime, app: &App)
+    -> Option<(&'a PlaybackRequest, &'a ProviderProfile, &'a CatalogEntry)>
+{
+    if runtime.play_target.is_some() || !runtime.play_work_allowed() || lifecycle::viewer_paused()
+        || runtime.cancel.load(Ordering::Acquire) || runtime.play_cancel.load(Ordering::Acquire)
+        || !runtime.pending_attachment_current() || !transient::target_current(runtime) { return None; }
+    let retry = runtime.continuity.pending_retry()?;
+    let anchor = runtime.explicit_step.anchor.as_ref()?;
+    anchor.list.as_ref()?;
+    if !anchor.failed || !anchor.retry_exact || retry.generation != runtime.generation
+        || retry.after != anchor.request.id || !anchor.current(runtime, app)
+        || runtime.continuity.active_selection(runtime.generation) != Some(anchor.request.id.as_str())
+    { return None; }
+    let entry = anchor.entry.as_ref()?;
+    guide_ui::is_live(&anchor.profile, entry).then_some((&anchor.request, &anchor.profile, entry))
+}
+
 pub(super) fn with_failure_continuation(runtime: &mut Runtime, proof: Option<FailureContinuation>,
     continue_failure: impl FnOnce(&mut Runtime)) {
     let (list, anchor) = match proof {
@@ -273,10 +329,36 @@ pub(super) fn with_failure_continuation(runtime: &mut Runtime, proof: Option<Fai
         },
         None => (None, None),
     };
+    let exact = anchor.as_ref().filter(|anchor| anchor.retry_exact).map(|anchor| anchor.request.id.clone());
+    let previous_exact = runtime.explicit_step.retry_exact_scope.take();
+    if previous_exact.as_ref().zip(exact.as_ref()).is_some_and(|(before, now)| before != now) {
+        runtime.explicit_step.retry_exact_scope = previous_exact;
+        runtime.continuity.stop(runtime.generation);
+        return;
+    }
+    runtime.explicit_step.retry_exact_scope = exact.or_else(|| previous_exact.clone());
     let owned = list.is_some();
     runtime.explicit_step.failure_scope = list;
     continue_failure(runtime);
     runtime.explicit_step.failure_scope = None;
+    runtime.explicit_step.retry_exact_scope = previous_exact;
+    // An exact refusal can already retain the pending anchor while its outgoing
+    // video is still installed. Promote only that same attempt; replacing it
+    // with a cloned proof could overwrite a newer explicit selection.
+    let promote = runtime.play_target.is_none() && anchor.as_ref().is_some_and(|candidate|
+        candidate.retry_exact && candidate.generation == runtime.generation
+            && candidate.play_generation == runtime.play_generation
+            && candidate.navigation_epoch == runtime.navigation_epoch
+            && candidate.playback_epoch == runtime.playback_epoch
+            && plx_media::route::play_request_is_current(candidate.ticket)
+            && candidate.binding_current(runtime)
+            && candidate.list.as_ref().is_some_and(|list| list.refreshed(runtime).is_some())
+            && runtime.continuity.active_selection(runtime.generation) == Some(candidate.request.id.as_str())
+            && runtime.explicit_step.anchor.as_ref().is_some_and(|retained|
+                retained.failed && retained.same_attempt(candidate)));
+    if promote {
+        runtime.explicit_step.anchor.as_mut().expect("same retained attempt").retry_exact = true;
+    }
     // A cooldown/discovery wait may retain only this exact failed candidate,
     // witnessed by the unchanged existing Continuity owner. It grants no input
     // or decoder capability and is removed by normal cancellation.
@@ -298,10 +380,20 @@ pub(super) fn with_failure_continuation(runtime: &mut Runtime, proof: Option<Fai
 /// Carry the already-owned automatic sequence into the existing request
 /// admission. A synchronous refusal cannot leave intent for another caller.
 pub(super) fn continue_at(runtime: &mut Runtime, id: &str, position_ms: u64) -> Result<(), &'static str> {
+    let retry_exact = runtime.explicit_step.retry_exact_scope.is_some()
+        || runtime.explicit_step.anchor.as_ref().is_some_and(|anchor| anchor.failed && anchor.retry_exact);
+    if runtime.explicit_step.retry_exact_scope.as_ref().is_some_and(|exact| exact != id)
+        || runtime.explicit_step.anchor.as_ref().is_some_and(|anchor|
+            anchor.failed && anchor.retry_exact && anchor.request.id != id)
+    { return Err("A live retry cannot select a different channel"); }
     let list = if kiosk_source::strict_folder_traversal(runtime) { None }
         else { continuation_list(runtime).map_err(|_| "The playing queue changed")? };
     runtime.explicit_step.step_list = list;
-    let result = runtime.play_at(id, position_ms);
+    let result = if retry_exact {
+        let mut request = PlaybackRequest::ordinary(id, position_ms);
+        request.advance_on_failure = false;
+        runtime.play_request(request)
+    } else { runtime.play_at(id, position_ms) };
     runtime.explicit_step.step_list = None;
     result
 }
@@ -529,3 +621,7 @@ pub(super) fn perform(runtime: &mut Runtime, app: &mut App, offset: i64)
     classic_play_handoff::begin(runtime, app);
     Ok(())
 }
+
+#[cfg(all(test, feature = "hostsim"))]
+#[path = "ott_runtime_tests/pending_live_retry_anchor.rs"]
+mod pending_live_retry_tests;

@@ -1562,19 +1562,26 @@ fn image_sub_actual_draw_reprojects_the_cached_cue_without_reloading_pixels() {
 #[test]
 fn working_player_readout_is_only_the_shared_orbit_without_central_caption() {
     let _lock = plx_base::testlock::serial();
-    let mut dots = Vec::new();
-    let text = plx_ui::draw_census::capture_runs(|| {
-        dots = plx_ui::draw_census::capture(|| plx_ui::record_walk(||
-            draw_readout(&plx_media::route::PlaybackSession::IDLE,
-                Busy::Readout(StatusKind::Working, c"33 Channel name"), 400, 0, &FM)));
-    });
-    assert!(text.is_empty(), "channel identity belongs to the footer, not the centre: {text:?}");
-    assert_eq!(dots.len(), 4);
-    for (kind, dot) in dots {
-        assert_eq!(kind, 9);
-        assert!(dot.x >= SCR_W * 0.5 - plx_ui::widgets::Spinner::OTT_BOX * 0.5);
-        assert!(dot.x + dot.w <= SCR_W * 0.5 + plx_ui::widgets::Spinner::OTT_BOX * 0.5);
-        assert!(dot.y >= SCR_H * 0.5 - plx_ui::widgets::Spinner::OTT_BOX * 0.5);
-        assert!(dot.y + dot.h <= SCR_H * 0.5 + plx_ui::widgets::Spinner::OTT_BOX * 0.5);
+    let mut phases = Vec::new();
+    for now in [0, 400, 800, plx_ui::widgets::Spinner::OTT_PERIOD_MS] {
+        let mut dots = Vec::new();
+        let text = plx_ui::draw_census::capture_runs(|| {
+            dots = plx_ui::draw_census::capture(|| plx_ui::record_walk(||
+                draw_readout(&plx_media::route::PlaybackSession::IDLE,
+                    Busy::Readout(StatusKind::Working, c"33 Channel name"), now, 0, &FM)));
+        });
+        assert!(text.is_empty(), "channel identity belongs to the footer, not the centre: {text:?}");
+        assert_eq!(dots.len(), 4);
+        // Desktop #buffering has a 30px box inset 10px from the top/left.
+        // On the native FHD surface the shared orbit must stay inside 15..60,
+        // rather than falling back to the centred modal status frame.
+        for (kind, dot) in &dots {
+            assert_eq!(*kind, 9);
+            assert!(dot.x >= 15.0 && dot.y >= 15.0);
+            assert!(dot.x + dot.w <= 60.0 && dot.y + dot.h <= 60.0);
+        }
+        phases.push(dots);
     }
+    assert_ne!(phases[0], phases[1], "the working read-out must advance the orbit clock");
+    assert_eq!(phases[0], phases[3], "the orbit retains its shared full-period cadence");
 }

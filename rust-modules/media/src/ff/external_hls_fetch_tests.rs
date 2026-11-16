@@ -1,7 +1,372 @@
-//! Actual loopback HTTP acquisition; no provider, FFmpeg or device is needed.
+//! Pure manifest retry policy and loopback HTTP acquisition. No provider,
+//! FFmpeg or device is needed; the pure cases use neither sockets nor sleeps.
 use super::*;
 use std::io::{Read, Write};
 use std::sync::atomic::AtomicUsize;
+
+// The production retry driver is tested without sockets, sleeps, global player
+// state or a decoder. Every attempt observes the exact same immutable request.
+type PlaylistFetchResult = Result<(String, String), FetchFailure>;
+struct FakePlaylistFetch {
+    now: Instant,
+    steps: std::collections::VecDeque<(Duration, PlaylistFetchResult)>,
+    deadlines: Vec<Instant>,
+    waits: Vec<Instant>,
+    retries: Vec<u8>,
+    requests: Vec<(String, Instant, u8)>,
+    cancelled: bool,
+    cancel_on_wait: bool,
+    cancel_after_attempt: bool,
+}
+impl FakePlaylistFetch {
+    fn new(steps: Vec<(Duration, PlaylistFetchResult)>) -> Self {
+        Self { now: Instant::now(), steps: steps.into(), deadlines: Vec::new(), waits: Vec::new(),
+            retries: Vec::new(), requests: Vec::new(), cancelled: false, cancel_on_wait: false, cancel_after_attempt: false }
+    }
+}
+impl PlaylistFetchIo for FakePlaylistFetch {
+    fn now(&self) -> Instant { self.now }
+    fn stopped(&self) -> bool { self.cancelled }
+    fn attempt(&mut self, deadline: Instant) -> Result<(String, String), FetchFailure> {
+        assert!(!self.cancelled, "a retired source cannot open another request");
+        self.deadlines.push(deadline);
+        let (elapsed, response) = self.steps.pop_front().expect("unexpected manifest attempt");
+        self.now += elapsed;
+        assert!(self.now <= deadline, "the transport must respect its assigned deadline");
+        self.cancelled |= self.cancel_after_attempt;
+        response
+    }
+    fn wait_until(&mut self, deadline: Instant) {
+        assert!(deadline >= self.now);
+        self.waits.push(deadline);
+        self.now = deadline;
+        self.cancelled |= self.cancel_on_wait;
+    }
+    fn retrying(&mut self, number: u8) { self.retries.push(number); }
+}
+impl InitialPlaylistIo for FakePlaylistFetch {
+    fn now(&self) -> Instant { self.now }
+    fn stopped(&self) -> bool { self.cancelled }
+    fn fetch(&mut self, url: &str, deadline: Instant, depth: u8) -> Result<(String, String), HlsExit> {
+        self.requests.push((url.into(), deadline, depth));
+        self.attempt(deadline).map_err(FetchFailure::into_hls)
+    }
+}
+fn transient_playlist_failure(outcome: TraceOutcome) -> FetchFailure {
+    FetchFailure { reason: "HLS playlist network transport failed", outcome, cancelled: false }
+}
+fn playlist_response() -> (String, String) {
+    ("https://fixture.invalid/selected".into(), "#EXTM3U\n".into())
+}
+
+#[test]
+fn pure_manifest_retry_keeps_initial_selected_and_playback_requests_within_one_budget() {
+    for stage in [PlaylistStage::Initial, PlaylistStage::Selected, PlaylistStage::Playback] {
+        for outcome in [TraceOutcome::Deadline, TraceOutcome::Transport, TraceOutcome::ServerState] {
+            let mut io = FakePlaylistFetch::new(vec![
+                (Duration::from_secs(5), Err(transient_playlist_failure(outcome))),
+                (Duration::from_millis(1), Ok(playlist_response())),
+            ]);
+            let began = io.now;
+            let response = fetch_with_retry(&mut io, began + Duration::from_secs(15), stage).unwrap();
+            assert_eq!(response, playlist_response());
+            assert_eq!(io.deadlines, vec![began + Duration::from_secs(15); 2]);
+            assert_eq!(io.retries, vec![1]);
+            assert_eq!(io.waits, vec![began + Duration::from_millis(5_200)]);
+            assert_eq!(io.now.duration_since(began), Duration::from_millis(5_201));
+        }
+    }
+}
+
+#[test]
+fn pure_manifest_retry_never_renews_the_original_absolute_deadline() {
+    let failure = transient_playlist_failure(TraceOutcome::Deadline);
+    let mut io = FakePlaylistFetch::new(vec![
+        (Duration::from_secs(5), Err(failure)),
+        (Duration::from_secs(5), Err(failure)),
+        (Duration::from_millis(4_400), Err(failure)),
+    ]);
+    let began = io.now;
+    let terminal = fetch_with_retry(&mut io, began + Duration::from_secs(90), PlaylistStage::Selected).unwrap_err();
+    assert_eq!(terminal.outcome, TraceOutcome::Deadline);
+    assert_eq!(io.deadlines, vec![began + Duration::from_secs(15); 3]);
+    assert_eq!(io.now.duration_since(began), Duration::from_secs(15));
+    assert_eq!(io.retries, vec![1, 2]);
+    assert!(io.steps.is_empty());
+}
+
+#[test]
+fn pure_manifest_retry_does_not_shorten_a_valid_cold_proxy_response() {
+    for stage in [PlaylistStage::Initial, PlaylistStage::Selected, PlaylistStage::Playback] {
+        let mut io = FakePlaylistFetch::new(vec![(Duration::from_secs(12), Ok(playlist_response()))]);
+        let began = io.now;
+        assert_eq!(fetch_with_retry(&mut io, began + Duration::from_secs(15), stage).unwrap(), playlist_response());
+        assert_eq!(io.deadlines, vec![began + Duration::from_secs(15)]);
+        assert_eq!(io.now.duration_since(began), Duration::from_secs(12));
+        assert!(io.waits.is_empty());
+        assert!(io.retries.is_empty());
+    }
+}
+
+#[test]
+fn pure_manifest_retry_stops_after_three_fast_failures_with_budget_remaining() {
+    let failure = transient_playlist_failure(TraceOutcome::ServerState);
+    let mut io = FakePlaylistFetch::new(vec![
+        (Duration::from_millis(1), Err(failure)),
+        (Duration::from_millis(1), Err(failure)),
+        (Duration::from_millis(1), Err(failure)),
+        (Duration::ZERO, Ok(playlist_response())),
+    ]);
+    let began = io.now;
+    assert!(fetch_with_retry(&mut io, began + Duration::from_secs(15), PlaylistStage::Playback).is_err());
+    assert_eq!(io.deadlines.len(), 3);
+    assert_eq!(io.retries, vec![1, 2]);
+    assert_eq!(io.now.duration_since(began), Duration::from_millis(603));
+    assert_eq!(io.steps.len(), 1, "a bounded burst cannot reach a fourth request");
+}
+
+#[test]
+fn pure_manifest_retry_keeps_short_outer_deadline_and_terminal_body_reason() {
+    let failure = FetchFailure { reason: "HLS playlist body transfer timed out",
+        outcome: TraceOutcome::Deadline, cancelled: false };
+    let mut io = FakePlaylistFetch::new(vec![(Duration::from_millis(60), Err(failure))]);
+    let began = io.now;
+    let terminal = fetch_with_retry(&mut io, began + Duration::from_millis(60), PlaylistStage::Playback).unwrap_err();
+    assert_eq!(terminal.reason, failure.reason);
+    assert_eq!(io.deadlines, vec![began + Duration::from_millis(60)]);
+    assert!(io.waits.is_empty());
+    assert!(io.retries.is_empty());
+}
+
+#[test]
+fn pure_manifest_retry_leaves_shared_readers_single_attempt() {
+    let mut io = FakePlaylistFetch::new(vec![(Duration::from_millis(1),
+        Err(transient_playlist_failure(TraceOutcome::ServerState)))]);
+    let deadline = io.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut io, deadline, PlaylistStage::Shared).is_err());
+    assert_eq!(io.deadlines, vec![deadline]);
+    assert!(io.waits.is_empty());
+}
+
+#[test]
+fn pure_manifest_retry_refuses_unknown_parse_auth_and_trust_causes() {
+    for (reason, outcome, cancelled) in [
+        ("HLS playlist server returned HTTP 401", TraceOutcome::Refused, false),
+        ("HLS playlist server returned HTTP 403", TraceOutcome::Refused, false),
+        ("HLS playlist server returned HTTP 404", TraceOutcome::Refused, false),
+        ("HLS playlist network transport failed", TraceOutcome::Refused, false),
+        ("HLS playlist is not UTF-8", TraceOutcome::Refused, false),
+        ("HLS playlist local transport failed", TraceOutcome::Inconclusive, false),
+        ("HLS request cancelled", TraceOutcome::Refused, true),
+    ] {
+        let failure = FetchFailure { reason, outcome, cancelled };
+        let mut io = FakePlaylistFetch::new(vec![(Duration::ZERO, Err(failure))]);
+        let deadline = io.now + Duration::from_secs(15);
+        let terminal = fetch_with_retry(&mut io, deadline, PlaylistStage::Selected).unwrap_err();
+        assert_eq!(terminal.reason, reason);
+        assert_eq!(io.deadlines.len(), 1);
+        assert!(io.waits.is_empty());
+        assert!(io.retries.is_empty());
+    }
+}
+
+#[test]
+fn pure_manifest_retry_cancellation_prevents_first_or_next_open_and_late_success() {
+    let failure = transient_playlist_failure(TraceOutcome::Transport);
+    let mut already_cancelled = FakePlaylistFetch::new(Vec::new());
+    already_cancelled.cancelled = true;
+    let deadline = already_cancelled.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut already_cancelled, deadline, PlaylistStage::Initial).unwrap_err().cancelled);
+    assert!(already_cancelled.deadlines.is_empty());
+
+    let mut during_wait = FakePlaylistFetch::new(vec![(Duration::ZERO, Err(failure))]);
+    during_wait.cancel_on_wait = true;
+    let deadline = during_wait.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut during_wait, deadline, PlaylistStage::Playback).unwrap_err().cancelled);
+    assert_eq!(during_wait.deadlines.len(), 1);
+    assert_eq!(during_wait.waits.len(), 1);
+
+    let mut on_response = FakePlaylistFetch::new(vec![(Duration::ZERO, Ok(playlist_response()))]);
+    on_response.cancel_after_attempt = true;
+    let deadline = on_response.now + Duration::from_secs(15);
+    assert!(fetch_with_retry(&mut on_response, deadline, PlaylistStage::Selected).unwrap_err().cancelled);
+    assert_eq!(on_response.deadlines.len(), 1);
+}
+
+#[test]
+fn pure_preparation_transport_reason_cannot_be_borrowed_by_trust_or_unknown_failures() {
+    use crate::curlio::OpenErr;
+    let transient = "HLS playlist transient transport failed";
+    // The same old display reason covered both checked network and TLS errors.
+    // Only the former carries the new closed retry evidence across inspection.
+    for error in [OpenErr::Transport(6), OpenErr::Transport(18), OpenErr::Transport(56)] {
+        let failure = FetchFailure { reason: "HLS playlist network transport failed",
+            outcome: super::super::hls_curl_open_outcome(error), cancelled: false };
+        assert_eq!(failure.preparation_reason(), transient);
+    }
+    for error in [OpenErr::Transport(60), OpenErr::Transport(35), OpenErr::Transport(999),
+        OpenErr::Status(401), OpenErr::Status(403), OpenErr::RangeIgnored, OpenErr::Local] {
+        let failure = FetchFailure { reason: "HLS playlist network transport failed",
+            outcome: super::super::hls_curl_open_outcome(error), cancelled: false };
+        assert_eq!(failure.preparation_reason(), failure.reason);
+        assert_ne!(failure.preparation_reason(), transient);
+    }
+    let truncated = FetchFailure { reason: "Truncated HLS response", outcome: TraceOutcome::Transport, cancelled: false };
+    assert_eq!(truncated.preparation_reason(), transient);
+    assert_eq!(FetchFailure { outcome: TraceOutcome::Inconclusive, ..truncated }.preparation_reason(), "Truncated HLS response");
+    assert_eq!(FetchFailure { cancelled: true, ..truncated }.preparation_reason(), "Truncated HLS response");
+}
+
+fn live_manifest(url: &str) -> (String, String) {
+    (url.into(), "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:2,\npart.ts\n".into())
+}
+fn master_manifest(url: &str, child: &str) -> (String, String) {
+    (url.into(), format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\n{child}\n"))
+}
+
+#[test]
+fn pure_inspected_source_retains_master_only_for_plain_live_playback() {
+    let master = "https://fixture.invalid/master.m3u8";
+    let selected = "https://fixture.invalid/old-session/media.m3u8";
+    for (ended, presentation, expected) in [(false, false, master), (true, false, selected),
+        (false, true, selected), (true, true, selected)] {
+        assert_eq!(inspected_hls_source(master, selected, ended, presentation), expected);
+    }
+}
+
+#[test]
+fn pure_redirect_landing_resolves_children_without_replacing_the_logical_input() {
+    let input = "https://fixture.invalid/channels/entry";
+    let landed = "https://fixture.invalid/ephemeral-client/master";
+    let Playlist::Master(variants) = parse(landed,
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nselected\n").unwrap() else {
+        panic!("master fixture");
+    };
+    let selected = &variants[0].url;
+    assert_eq!(selected, "https://fixture.invalid:443/ephemeral-client/selected");
+    assert_eq!(inspected_hls_source(input, selected, false, false), input,
+        "plain live replay returns to the admitted entry, never an ephemeral redirect");
+    assert_eq!(inspected_hls_source(input, selected, true, false), selected);
+    assert_eq!(inspected_hls_source(input, selected, false, true), selected);
+}
+
+#[test]
+fn pure_plain_live_bootstrap_uses_fresh_master_child_and_freezes_its_landed_media_url() {
+    let master = "https://fixture.invalid/channel/master.m3u8";
+    let stale = "https://fixture.invalid/old-session/media.m3u8";
+    let selected = "https://fixture.invalid:443/new-session/media.m3u8";
+    let landed = "https://cdn.fixture.invalid/new-session/index.m3u8";
+    let mut io = FakePlaylistFetch::new(vec![
+        (Duration::from_secs(1), Ok((master.into(), concat!(
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200\n/new-session/high.m3u8\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=100\n/new-session/media.m3u8\n").into()))),
+        (Duration::from_secs(1), Ok(live_manifest(landed))),
+    ]);
+    let began = io.now;
+    let source = inspected_hls_source(master, stale, false, false);
+    let (media_url, media) = initial_playback_media(source, true, began + Duration::from_secs(15), &mut io).unwrap();
+    assert_eq!(media_url, landed);
+    assert_eq!(io.requests, vec![("https://fixture.invalid:443/channel/master.m3u8".into(), began + Duration::from_secs(15), 0),
+        (selected.into(), began + Duration::from_secs(15), 1)]);
+    assert_eq!(media.segments.len(), 1);
+    assert_eq!(media.segments[0].inner.resource.path, "/new-session/part.ts");
+    assert!(!media.ended);
+    assert!(io.requests.iter().all(|(url, _, _)| url != stale));
+    assert!(matches!(playback_media_refresh(&media_url,
+        &master_manifest(landed, "/another-session/media.m3u8").1),
+        Err(HlsExit::Failed("HLS media address became a master playlist"))),
+        "an established media refresh never creates another provider session");
+}
+
+#[test]
+fn pure_live_bootstrap_keeps_the_existing_four_document_nesting_limit() {
+    for master_count in [3, 4] {
+        let source = "https://fixture.invalid/level0.m3u8";
+        let mut steps = Vec::new();
+        for level in 0..master_count {
+            steps.push((Duration::from_millis(1), Ok(master_manifest(
+                &format!("https://fixture.invalid/level{level}.m3u8"),
+                &format!("/level{}.m3u8", level + 1)))));
+        }
+        steps.push((Duration::from_millis(1), Ok(live_manifest(
+            &format!("https://fixture.invalid/level{master_count}.m3u8")))));
+        let mut io = FakePlaylistFetch::new(steps);
+        let deadline = io.now + Duration::from_secs(15);
+        let result = initial_playback_media(source, true, deadline, &mut io);
+        if master_count == 3 {
+            assert!(result.is_ok());
+            assert!(io.steps.is_empty());
+        } else {
+            assert!(matches!(result, Err(HlsExit::Failed("HLS playlist nesting exceeds limit"))));
+            assert_eq!(io.steps.len(), 1, "never issue a fifth request");
+        }
+        assert_eq!(io.requests.len(), 4);
+        assert!(io.requests.iter().all(|(_, at, _)| *at == deadline));
+    }
+}
+
+#[test]
+fn pure_live_bootstrap_cannot_renew_the_budget_at_a_selected_child() {
+    let master = "https://fixture.invalid/master.m3u8";
+    let mut io = FakePlaylistFetch::new(vec![
+        (Duration::from_secs(12), Ok(master_manifest(master, "/selected.m3u8"))),
+        (Duration::from_secs(3), Err(transient_playlist_failure(TraceOutcome::Deadline))),
+    ]);
+    let began = io.now;
+    assert!(matches!(initial_playback_media(master, true, began + Duration::from_secs(90), &mut io),
+        Err(HlsExit::OpenFailed { outcome: TraceOutcome::Deadline, .. })));
+    assert_eq!(io.now.duration_since(began), Duration::from_secs(15));
+    assert_eq!(io.requests.len(), 2);
+    assert!(io.requests.iter().all(|(_, at, _)| *at == began + Duration::from_secs(15)));
+}
+
+#[test]
+fn pure_live_bootstrap_cancellation_and_deadline_prevent_another_child_request() {
+    let master = "https://fixture.invalid/master.m3u8";
+    let mut retired = FakePlaylistFetch::new(Vec::new());
+    retired.cancelled = true;
+    let deadline = retired.now + Duration::from_secs(15);
+    assert!(matches!(initial_playback_media(master, true, deadline, &mut retired), Err(HlsExit::Aborted)));
+    assert!(retired.requests.is_empty());
+    let mut after_master = FakePlaylistFetch::new(vec![
+        (Duration::ZERO, Ok(master_manifest(master, "/selected.m3u8"))),
+    ]);
+    after_master.cancel_after_attempt = true;
+    let deadline = after_master.now + Duration::from_secs(15);
+    assert!(matches!(initial_playback_media(master, true, deadline, &mut after_master), Err(HlsExit::Aborted)));
+    assert_eq!(after_master.requests.len(), 1);
+    let mut exhausted = FakePlaylistFetch::new(vec![
+        (Duration::from_secs(15), Ok(master_manifest(master, "/selected.m3u8"))),
+    ]);
+    let deadline = exhausted.now + Duration::from_secs(15);
+    assert!(matches!(initial_playback_media(master, true, deadline, &mut exhausted),
+        Err(HlsExit::OpenFailed { outcome: TraceOutcome::Deadline, .. })));
+    assert_eq!(exhausted.requests.len(), 1);
+}
+
+#[test]
+fn pure_live_bootstrap_preserves_presentation_auth_and_parse_refusals() {
+    let master = "https://fixture.invalid/master.m3u8";
+    let mut presentation = FakePlaylistFetch::new(vec![
+        (Duration::ZERO, Ok(master_manifest(master, "/selected.m3u8"))),
+    ]);
+    let deadline = presentation.now + Duration::from_secs(15);
+    assert!(matches!(initial_playback_media(master, false, deadline, &mut presentation),
+        Err(HlsExit::Failed("HLS media address became a master playlist"))));
+    assert_eq!(presentation.requests.len(), 1);
+    let mut auth = FakePlaylistFetch::new(vec![(Duration::ZERO, Err(FetchFailure {
+        reason: "HLS playlist server returned HTTP 403", outcome: TraceOutcome::Refused, cancelled: false,
+    }))]);
+    let deadline = auth.now + Duration::from_secs(15);
+    assert!(matches!(initial_playback_media(master, true, deadline, &mut auth),
+        Err(HlsExit::OpenFailed { outcome: TraceOutcome::Refused, .. })));
+    assert_eq!(auth.requests.len(), 1);
+    let mut malformed = FakePlaylistFetch::new(vec![(Duration::ZERO, Ok((master.into(), "not a manifest".into())))]);
+    let deadline = malformed.now + Duration::from_secs(15);
+    assert!(matches!(initial_playback_media(master, true, deadline, &mut malformed),
+        Err(HlsExit::Failed("Invalid HLS playlist header"))));
+    assert_eq!(malformed.requests.len(), 1);
+}
 
 struct Server {
     url: String,
@@ -170,7 +535,7 @@ fn real_inspection_labels_master_then_selected_playlist_failure() {
 }
 
 #[test]
-fn playlist_http_rejections_are_distinct_static_and_not_retried() {
+fn playlist_http_rejections_keep_static_causes_and_only_transient_statuses_retry() {
     let _serial = curl();
     for (status, message) in [
         (401, "HLS playlist server returned HTTP 401"),
@@ -191,7 +556,7 @@ fn playlist_http_rejections_are_distinct_static_and_not_retried() {
             )
         });
         assert_eq!(result.unwrap_err(), message);
-        assert_eq!(server.count.load(Ordering::Acquire), 1);
+        assert_eq!(server.count.load(Ordering::Acquire), if matches!(status, 429 | 503) { 3 } else { 1 });
         assert!(lines
             .iter()
             .any(|line| line.contains("stage=selected depth=1 phase=open")
@@ -296,7 +661,7 @@ fn playlist_transport_failure_is_not_http_or_timeout_and_success_is_unchanged() 
         let cancelled = AtomicBool::new(false);
         let (result, lines) = captured(|| fetch(&server.url, &mut Owner::Inspect(&cancelled)));
         if status == 0 {
-            assert_eq!(result.unwrap_err(), "HLS playlist network transport failed");
+            assert_eq!(result.unwrap_err(), "HLS playlist transient transport failed");
             assert!(lines
                 .iter()
                 .any(|line| line.contains("phase=open") && line.contains("kind=transport code=")));
@@ -392,7 +757,7 @@ fn sniffed_master_reuses_its_response_and_fetches_selected_only_once() {
     let cancel = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + Duration::from_secs(2);
     let (source, prefix) = opened_prefix(&server.url, &cancel, deadline);
-    let (result, lines) = captured(|| inspect_opened(source, prefix, deadline, cancel)
+    let (result, lines) = captured(|| inspect_opened(&server.url, source, prefix, deadline, cancel)
         .map(|_| (String::new(), String::new())));
     assert_eq!(result.unwrap_err(), "HLS playlist server returned HTTP 403");
     assert_eq!(server.count.load(Ordering::Acquire), 2,
@@ -411,7 +776,7 @@ fn sniffed_manifest_still_validates_body_and_honours_cancel_without_refetch() {
         let deadline = Instant::now() + Duration::from_secs(2);
         let (source, prefix) = opened_prefix(&server.url, &cancel, deadline);
         cancel.store(cancelled, Ordering::Relaxed);
-        let result = inspect_opened(source, prefix, deadline, cancel);
+        let result = inspect_opened(&server.url, source, prefix, deadline, cancel);
         assert_eq!(result.unwrap_err(), if cancelled { "HLS request cancelled" } else { "Invalid HLS target duration" });
         assert_eq!(server.count.load(Ordering::Acquire), 1);
     }
@@ -430,7 +795,7 @@ fn sniffed_redirect_response_keeps_landed_url_without_reopening_it() {
     let deadline = Instant::now() + Duration::from_secs(2);
     let (source, prefix) = opened_prefix(&server.url, &cancel, deadline);
     assert!(source.effective_url().ends_with("/landing/manifest"));
-    let result = inspect_opened(source, prefix, deadline, cancel);
+    let result = inspect_opened(&server.url, source, prefix, deadline, cancel);
     assert_eq!(result.unwrap_err(), "HLS playlist server returned HTTP 404");
     assert_eq!(server.count.load(Ordering::Acquire), 3,
         "redirect, its admitted master body, then the selected playlist exactly once");
@@ -450,6 +815,7 @@ fn live_refresh_http_failure_keeps_checked_cause_through_producer_settlement() {
     let _reset = ProducerStateReset;
     for (status, expected) in [(503, TraceOutcome::ServerState), (429, TraceOutcome::ServerState),
         (401, TraceOutcome::Refused), (403, TraceOutcome::Refused), (404, TraceOutcome::Refused),
+        (501, TraceOutcome::Refused), (505, TraceOutcome::Refused), (511, TraceOutcome::Refused),
         (0, TraceOutcome::Transport)] {
         SHARED.reset_session();
         let epoch = SHARED.begin_native_session().unwrap();
@@ -472,8 +838,9 @@ fn live_refresh_http_failure_keeps_checked_cause_through_producer_settlement() {
         }));
         assert!(SHARED.demux_io_failed.load(Ordering::Acquire));
         assert!(!SHARED.demux_failed.load(Ordering::Acquire));
-        assert_eq!(server.count.load(Ordering::Acquire), 1,
-            "one refresh; no hidden retry, segment request or alternate source");
+        assert_eq!(server.count.load(Ordering::Acquire),
+            if matches!(expected, TraceOutcome::ServerState | TraceOutcome::Transport) { 3 } else { 1 },
+            "bounded retries stay on this manifest; no segment request or alternate source");
     }
 }
 
@@ -604,6 +971,26 @@ fn segment_missing_after_bounded_retries_preserves_server_state_but_auth_stays_r
             assert!(matches!(result, Err(HlsExit::OpenFailed { outcome: TraceOutcome::Refused, .. })),
                 "authentication refusal must stay terminal: {:?}", result.as_ref().err());
             assert_eq!(server.count.load(Ordering::Acquire), 1);
+        }
+    }
+}
+
+#[test]
+fn pure_only_admitted_plain_live_duration_can_bootstrap_a_master() {
+    for duration in [None, Some(-1), Some(1), Some(12_000_000_000), Some(i64::MAX), Some(0)] {
+        for presentation in [false, true] {
+            let allowed = may_bootstrap_live_entry(duration, presentation);
+            assert_eq!(allowed, duration == Some(0) && !presentation);
+            if !allowed {
+                let master = "https://fixture.invalid/entry.m3u8";
+                let mut io = FakePlaylistFetch::new(vec![
+                    (Duration::ZERO, Ok(master_manifest(master, "/unexpected-child.m3u8"))),
+                ]);
+                let deadline = io.now + Duration::from_secs(15);
+                assert!(matches!(initial_playback_media(master, allowed, deadline, &mut io),
+                    Err(HlsExit::Failed("HLS media address became a master playlist"))));
+                assert_eq!(io.requests.len(), 1, "finite, unknown and presentation inputs cannot follow a child");
+            }
         }
     }
 }

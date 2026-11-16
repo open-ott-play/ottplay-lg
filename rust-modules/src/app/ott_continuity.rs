@@ -5,10 +5,12 @@
 //! is reserved for viewer/remote intent, not Starts emitted by this policy.
 use std::collections::HashSet;
 
-/// One isolated bad item skips immediately; repeated failures yield to input.
-/// A fifth consecutive failure stops automatic attempts, regardless of catalogue
-/// size. Explicit viewer actions or an accepted EOF start a fresh budget.
+/// Finite-file failures retain a bounded skip budget. A fifth consecutive
+/// failure stops automatic attempts, regardless of catalogue size.
 const FAILURE_DELAYS_MS: [u64; 4] = [0, 1_000, 2_000, 4_000];
+/// Attributed transient live failures retry the same source until intent is
+/// withdrawn. Backoff is capped, not the number of source-owned attempts.
+const LIVE_FAILURE_DELAYS_MS: [u64; 6] = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailedContinuation {
@@ -97,6 +99,7 @@ pub(super) struct Continuity {
     waiting_after: Option<String>,
     failed: HashSet<String>,
     consecutive_failures: usize,
+    live_health_epoch: u64,
     failed_continuation: FailedContinuation,
     complete: bool,
     enabled: bool,
@@ -115,6 +118,7 @@ impl Continuity {
             waiting_after: None,
             failed: HashSet::new(),
             consecutive_failures: 0,
+            live_health_epoch: 0,
             failed_continuation: FailedContinuation::None,
             complete: false,
             enabled: true,
@@ -126,6 +130,7 @@ impl Continuity {
     /// A background refresh changes the catalogue generation, not viewer intent.
     /// Keep Stop, pause, selection and failures; only the new scan can grant wrap.
     pub fn rebase(&mut self, generation: u64) {
+        self.invalidate_live_health();
         self.cancel_failed_continuation();
         self.generation = generation;
         self.complete = false;
@@ -188,6 +193,7 @@ impl Continuity {
             reason,
         };
         if self.deferred.as_ref().is_some_and(|old| old != &pending) { return false; }
+        self.invalidate_live_health();
         self.deferred = Some(pending);
         true
     }
@@ -285,6 +291,7 @@ impl Continuity {
         if generation != self.generation {
             return;
         }
+        self.invalidate_live_health();
         self.enabled = true;
         self.explicitly_stopped = false;
         self.restore = None;
@@ -302,6 +309,7 @@ impl Continuity {
         if generation != self.generation {
             return;
         }
+        self.invalidate_live_health();
         self.enabled = false;
         self.explicitly_stopped = true;
         self.suspended = false;
@@ -318,6 +326,7 @@ impl Continuity {
         if generation != self.generation {
             return;
         }
+        self.invalidate_live_health();
         self.enabled = false;
         self.restore = None;
         self.issued_restore = None;
@@ -329,6 +338,7 @@ impl Continuity {
     /// viewer's enabled/paused intent. It does not become a viewer Pause.
     pub fn suspend(&mut self, generation: u64) {
         if generation == self.generation {
+            self.invalidate_live_health();
             self.suspended = true;
             self.cancel_failed_continuation();
         }
@@ -380,6 +390,7 @@ impl Continuity {
         if !self.accepts_end(generation, installed_id) {
             return Decision::Idle;
         }
+        self.invalidate_live_health();
         self.issued_restore = None;
         self.complete |= complete;
         self.consecutive_failures = 0;
@@ -401,6 +412,7 @@ impl Continuity {
             || self.failed.contains(id) || self.deferred.is_some() {
             return Decision::Idle;
         }
+        self.invalidate_live_health();
         self.issued_restore = None;
         self.complete |= complete;
         self.failed.insert(id.into());
@@ -435,27 +447,43 @@ impl Continuity {
         }
     }
 
-    /// A live EOF is a disconnected source, never completion of a TV channel.
-    /// Reuse the failure budget and frame deadline without selecting a successor.
+    /// A live EOF or attributed transient transport failure disconnects a
+    /// source; it never completes a TV channel. Keep paced same-source recovery
+    /// available after a long outage without selecting a successor. The runtime
+    /// must freshly admit each attempt and must not route permanent failures here.
     pub fn live_disconnected(&mut self, generation: u64, id: &str, now_ms: u64) -> Decision {
         if !self.accepts_end(generation, id) { return Decision::Idle; }
+        self.invalidate_live_health();
         self.issued_restore = None;
         self.waiting_after = Some(id.into());
-        let delay = FAILURE_DELAYS_MS.get(self.consecutive_failures).copied();
+        let delay = LIVE_FAILURE_DELAYS_MS[
+            self.consecutive_failures.min(LIVE_FAILURE_DELAYS_MS.len() - 1)];
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        match delay {
-            Some(delay) => {
-                self.failed_continuation = FailedContinuation::SameCooldown {
-                    not_before_ms: now_ms.saturating_add(delay.max(1_000)),
-                };
-                Decision::Wait
-            }
-            None => {
-                self.failed_continuation = FailedContinuation::Halted;
-                self.waiting_after = None;
-                Decision::Idle
-            }
-        }
+        self.failed_continuation = FailedContinuation::SameCooldown {
+            not_before_ms: now_ms.saturating_add(delay),
+        };
+        Decision::Wait
+    }
+
+    /// Only sustained decoder progress renews a live retry budget. The caller
+    /// supplies None while not actively playing the exact admitted live owner.
+    /// This changes no selection, pending action, pause state or permission.
+    pub fn observe_live_progress<I: Clone + Eq>(
+        &mut self,
+        health: &mut super::live_health::Tracker<I>,
+        sample: Option<super::live_health::Sample<'_, I>>,
+    ) -> bool {
+        let sample = sample.filter(|sample| self.live_health_epoch != u64::MAX
+            && self.accepts_end(sample.generation, sample.selection_id));
+        if health.observe(self.live_health_epoch, sample) && self.consecutive_failures > 0 {
+            self.consecutive_failures = 0;
+            true
+        } else { false }
+    }
+
+    fn invalidate_live_health(&mut self) {
+        // Saturation permanently disables renewal rather than reusing a stale epoch.
+        self.live_health_epoch = self.live_health_epoch.saturating_add(1);
     }
 
     /// The existing frame runner supplies its monotonic clock projection after
@@ -512,6 +540,7 @@ impl Continuity {
     }
 
     fn start(&mut self, id: &str, position_ms: u64, reason: Reason) -> Decision {
+        self.invalidate_live_health();
         self.deferred = None;
         self.issued_restore = (reason == Reason::Restore).then(|| ResumePoint {
             entry_id: id.into(), position_ms,
@@ -1402,25 +1431,41 @@ mod canonical_anchor_tests;
 mod live_recovery_tests {
     use super::*;
     #[test]
-    fn live_eof_retries_exact_channel_with_bounded_cancelable_budget() {
+    fn live_outages_retry_exact_channel_with_capped_cancelable_backoff() {
         let mut policy = Continuity::new(7, None);
         policy.user_selected(7, "third");
         let ids = ["third", "fourth", "fifth"];
         let mut now = 100;
-        for _ in 0..4 {
+        for attempt in 0..24 {
             assert_eq!(policy.live_disconnected(7, "third", now), Decision::Wait);
-            let due = policy.pending_retry().unwrap().not_before_ms;
+            let pending = policy.pending_retry().unwrap();
+            let due = pending.not_before_ms;
+            let delay = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000][attempt.min(5)];
+            assert_eq!(due - now, delay, "attempt {}", attempt + 1);
+            assert_eq!(pending.failures, attempt + 1);
             assert_eq!(policy.tick(7, due - 1, &ids, true), Decision::Wait);
             assert!(matches!(policy.tick(7, due, &ids, true),
                 Decision::Start { entry_id, reason: Reason::LiveRetry, .. } if entry_id == "third"));
             now = due + 1;
         }
-        assert_eq!(policy.live_disconnected(7, "third", now), Decision::Idle);
-        assert_eq!(policy.tick(7, u64::MAX, &ids, true), Decision::Idle);
-        policy.user_selected(7, "fourth");
-        assert_eq!(policy.live_disconnected(7, "fourth", now), Decision::Wait);
+        assert_eq!(policy.live_disconnected(7, "third", now), Decision::Wait);
+        assert_eq!(policy.pending_retry().unwrap().not_before_ms - now, 30_000);
         policy.stop(7);
+        assert!(policy.pending_retry().is_none());
         assert_eq!(policy.tick(7, u64::MAX, &ids, true), Decision::Idle);
+    }
+
+    #[test]
+    fn saturated_live_failure_count_still_uses_the_capped_delay() {
+        let mut policy = Continuity::new(7, None);
+        policy.user_selected(7, "channel");
+        policy.consecutive_failures = usize::MAX;
+        assert_eq!(policy.live_disconnected(7, "channel", 100), Decision::Wait);
+        let pending = policy.pending_retry().unwrap();
+        assert_eq!(pending.failures, usize::MAX);
+        assert_eq!(pending.not_before_ms, 30_100);
+        assert_eq!(policy.tick(7, 30_100, &["channel", "neighbor"], true),
+            Decision::Start { entry_id: "channel".into(), position_ms: 0, reason: Reason::LiveRetry });
     }
 }
 
@@ -1428,6 +1473,36 @@ mod live_recovery_tests {
 #[cfg(test)]
 mod live_retry_cancellation_tests {
     use super::*;
+    #[test]
+    fn capped_live_retry_does_not_survive_withdrawn_intent_or_source_membership() {
+        for boundary in 0..6 {
+            let mut policy = Continuity::new(7, None);
+            policy.user_selected(7, "first");
+            let mut now = 0;
+            for _ in 0..20 {
+                assert_eq!(policy.live_disconnected(7, "first", now), Decision::Wait);
+                now = policy.pending_retry().unwrap().not_before_ms;
+                assert!(matches!(policy.tick(7, now, &["first", "second"], true),
+                    Decision::Start { entry_id, reason: Reason::LiveRetry, .. } if entry_id == "first"));
+            }
+            assert_eq!(policy.live_disconnected(7, "first", now), Decision::Wait);
+            assert_eq!(policy.pending_retry().unwrap().not_before_ms - now, 30_000);
+            match boundary {
+                0 => policy.pause(7),
+                1 => { policy.suspend(7); policy.resume_after_suspend(7); }
+                2 => policy.stop(7),
+                3 => policy.user_selected(7, "second"),
+                4 => policy.rebase(8),
+                _ => { assert_eq!(policy.tick(7, u64::MAX, &["second"], true), Decision::Idle); }
+            }
+            assert!(policy.pending_retry().is_none(), "boundary {boundary}");
+            assert_eq!(policy.tick(7, u64::MAX, &["first", "second"], true), Decision::Idle);
+            if boundary == 4 {
+                assert_eq!(policy.tick(8, u64::MAX, &["first", "second"], true), Decision::Idle);
+            }
+        }
+    }
+
     #[test]
     fn live_retry_deadline_cannot_cross_pause_suspend_source_or_manual_selection() {
         for boundary in 0..5 {
@@ -1446,3 +1521,7 @@ mod live_retry_cancellation_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ott_continuity_live_health_tests.rs"]
+mod live_health_tests;
