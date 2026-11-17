@@ -394,3 +394,77 @@ fn non_success_status_diagnostics_omit_private_paths_and_queries() {
     assert!(!logged.contains("private-path-token"));
     assert!(!logged.contains("private-query"));
 }
+
+/// A legacy negative read is not itself retry evidence: only an actual FIN
+/// before a declared body length latches this per-response observation.
+#[test]
+fn native_body_fin_attribution_distinguishes_truncated_complete_and_malformed() {
+    for (response, expected) in [
+        (&b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabc"[..], true),
+        (&b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc"[..], false),
+        (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\ninvalid\r\n"[..], false),
+        (&b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"[..], false),
+    ] {
+        let (port, server) = one_shot_server(response.to_vec());
+        let (mut hs, opened) = open_against(port);
+        server.join().unwrap();
+        if opened == 0 {
+            let mut bytes = [0u8; 16];
+            for _ in 0..16 {
+                if http_read(&mut *hs, bytes.as_mut_ptr(), bytes.len() as c_int) <= 0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(http_body_truncated(&*hs), expected);
+        if expected {
+            http_shutdown(&mut *hs);
+            assert!(!http_body_truncated(&*hs), "explicit teardown cannot authorize retry");
+        }
+        http_close(&mut *hs);
+    }
+    assert!(!http_body_truncated(std::ptr::null()));
+}
+
+#[test]
+fn native_body_fin_attribution_survives_nonblocking_drain_without_false_full_body_cut() {
+    for (declared, expected) in [(8, true), (3, false)] {
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n\r\nabc");
+        let (port, server) = one_shot_server(response.into_bytes());
+        let (mut hs, opened) = open_against(port);
+        assert_eq!(opened, 0);
+        server.join().unwrap();
+        let mut bytes = [0u8; 16];
+        for _ in 0..16 {
+            let read = http_drain_available(&mut *hs, &mut bytes);
+            if read < 0 || http_body_done(&*hs) { break; }
+        }
+        assert_eq!(http_body_truncated(&*hs), expected,
+            "bytes copied before FIN must be counted before declaring truncation");
+        http_close(&mut *hs);
+    }
+}
+
+#[test]
+fn native_body_fin_attribution_is_cleared_by_an_actual_new_request() {
+    let (port, first_server) = one_shot_server(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabc".to_vec());
+    let (mut hs, opened) = open_against(port);
+    assert_eq!(opened, 0);
+    first_server.join().unwrap();
+    let mut bytes = [0u8; 16];
+    while http_read(&mut *hs, bytes.as_mut_ptr(), bytes.len() as c_int) > 0 {}
+    assert!(http_body_truncated(&*hs));
+    let (port, second_server) = one_shot_server(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc".to_vec());
+    let host = std::ffi::CString::new("127.0.0.1").unwrap();
+    let path = std::ffi::CString::new("/new-body").unwrap();
+    assert_eq!(http_open(&mut *hs, host.as_ptr(), port as c_int, path.as_ptr(),
+        std::ptr::null(), "GET"), 0);
+    assert!(!http_body_truncated(&*hs));
+    second_server.join().unwrap();
+    assert_eq!(http_read(&mut *hs, bytes.as_mut_ptr(), bytes.len() as c_int), 3);
+    assert_eq!(http_read(&mut *hs, bytes.as_mut_ptr(), bytes.len() as c_int), 0);
+    assert!(!http_body_truncated(&*hs));
+    http_close(&mut *hs);
+}
