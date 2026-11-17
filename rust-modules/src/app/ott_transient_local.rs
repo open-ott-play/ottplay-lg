@@ -783,6 +783,7 @@ pub(in crate::app::ott_runtime) fn finish_native(
         .local_inventory
         .install(candidate.inventory, runtime.generation);
     rebind_lifecycle_resume(runtime);
+    numeric_remote::capture(runtime);
     runtime.catalog = catalog;
     runtime.catalog_complete = state == local::ScanState::Complete;
     runtime.catalog_loading = state == local::ScanState::Scanning;
@@ -933,6 +934,7 @@ pub(in crate::app::ott_runtime) fn note_stop(runtime: &mut Runtime) {
 }
 
 pub(in crate::app::ott_runtime) fn discard(runtime: &mut Runtime) {
+    numeric_remote::clear(runtime);
     note_stop(runtime);
     if runtime.transient.accepted.take().is_some() {
         runtime.retire_parental_source();

@@ -1197,6 +1197,7 @@ pub(in crate::app::ott_runtime) fn finish_native(
         }
         .map(ok)
         .unwrap_or_else(|_| rejected("Invalid Plex result"));
+        numeric_remote::capture(runtime);
         runtime.catalog = catalog;
         runtime.catalog_complete = true;
         runtime.catalog_loading = false;
