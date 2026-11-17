@@ -431,7 +431,6 @@ struct Hls {
     init_sent: bool,
     delivered_segment: bool,
     reprobe: bool,
-    refreshed: Instant,
     checked: Instant,
     cap: usize,
 }
@@ -475,7 +474,6 @@ impl Hls {
             init_sent: false,
             delivered_segment: false,
             reprobe: false,
-            refreshed: checked,
             checked,
             cap,
         })
@@ -487,21 +485,35 @@ impl Hls {
             return Err(Error::Unsupported);
         }
         self.checked = Instant::now();
-        if fresh.segments.last().map(|s| s.sequence) > self.playlist.segments.last().map(|s| s.sequence) {
-            self.refreshed = self.checked;
-        }
         self.url = manifest.effective_url;
         self.playlist = fresh;
         Ok(())
     }
 
-    fn refresh_retry(&mut self, c: &Control, remaining: &mut u8) -> Result<(), Error> {
+    // Budget only the current demand for more bytes. A paused decoder can
+    // still be inside AVIO when the UI suspends it between manifest requests.
+    fn arm_request(&mut self, c: &Control, deadline: &mut Instant) -> Result<(), Error> {
+        if c.paused.load(Ordering::Acquire) {
+            let paused = Instant::now();
+            while c.paused.load(Ordering::Acquire) {
+                if !c.wait(Duration::from_millis(10)) { return Err(Error::Cancelled); }
+            }
+            *deadline += paused.elapsed();
+        }
+        if c.stopped() { return Err(Error::Cancelled); }
+        if Instant::now() >= *deadline { return Err(Error::Source); }
+        self.remote.deadline = Some(*deadline);
+        Ok(())
+    }
+
+    fn refresh_retry(&mut self, c: &Control, remaining: &mut u8, deadline: &mut Instant) -> Result<(), Error> {
         loop {
+            self.arm_request(c, deadline)?;
             match self.refresh(c) {
                 Err(error) if *remaining > 0 && (error == Error::SourceInterrupted
                     || (error == Error::Source && self.remote.retryable())) => {
                     *remaining -= 1;
-                    if !c.wait(Duration::from_millis(200)) { return Err(Error::Cancelled); }
+                    if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
                 }
                 result => return result,
             }
@@ -509,16 +521,16 @@ impl Hls {
     }
 
     fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        self.remote.deadline = Some(deadline);
+        self.read_with_budget(out, c, Duration::from_secs(30))
+    }
+
+    fn read_with_budget(&mut self, out: &mut [u8], c: &Control, budget: Duration) -> Result<usize, Error> {
+        if c.stopped() { return Err(Error::Cancelled); }
+        let mut deadline = Instant::now() + budget;
         let mut remaining = 2;
         while self.pos == self.bytes.len() {
-            if c.stopped() {
-                return Err(Error::Cancelled);
-            }
-            if self.reprobe || Instant::now() >= deadline {
-                return Err(Error::Source);
-            }
+            if self.reprobe { return Err(Error::Source); }
+            self.arm_request(c, &mut deadline)?;
             if !self.init_sent {
                 if let Some(url) = &self.playlist.init {
                     self.bytes = self.remote.fetch(url, self.cap, c)?;
@@ -545,8 +557,8 @@ impl Hls {
                         // Do not spend another request on a stale signed URI until
                         // the selected playlist has supplied a current segment.
                         remaining -= 1;
-                        if !c.wait(Duration::from_millis(200)) { return Err(Error::Cancelled); }
-                        self.refresh_retry(c, &mut remaining)?;
+                        if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
+                        self.refresh_retry(c, &mut remaining, &mut deadline)?;
                         continue;
                     }
                     Ok(_) => return Err(Error::Source),
@@ -567,13 +579,12 @@ impl Hls {
             if self.playlist.ended {
                 return Ok(0);
             }
-            if self.refreshed.elapsed() >= Duration::from_secs(30) {
-                return Err(Error::Source);
-            }
-            if !c.wait(poll_wait(self.checked, self.playlist.target, Instant::now())) {
+            let now = Instant::now();
+            let wait = poll_wait(self.checked, self.playlist.target, now).min(deadline.saturating_duration_since(now));
+            if !c.wait(wait) {
                 return Err(Error::Cancelled);
             }
-            self.refresh_retry(c, &mut remaining)?;
+            self.refresh_retry(c, &mut remaining, &mut deadline)?;
         }
         let n = out.len().min(self.bytes.len() - self.pos);
         out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
@@ -1228,6 +1239,82 @@ mod tests {
         assert_eq!(dimensions(3, 3, l), Ok((3, 3, 2, 2)));
         assert!(dimensions(-1, 100, l).is_err());
     }
+    #[test]
+    fn late_live_read_refreshes_after_a_pause_or_two_long_segments() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let initial = b"#EXTM3U\n#EXT-X-TARGETDURATION:20\n#EXT-X-MEDIA-SEQUENCE:41\n#EXTINF:20,\na.ts\n#EXTINF:20,\nb.ts\n";
+        let fresh = b"#EXTM3U\n#EXT-X-TARGETDURATION:20\n#EXT-X-MEDIA-SEQUENCE:43\n#EXTINF:20,\nc.ts\n";
+        for paused in [false, true] {
+            let server = SessionServer::new(vec![Reply::ok("", initial), Reply::ok("", b"aa"),
+                Reply::ok("", b"b"), Reply::ok("", fresh), Reply::ok("", b"c")]);
+            let control = Control::default();
+            let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+            let mut data = [0];
+            assert_eq!(hls.read(&mut data, &control), Ok(1));
+            if paused { control.paused.store(true, Ordering::Release); }
+            // Position the last real response 35s into a pause, or two full
+            // 20s segments in the past, without making the test sleep.
+            hls.checked = Instant::now() - Duration::from_secs(if paused { 35 } else { 40 });
+            control.paused.store(false, Ordering::Release);
+            for expected in [b'a', b'b', b'c'] {
+                assert_eq!(hls.read(&mut data, &control), Ok(1));
+                assert_eq!(data[0], expected);
+            }
+            let heads = server.heads();
+            assert_eq!(heads.len(), 5);
+            assert!(heads[3].starts_with("GET /live.m3u8 "));
+        }
+    }
+
+    #[test]
+    fn late_live_read_paused_inside_avio_waits_for_resume_without_using_its_request_budget() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let server = SessionServer::new(vec![
+            Reply::ok("", b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\na.ts\n"),
+            Reply::ok("", b"a"),
+            Reply::ok("", b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:2\n#EXTINF:1,\nb.ts\n"),
+            Reply::ok("", b"b"),
+        ]);
+        let control = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+        let mut byte = [0];
+        assert_eq!(hls.read(&mut byte, &control), Ok(1));
+        hls.checked = Instant::now() - Duration::from_secs(35);
+        control.paused.store(true, Ordering::Release);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(600));
+                // Release before asserting so a failed test cannot strand the reader.
+                let visits = server.heads().len();
+                control.paused.store(false, Ordering::Release);
+                assert_eq!(visits, 2);
+            });
+            assert_eq!(hls.read_with_budget(&mut byte, &control, Duration::from_millis(400)), Ok(1));
+        });
+        assert_eq!(&byte, b"b");
+    }
+
+    #[test]
+    fn late_live_read_bounds_an_unchanged_edge_and_stops_on_cancel() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let edge = b"#EXTM3U\n#EXT-X-TARGETDURATION:20\n#EXT-X-MEDIA-SEQUENCE:99\n#EXTINF:20,\na.ts\n";
+        let server = SessionServer::new(vec![Reply::ok("", edge), Reply::ok("", b"a"), Reply::ok("", edge)]);
+        let control = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+        let mut data = [0];
+        assert_eq!(hls.read(&mut data, &control), Ok(1));
+        hls.checked = Instant::now() - Duration::from_secs(35);
+        assert_eq!(hls.read_with_budget(&mut data, &control, Duration::from_millis(300)), Err(Error::Source));
+        assert_eq!(server.heads().len(), 3);
+        control.paused.store(true, Ordering::Release);
+        control.cancel.store(true, Ordering::Release);
+        assert_eq!(hls.read(&mut data, &control), Err(Error::Cancelled));
+        assert_eq!(server.heads().len(), 3);
+    }
+
     #[test]
     fn live_poll_counts_time_since_the_previous_manifest_response() {
         let checked = Instant::now();
