@@ -4711,6 +4711,27 @@ impl Runtime {
                     Some(selection::SelectionOwner::LocalRoot(root)) => {
                         Some(self.bind_local_selection(root)?)
                     }
+                    Some(selection::SelectionOwner::Profile(owner))
+                        if owner == &profile && profile.kind == ProviderKind::Local
+                            && plx_data::ott::http_url(&profile.source).is_none()
+                            && request.local_selection.is_some() =>
+                    {
+                        // An addressed handoff may already hold a Folder receipt.
+                        // Retain that exact live grant through deferred Load instead
+                        // of silently replacing it with an unbound ordinary request.
+                        let selected = request.local_selection.as_ref().ok_or("Local source binding is missing")?;
+                        let root = self.current_local_root(selected).ok_or("Local source changed before playback")?;
+                        if root.canonical_path.as_deref() != Some(profile.source.as_str())
+                            || !matches!(&entry.media, MediaLocator::Local { .. })
+                        {
+                            return Err("Local source profile changed before playback");
+                        }
+                        if self.local_profile_selection(&profile).as_ref() != Some(selected) {
+                            return Err("Local source is unavailable or ambiguous");
+                        }
+                        self.capture_local_root(selected).ok_or("Local source binding changed before playback")?;
+                        Some(selected.clone())
+                    }
                     _ => None,
                 };
                 (profile, Some(entry), None, binding)
