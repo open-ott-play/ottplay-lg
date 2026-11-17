@@ -13,6 +13,8 @@ pub enum Error {
     InvalidLimits,
     Unsupported,
     Source,
+    SourceDenied,
+    SourceInterrupted,
     Playlist,
     Decode,
     Budget,

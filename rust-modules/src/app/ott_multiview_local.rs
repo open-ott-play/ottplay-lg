@@ -101,6 +101,11 @@ impl Default for Driver {
     }
 }
 impl Driver {
+    #[cfg(all(test, feature = "hostsim"))]
+    pub(super) fn active_layout_for_test(layout: Layout) -> Self {
+        Self { layout: Some(layout), ..Self::default() }
+    }
+
     pub fn owns_ui(&self, runtime: &Runtime, app: &App) -> bool {
         self.active()
             && !self.closing
@@ -784,6 +789,8 @@ impl Driver {
                                 Event::Failure(Error::InvalidLimits) => "invalid_limits",
                                 Event::Failure(Error::Unsupported) => "unsupported",
                                 Event::Failure(Error::Source) => "source_read",
+                                Event::Failure(Error::SourceDenied) => "provider_session_denied",
+                                Event::Failure(Error::SourceInterrupted) => "provider_interrupted",
                                 Event::Failure(Error::Playlist) => "playlist",
                                 Event::Failure(Error::Decode) => "decode",
                                 Event::Failure(Error::Budget) => "resource_limit",

@@ -24,10 +24,32 @@ impl Checkpoint for Check<'_> {
 fn playlist_header(bytes: &[u8]) -> bool {
     bytes.starts_with(b"#EXTM3U") || bytes.starts_with(b"\xef\xbb\xbf#EXTM3U")
 }
+const INTERRUPTED_RESPONSE: &[u8] = b"The request is interrupted by main process";
+const DENIED_RESPONSE: &[u8] = b"Forbidden (No client found)";
+
+/// Only exact known control replies are meaningful. Arbitrary HTML or media
+/// bytes never authorize a retry or appear in a diagnostic.
+fn provider_reply(bytes: &[u8]) -> Option<Error> {
+    if bytes.len() > 128 { return None; }
+    let text = bytes.trim_ascii();
+    if text == INTERRUPTED_RESPONSE {
+        return Some(Error::SourceInterrupted);
+    }
+    let text = text.strip_prefix(b"<h1>").and_then(|t| t.strip_suffix(b"</h1>")).unwrap_or(text);
+    (text == DENIED_RESPONSE).then_some(Error::SourceDenied)
+}
+
+fn open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
+    if c.stopped() { Error::Cancelled }
+    else if matches!(error, crate::curlio::OpenErr::Status(401 | 403)) { Error::SourceDenied }
+    else { Error::Source }
+}
+
 struct Remote {
     source: Box<crate::curlio::CurlSource>,
     deadline: Option<Instant>,
     failure: Option<crate::curlio::OpenErr>,
+    startup_retries: u8,
     position: i64,
     prefix: std::collections::VecDeque<u8>,
 }
@@ -43,14 +65,15 @@ impl Remote {
             // cookie on its first response, before we know the source is HLS.
             crate::curlio::CurlSource::open_hls_private_checked(url, deadline, &mut check)
         }
-        .map_err(|_| Error::Source)?;
+        .map_err(|e| open_error(e, c))?;
         if !(200..300).contains(&source.status()) {
-            return Err(Error::Source);
+            return Err(open_error(crate::curlio::OpenErr::Status(source.status()), c));
         }
         Ok(Self {
             source,
             deadline: None,
             failure: None,
+            startup_retries: 2,
             position: 0,
             prefix: Default::default(),
         })
@@ -60,11 +83,12 @@ impl Remote {
         let deadline = self.deadline();
         self.source.reopen_until(url, Some(deadline), &mut Check(c)).map_err(|e| {
             self.failure = Some(e);
-            if c.stopped() { Error::Cancelled } else { Error::Source }
+            open_error(e, c)
         })?;
         if !(200..300).contains(&self.source.status()) {
-            self.failure = Some(crate::curlio::OpenErr::Status(self.source.status()));
-            return Err(Error::Source);
+            let error = crate::curlio::OpenErr::Status(self.source.status());
+            self.failure = Some(error);
+            return Err(open_error(error, c));
         }
         self.position = 0;
         self.prefix.clear();
@@ -72,7 +96,9 @@ impl Remote {
     }
     fn fetch(&mut self, url: &str, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
         self.reopen(url, c)?;
-        collect(self, cap, c)
+        let bytes = collect(self, cap, c)?;
+        if let Some(error) = provider_reply(&bytes) { return Err(error); }
+        Ok(bytes)
     }
     fn deadline(&self) -> Instant {
         let request = Instant::now() + Duration::from_secs(15);
@@ -81,6 +107,28 @@ impl Remote {
     fn retryable(&self) -> bool {
         self.failure.is_some_and(|e| matches!(hls_curl_open_outcome(e),
             TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
+    }
+    /// The root and selected variant share a retry allowance and private
+    /// transfer context. Reopening preserves cookies received during redirects.
+    fn startup<T>(&mut self, url: &str, mut open: bool, c: &Control,
+        parse: impl Fn(&mut Self, &Control) -> Result<T, Error>) -> Result<T, Error> {
+        let previous_deadline = self.deadline;
+        self.deadline = Some(self.deadline());
+        let result = loop {
+            let result = (if open { self.reopen(url, c) } else { Ok(()) })
+                .and_then(|()| parse(self, c));
+            let transient = matches!(&result, Err(Error::SourceInterrupted))
+                || (matches!(&result, Err(Error::Source)) && self.retryable());
+            let delay = Duration::from_millis(if self.startup_retries == 2 { 400 } else { 1000 });
+            if !transient || self.startup_retries == 0 || self.deadline().saturating_duration_since(Instant::now()) <= delay {
+                break result;
+            }
+            if !c.wait(delay) { break Err(Error::Cancelled); }
+            self.startup_retries -= 1;
+            open = true;
+        };
+        self.deadline = previous_deadline;
+        result
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
         let mut bytes = Vec::new();
@@ -93,6 +141,21 @@ impl Remote {
             bytes.extend_from_slice(&head[..n]);
         }
         let hls = playlist_header(&bytes);
+        // Most progressive files need just the first 16 bytes. Read a small
+        // potential control body to EOF before recognizing its exact meaning.
+        let head = bytes.trim_ascii_start();
+        if !head.is_empty() && !hls && (INTERRUPTED_RESPONSE.starts_with(head)
+            || DENIED_RESPONSE.starts_with(head) || head.starts_with(b"<h1>")) {
+            while bytes.len() < 128 {
+                let mut rest = [0; 128];
+                let n = self.read_raw(&mut rest[..128 - bytes.len()], c)?;
+                if n == 0 {
+                    if let Some(error) = provider_reply(&bytes) { return Err(error); }
+                    break;
+                }
+                bytes.extend_from_slice(&rest[..n]);
+            }
+        }
         self.prefix.extend(bytes);
         Ok(hls)
     }
@@ -154,10 +217,9 @@ impl Manifest {
     fn from_remote(remote: &mut Remote, c: &Control) -> Result<Self, Error> {
         let effective_url = remote.source.effective_url().to_owned();
         resource(&effective_url)?;
-        Ok(Self {
-            effective_url,
-            bytes: collect(remote, 512 * 1024, c)?,
-        })
+        let bytes = collect(remote, 512 * 1024, c)?;
+        if let Some(error) = provider_reply(&bytes) { return Err(error); }
+        Ok(Self { effective_url, bytes })
     }
     fn fetch(remote: &mut Remote, url: &str, c: &Control) -> Result<Self, Error> {
         remote.reopen(url, c)?;
@@ -381,9 +443,9 @@ impl Hls {
             Some(remote) => remote,
             None => Remote::open(&url, false, c)?,
         };
-        let first = Manifest::from_remote(&mut remote, c)?;
+        let first = remote.startup(&url, false, c, Manifest::from_remote)?;
         let manifest = if let Some(child) = first.variant()? {
-            Manifest::fetch(&mut remote, &child, c)?
+            remote.startup(&child, true, c, Manifest::from_remote)?
         } else {
             first
         };
@@ -426,7 +488,8 @@ impl Hls {
     fn refresh_retry(&mut self, c: &Control, remaining: &mut u8) -> Result<(), Error> {
         loop {
             match self.refresh(c) {
-                Err(Error::Source) if self.remote.retryable() && *remaining > 0 => {
+                Err(error) if *remaining > 0 && (error == Error::SourceInterrupted
+                    || (error == Error::Source && self.remote.retryable())) => {
                     *remaining -= 1;
                     if !c.wait(Duration::from_millis(200)) { return Err(Error::Cancelled); }
                 }
@@ -465,9 +528,10 @@ impl Hls {
                         self.delivered_segment = true;
                         break;
                     }
-                    Err(Error::Source) if !self.playlist.ended && remaining > 0
-                        && (self.remote.retryable() || matches!(self.remote.failure,
-                            Some(crate::curlio::OpenErr::Status(404 | 410)))) => {
+                    Err(error) if !self.playlist.ended && remaining > 0
+                        && (error == Error::SourceInterrupted || (error == Error::Source
+                            && (self.remote.retryable() || matches!(self.remote.failure,
+                                Some(crate::curlio::OpenErr::Status(404 | 410)))))) => {
                         // Do not spend another request on a stale signed URI until
                         // the selected playlist has supplied a current segment.
                         remaining -= 1;
@@ -699,7 +763,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         }
         ExternalSource::Http(url) => {
             let mut remote = Remote::open(&url, false, c)?;
-            if remote.sniff_hls(c)? {
+            if remote.startup(&url, false, c, Remote::sniff_hls)? {
                 Input::Hls(Hls::open_response(
                     url,
                     limits.max_object_bytes,

@@ -253,3 +253,66 @@ fn local_window_reprobes_the_same_session_after_a_missing_live_segment() {
     assert_eq!(media.load(Ordering::Relaxed), 1);
     assert_eq!(manifests.load(Ordering::Relaxed), 4);
 }
+
+#[test]
+#[ignore = "requires the bundled software decoder, ffmpeg CLI and localhost"]
+fn local_startup_retries_only_the_recognized_interruption_with_slot_cookies() {
+    use crate::local_multiview::{Error, Event, Limits, Session};
+    use std::sync::atomic::AtomicUsize;
+
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    entry_fixture_with_length(&dir.0, "10", false, "2", 2);
+    let root_count = Arc::new(AtomicUsize::new(0));
+    let child_count = Arc::new(AtomicUsize::new(0));
+    let deny_count = Arc::new(AtomicUsize::new(0));
+    let other_count = Arc::new(AtomicUsize::new(0));
+    let exhausted = Arc::new(AtomicUsize::new(0));
+    let (r, m, d, o, e) = (root_count.clone(), child_count.clone(), deny_count.clone(), other_count.clone(), exhausted.clone());
+    let http = HttpFixture::start_with(dir.0.clone(), move |request| {
+        let has_cookie = request.to_ascii_lowercase().contains("cookie: slot_fixture=ok");
+        let interruption = "The request is interrupted by main process";
+        let denied = "<h1>Forbidden (No client found)</h1>";
+        let body = match request.split_whitespace().nth(1)? {
+            "/entry" if r.fetch_add(1, Ordering::Relaxed) == 0 => return Some(
+                b"HTTP/1.1 302 Found\r\nLocation: /busy\r\nSet-Cookie: slot_fixture=ok; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()),
+            "/busy" => interruption,
+            "/entry" if has_cookie => "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\n/selected.m3u8\n",
+            "/entry" => denied,
+            "/selected.m3u8" if m.fetch_add(1, Ordering::Relaxed) == 0 => interruption,
+            "/selected.m3u8" if has_cookie => "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\npart-0.ts\n#EXTINF:1,\npart-1.ts\n#EXT-X-ENDLIST\n",
+            "/deny" => { d.fetch_add(1, Ordering::Relaxed); denied }
+            "/unknown" => { o.fetch_add(1, Ordering::Relaxed); "<h1>Unknown reply</h1>" }
+            "/alwaysbusy" => { e.fetch_add(1, Ordering::Relaxed); interruption }
+            _ => return None,
+        };
+        Some(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes())
+    });
+    for (path, expected) in [("/entry", None), ("/deny", Some(Error::SourceDenied)),
+        ("/unknown", Some(Error::Playlist)), ("/alwaysbusy", Some(Error::SourceInterrupted))] {
+        let url = format!("{}{path}", http.url);
+        // The ordinary HTTP case must sniff correctly; explicit HLS must also
+        // keep an unknown 200 response terminal.
+        let source = if path == "/unknown" { ExternalSource::Hls(url) } else { ExternalSource::Http(url) };
+        let mut session = Session::open(source, Limits::default()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let result = loop {
+            assert!(Instant::now() < deadline, "startup fixture did not terminate");
+            match session.poll() {
+                Some(Event::Video(_)) => break None,
+                Some(Event::Failure(error)) => break Some(error),
+                Some(Event::Ended) => panic!("startup fixture ended before presenting a frame"),
+                _ => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        session.cancel();
+        assert_eq!(result, expected);
+    }
+    for (counter, expected) in [(root_count, 2), (child_count, 2), (deny_count, 1),
+        (other_count, 1), (exhausted, 3)] {
+        assert_eq!(counter.load(Ordering::Relaxed), expected);
+    }
+}
