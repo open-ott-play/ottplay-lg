@@ -8,8 +8,7 @@ This page is about what to do when something doesn't work.
 PlxNative needs **webOS 4.0 or newer** (webOS 3.4.3 has also been tested and works, and 3.9.3
 plays direct play from a source build at or after
 [`60f99c7`](https://github.com/GLinnik21/plx-native/commit/60f99c7)). Older
-firmware may not be able to start it at all, so the tile just does nothing when you select it. See [Will it work on my
-television?](../README.md#will-it-work-on-my-television) for the full picture, including sets
+firmware may not be able to start it at all, so the tile just does nothing when you select it. See [compatibility reports](https://github.com/GLinnik21/plx-native/blob/0f4f242e2bc12c31f7d18b6f91f15ea1a828ccf3/README.md#will-it-work-on-my-television) for the full picture, including sets
 that start but hit a specific known problem.
 
 ## Developer Mode removed the app
@@ -67,7 +66,7 @@ webOS platform release.
 This is a specific problem on Realtek **k5lp/k3lp** sets: LG's Developer Mode sandbox on some of
 these sets withholds a device (`/dev/rtkmem`) that native video decoding needs. PlxNative detects
 this and reports it instead of crashing. See the [Known
-issues](../README.md#known-issues) table for which sets are affected.
+issues](known-issues.md) table for which sets are affected.
 
 On a **rooted TV with Homebrew Channel**, the failure screen offers **Repair**, which asks
 Homebrew Channel's elevated service to patch the sandbox. Read the [full repair procedure and its

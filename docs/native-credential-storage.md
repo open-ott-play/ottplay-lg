@@ -3,7 +3,7 @@
 This describes the native ARM storage paths in this source tree.
 It is not evidence that a particular package or television has passed persistence
 checks. For installation and verification steps, use the
-[native delivery guide](ott-native-delivery.md#update-without-assuming-that-state-survived).
+[native delivery guide](ott-native-delivery.md).
 
 Plex, native ARM OTT Control and the saved OTT player state use the same named
 storage helper, with separate keys, records and fallback policies. Saved player

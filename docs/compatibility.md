@@ -1,8 +1,8 @@
 # Compatibility reports
 
-Which televisions PlxNative has been seen running on, as reported by their owners. For the short
-answer and the sets with a known problem, see [Will it work on my
-television?](../README.md#will-it-work-on-my-television); this page is the evidence behind it.
+Which televisions PlxNative has been seen running on, as reported by their owners. The table
+below is the answer to "will it work on my television?" — the short answer is that webOS 4.0 or
+newer generally works, and the rows marked as failing are the sets with a known problem.
 
 Each row is one report, linked to where it was made. **Tried** lists only what the reporter saw
 working; everything else is not tested, not known to fail. A model that appears twice has two
@@ -19,9 +19,9 @@ Whether it works or not, the form asks for the same things.
 | LG OLED77B5PUA (2025), board `K24N_ATSC` | 10.3.0 | 0.8.0 release build | Rooted, Homebrew Channel | Works | Sign-in, browsing, search, movie playback | [#906](https://github.com/GLinnik21/plx-native/discussions/906) |
 | LG OLED55C7V-Z (2017) | 3.9.0 | 0.8.0 prebuilt | Developer Mode | The app closes on Play, with no message | Not recorded | [#249](https://github.com/GLinnik21/plx-native/issues/249) (comment) |
 | 2018 sets on the M16P chip | 3.9.3 | 0.6.0 to 0.6.6 (prebuilt) | Developer Mode | Sign-in and browsing work; playback never starts | Opt-in usage reports | [#249](https://github.com/GLinnik21/plx-native/issues/249) |
-| LG C7, W17H chassis | 3.9.3 | Source build at or after [`60f99c7`](https://github.com/GLinnik21/plx-native/commit/60f99c7) | Developer Mode | Works | Direct play | [README](../README.md#will-it-work-on-my-television) |
-| A 2016 set | 3.4.3 | Not recorded | Developer Mode | Works | Sign-in, browsing, search, direct play, transcodes, subtitles, seeking | [README](../README.md#will-it-work-on-my-television) |
-| LG 49SM9000PLA (2019), the development set | 4.5 | Every build | Rooted | Works | The set the app is developed and tested on | [README](../README.md#will-it-work-on-my-television) |
+| LG C7, W17H chassis | 3.9.3 | Source build at or after [`60f99c7`](https://github.com/GLinnik21/plx-native/commit/60f99c7) | Developer Mode | Works | Direct play | Not recorded |
+| A 2016 set | 3.4.3 | Not recorded | Developer Mode | Works | Sign-in, browsing, search, direct play, transcodes, subtitles, seeking | Not recorded |
+| LG 49SM9000PLA (2019), the development set | 4.5 | Every build | Rooted | Works | The set the app is developed and tested on | Not recorded |
 
 The 3.9.x rows read together: the prebuilt v0.8.0 does not play on 3.9.x firmware, while builds
 that contain [`60f99c7`](https://github.com/GLinnik21/plx-native/commit/60f99c7) do, on 3.9.3 (a

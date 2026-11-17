@@ -12,7 +12,7 @@ You can skip the Developer Mode and computer setup below. If your existing Homeb
 
 You will need:
 
-- an LG TV running **webOS 4.0 or newer** (or webOS 3.4.3, tested on one set); check the [compatibility notes](../README.md#will-it-work-on-my-television), since playback support varies by model;
+- an LG TV running **webOS 4.0 or newer** (or webOS 3.4.3, tested on one set); check the [compatibility notes](https://github.com/GLinnik21/plx-native/blob/0f4f242e2bc12c31f7d18b6f91f15ea1a828ccf3/README.md#will-it-work-on-my-television), since playback support varies by model;
 - a Plex account with access to a **Plex Media Server**, either your own or one shared with you;
 - a Mac, Windows PC, or Linux computer for the setup described here;
 - the TV and computer on the **same local network**.
