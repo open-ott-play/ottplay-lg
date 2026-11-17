@@ -101,6 +101,23 @@ ott l mv audio follows-focus
 ott l mv off restore_previous
 ```
 
+With a CLI that lists named selection in `ott PLAYER mv --help`, assign an
+M3U channel or an authorized TV-local file directly. In this example, replace
+the player alias and file name with your own:
+
+```sh
+ott l_ mv layout grid4
+ott l_ mv 1 m3u "VF Disney Movie"
+ott l_ mv 2 m3u "BCU Premiere HD"
+ott l_ mv 3 local "Movie.mp4"
+ott l_ mv sources 4 --provider m3u --search "РЕН ТВ HD"
+ott l_ mv window 4 play TICKET_FROM_WINDOW_4
+```
+
+Use the file's exact displayed name from the player's Local catalog or Favorites.
+Its spelling and case matter. When two channels share a name, choose the ticket
+for the intended entry or pass its `--source` ID with the named command.
+
 Repeat the source-list/play pair for `vportal` or `local`, or use a returned
 opaque profile token with `--profile`. Apply each fresh source ticket before
 refreshing discovery; tickets and cursors cannot be reused across windows or
