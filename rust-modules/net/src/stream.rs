@@ -67,6 +67,9 @@ pub struct HttpStream {
     /// 1 once the body has been fully consumed and the fd is still open. A second open
     /// may reuse only when this is set — an unread body would poison the next request.
     body_done: c_int,
+    /// A real peer FIN ended a non-chunked response before Content-Length.
+    /// Reset for every request; parser/unknown read errors do not set it.
+    body_truncated: bool,
     /// 1 once the current chunked-trailer line has seen a non-CR byte. Drain can return
     /// `HTTP_READ_DEADLINE` mid-trailer and resume on a later call; a stack `line_empty = true`
     /// on every entry treated the first `\n` of `\r\n\r\n` as the terminator and left leftover
@@ -138,6 +141,15 @@ impl HttpStream {
     fn body_is_done(&self) -> bool {
         self.body_done != 0
     }
+    /// Record only actual EOF of a declared-size body, accounting for bytes
+    /// copied by a nonblocking drain but not yet added to `consumed`.
+    fn note_body_fin(&mut self, pending_bytes: usize) {
+        if !self.interrupted() && self.chunked == 0 && self.content_length >= 0
+            && self.consumed.saturating_add(pending_bytes as i64) < self.content_length
+        {
+            self.body_truncated = true;
+        }
+    }
     /// Reset every per-request field EXCEPT `fd` and `interrupted`. `http_open` used to
     /// `write_bytes`-memset the whole struct, which wrote the ATOMIC fd non-atomically — and
     /// momentarily as 0, i.e. stdin — while another thread could be loading it in
@@ -162,6 +174,7 @@ impl HttpStream {
         self.chunk_left = 0;
         self.keep_alive = 0;
         self.body_done = 0;
+        self.body_truncated = false;
         self.trailer_line_has_content = 0;
         self.location_len = 0;
     }
@@ -1961,6 +1974,7 @@ pub fn http_read_until(
             }
             if r == 0 {
                 let short = hs.content_length >= 0 && hs.consumed < hs.content_length;
+                hs.note_body_fin(0);
                 close_owned(hs);
                 return if short { -1 } else { 0 };
             }
@@ -2009,6 +2023,16 @@ pub fn http_body_done(hs: *const HttpStream) -> bool {
         return true;
     }
     unsafe { (*hs).body_is_done() }
+}
+
+/// Positive per-response evidence only. A teardown can also make recv return
+/// zero; its latched interruption must never authorize a network retry.
+pub fn http_body_truncated(hs: *const HttpStream) -> bool {
+    if hs.is_null() {
+        return false;
+    }
+    let hs = unsafe { &*hs };
+    hs.body_truncated && !hs.interrupted()
 }
 
 /// **What a transport holds of the current response body beyond what its reader has taken** —
@@ -2293,6 +2317,7 @@ pub fn http_drain_available(hs: *mut HttpStream, dst: &mut [u8]) -> c_int {
                         return -1;
                     }
                 } else if r == 0 {
+                    hs.note_body_fin(got);
                     close_owned(hs);
                     if got == 0 {
                         return hs_closed_or_idle_read_result(hs);

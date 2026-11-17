@@ -217,6 +217,7 @@ fn a_seek_reopen_follows_a_relative_302_and_keeps_its_range() {
         off: 0,
         size: 4,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,

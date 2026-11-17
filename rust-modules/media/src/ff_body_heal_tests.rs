@@ -167,6 +167,7 @@ fn with_sized_source<R>(port: u16, size: i64, f: impl FnOnce(*mut c_void) -> R) 
         off: 0,
         size,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,

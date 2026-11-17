@@ -154,7 +154,19 @@ pub(super) fn volume_command(runtime: &mut Runtime, app: &mut App, inv: &Invocat
     result
 }
 
+fn failed_restart_selection<'a>(runtime: &'a Runtime, app: &App) -> Option<&'a str> {
+    if !app.running || !super::super::playback_allowed(app)
+        || app.player.pending_exit.is_some() || lifecycle::viewer_paused()
+        || !runtime.loaded || runtime.persistence_uncertain || !runtime.play_work_allowed()
+        || runtime.track_selection_kiosk().is_err() || input_policy::pending(runtime)
+    { return None; }
+    failed_playback::admissible(runtime, app).map(|playing| playing.selection_id.as_str())
+}
+
 pub(super) fn restartable(runtime: &Runtime, app: &App) -> bool {
+    if failed_restart_selection(runtime, app).is_some() {
+        return true;
+    }
     let session = &app.player.session;
     let state = plx_media::player::state(session);
     let external = plx_media::route::external_source(session);
@@ -189,6 +201,16 @@ pub(super) struct RestartedStream {
 
 /// Typed native outcome shared by UI and command projection.
 pub(super) fn restart_stream(runtime: &mut Runtime, app: &mut App) -> Result<RestartedStream, &'static str> {
+    if let Some(selection) = failed_restart_selection(runtime, app).map(str::to_owned) {
+        // Terminal cleanup retired the decoder and its URL. The retained live
+        // row grants only a new, fully policy-checked selection of that source.
+        // Never ask restart_current to resurrect the retired native route.
+        let mut request = PlaybackRequest::ordinary(&selection, 0);
+        request.advance_on_failure = false;
+        runtime.play_request_with_policy(app, request)?;
+        supersede_deferred(runtime);
+        return Ok(RestartedStream { duration: 0, position: 0, paused: false });
+    }
     if !restartable(runtime, app) {
         return Err("There is no owned, restartable stream");
     }

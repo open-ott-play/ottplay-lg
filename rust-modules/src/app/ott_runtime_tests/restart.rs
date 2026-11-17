@@ -247,3 +247,246 @@ fn first_panicked_native_resolve_offers_restart_after_its_default_plan_lands() {
     assert!(restart_offered(&mut app),
         "a failed initial plan has no older installed source to protect from retry");
 }
+
+// Actual catalogue admission and terminal reconciliation, with only decoder
+// resources injected. The resolver is held: these tests never fetch a source.
+fn failed_live_restart_fixture() -> RestartFixture {
+    struct Accepted;
+    impl playback::PlaybackResources for Accepted {
+        fn request_movie(&mut self, _: &mut plx_media::route::PlaybackSession,
+            _: &mut plx_data::stores::metadata::MetadataStore, _: &plx_data::pms::PmsMovie,
+            _: Option<plx_plex::plex::MediaId>) -> bool { panic!("external source only") }
+        fn request_episode(&mut self, _: &mut plx_media::route::PlaybackSession,
+            _: &mut plx_data::stores::metadata::MetadataStore, _: &str,
+            _: Option<plx_plex::plex::MediaId>) -> bool { panic!("external source only") }
+        fn describe_movie(&mut self, _: &mut plx_data::stores::metadata::MetadataStore,
+            _: plx_plex::plex::ServerId, _: &str) { panic!("external source only") }
+        fn prepare_start(&mut self, _: &mut plx_media::route::PlaybackSession,
+            _: &mut plx_media::player::adapter::PlayerAdapter, _: i64) -> bool { true }
+    }
+    plx_media::player::SHARED.reset_session();
+    plx_media::player::TX.reset();
+    plx_media::route::reset_player_control_for_test(&plx_media::route::PlaybackSession::IDLE);
+    let mut app = ready_app_fixture();
+    app.running = true;
+    assert!(lifecycle::set_transport_paused(&mut app.adapters.player, false));
+    let profile = ProviderProfile {
+        id: "restart-live".into(), name: "Restart live".into(), kind: ProviderKind::M3u,
+        source: "https://restart.invalid/list.m3u".into(), source_alias: String::new(), enabled: true,
+    };
+    let mut entry = local_entry("first");
+    entry.media = MediaLocator::Http { url: "https://restart.invalid/live.m3u8".into() };
+    entry.live = Some(Default::default());
+    entry.duration_ms = None;
+    let mut runtime = app.ott.take().unwrap();
+    runtime.saved.profiles.profiles = vec![profile.clone()];
+    runtime.saved.profiles.active_profile = Some(profile.id.clone());
+    runtime.provider = ProviderKind::M3u;
+    runtime.catalog = Catalog { entries: vec![entry.clone()], hierarchy: None };
+    runtime.catalog_loading = false;
+    runtime.catalog_complete = true;
+    runtime.catalog_done.store(false, Ordering::Release);
+    runtime.metadata_done.store(false, Ordering::Release);
+    runtime.resolver_busy = true;
+    runtime.resolver_hold_for_test = true;
+    runtime.plex_refresh_pending = true;
+    runtime.saving = true;
+    runtime.write_permit.revoke();
+    runtime.continuity.suppress_unrequested_start();
+    let mut request = PlaybackRequest::ordinary("first", 0);
+    request.advance_on_failure = false;
+    runtime.play_request_with_policy(&mut app, request).unwrap();
+    let queued = runtime.resolver_next.take().unwrap();
+    let generation = queued.generation;
+    app.ott = Some(runtime);
+    let mut info = unsupported_info();
+    info.video_codec = "h264".into(); info.audio_codec = "aac".into();
+    info.audio_channels = 2; info.audio_sample_rate = 48_000; info.audio_bit_depth = 16;
+    info.duration_ns = 0;
+    // A real successful playlist inspection supplies this typed source. Passing
+    // a raw Http(.m3u8) correctly fails admission as an uninspected playlist.
+    info.resolved_source = Some(plx_media::ff::ExternalSource::Hls(
+        "https://restart.invalid/live.m3u8".into()));
+    app.ott.as_ref().unwrap().tx.send(Job::Play(generation, profile,
+        Ok((entry, ReadySource::External(plx_media::ff::ExternalSource::Http(
+            "https://restart.invalid/live.m3u8".into()), info, None)))))
+        .unwrap_or_else(|_| panic!("fixture receiver disappeared"));
+    let clock = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap();
+    tick_with_start(&mut app, clock, |runtime, app, profile, entry, source|
+        start_resolved_with(runtime, app, profile, entry, source, &mut Accepted));
+    {
+        let runtime = app.ott.as_ref().unwrap();
+        assert!(runtime.playing.as_ref().is_some_and(|playing| playing_matches(playing, &app)),
+            "real live fixture admission failed: status={}, target={:?}", runtime.status, runtime.play_target);
+    }
+    // Attach the existing inert Engine to the real admitted start transaction.
+    // Its native callback epoch owns the same closed failure seen on the TV;
+    // no decoder producer or loaded HostSink object exists in this fixture.
+    assert_eq!(unsafe {
+        plx_platform::tv::sink::VideoSink::ready(&plx_media::player::ffi_host::HostSink,
+            app.adapters.player.mt())
+    }, 0);
+    let transaction = plx_media::route::pending_route_start().unwrap();
+    let attempt = plx_media::route::claim_route_start_attempt(transaction).unwrap();
+    assert!(plx_media::route::settle_route_start(&mut app.player.session, attempt,
+        plx_media::route::RouteStartResult::Started));
+    let epoch = plx_media::player::SHARED.begin_native_session().unwrap();
+    assert!(plx_media::player::SHARED.mark_native_load_returned(epoch, None).is_some());
+    let mut engine = plx_media::player::engine::engine_after_reload_for_test();
+    engine.route_start = attempt;
+    engine.native_epoch = epoch;
+    app.adapters.player.install(engine);
+    assert!(plx_media::player::SHARED.note_io_failure_for(epoch,
+        plx_media::player::report::IoFailureDetails::Hls {
+            exit: plx_telemetry::telemetry::classes::DemuxExitClass::HlsTransportFailed,
+            outcome: None,
+        }));
+    plx_media::player::SHARED.demux_io_failed.store(true, Ordering::Release);
+    let mut runtime = app.ott.take().unwrap();
+    assert!(runtime.playing.as_ref().is_some_and(|playing| playing_matches(playing, &app)));
+    plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Error);
+    runtime.reconcile_failure(&mut app);
+    runtime.reconcile_owner(&mut app);
+    assert!(runtime.playing.is_none());
+    assert!(failed_playback::admissible(&runtime, &app).is_some());
+    assert!(!app.adapters.player.is_live());
+    // Stop clears the playable URL and native work, but intentionally retains
+    // the bound external descriptor as session metadata for ownership checks.
+    assert!(plx_media::route::external_source(&app.player.session).is_some());
+    assert!(!plx_media::route::has_url(&app.player.session));
+    assert!(plx_media::route::pending_route_start().is_none());
+    assert!(!app.adapters.player.release_has_queued_start());
+    assert_eq!(plx_media::player::state(&app.player.session), plx_media::player::PlaybackState::Idle);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+    app.ott = Some(runtime);
+    RestartFixture(app)
+}
+
+#[test]
+fn explicit_restart_of_retired_live_channel_queues_fresh_exact_admission() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = failed_live_restart_fixture();
+    // CLI restart also works from the catalogue, not only the fullscreen HUD.
+    bridge::show_page(&mut app.pages, AppArg::Ott);
+    settle_pages(&mut app);
+    let before = app.ott.as_ref().unwrap();
+    let saved = serde_json::to_value(&before.saved).unwrap();
+    let generation = before.play_generation;
+    let retired_source = plx_media::route::external_source(&app.player.session);
+    assert!(restart_offered(&mut app), "retired decoder is not a lost current channel");
+    assert_eq!(remote_restart(&mut app)["status"], "ok");
+    let runtime = app.ott.as_ref().unwrap();
+    let request = runtime.play_target.as_ref().expect("fresh policy admission");
+    assert_eq!(request.id, "first");
+    assert_eq!(request.position_ms, 0);
+    assert!(!request.advance_on_failure);
+    assert_ne!(runtime.play_generation, generation);
+    assert_eq!(runtime.resolver_next.as_ref().unwrap().generation, runtime.play_generation);
+    assert_eq!(runtime.resolver_next.as_ref().unwrap().entry.as_ref().unwrap().id, "first");
+    assert!(runtime.failed_playback.is_none());
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+    assert_eq!(plx_media::route::external_source(&app.player.session), retired_source,
+        "accepting a resolve must not replace the retained source metadata");
+    assert!(!plx_media::route::has_url(&app.player.session),
+        "accepting a new resolve must not reinstall a retired native URL");
+    assert!(plx_media::route::pending_route_start().is_none());
+    assert!(!app.adapters.player.release_has_queued_start());
+    assert!(!app.adapters.player.is_live());
+    assert_eq!(runtime.resolver_launches_for_test, 0);
+}
+
+#[test]
+fn retired_live_restart_rejects_changed_owner_or_suspended_intent_without_work() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    for mutation in 0..8 {
+        let mut app = failed_live_restart_fixture();
+        match mutation {
+            0 => app.ott.as_mut().unwrap().playback_epoch += 1,
+            1 => app.ott.as_mut().unwrap().generation += 1,
+            2 => app.ott.as_mut().unwrap().saved.profiles.profiles[0].source.push_str("?changed"),
+            3 => app.ott.as_mut().unwrap().catalog.entries[0].media =
+                MediaLocator::Http { url: "https://restart.invalid/replaced.m3u8".into() },
+            4 => app.ott_standby = true,
+            // There is intentionally no Engine after terminal cleanup. Model
+            // retained viewer intent, not a fabricated native Pause success.
+            5 => plx_media::player::transport::set_paused(true),
+            6 => app.ott.as_mut().unwrap().persistence_uncertain = true,
+            7 => { app.ott.as_mut().unwrap().saved.settings.insert("nativeKiosk".into(), json!({"version":999})); },
+            _ => unreachable!(),
+        }
+        let before = app.ott.as_ref().unwrap();
+        let generation = before.play_generation;
+        let saved = serde_json::to_value(&before.saved).unwrap();
+        assert!(!restart_offered(&mut app), "mutation {mutation}");
+        assert_eq!(remote_restart(&mut app)["status"], "rejected", "mutation {mutation}");
+        let runtime = app.ott.as_ref().unwrap();
+        assert_eq!(runtime.play_generation, generation);
+        assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+        assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+        assert!(!plx_media::route::has_url(&app.player.session));
+        assert!(plx_media::route::pending_route_start().is_none());
+        assert!(!app.adapters.player.release_has_queued_start());
+    }
+}
+
+#[test]
+fn retired_live_restart_rechecks_parental_policy_before_consuming_failure() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = failed_live_restart_fixture();
+    // Enrichment may mark a previously admitted row as protected without
+    // changing its media identity. A recovery receipt is not parental consent.
+    app.ott.as_mut().unwrap().catalog.entries[0].protection = Some(true);
+    let generation = app.ott.as_ref().unwrap().play_generation;
+    assert_eq!(remote_restart(&mut app)["status"], "rejected");
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(runtime.failed_playback.is_some());
+    assert_eq!(runtime.play_generation, generation);
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
+}
+
+#[test]
+fn retired_live_restart_cannot_cancel_a_newer_admitted_selection() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = failed_live_restart_fixture();
+    explicit_play(&mut app, "first");
+    let runtime = app.ott.as_ref().unwrap();
+    let request = runtime.play_target.clone();
+    let generation = runtime.play_generation;
+    let cancel = runtime.play_cancel.clone();
+    assert!(request.is_some() && runtime.resolver_next.is_some());
+    assert!(!restart_offered(&mut app));
+    assert_eq!(remote_restart(&mut app)["status"], "rejected");
+    let runtime = app.ott.as_ref().unwrap();
+    assert_eq!(runtime.play_target, request);
+    assert_eq!(runtime.play_generation, generation);
+    assert!(!cancel.load(Ordering::Acquire));
+    assert_eq!(runtime.resolver_next.as_ref().unwrap().generation, generation);
+}
+
+#[test]
+fn retired_live_restart_revalidates_same_strict_pin_instead_of_denying_all_kiosks() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = failed_live_restart_fixture();
+    let runtime = app.ott.as_mut().unwrap();
+    let profile = runtime.effective_profile().unwrap();
+    let bindings = selection::SelectionBindings::profiles_only(&runtime.saved.profiles);
+    let favorite = selection::capture_bound(&bindings,
+        selection::SelectionOwner::Profile(profile), &runtime.catalog.entries[0]).unwrap();
+    let pin = crate::app::ott_kiosk_stored::Stored::item(favorite, true).unwrap();
+    runtime.saved.settings.insert("nativeKiosk".into(), pin.encode().unwrap());
+    let saved = serde_json::to_value(&runtime.saved).unwrap();
+    assert!(restart_offered(&mut app), "a valid strict pin permits restarting that same source");
+    assert_eq!(remote_restart(&mut app)["status"], "ok");
+    let runtime = app.ott.as_ref().unwrap();
+    let request = runtime.play_target.as_ref().unwrap();
+    assert_eq!(request.id, "first");
+    assert!(!request.advance_on_failure);
+    assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+    assert!(!plx_media::route::has_url(&app.player.session));
+    assert!(!app.adapters.player.is_live());
+}
