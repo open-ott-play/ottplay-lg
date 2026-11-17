@@ -47,6 +47,7 @@ struct LeaseWork {
 }
 pub(super) struct Driver {
     pictures: [Option<Picture>; 9],
+    last_stop: [Option<&'static str>; 9],
     workers: [Option<Work>; 9],
     stopping: [Option<ResolveTicket>; 9],
     leases: [std::collections::VecDeque<LeaseWork>; 9],
@@ -74,6 +75,7 @@ impl Default for Driver {
         let (tx, rx) = mpsc::channel();
         Self {
             pictures: std::array::from_fn(|_| None),
+            last_stop: [None; 9],
             workers: std::array::from_fn(|_| None),
             stopping: [None; 9],
             leases: std::array::from_fn(|_| Default::default()),
@@ -134,6 +136,9 @@ impl Driver {
         };
         runtime.multiview = coordinator;
         runtime.multiview_effects.extend(result?.effects);
+        if self.layout.is_none() {
+            self.last_stop = [None; 9];
+        }
         self.layout = Some(layout);
         self.cleanup_failed = false;
         self.restore_ready = false;
@@ -301,6 +306,7 @@ impl Driver {
             return Ok(());
         }
         let t = runtime.multiview.bind_source(slot, handle)?;
+        self.last_stop[index] = None;
         runtime.multiview_effects.extend(t.effects);
         let mut coordinator = std::mem::take(&mut runtime.multiview);
         let result = coordinator.begin_play_local(runtime, app, slot);
@@ -375,6 +381,12 @@ impl Driver {
             .as_ref()
             .filter(|p| p.admitted && !p.terminal && self.stopping[slot.index()].is_none() && !p.receipt.input.is_cancelled())
             .map(|p| p.ticket)
+    }
+    pub fn last_stop(&self, slot: SlotId) -> Option<&'static str> {
+        self.last_stop[slot.index()]
+    }
+    pub fn texture_failed(&mut self, slot: SlotId) {
+        self.last_stop[slot.index()] = Some("texture_upload");
     }
     pub fn set_background_audio_percent(&mut self, percent: u8) {
         let percent = percent.min(100);
@@ -466,6 +478,9 @@ impl Driver {
     }
     fn queue(&mut self, runtime: &mut Runtime, transition: Result<Transition, multiview::Error>) {
         if let Ok(transition) = transition {
+            for issue in transition.issues {
+                self.last_stop[issue.slot.index()].get_or_insert(issue.issue.token());
+            }
             runtime.multiview_effects.extend(transition.effects);
         }
     }
@@ -701,6 +716,7 @@ impl Driver {
             if picture.receipt.input.reauthorize(runtime, app).is_err()
                 && self.stopping[index].is_none()
             {
+                self.last_stop[index] = Some("authorization_changed");
                 let transition = runtime.multiview.close_slot(picture.ticket.slot());
                 if let Ok(transition) = transition {
                     runtime.multiview_effects.extend(transition.effects);
@@ -761,6 +777,21 @@ impl Driver {
                         }
                     }
                     Event::Failure(_) | Event::Ended => {
+                        if self.stopping[index].is_none() {
+                            use plx_media::local_multiview::Error;
+                            self.last_stop[index] = Some(match event {
+                                Event::Failure(Error::Unavailable) => "unavailable",
+                                Event::Failure(Error::InvalidLimits) => "invalid_limits",
+                                Event::Failure(Error::Unsupported) => "unsupported",
+                                Event::Failure(Error::Source) => "source_read",
+                                Event::Failure(Error::Playlist) => "playlist",
+                                Event::Failure(Error::Decode) => "decode",
+                                Event::Failure(Error::Budget) => "resource_limit",
+                                Event::Failure(Error::Cancelled) => "cancelled",
+                                Event::Failure(Error::Thread) => "worker_unavailable",
+                                _ => "ended",
+                            });
+                        }
                         picture.terminal = true;
                         picture.frame = None;
                         picture.decoder.cancel();

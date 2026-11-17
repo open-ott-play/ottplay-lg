@@ -333,7 +333,8 @@ impl Texture {
         self.matrix = matrix;
         Ok(())
     }
-    pub fn draw(&self, _main: &MainThread, rect: Rect, opacity: f32) -> Result<(), &'static str> {
+    /// Returns true when a video draw was submitted. Culled or transparent draws are skipped.
+    pub fn draw(&self, _main: &MainThread, rect: Rect, opacity: f32) -> Result<bool, &'static str> {
         self.current()?;
         if self.sizes.is_none() {
             return Err("Video texture has no frame");
@@ -350,7 +351,7 @@ impl Texture {
             || culled(rect.x, rect.y, rect.w, rect.h)
             || gate(Class::Image, rect.x, rect.y, rect.w, rect.h)
         {
-            return Ok(());
+            return Ok(false);
         }
         unsafe {
             let _state = State::save();
@@ -375,8 +376,11 @@ impl Texture {
                 glUniform1i(self.locations[6 + i], i as i32);
             }
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            if glGetError() != GL_NO_ERROR {
+                return Err("Video texture draw failed");
+            }
         }
-        Ok(())
+        Ok(true)
     }
 }
 impl Drop for Texture {

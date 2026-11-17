@@ -92,6 +92,22 @@ impl LeaseClose {
             .then(|| self.success.load(Ordering::Acquire))
     }
 }
+/// Each uploaded frame can contribute at most one successful draw.
+#[derive(Clone, Copy, Default)]
+struct RenderedFrames {
+    pending_pts_us: Option<i64>,
+    last_pts_us: Option<i64>,
+    count: u64,
+}
+impl RenderedFrames {
+    fn submitted(&mut self) {
+        if let Some(pts) = self.pending_pts_us.take() {
+            self.count = self.count.saturating_add(1);
+            self.last_pts_us = Some(pts);
+        }
+    }
+}
+
 pub(super) struct State {
     taken: bool,
     graphics_ready: bool,
@@ -101,6 +117,7 @@ pub(super) struct State {
     textures: [Option<Texture>; 9],
     tickets: [Option<ResolveTicket>; 9],
     sizes: [(u32, u32); 9],
+    frames: [RenderedFrames; 9],
     plan: Option<RasterPlan>,
     sink: Option<Sink>,
     audio: Option<(SlotId, ResolveTicket, OwnerToken)>,
@@ -120,6 +137,7 @@ impl Default for State {
             textures: std::array::from_fn(|_| None),
             tickets: [None; 9],
             sizes: [(0, 0); 9],
+            frames: [RenderedFrames::default(); 9],
             plan: None,
             sink: None,
             audio: None,
@@ -188,6 +206,7 @@ impl State {
         self.pending_pcm = None;
         self.textures = std::array::from_fn(|_| None);
         self.tickets = [None; 9];
+        self.frames = [RenderedFrames::default(); 9];
         self.plan = None;
     }
     fn takeover(&mut self, runtime: &mut Runtime, app: &mut App) {
@@ -320,6 +339,7 @@ impl State {
             if ticket != self.tickets[index] {
                 self.textures[index] = None;
                 self.tickets[index] = ticket;
+                self.frames[index] = RenderedFrames::default();
             }
             let Some(frame) = runtime.multiview_local.take_frame(slot) else {
                 continue;
@@ -352,6 +372,7 @@ impl State {
             })();
             if let Err(error) = result {
                 runtime.status = error.into();
+                runtime.multiview_local.texture_failed(slot);
                 if let Ok(t) = runtime.multiview.close_slot(slot) {
                     runtime.multiview_effects.extend(t.effects);
                 }
@@ -359,6 +380,7 @@ impl State {
                 self.textures[index] = None;
             } else {
                 self.sizes[index] = (frame.width, frame.height);
+                self.frames[index].pending_pts_us = Some(frame.pts_us);
             }
         }
         if app.adapters.player.release_busy() || self.lease.is_some() || self.lease_failed {
@@ -495,7 +517,7 @@ impl State {
             }
         }
     }
-    fn draw(&self, app: &App) {
+    fn draw(&mut self, app: &App) {
         let Some(plan) = self.plan.as_ref() else {
             return;
         };
@@ -529,7 +551,11 @@ impl State {
                 w as f32 * scale,
                 h as f32 * scale,
             );
-            let _ = texture.draw(app.adapters.player.mt(), rect, 1.0);
+            if texture.draw(app.adapters.player.mt(), rect, 1.0) == Ok(true)
+                && !plx_gfx::gfx::blur_source_pass()
+            {
+                self.frames[index].submitted();
+            }
         }
     }
 }
@@ -539,11 +565,30 @@ pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
     runtime.multiview_local_present = state;
 }
 pub(super) fn draw(app: &mut App) {
-    let Some(runtime) = app.ott.take() else {
+    let Some(mut runtime) = app.ott.take() else {
         return;
     };
     runtime.multiview_local_present.draw(app);
     app.ott = Some(runtime);
+}
+/// Snapshot only the current ticket; a status read can interleave with queued cleanup.
+pub(super) fn video_evidence(runtime: &Runtime) -> Option<Value> {
+    if !runtime.multiview_local.active() {
+        return None;
+    }
+    let scene = runtime.multiview.scene_status(runtime)?;
+    let state = &runtime.multiview_local_present;
+    let slots: Vec<_> = scene.slots.iter().map(|row| {
+        let i = row.slot.index();
+        let frames = state.tickets[i]
+            .filter(|&ticket| runtime.multiview.require_current_ticket(ticket).is_ok()
+                && runtime.multiview_local.slot_ticket(row.slot) == Some(ticket))
+            .map_or_else(RenderedFrames::default, |_| state.frames[i]);
+        json!({"slot_id": i, "slot_generation": row.slot_generation, "source_revision": row.source_revision,
+            "drawn_frames": frames.count, "last_pts_us": frames.last_pts_us,
+            "last_stop": runtime.multiview_local.last_stop(row.slot)})
+    }).collect();
+    Some(json!({"version": 1, "scene": scene.scene, "slots": slots}))
 }
 /// Decoder retirement does not transfer the previous fullscreen lease or output.
 /// Keep admission fenced until the presenter's independent custody has settled.
@@ -579,6 +624,20 @@ pub(super) fn flush_audio(runtime: &mut Runtime, app: &App) {
 #[cfg(all(test, feature = "hostsim"))]
 mod tests {
     use super::*;
+    #[test]
+    fn rendered_frames_count_new_successful_draws_only() {
+        let mut frames = RenderedFrames::default();
+        frames.submitted();
+        assert_eq!(frames.count, 0);
+        frames.pending_pts_us = Some(12);
+        frames.pending_pts_us = Some(16); // a newer upload superseded it before draw
+        frames.submitted();
+        frames.submitted(); // a UI redraw of the same texture
+        assert_eq!((frames.count, frames.last_pts_us), (1, Some(16)));
+        frames.pending_pts_us = Some(2); // a new picture after seek
+        frames.submitted();
+        assert_eq!((frames.count, frames.last_pts_us), (2, Some(2)));
+    }
     fn previous_favorite_fixture() -> (Runtime, Playing, Favorite) {
         use plx_data::ott::favorites::{Locator, Origin};
         let mut runtime =

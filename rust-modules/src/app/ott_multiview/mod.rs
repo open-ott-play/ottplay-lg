@@ -81,6 +81,11 @@ pub(super) enum Issue {
     BackendRejected,
     BackendUnsupported,
 }
+impl Issue {
+    pub(super) fn token(self) -> &'static str {
+        slot_failure_token(slot_failure(self))
+    }
+}
 
 /// A per-slot failure that the UI may show alongside successful neighboring slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1219,7 +1224,7 @@ impl Coordinator {
         Ok(())
     }
 
-    fn require_current_ticket(&self, ticket: ResolveTicket) -> Result<(), Error> {
+    pub(super) fn require_current_ticket(&self, ticket: ResolveTicket) -> Result<(), Error> {
         let index = ticket.slot().index();
         if self.lifecycle != Lifecycle::Active
             || self.tickets[index] != Some(ticket)

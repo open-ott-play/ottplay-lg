@@ -57,6 +57,15 @@ The feature must be qualified in stages: pure tests, actual concurrent decoding,
 GL and audio output, ARM packaging, then sustained playback on the target TV.
 Host compilation alone does not establish physical TV capacity or playback.
 
+To check a local grid, run `ott -j NAME status --details | jq .multiview_video_evidence`
+twice, several seconds apart. The slot IDs are zero-based. Compare the same
+scene and slot generation in both readings. Each successful GLES draw of a newly
+uploaded video frame increments `drawn_frames` once. `last_pts_us` gives its
+media timestamp. UI redraws of a held picture leave both values unchanged.
+These readings measure rendering inside the application. Verify audio and
+the visible panel separately. If a window stops, `last_stop` can identify the
+source, decoder or renderer stage. A new source attempt clears the old reason.
+
 ## Using local scenes
 
 Open **Settings → Multiview** and choose a layout. On the video surface,

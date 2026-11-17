@@ -180,7 +180,8 @@ fn upload(texture: &mut Texture, main: &MainThread, frame: &FrameYuv) {
 fn render(textures: &[Texture], main: &MainThread) -> Vec<u8> {
     gfx::frame_clear(0.0, 0.0, 0.0);
     for (index, texture) in textures.iter().enumerate() {
-        texture.draw(main, rect(index), 1.0).unwrap();
+        assert!(!texture.draw(main, rect(index), 0.0).unwrap());
+        assert!(texture.draw(main, rect(index), 1.0).unwrap());
     }
     clean_gl();
     readback()
