@@ -2333,11 +2333,15 @@ fn observe_hls_deadline(
 fn classify_hls_deadline(wake: BlockingWake) -> Option<HlsExit> {
     match wake.owner {
         BlockingDeadlineOwner::Transport if wake.transport_due => {
-            Some(HlsExit::Failed("HLS transport stalled"))
+            Some(HlsExit::OpenFailed {
+                reason: "HLS transport stalled", outcome: TraceOutcome::Deadline,
+            })
         }
         BlockingDeadlineOwner::Reserve if wake.reserve_spent => Some(HlsExit::PrimeExpired),
         BlockingDeadlineOwner::Reserve if wake.transport_due => {
-            Some(HlsExit::Failed("HLS transport stalled"))
+            Some(HlsExit::OpenFailed {
+                reason: "HLS transport stalled", outcome: TraceOutcome::Deadline,
+            })
         }
         _ => None,
     }
@@ -2409,6 +2413,9 @@ struct AvioState {
     /// FFmpeg may heal it through `seek_cb`; only an operation that still returns failure may
     /// publish it to the player.
     io_failed: bool,
+    /// Positive callback-boundary evidence for this enclosing FFmpeg operation.
+    /// Unknown read failures stay None; successful operations/seeks clear it.
+    io_failure_outcome: Option<TraceOutcome>,
     /// Time spent inside successful body reads only. Request setup, PMS JIT production, TTFB and
     /// demux/probe work intentionally stay out of this network-rate clock and remain in the
     /// enclosing segment's total acquisition clock.
@@ -2512,6 +2519,29 @@ fn elapsed_since(started: std::time::Instant) -> std::time::Duration {
 }
 
 impl AvioState {
+    fn clear_io_failure(&mut self) {
+        self.io_failed = false;
+        self.io_failure_outcome = None;
+    }
+
+    /// Preserve the cause captured when a blocking callback actually wakes. A
+    /// later wall-clock sample cannot relabel an unrelated read failure.
+    fn settle_hls_callback_deadline(&mut self, wake: BlockingWake) -> Option<c_int> {
+        match classify_hls_deadline(wake) {
+            Some(HlsExit::PrimeExpired) => Some(AVERROR_EOF),
+            Some(HlsExit::OpenFailed { outcome, .. }) => {
+                self.io_failed = true;
+                self.io_failure_outcome = Some(outcome);
+                Some(AVERROR_IO)
+            }
+            Some(_) => {
+                self.io_failed = true;
+                Some(AVERROR_IO)
+            }
+            None => None,
+        }
+    }
+
     /// **Fold the AU lane's abort into the transport's own.**
     ///
     /// There are two abort signals in the media path and they arrive by different routes. The AU
@@ -2711,6 +2741,16 @@ fn classify_hls_avio_operation(
         operation_failed,
     );
     if matches!(terminal, Some(HlsExit::Failed("segment body transport failed"))) {
+        if let Some(outcome) = state.io_failure_outcome {
+            return Some(HlsExit::OpenFailed {
+                reason: "segment body transport failed", outcome,
+            });
+        }
+        if let Src::Socket { hs, .. } = &state.src {
+            if plx_net::stream::http_body_truncated(*hs) {
+                return Some(hls_short_body_failure());
+            }
+        }
         if let Src::Curl(source) = &state.src {
             if let Some(failure) = source.body_failure() {
                 let outcome = hls_curl_open_outcome(crate::curlio::OpenErr::Transport(failure.rc));
@@ -2934,13 +2974,8 @@ extern "C" fn read_cb(op: *mut c_void, dst: *mut u8, n: c_int) -> c_int {
                 return avio_stopped(s);
             }
             if let Some(wake) = wake {
-                match classify_hls_deadline(wake) {
-                    Some(HlsExit::PrimeExpired) => return AVERROR_EOF,
-                    Some(_) => {
-                        s.io_failed = true;
-                        return AVERROR_IO;
-                    }
-                    None => {}
+                if let Some(result) = s.settle_hls_callback_deadline(wake) {
+                    return result;
                 }
                 // A stale reserve projection is neither evidence nor progress. Retry in this
                 // frame (not recursively) with the same inactivity epoch and a fresh projection.
@@ -3062,7 +3097,7 @@ extern "C" fn seek_cb(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
         // (`ff_eof_seek_tests.rs`). An unsized source has no end to compare with and still asks.
         if s.size >= 0 && target >= s.size {
             s.off = target;
-            s.io_failed = false;
+            s.clear_io_failure();
             s.parked_at_end = true;
             return target;
         }
@@ -3162,7 +3197,7 @@ extern "C" fn seek_cb(op: *mut c_void, offset: i64, whence: c_int) -> i64 {
         s.off = target;
         // This may be libavformat healing a failed read. A source validated at the requested byte
         // has recovered; a later callback failure will arm the bit again.
-        s.io_failed = false;
+        s.clear_io_failure();
         target
     }
 }
@@ -4334,8 +4369,8 @@ enum HlsExit {
     /// observation: PMS production, response pacing and network service are not identifiable
     /// separately before the response completes.
     StallAbort(SegmentTransfer),
-    /// The exact current open failed. Closed diagnostic outcome only: never a
-    /// URL, an inferred previous HTTP status, or a retry policy decision.
+    /// The exact current request or body operation failed. Closed diagnostic
+    /// outcome only: never a URL, an inferred previous HTTP status, or retry policy.
     OpenFailed { reason: &'static str, outcome: TraceOutcome },
     Failed(&'static str),
 }
@@ -5040,6 +5075,7 @@ unsafe fn hls_input(
             off: 0,
             size,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -5079,7 +5115,7 @@ unsafe fn hls_input(
         return Err(HlsExit::Failed("segment format allocation failed"));
     }
     (*input.fmt).pb = input.avio;
-    input.state.io_failed = false;
+    input.state.clear_io_failure();
     // The new lane-only entry must not reinterpret ADTS/fMP4/other input as TS.
     // Ordinary multiplexed/PMS input keeps its existing format-probe behavior.
     let format = if single_rendition {
@@ -5108,7 +5144,7 @@ unsafe fn hls_input(
         return Err(HlsExit::Failed("segment open/probe failed"));
     }
     // A successful enclosing FFmpeg operation healed any callback-level read retry.
-    input.state.io_failed = false;
+    input.state.clear_io_failure();
     let discovered = avformat_find_stream_info(input.fmt, std::ptr::null_mut());
     if crate::aq::aq_is_aborted(aq) {
         return Err(HlsExit::Aborted);
@@ -5124,7 +5160,7 @@ unsafe fn hls_input(
     if discovered < 0 {
         return Err(HlsExit::Failed("segment stream discovery failed"));
     }
-    input.state.io_failed = false;
+    input.state.clear_io_failure();
     log_hls_video_change(input.fmt);
     input.pkt = av_packet_alloc();
     if input.pkt.is_null() {
@@ -5599,7 +5635,7 @@ unsafe fn hls_demux_segment_path(
     let mut audio_tail_ns = None;
 
     loop {
-        input.state.io_failed = false;
+        input.state.clear_io_failure();
         let read = av_read_frame(input.fmt, input.pkt);
         if body_limit.is_some_and(|limit| input.state.body_bytes > limit) {
             return Err(HlsExit::Failed("HLS segment exceeds size limit"));
@@ -10025,6 +10061,7 @@ fn demux_inner(
                     off: 0,
                     size,
                     io_failed: false,
+                    io_failure_outcome: None,
                     body_active_us: 0,
                     body_bytes: 0,
                     first_byte_at: None,

@@ -132,7 +132,7 @@ fn early_segment_input_drop_returns_external_context_for_cold_entry_retry() {
             return_curl: &mut slot,
             state: Box::new(AvioState {
                 hls_ts: None, src: Src::Curl(source), aq: std::ptr::null_mut(), off: 0, size: -1,
-                io_failed: false, body_active_us: 0, body_bytes: 0, first_byte_at: None,
+                io_failed: false, io_failure_outcome: None, body_active_us: 0, body_bytes: 0, first_byte_at: None,
                 reserve_deadline: ReserveDeadlineState::new(None, false), transport_watchdog: None,
                 acquisition: None, bounce: Vec::new(), bounce_pos: 0, parked_at_end: false,
                 heal: HealBudget::default(),

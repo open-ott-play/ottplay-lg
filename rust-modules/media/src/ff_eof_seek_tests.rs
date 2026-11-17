@@ -211,6 +211,7 @@ fn avio_over(src: Src, size: i64, aq: *mut AuQueue) -> AvioState {
         off: 0,
         size,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,

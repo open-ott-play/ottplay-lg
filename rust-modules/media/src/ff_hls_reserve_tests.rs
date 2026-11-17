@@ -611,7 +611,7 @@ fn stale_reserve_wakes_cannot_renew_transport_liveness() {
     assert_eq!(attempted.owner, BlockingDeadlineOwner::Transport);
     let wake = observe_hls_deadline(Some(&mut reserve), attempted, &watchdog, false);
     let outcome = classify_hls_deadline(wake);
-    assert!(matches!(outcome, Some(HlsExit::Failed(_))));
+    assert!(matches!(outcome, Some(HlsExit::OpenFailed { outcome: TraceOutcome::Deadline, .. })));
     assert!(
         !reserve.expired,
         "transport failure is not censored rung evidence"
@@ -684,7 +684,7 @@ fn an_earlier_liveness_boundary_stays_transport_even_if_reserve_spends_before_cl
         .store(start_ns + 20_000_000, std::sync::atomic::Ordering::Release);
     assert!(matches!(
         classify_hls_deadline(wake),
-        Some(HlsExit::Failed(_))
+        Some(HlsExit::OpenFailed { outcome: TraceOutcome::Deadline, .. })
     ));
     assert!(
         !reserve.expired,

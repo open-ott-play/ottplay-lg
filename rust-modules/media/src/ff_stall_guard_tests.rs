@@ -1980,6 +1980,7 @@ fn avio_state_for(
         off: 0,
         size,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,

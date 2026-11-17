@@ -38,6 +38,7 @@ fn a_seek_after_teardown_fails_instead_of_opening_a_second_connection() {
             off: 0,
             size: 8,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -96,6 +97,7 @@ fn an_aborted_read_and_seek_cannot_ping_pong_into_new_connections() {
             off: 0,
             size: 8,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -150,6 +152,7 @@ fn an_expired_candidate_deadline_stops_before_touching_its_transport() {
         off: 0,
         size: -1,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -232,6 +235,7 @@ fn a_stalled_candidate_body_ends_at_transport_liveness_not_recursive_reserve_ret
         off: 0,
         size: 8,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -260,6 +264,11 @@ fn a_stalled_candidate_body_ends_at_transport_liveness_not_recursive_reserve_ret
 
     assert_eq!(result, AVERROR_IO);
     assert!(state.io_failed);
+    assert_eq!(state.io_failure_outcome, Some(TraceOutcome::Deadline),
+        "the actual socket callback must preserve the watchdog boundary");
+    assert!(matches!(classify_hls_avio_operation(&state, true, started, false),
+        Some(HlsExit::OpenFailed { outcome: TraceOutcome::Deadline, .. })),
+        "native-operation settlement must not erase the callback's deadline");
     assert!(!state.reserve_deadline.expired);
     assert!(
         elapsed >= std::time::Duration::from_millis(20)
@@ -443,6 +452,7 @@ fn io_failed_after_drain_surfaces_once_bounce_is_empty() {
         off: 0,
         size: 8,
         io_failed: true,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -488,6 +498,7 @@ fn take_curl_leaves_idle_and_seek_on_idle_does_not_open() {
         off: 0,
         size: 8,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -550,6 +561,7 @@ fn a_curl_seek_after_teardown_fails_instead_of_opening_a_second_connection() {
             off: 0,
             size: 8,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -601,6 +613,7 @@ fn an_aborted_curl_read_and_seek_cannot_ping_pong_into_new_connections() {
             off: 0,
             size: 8,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -672,6 +685,7 @@ fn a_curl_transport_failure_crosses_avio_as_io_error_not_eof() {
             off: 0,
             size: 8,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -760,6 +774,7 @@ fn a_frame_read_failure_names_the_curl_rc_and_publishes_it_for_the_report() {
                 off: 0,
                 size: 8,
                 io_failed: true,
+                io_failure_outcome: None,
                 body_active_us: 0,
                 body_bytes: 0,
                 first_byte_at: None,
@@ -833,6 +848,7 @@ fn a_cut_transfer_is_reopened_at_its_offset_before_the_read_fails() {
             off: 0,
             size: 16,
             io_failed: false,
+            io_failure_outcome: None,
             body_active_us: 0,
             body_bytes: 0,
             first_byte_at: None,
@@ -912,6 +928,7 @@ fn read_all_through_read_cb(port: u16) -> (Vec<u8>, c_int, bool, Option<c_int>) 
         off: 0,
         size,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -1002,6 +1019,7 @@ fn a_cut_hls_segment_read_is_not_reopened_by_the_read_callback() {
         off: 0,
         size,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -1054,6 +1072,7 @@ fn frame_read_failure_context_requires_terminal_io_and_its_native_epoch() {
         off: 0,
         size: 0,
         io_failed: false,
+        io_failure_outcome: None,
         body_active_us: 0,
         body_bytes: 0,
         first_byte_at: None,
@@ -1136,6 +1155,154 @@ fn hls_terminal_context_preserves_failure_flags_and_closed_classes() {
     assert!(!SHARED.demux_io_failed.load(Ordering::Acquire));
     assert!(SHARED.demux_failed.load(Ordering::Acquire));
     assert_eq!(SHARED.dg_demux_exit.load(Ordering::Acquire), DemuxExitClass::DemuxPanicked.latch());
+}
+
+/// A real plaintext FIN must reach the same closed retry detail as a curl cut,
+/// without reopening a partly consumed HLS object inside AVIO.
+#[test]
+fn a_truncated_plaintext_hls_body_keeps_its_checked_transport_cause() {
+    use std::io::{Read, Write};
+    let _serial = plx_base::testlock::serial();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let mut request = Vec::new();
+        let mut bytes = [0u8; 512];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let n = socket.read(&mut bytes).unwrap();
+            if n == 0 { return; }
+            request.extend_from_slice(&bytes[..n]);
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabc").unwrap();
+    });
+    let host = CString::new("127.0.0.1").unwrap();
+    let path = CString::new("/segment.ts").unwrap();
+    let mut hs = plx_net::stream::http_stream_boxed();
+    assert_eq!(plx_net::stream::http_open(&mut *hs, host.as_ptr(), port as c_int,
+        path.as_ptr(), std::ptr::null(), "GET"), 0);
+    server.join().unwrap();
+    let mut aq = crate::aq::aq_new(1 << 20);
+    let (reserve_deadline, runtime) = SegmentAcquisition::for_test(None, false, false).begin(&mut *aq);
+    let mut state = AvioState {
+        hls_ts: None,
+        src: Src::Socket { hs: &mut *hs, host, port: port as c_int, path },
+        aq: &mut *aq,
+        off: 0,
+        size: 8,
+        io_failed: false,
+        io_failure_outcome: None,
+        body_active_us: 0,
+        body_bytes: 0,
+        first_byte_at: None,
+        reserve_deadline,
+        transport_watchdog: None,
+        acquisition: Some(runtime),
+        bounce: Vec::new(),
+        bounce_pos: 0,
+        parked_at_end: false,
+        heal: HealBudget::default(),
+    };
+    let op = &mut state as *mut AvioState as *mut c_void;
+    let mut bytes = [0u8; 16];
+    assert_eq!(read_cb(op, bytes.as_mut_ptr(), bytes.len() as c_int), 3);
+    assert_eq!(read_cb(op, bytes.as_mut_ptr(), bytes.len() as c_int), AVERROR_IO);
+    assert!(plx_net::stream::http_body_truncated(&*hs));
+    assert!(matches!(classify_hls_avio_operation(&state, true, std::time::Instant::now(), false),
+        Some(HlsExit::OpenFailed {
+            reason: "segment body ended before Content-Length", outcome: TraceOutcome::Transport,
+        })));
+    assert!(classify_hls_avio_operation(&state, false, std::time::Instant::now(), false).is_none(),
+        "a recovered FFmpeg operation cannot publish the body observation");
+    plx_net::stream::http_shutdown(&mut *hs);
+    assert!(matches!(classify_hls_avio_operation(&state, true, std::time::Instant::now(), false),
+        Some(HlsExit::Failed("segment body transport failed"))),
+        "interrupted transports cannot authorize a live retry");
+    plx_net::stream::http_close(&mut *hs);
+    crate::aq::aq_destroy(&mut *aq);
+}
+
+/// Follow the actual callback reducer through FFmpeg-operation settlement and
+/// native publication, rather than inferring a retry from a generic error string.
+#[test]
+fn hls_callback_deadline_keeps_positive_cause_until_native_terminal_publication() {
+    let _serial = plx_base::testlock::serial();
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) { SHARED.reset_session(); PUSHED_ANY.store(false, Ordering::Relaxed); }
+    }
+    let _reset = Reset;
+    let mut state = AvioState {
+        hls_ts: None,
+        src: Src::Idle,
+        aq: std::ptr::null_mut(),
+        off: 0,
+        size: 0,
+        io_failed: false,
+        io_failure_outcome: None,
+        body_active_us: 0,
+        body_bytes: 0,
+        first_byte_at: None,
+        reserve_deadline: ReserveDeadlineState::new(None, false),
+        transport_watchdog: None,
+        acquisition: None,
+        bounce: Vec::new(),
+        bounce_pos: 0,
+        parked_at_end: false,
+        heal: HealBudget::default(),
+    };
+    for owner in [BlockingDeadlineOwner::Transport, BlockingDeadlineOwner::Reserve] {
+        for pushed in [false, true] {
+            SHARED.reset_session();
+            let epoch = SHARED.begin_native_session().expect("native session");
+            PUSHED_ANY.store(pushed, Ordering::Relaxed);
+            state.clear_io_failure();
+            assert_eq!(state.settle_hls_callback_deadline(BlockingWake {
+                owner, reserve_spent: false, transport_due: true,
+            }), Some(AVERROR_IO));
+            assert_eq!(state.io_failure_outcome, Some(TraceOutcome::Deadline));
+            assert!(classify_hls_avio_operation(&state, false, std::time::Instant::now(), false).is_none(),
+                "FFmpeg success must not publish a recovered callback error");
+            let terminal = classify_hls_avio_operation(&state, true, std::time::Instant::now(), false)
+                .expect("unrecovered callback deadline");
+            assert!(matches!(terminal, HlsExit::OpenFailed {
+                reason: "segment body transport failed", outcome: TraceOutcome::Deadline,
+            }));
+            settle_hls_demux(epoch, Ok(Err(terminal)));
+            assert_eq!(SHARED.io_failure(), Some(IoFailureDetails::Hls {
+                exit: DemuxExitClass::HlsTransportFailed, outcome: Some(TraceOutcome::Deadline),
+            }));
+            assert_eq!(SHARED.demux_io_failed.load(Ordering::Acquire), pushed);
+            assert_eq!(SHARED.demux_failed.load(Ordering::Acquire), !pushed);
+
+            // Generation retirement remains authoritative even for positive evidence.
+            SHARED.reset_session();
+            let replacement = SHARED.begin_native_session().expect("replacement");
+            assert_ne!(epoch, replacement);
+            settle_hls_demux(epoch, Ok(Err(terminal)));
+            assert_eq!(SHARED.io_failure(), None);
+            assert!(!SHARED.demux_io_failed.load(Ordering::Acquire));
+            assert!(!SHARED.demux_failed.load(Ordering::Acquire));
+        }
+    }
+    state.clear_io_failure();
+    assert!(!state.io_failed);
+    assert_eq!(state.io_failure_outcome, None);
+    state.io_failed = true;
+    assert!(matches!(classify_hls_avio_operation(&state, true, std::time::Instant::now(), false),
+        Some(HlsExit::Failed("segment body transport failed"))),
+        "a later unclassified failure must not inherit a healed deadline");
+    state.clear_io_failure();
+    assert_eq!(state.settle_hls_callback_deadline(BlockingWake {
+        owner: BlockingDeadlineOwner::Reserve, reserve_spent: true, transport_due: true,
+    }), Some(AVERROR_EOF));
+    assert!(!state.io_failed, "spent reserve retains precedence over transport deadline");
+    assert_eq!(state.io_failure_outcome, None);
+    assert_eq!(state.settle_hls_callback_deadline(BlockingWake {
+        owner: BlockingDeadlineOwner::Reserve, reserve_spent: false, transport_due: false,
+    }), None);
+    assert_eq!(state.io_failure_outcome, None, "a stale projection creates no deadline evidence");
 }
 
 #[test]
