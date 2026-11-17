@@ -18,7 +18,7 @@ fn read_at(media: &Vod, index: usize, binding: &Binding, clock: &mut LaneClock,
 {
     let segment = media.segments.get(index).ok_or(HlsExit::Failed("HLS segment is missing"))?;
     let raw = unsafe { hls_rendition::read_segment(&segment.segment, binding.lane(),
-        Some(binding), aq, net, SegmentAcquisition::for_cursor(None)) }?;
+        Some(binding), aq, net, SegmentAcquisition::for_cursor(None), HlsSegmentTransport::External) }?;
     clock.map(raw, segment.pdt_ns, origin, segment.explicit_precision_ns).map_err(HlsExit::Failed)
 }
 

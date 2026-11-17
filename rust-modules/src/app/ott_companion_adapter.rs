@@ -1969,7 +1969,7 @@ impl Adapter {
                     key,
                     "Torrent or magnet link",
                     String::new(),
-                    true,
+                    false,
                     16384,
                     OttTextPolicy::Literal,
                 ),
@@ -1992,7 +1992,7 @@ impl Adapter {
                         "load" => self.load_draft(runtime)?,
                         "id" => self.editor(runtime, app, key, "Source ID", self.draft.id.clone(), false, 64, OttTextPolicy::Literal),
                         "label" => self.editor(runtime, app, key, "Name (optional)", self.draft.label.clone(), false, 128, OttTextPolicy::Predictive),
-                        "endpoint" => self.editor(runtime, app, key, "Local Torznab endpoint", self.draft.endpoint.clone(), true, 4096, OttTextPolicy::Literal),
+                        "endpoint" => self.editor(runtime, app, key, "Local Torznab endpoint", self.draft.endpoint.clone(), false, 4096, OttTextPolicy::Literal),
                         "key" => self.editor(runtime, app, key, "API key (optional)", self.draft.api_key.clone(), true, 2048, OttTextPolicy::Literal),
                         _ => return Err("Invalid indexer field"),
                     }

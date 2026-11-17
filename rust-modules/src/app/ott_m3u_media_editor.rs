@@ -80,7 +80,7 @@ impl Runtime {
             purpose: search::EditorPurpose::Setting });
         let editor = OttEditor { kind: plx_screens::ott::OttEditorKind::Setting,
             session: id, key: KEY.into(), title: "Media library link".into(),
-            value, secret: true, limit: 16384, text_policy: OttTextPolicy::Literal };
+            value, secret: false, limit: 16384, text_policy: OttTextPolicy::Literal };
         app.pages.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(owner),
             Delivery::Screen(plx_ui::screen::ScreenEvent::App(AppMsg::OttEditor(Arc::new(editor))))));
         Ok(())
