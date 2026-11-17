@@ -51,22 +51,26 @@ impl BootInputs {
 
 pub(super) struct Registry {
     inputs: BootInputs,
-    contexts: [OnceLock<LocaleContext>; Preference::SHIPPED.len() + 1],
+    // Construct finite slots on the heap, not as a boxed inline array: the
+    // latter still reserves every large ICU context on a cold worker's stack.
+    contexts: Box<[OnceLock<Box<LocaleContext>>]>,
     // Low byte is the generated preference slot; upper bits are the monotonic
     // epoch. One acquire sees a coherent pair, including A -> B -> A changes.
     published: AtomicU64,
 }
 impl Registry {
     pub(super) fn new(preference: Preference, inputs: BootInputs) -> Result<Self, PrepareError> {
-        let context = inputs.resolve(preference)?;
-        let registry = Self { inputs, contexts: [const { OnceLock::new() }; Preference::SHIPPED.len() + 1],
+        let context = Box::new(inputs.resolve(preference)?);
+        let contexts = std::iter::repeat_with(OnceLock::new)
+            .take(Preference::SHIPPED.len() + 1).collect();
+        let registry = Self { inputs, contexts,
             published: AtomicU64::new(u64::from(preference.slot())) };
         registry.contexts[usize::from(preference.slot())].set(context).map_err(|_| PrepareError::Unavailable)?;
         Ok(registry)
     }
     pub(super) fn current(&self) -> &LocaleContext {
         let slot = (self.published.load(Ordering::Acquire) & SLOT_MASK) as usize;
-        self.contexts[slot].get().expect("published locale was prepared")
+        self.contexts[slot].get().expect("published locale was prepared").as_ref()
     }
     pub(super) fn epoch(&self) -> u64 { self.published.load(Ordering::Acquire) >> SLOT_BITS }
     pub(super) fn prepare(&self, preference: Preference) -> Result<PreparedLocale, PrepareError> {
@@ -83,7 +87,7 @@ impl Registry {
             let context = resolve(&self.inputs, preference)?;
             // Another preparer may have won this same finite slot. Its inputs
             // are identical; discard our temporary context, never leak it.
-            let _ = slot.set(context);
+            let _ = slot.set(Box::new(context));
         }
         Ok(PreparedLocale { preference, previous })
     }
