@@ -6,8 +6,10 @@ playback state. This application runs directly on the television.
 
 **Development repository.** The imported source includes both presentations and
 major provider families, but full shared-player parity and physical-TV acceptance
-have not been established. This repository has not published an installable
-release. See [the migration plan](docs/port-plan.md).
+have not been established. The release pipeline has published a beta,
+`v0.3.3-beta.1`; no stable release has been published. See
+[the native release process](docs/native-release-process.md) and
+[the migration plan](docs/port-plan.md).
 
 ## Source and architecture
 
