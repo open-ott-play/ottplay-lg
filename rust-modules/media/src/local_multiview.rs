@@ -14,6 +14,7 @@ pub enum Error {
     Unsupported,
     Source,
     SourceDenied,
+    LostProviderLease,
     SourceInterrupted,
     Playlist,
     Decode,
@@ -131,6 +132,7 @@ pub(crate) struct Control {
     pub seekable: AtomicBool,
     pub hls_origin: OnceLock<String>,
     pub hls_live: AtomicBool,
+    pub video_decoded: AtomicBool,
     pub hls_request: AtomicU64,
     pub duration_us: AtomicI64,
     pub seek: Mutex<Option<(u64, i64)>>,
@@ -193,7 +195,6 @@ impl Drop for WorkerPermit {
 }
 pub struct Session {
     control: Arc<Control>,
-    video_seen: bool,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Session {
@@ -224,6 +225,7 @@ impl Session {
             seekable: AtomicBool::new(false),
             hls_origin: OnceLock::new(),
             hls_live: AtomicBool::new(false),
+            video_decoded: AtomicBool::new(false),
             hls_request: AtomicU64::new(0),
             duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
@@ -253,7 +255,6 @@ impl Session {
         .ok_or(Error::Thread)?;
         Ok(Self {
             control,
-            video_seen: false,
             worker: Some(handle),
         })
     }
@@ -283,7 +284,7 @@ impl Session {
         }
         if let Some((generation, f)) = m.video.take() {
             if generation == self.control.timeline.load(Ordering::Acquire) {
-                self.video_seen = true;
+                self.control.video_decoded.store(true, Ordering::Release);
                 return Some(Event::Video(f));
             }
         }
@@ -376,7 +377,7 @@ impl Session {
     /// An opted-in live HLS gateway and the latest completed leaf/segment GET's start order.
     /// Origin discovery alone has a zero receipt. No path, query or playback ID escapes the worker.
     pub fn hls_handoff(&self) -> Option<(String, u64)> {
-        if !self.video_seen { return None; }
+        if !self.control.video_decoded.load(Ordering::Acquire) { return None; }
         self.hls_handoff_lease()
     }
 
@@ -403,13 +404,13 @@ mod tests {
     use super::*;
     #[test]
     fn starting_live_gateway_has_a_retirement_lease_before_its_first_video() {
-        let mut session = manual_session();
+        let session = manual_session();
         assert!(session.hls_handoff_lease().is_none());
         session.control.hls_origin.set("http://gateway.invalid:8080".into()).unwrap();
         session.control.hls_live.store(true, Ordering::Release);
         assert_eq!(session.hls_handoff_lease(), Some(("http://gateway.invalid:8080".into(), 0)));
         assert!(session.hls_handoff().is_none());
-        session.video_seen = true;
+        session.control.video_decoded.store(true, Ordering::Release);
         assert_eq!(session.hls_handoff(), session.hls_handoff_lease());
         session.control.hls_live.store(false, Ordering::Release);
         assert!(session.hls_handoff_lease().is_none());
@@ -436,7 +437,6 @@ mod tests {
     }
     fn manual_session() -> Session {
         Session {
-            video_seen: false,
             control: Arc::new(Control {
                 cancel: AtomicBool::new(false),
                 held: None,
@@ -449,6 +449,7 @@ mod tests {
                 seekable: AtomicBool::new(true),
                 hls_origin: OnceLock::new(),
                 hls_live: AtomicBool::new(false),
+                video_decoded: AtomicBool::new(false),
                 hls_request: AtomicU64::new(0),
                 duration_us: AtomicI64::new(0),
                 seek: Mutex::new(None),

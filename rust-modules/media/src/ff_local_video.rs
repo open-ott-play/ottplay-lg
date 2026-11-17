@@ -36,12 +36,16 @@ fn provider_reply(bytes: &[u8]) -> Option<Error> {
         return Some(Error::SourceInterrupted);
     }
     let text = text.strip_prefix(b"<h1>").and_then(|t| t.strip_suffix(b"</h1>")).unwrap_or(text);
-    (text == DENIED_RESPONSE).then_some(Error::SourceDenied)
+    match text {
+        DENIED_RESPONSE | b"Forbidden (No client session found)" => Some(Error::SourceDenied),
+        b"No stream id found" => Some(Error::Source),
+        _ => None,
+    }
 }
 
 fn open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
     if c.stopped() { Error::Cancelled }
-    else if matches!(error, crate::curlio::OpenErr::Status(401 | 403)) { Error::SourceDenied }
+    else if matches!(error, crate::curlio::OpenErr::Status(401 | 403 | 429)) { Error::SourceDenied }
     else { Error::Source }
 }
 
@@ -94,10 +98,31 @@ impl Remote {
         self.prefix.clear();
         Ok(())
     }
-    fn fetch(&mut self, url: &str, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
+    /// A successful lookup of an already-playing gateway session can return one of these exact
+    /// HTML bodies after the provider stopped that stream. An authentication/limit status, a
+    /// denial opening the source itself, and an arbitrary HTML body retain their ordinary errors.
+    fn provider_error(&self, bytes: &[u8], existing: Option<&str>, c: &Control) -> Option<Error> {
+        let error = provider_reply(bytes)?;
+        let lost = matches!(bytes.trim_ascii(), b"<h1>No stream id found</h1>"
+            | b"<h1>Forbidden (No client found)</h1>" | b"<h1>Forbidden (No client session found)</h1>");
+        if lost && self.source.status() == 200 && c.video_decoded.load(Ordering::Acquire)
+            && c.hls_live.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
+        {
+            if let (Some(request), Some(origin)) = (existing, c.hls_origin.get()) {
+                if crate::local_multiview::hls_handoff_origin(request).as_ref() == Some(origin)
+                    && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
+                {
+                    return Some(Error::LostProviderLease);
+                }
+            }
+        }
+        Some(error)
+    }
+
+    fn fetch(&mut self, url: &str, cap: usize, is_segment: bool, c: &Control) -> Result<Vec<u8>, Error> {
         self.reopen(url, c)?;
         let bytes = collect(self, cap, c)?;
-        if let Some(error) = provider_reply(&bytes) { return Err(error); }
+        if let Some(error) = self.provider_error(&bytes, is_segment.then_some(url), c) { return Err(error); }
         Ok(bytes)
     }
     fn deadline(&self) -> Instant {
@@ -215,15 +240,18 @@ struct Manifest {
 }
 impl Manifest {
     fn from_remote(remote: &mut Remote, c: &Control) -> Result<Self, Error> {
+        Self::read(remote, None, c)
+    }
+    fn read(remote: &mut Remote, existing: Option<&str>, c: &Control) -> Result<Self, Error> {
         let effective_url = remote.source.effective_url().to_owned();
         resource(&effective_url)?;
         let bytes = collect(remote, 512 * 1024, c)?;
-        if let Some(error) = provider_reply(&bytes) { return Err(error); }
+        if let Some(error) = remote.provider_error(&bytes, existing, c) { return Err(error); }
         Ok(Self { effective_url, bytes })
     }
     fn fetch(remote: &mut Remote, url: &str, c: &Control) -> Result<Self, Error> {
         remote.reopen(url, c)?;
-        Self::from_remote(remote, c)
+        Self::read(remote, Some(url), c)
     }
     fn text(&self) -> Result<&str, Error> {
         std::str::from_utf8(&self.bytes).map_err(|_| Error::Playlist)
@@ -574,7 +602,7 @@ impl Hls {
             self.arm_request(c, &mut deadline)?;
             if !self.init_sent {
                 if let Some(url) = &self.playlist.init {
-                    self.bytes = self.remote.fetch(url, self.cap, c)?;
+                    self.bytes = self.remote.fetch(url, self.cap, false, c)?;
                     if self.bytes.is_empty() { return Err(Error::Source); }
                     self.pos = 0;
                 }
@@ -583,7 +611,7 @@ impl Hls {
             }
             if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
                 let order = admission_read_started(&segment.url, c);
-                let result = self.remote.fetch(&segment.url, self.cap, c);
+                let result = self.remote.fetch(&segment.url, self.cap, true, c);
                 match result {
                     Ok(bytes) if !bytes.is_empty() => {
                         if order.is_some() && media_segment_bytes(&bytes) {
@@ -1231,6 +1259,50 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_established_leaf_is_distinct_from_denial_and_does_not_reopen_the_master() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let opt_in = "OTT-Multiview-Admission: refresh-peers-v1\r\n";
+        let missing = b"<h1>No stream id found</h1>";
+        let missing_viewer = b"<h1>Forbidden (No client found)</h1>";
+        let missing_session = b"<h1>Forbidden (No client session found)</h1>";
+        let server = SessionServer::new(vec![
+            Reply::ok(opt_in, master), Reply::ok("", live),
+            Reply::ok("", missing_viewer), Reply::ok("", missing),
+            Reply::ok("", missing_session), Reply::ok("", missing_viewer), Reply::ok("", missing),
+            Reply::ok("", b"<h1>Forbidden</h1>"),
+            Reply { status: 403, ..Reply::ok("", missing_viewer) },
+            Reply { status: 429, ..Reply::ok("", missing_viewer) },
+            Reply { status: 401, ..Reply::ok("", missing_viewer) },
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/source.m3u8", server.base), 1024, &c).unwrap();
+        assert_eq!(hls.refresh(&c), Err(Error::SourceDenied), "never-played lease");
+        c.video_decoded.store(true, Ordering::Release);
+        c.paused.store(true, Ordering::Release);
+        assert_eq!(hls.refresh(&c), Err(Error::Source), "paused reader");
+        c.paused.store(false, Ordering::Release);
+        assert_eq!(hls.refresh(&c), Err(Error::LostProviderLease));
+        assert_eq!(hls.read(&mut [0], &c), Err(Error::LostProviderLease));
+        assert_eq!(hls.refresh(&c), Err(Error::LostProviderLease));
+        assert_eq!(hls.refresh(&c), Err(Error::Playlist), "unspecified forbidden body");
+        for _ in 0..3 { assert_eq!(hls.read(&mut [0], &c), Err(Error::SourceDenied)); }
+        let heads = server.heads();
+        assert_eq!(heads.len(), 11, "one request per case, no retry of refusal");
+        assert_eq!(heads.iter().filter(|line| line.starts_with("GET /source.m3u8 ")).count(), 1);
+
+        let server = SessionServer::new(vec![Reply::ok("", live), Reply::ok("", missing)]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &c).unwrap();
+        c.video_decoded.store(true, Ordering::Release);
+        assert_eq!(hls.refresh(&c), Err(Error::Source), "unmarked source");
+        let server = SessionServer::new(vec![Reply::ok(opt_in, missing_viewer)]);
+        assert!(matches!(Hls::open(format!("{}/source.m3u8", server.base), 1024, &c), Err(Error::SourceDenied)));
+    }
 
     #[test]
     fn handoff_reports_only_real_live_reads_started_after_retirement() {
