@@ -12,7 +12,12 @@ fn paired_live_refresh_accepts_overlap_but_rejects_mutation_rollback_and_skipped
     let next = window(1, 4, 3);
     assert!(refresh_valid(&first, &next, 3).is_ok());
     assert!(refresh_valid(&next, &first, 3).is_err());
-    assert!(refresh_valid(&first, &window(4, 4, 2), 3).is_err());
+    assert!(matches!(refresh_valid(&first, &window(4, 4, 2), 3),
+        Err(HlsExit::OpenFailed { reason: "HLS live window advanced past playback", outcome: TraceOutcome::ServerState })));
+    let mut different = window(4, 4, 2);
+    different.media.url = "https://fixture.invalid/other.m3u8".into();
+    assert!(matches!(refresh_valid(&first, &different, 3),
+        Err(HlsExit::Failed("Live HLS rendition source changed"))));
     let mut changed = next.clone();
     changed.epochs[0] += 1;
     assert!(refresh_valid(&first, &changed, 3).is_err());
@@ -91,7 +96,7 @@ fn paired_live_advancing_wrong_audio_epoch_cannot_extend_acquisition_deadline() 
     let previous_seek = SHARED.seek_to_ns.swap(-1,Ordering::AcqRel);
     let mut queue = crate::aq::aq_new(4096);
     let started = Instant::now();
-    let result = refresh.ensure_epoch_until(5,0,&mut *queue,started+Duration::from_millis(100));
+    let result = refresh.ensure_epoch_until(5,0,&mut *queue,&mut HlsNet { hs: std::ptr::null_mut(), curl: None },started+Duration::from_millis(100));
     crate::aq::aq_destroy(&mut *queue);
     SHARED.seek_to_ns.store(previous_seek,Ordering::Release);
     server.join().unwrap();
@@ -99,6 +104,44 @@ fn paired_live_advancing_wrong_audio_epoch_cannot_extend_acquisition_deadline() 
     assert!(refresh.progress > before,"a real sequence advance occurred inside the wrong epoch");
     assert_eq!(refresh.window.last_sequence(),1);
     assert!(started.elapsed() < Duration::from_secs(1),"publication progress cannot reset the fixed epoch budget");
+}
+
+#[test]
+fn paired_live_slow_manifest_cannot_outlive_the_epoch_acquisition_deadline() {
+    use std::io::Read;
+    let _serial = crate::curlio::cookie_tests::curl();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/audio.m3u8", listener.local_addr().unwrap());
+    let manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-DISCONTINUITY-SEQUENCE:4\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00.000000000Z\n#EXTINF:1,\na.ts\n";
+    // Hold the response headers until the client returns or the guard expires.
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let timeout = Instant::now() + Duration::from_secs(2);
+        let mut socket = loop {
+            if let Ok((socket, _)) = listener.accept() { break socket; }
+            assert!(Instant::now() < timeout);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        socket.set_nonblocking(false).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        socket.read_exact(&mut [0; 1]).unwrap();
+        let _ = wait.recv_timeout(Duration::from_secs(2));
+    });
+    let mut refresh = Refresh::new(parse(&url, manifest).unwrap());
+    let previous_seek = SHARED.seek_to_ns.swap(-1, Ordering::AcqRel);
+    let mut queue = crate::aq::aq_new(4096);
+    let mut net = HlsNet { hs: std::ptr::null_mut(), curl: None };
+    let start = Instant::now();
+    let result = refresh.ensure_epoch_until(5, 0, &mut *queue, &mut net, start + Duration::from_millis(200));
+    let elapsed = start.elapsed();
+    let _ = release.send(());
+    server.join().unwrap();
+    crate::aq::aq_destroy(&mut *queue);
+    SHARED.seek_to_ns.store(previous_seek, Ordering::Release);
+    assert!(matches!(result, Err(HlsExit::OpenFailed {outcome: TraceOutcome::Deadline, ..})));
+    assert!(elapsed < Duration::from_secs(1), "epoch deadline was extended: {elapsed:?}");
+    assert_eq!(refresh.window.last_sequence(), 0);
 }
 
 #[test]

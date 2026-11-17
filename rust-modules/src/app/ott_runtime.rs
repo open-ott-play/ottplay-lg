@@ -884,6 +884,7 @@ pub(super) struct Runtime {
     classic_source: classic_source::State,
     continuity: continuity::Continuity,
     live_health: live_health::Tracker<plx_media::route::PlaybackIdentity>,
+    live_stall: Option<live_health::PresentationWatch>,
     continuity_retry_log: Option<continuity_diagnostics::Pending>,
     play_target: Option<PlaybackRequest>,
     classic_play_handoff: classic_play_handoff::State,
@@ -1385,6 +1386,7 @@ impl Runtime {
             classic_source: classic_source::State::default(),
             continuity: continuity::Continuity::new(0, None),
             live_health: Default::default(),
+            live_stall: None,
             continuity_retry_log: None,
             play_target: None,
             classic_play_handoff: Default::default(),
@@ -2420,7 +2422,7 @@ impl Runtime {
     }
     /// Renew recovery only from real progress of the exact admitted live decoder.
     /// A loading/held/cancelled or replaced owner supplies no health evidence.
-    fn observe_live_health(&mut self, app: &App) {
+    fn observe_live_health(&mut self, app: &mut App) {
         let identity = plx_media::route::playback_identity(&app.player.session);
         let position = plx_media::player::playpos_ns();
         let eligible = app.running && playback_allowed(app)
@@ -2439,7 +2441,46 @@ impl Runtime {
                     position_ms: position as u64 / 1_000_000, now_ms: self.now_ms(),
                 })
             });
+        let epoch = app.adapters.player.engine().map(|engine| engine.native_epoch);
+        let stall_sample = sample.as_ref().zip(epoch).filter(|(sample, epoch)| {
+            *epoch != 0 && self.continuity.accepts_end(sample.generation, sample.selection_id)
+                && !plx_media::player::rebuffering() && !retained_request_replaces_installed(app)
+                && !multiview_output::owns_picture(self, app)
+        }).map(|(sample, epoch)| live_health::PresentationSample {
+            generation: sample.generation, play_generation: sample.play_generation, epoch,
+            now_ms: sample.now_ms, position_ms: sample.position_ms, callbacks: plx_media::player::frames(),
+        });
         self.continuity.observe_live_progress(&mut self.live_health, sample);
+        if live_health::PresentationWatch::stopped(&mut self.live_stall, stall_sample)
+            && self.play_work_allowed()
+            && matches!(self.track_selection_kiosk(), Ok(crate::app::ott_kiosk_policy::State::Off))
+            && plx_media::player::report::video_evidence_now(
+                &app.player.session, &mut app.adapters.player,
+            ).is_some()
+        {
+            self.disconnect_live(app, "Live stream stalled; retrying the same channel");
+        }
+    }
+
+    /// Terminal live EOF and a stopped presentation both reuse the existing
+    /// same-channel cooldown and freshly resolve the current source.
+    fn disconnect_live(&mut self, app: &mut App, message: &str) {
+        let Some(current) = self.playing.as_ref().map(|p| p.selection_id.clone()) else { return; };
+        if !self.continuity.accepts_end(self.generation, &current) { return; }
+        let decision = self.continuity.live_disconnected(self.generation, &current, self.now_ms());
+        self.checkpoint(app, false);
+        self.failed_playback = failed_playback::capture(self, app);
+        self.playing = None;
+        self.resume_floor = None;
+        self.release_active_lease();
+        plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
+        if let Some(page) = bridge::player_mut(&mut app.pages) {
+            page.transport_reset(false);
+        }
+        plx_media::route::cancel_play(&mut app.player.session);
+        self.status = message.into();
+        self.apply_continuity(decision);
+        self.changed();
     }
     fn reconcile_failure(&mut self, app: &mut App) {
         if self.current_kiosk_pin_owned(app) && !self.archive_playback_owned(app) {
@@ -5344,8 +5385,11 @@ fn recoverable_live_preparation(reason: &str) -> bool {
 /// attribution; unknown/malformed/refused sources and decoder failures stay terminal.
 fn recoverable_live_transport(details: Option<plx_media::player::report::FailureDetails>) -> bool {
     use plx_media::player::report::IoFailureDetails;
-    use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome};
-    matches!(details.filter(|details| details.pipeline_error == 0).and_then(|details| details.io_failure), Some(IoFailureDetails::Hls {
+    use plx_telemetry::telemetry::classes::{DemuxExitClass, TraceOutcome, TransportClass};
+    matches!(details.filter(|details| details.pipeline_error == 0).and_then(|details| details.io_failure), Some(IoFailureDetails::SourceIo {
+        transport: TransportClass::Partial | TransportClass::RecvError | TransportClass::SendError
+            | TransportClass::GotNothing | TransportClass::Timeout | TransportClass::Http2,
+    } | IoFailureDetails::Hls {
         exit: DemuxExitClass::HlsTransportOpenFailed | DemuxExitClass::HlsTransportFailed
             | DemuxExitClass::HlsPlaylistFetchFailed,
         outcome: Some(TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState),
@@ -7992,7 +8036,7 @@ fn handle_action(
                     (
                         "New profile source",
                         String::new(),
-                        true,
+                        false,
                         16384,
                         OttTextPolicy::Literal,
                     )
@@ -8030,7 +8074,7 @@ fn handle_action(
                             .ok_or("Select a profile first")?
                             .source
                             .clone(),
-                        true,
+                        false,
                         16384,
                         OttTextPolicy::Literal,
                     )
@@ -8289,28 +8333,7 @@ pub(super) fn finish_catalog_playback(app: &mut App) -> bool {
     {
         // A live source has no successful final episode. Retain its exact row
         // and retry through the existing bounded, generation-fenced runner.
-        let accepted = runtime.continuity.accepts_end(runtime.generation, &current);
-        let decision = runtime.continuity.live_disconnected(runtime.generation, &current, runtime.now_ms());
-        if accepted {
-            // A terminal live decoder has the same source-bound catalogue
-            // recovery as an attributed error, without lending transport
-            // authority or advancing to a different channel.
-            runtime.checkpoint(app, false);
-            runtime.failed_playback = failed_playback::capture(&runtime, app);
-            runtime.playing = None;
-            runtime.resume_floor = None;
-            runtime.release_active_lease();
-            plx_media::player::stop_bufferfeed(&mut app.player.session, &mut app.adapters.player);
-            if let Some(page) = bridge::player_mut(&mut app.pages) {
-                page.transport_reset(false);
-            }
-            plx_media::route::cancel_play(&mut app.player.session);
-            runtime.status = if runtime.continuity.pending_retry().is_some() {
-                "Live stream ended; retrying the same channel"
-            } else { "Live stream ended" }.into();
-            runtime.apply_continuity(decision);
-            runtime.changed();
-        }
+        runtime.disconnect_live(app, "Live stream ended; retrying the same channel");
         app.ott = Some(runtime);
         return true;
     }

@@ -266,7 +266,7 @@ fn nodes_only_proof_rejects_source_owner_navigation_and_status_replacement() {
 // Draw the actual already-mounted screen using the same current host views,
 // measurement and focus. Only the painter is recording; no alternate Form or
 // Table is built by this test, and no GL frame clear is permitted.
-fn painted_catalog(app: &mut App) -> Vec<plx_ui::draw_census::Run> {
+pub(super) fn painted_catalog(app: &mut App) -> Vec<plx_ui::draw_census::Run> {
     let owner = bridge::ott_ui_target(&app.pages).expect("mounted catalogue owner");
     let parts = app.pages.parts(Tick { ms: app.loop_t, dt_us: 0 });
     let split = plx_ui::dispatch::Rig::<bridge::AppHost>::split(&mut app.bridge);
