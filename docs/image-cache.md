@@ -74,9 +74,8 @@ endpoint changes the phase label and enables or refuses image responses without 
 `GET /__stress/stats` reports both phases' request and distinct-key counts. Neither endpoint logs
 Plex query tokens.
 
-The device-owning lane follows [tv-lock](../.agents/skills/tv-lock/SKILL.md) and
-[tv-session](../.agents/skills/tv-session/SKILL.md), using the debug installation. Read its runtime
-root and event-log path with `make -s print-rundir FLAVOR=debug` and
+The device-owning lane follows the `tv-lock` and `tv-session` skills, using the debug installation.
+Read its runtime root and event-log path with `make -s print-rundir FLAVOR=debug` and
 `make -s print-eventlog FLAVOR=debug`. `tv-session.sh up` clears triggers, so custom fixture triggers
 must be installed for a subsequent close-first `make FLAVOR=debug run` launch under the same lease.
 

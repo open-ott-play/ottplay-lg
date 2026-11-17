@@ -4,9 +4,9 @@ This is an index, not a specification. Every claim below points at the file that
 it, because those files are checked by the compiler, by the lint gate, or by a test, and prose is
 not. If this file and a pointer disagree, the pointer wins and this file is stale.
 
-The full design and migration status lives in [docs/ui-system-migration.md](docs/ui-system-migration.md).
+The full design and migration status lives in [docs/ui-system-migration.md](ui-system-migration.md).
 The rules you must follow when writing UI code live in
-[rust-modules/ui/src/CLAUDE.md](rust-modules/ui/src/CLAUDE.md). Read that before touching a screen.
+[rust-modules/ui/src/CLAUDE.md](../rust-modules/ui/src/CLAUDE.md). Read that before touching a screen.
 
 ## The surface
 
@@ -74,7 +74,7 @@ can grade it. `widgets.rs`'s `hero_scrim_a` doc says it plainly: the contract "i
 is the arithmetic the anchor table in this module's tests reads, so the promise and the paint cannot
 come from two different curves."
 
-- Vertical ramp, [rust-modules/ui/src/landing_hero.rs](rust-modules/ui/src/landing_hero.rs):
+- Vertical ramp, [rust-modules/ui/src/landing_hero.rs](../rust-modules/ui/src/landing_hero.rs):
   zero above `HERO_BASE_SCRIM_Y0` (0.34 of the screen, 367), `foot * MID_WEIGHT` at `KNEE_Y` (0.65
   of the screen, 702), and `foot = 0.30 + 0.64 * hero_a` at the bottom. The text stack builds upward
   from `TEXT_BOTTOM` 692 in a column of `COL_W` 660.
