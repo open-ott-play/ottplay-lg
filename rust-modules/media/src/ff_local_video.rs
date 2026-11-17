@@ -421,6 +421,27 @@ fn poll_wait(checked: Instant, target: Duration, now: Instant) -> Duration {
     (checked + target.min(Duration::from_secs(2)) / 2).saturating_duration_since(now)
 }
 
+fn admission_read_started(url: &str, c: &Control) -> Option<u64> {
+    if !c.hls_live.load(Ordering::Acquire) { return None; }
+    let admitted = c.hls_origin.get()?;
+    (crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(admitted))
+        .then(crate::local_multiview::hls_request_started)
+}
+
+fn finish_admission_read(order: Option<u64>, effective_url: &str, c: &Control) {
+    if let Some(order) = order {
+        if !c.stopped() && crate::local_multiview::hls_handoff_origin(effective_url).as_ref() == c.hls_origin.get() {
+            c.hls_request.store(order, Ordering::Release);
+        }
+    }
+}
+
+fn media_segment_bytes(bytes: &[u8]) -> bool {
+    // A 200 HTML or text reply is not a media read. Confirm MPEG-TS sync or a fragmented MP4 box.
+    (bytes.len() >= 188 * 2 && bytes[0] == 0x47 && bytes[188] == 0x47)
+        || (bytes.len() >= 8 && matches!(&bytes[4..8], b"styp" | b"sidx" | b"moof" | b"mdat"))
+}
+
 struct Hls {
     remote: Remote,
     url: String,
@@ -450,13 +471,30 @@ impl Hls {
             None => Remote::open(&url, false, c)?,
         };
         let first = remote.startup(&url, false, c, Manifest::from_remote)?;
+        let source_origin = crate::local_multiview::hls_handoff_origin(&url);
+        let advertised = remote.source.multiview_refresh_peers()
+            && source_origin.is_some()
+            && crate::local_multiview::hls_handoff_origin(&first.effective_url) == source_origin;
         let manifest = if let Some(child) = first.variant()? {
+            if advertised {
+                if let Some(origin) = &source_origin {
+                    c.hls_origin.get_or_init(|| origin.clone());
+                    c.hls_live.store(true, Ordering::Release);
+                }
+            }
             remote.startup(&child, true, c, Manifest::from_remote)?
         } else {
             first
         };
         url = manifest.effective_url.clone();
         let playlist = manifest.media()?;
+        let admitted_origin = source_origin.filter(|origin| {
+            !playlist.ended && (advertised || remote.source.multiview_refresh_peers())
+                && crate::local_multiview::hls_handoff_origin(&url).as_ref() == Some(origin)
+        });
+        let admitted = admitted_origin.is_some();
+        if let Some(origin) = admitted_origin { let _ = c.hls_origin.set(origin); }
+        c.hls_live.store(admitted, Ordering::Release);
         let start = if playlist.ended {
             0
         } else {
@@ -479,11 +517,14 @@ impl Hls {
         })
     }
     fn refresh(&mut self, c: &Control) -> Result<(), Error> {
+        let order = admission_read_started(&self.url, c);
         let manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
         let fresh = manifest.media()?;
         if fresh.init != self.playlist.init {
             return Err(Error::Unsupported);
         }
+        if fresh.ended { c.hls_live.store(false, Ordering::Release); }
+        else { finish_admission_read(order, &manifest.effective_url, c); }
         self.checked = Instant::now();
         self.url = manifest.effective_url;
         self.playlist = fresh;
@@ -541,9 +582,13 @@ impl Hls {
                 if !self.bytes.is_empty() { break; }
             }
             if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
+                let order = admission_read_started(&segment.url, c);
                 let result = self.remote.fetch(&segment.url, self.cap, c);
                 match result {
                     Ok(bytes) if !bytes.is_empty() => {
+                        if order.is_some() && media_segment_bytes(&bytes) {
+                            finish_admission_read(order, self.remote.source.effective_url(), c);
+                        }
                         self.bytes = bytes;
                         self.pos = 0;
                         self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
@@ -1186,6 +1231,86 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_reports_only_real_live_reads_started_after_retirement() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        use crate::local_multiview::hls_handoff_barrier;
+        let _serial = curl();
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25\nleaf.m3u8\n";
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let mut ts = [0; 376];
+        ts[0] = 0x47;
+        ts[188] = 0x47;
+        let server = SessionServer::new(vec![
+            Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\n", master),
+            Reply::ok("", live), Reply::ok("", &ts), Reply::ok("", live),
+            Reply::ok("", b"<h1>Forbidden (No client found)</h1>"),
+            Reply::ok("", &[&live[..], b"#EXT-X-ENDLIST\n"].concat()),
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/source.m3u8?private=1", server.base), 1024, &c).unwrap();
+        assert_eq!(c.hls_origin.get(), Some(&server.base));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), 0, "opening a session is not a refresh");
+        let old = admission_read_started(&hls.url, &c);
+        let fence = hls_handoff_barrier();
+        finish_admission_read(old, &hls.url, &c);
+        assert!(c.hls_request.load(Ordering::Acquire) <= fence, "in-flight GET began before retirement");
+        assert_eq!(admission_read_started("https://other.example/leaf.m3u8", &c), None);
+        let mut out = [0];
+        assert_eq!(hls.read(&mut out, &c), Ok(1));
+        let received = c.hls_request.load(Ordering::Acquire);
+        assert!(received > fence);
+        assert_eq!(hls.read(&mut out, &c), Ok(1));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), received, "cached bytes are not another GET");
+        hls.refresh(&c).unwrap();
+        let refreshed = c.hls_request.load(Ordering::Acquire);
+        assert!(refreshed > received);
+        assert_eq!(hls.refresh(&c), Err(Error::SourceDenied));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), refreshed);
+        hls.refresh(&c).unwrap();
+        assert!(!c.hls_live.load(Ordering::Acquire));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), refreshed);
+    }
+
+    #[test]
+    fn handoff_requires_approved_response_on_original_origin_and_live_media() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let ended = [&live[..], b"#EXT-X-ENDLIST\n"].concat();
+        for (header, playlist) in [
+            ("", &live[..]), ("OTT-Multiview-Admission: other\r\n", &live[..]),
+            ("OTT-Multiview-Admission: refresh-peers-v1\r\n", &ended[..]),
+        ] {
+            let server = SessionServer::new(vec![Reply::ok(header, playlist)]);
+            let c = Control::default();
+            Hls::open(format!("{}/master.m3u8", server.base), 1024, &c).unwrap();
+            assert!(c.hls_origin.get().is_none());
+        }
+        let redirect = Reply {
+            status: 302,
+            headers: "Location: /final.m3u8\r\nOTT-Multiview-Admission: refresh-peers-v1\r\n".into(),
+            body: vec![], required: None,
+        };
+        let server = SessionServer::new(vec![redirect, Reply::ok("", live)]);
+        let c = Control::default();
+        Hls::open(format!("{}/redirect.m3u8", server.base), 1024, &c).unwrap();
+        assert!(c.hls_origin.get().is_none(), "a redirect cannot opt in its destination");
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25\nvod.m3u8\n";
+        let server = SessionServer::new(vec![
+            Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\n", master), Reply::ok("", &ended),
+        ]);
+        let c = Control::default();
+        Hls::open(format!("{}/master.m3u8", server.base), 1024, &c).unwrap();
+        assert!(!c.hls_live.load(Ordering::Acquire), "a finite leaf withdraws provisional master admission");
+        use crate::local_multiview::hls_handoff_origin as origin;
+        assert_eq!(origin("https://Example.org:443/private/abc?token=value"), Some("https://example.org:443".to_owned()));
+        for url in ["https://user:password@example.org/path", "ftp://host/file", "https://example.org/a#x"] {
+            assert_eq!(origin(url), None);
+        }
+        assert!(!media_segment_bytes(b"<h1>No stream id found</h1>"));
+    }
 
     #[test]
     fn local_slot_keeps_its_private_cookie_through_segment_and_playlist_refresh() {

@@ -3,7 +3,7 @@
 use crate::ff::ExternalSource;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
 
@@ -97,6 +97,26 @@ pub(crate) struct Mailbox {
     pub audio: std::collections::VecDeque<(u64, PcmChunk)>,
     pub terminal: Option<Result<(), Error>>,
 }
+/// A completed request counts after a retirement only if it also *started* afterwards.
+static HLS_REQUEST_ORDER: AtomicU64 = AtomicU64::new(0);
+
+/// Sample after the outgoing reader has fully retired. A sibling's receipt must exceed this value.
+pub fn hls_handoff_barrier() -> u64 {
+    HLS_REQUEST_ORDER.load(Ordering::SeqCst)
+}
+
+pub(crate) fn hls_request_started() -> u64 {
+    HLS_REQUEST_ORDER.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Canonical, credential-free origin shared by the scheduler and HLS transport.
+pub fn hls_handoff_origin(url: &str) -> Option<String> {
+    if url.contains('#') { return None; }
+    let url = plx_data::ott::http_url(url)?;
+    let (origin, _) = plx_net::net::origin::split(&url);
+    Some(origin.base().to_ascii_lowercase())
+}
+
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
@@ -109,6 +129,9 @@ pub(crate) struct Control {
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
     pub seekable: AtomicBool,
+    pub hls_origin: OnceLock<String>,
+    pub hls_live: AtomicBool,
+    pub hls_request: AtomicU64,
     pub duration_us: AtomicI64,
     pub seek: Mutex<Option<(u64, i64)>>,
     pub mailbox: Mutex<Mailbox>,
@@ -170,6 +193,7 @@ impl Drop for WorkerPermit {
 }
 pub struct Session {
     control: Arc<Control>,
+    video_seen: bool,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Session {
@@ -198,6 +222,9 @@ impl Session {
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
             seekable: AtomicBool::new(false),
+            hls_origin: OnceLock::new(),
+            hls_live: AtomicBool::new(false),
+            hls_request: AtomicU64::new(0),
             duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
@@ -226,6 +253,7 @@ impl Session {
         .ok_or(Error::Thread)?;
         Ok(Self {
             control,
+            video_seen: false,
             worker: Some(handle),
         })
     }
@@ -255,6 +283,7 @@ impl Session {
         }
         if let Some((generation, f)) = m.video.take() {
             if generation == self.control.timeline.load(Ordering::Acquire) {
+                self.video_seen = true;
                 return Some(Event::Video(f));
             }
         }
@@ -344,6 +373,21 @@ impl Session {
             && !self.control.retired.load(Ordering::Acquire)
             && self.control.seekable.load(Ordering::Acquire)
     }
+    /// An opted-in live HLS gateway and the latest completed leaf/segment GET's start order.
+    /// Origin discovery alone has a zero receipt. No path, query or playback ID escapes the worker.
+    pub fn hls_handoff(&self) -> Option<(String, u64)> {
+        if !self.video_seen { return None; }
+        self.hls_handoff_lease()
+    }
+
+    /// The gateway can register a confirmed master before its leaf or first picture arrives.
+    /// Keep that fact available for retirement while the decoder is still starting.
+    pub fn hls_handoff_lease(&self) -> Option<(String, u64)> {
+        if !self.control.hls_live.load(Ordering::Acquire) { return None; }
+        let origin = self.control.hls_origin.get()?;
+        Some((origin.clone(), self.control.hls_request.load(Ordering::Acquire)))
+    }
+
     pub fn is_retired(&self) -> bool {
         self.control.retired.load(Ordering::Acquire)
             && self.worker.as_ref().is_none_or(|w| w.is_finished())
@@ -357,6 +401,21 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn starting_live_gateway_has_a_retirement_lease_before_its_first_video() {
+        let mut session = manual_session();
+        assert!(session.hls_handoff_lease().is_none());
+        session.control.hls_origin.set("http://gateway.invalid:8080".into()).unwrap();
+        session.control.hls_live.store(true, Ordering::Release);
+        assert_eq!(session.hls_handoff_lease(), Some(("http://gateway.invalid:8080".into(), 0)));
+        assert!(session.hls_handoff().is_none());
+        session.video_seen = true;
+        assert_eq!(session.hls_handoff(), session.hls_handoff_lease());
+        session.control.hls_live.store(false, Ordering::Release);
+        assert!(session.hls_handoff_lease().is_none());
+        assert!(session.hls_handoff().is_none());
+    }
+
     #[test]
     fn budgets_are_closed_and_bounded() {
         assert!(Limits::default().valid());
@@ -377,6 +436,7 @@ mod tests {
     }
     fn manual_session() -> Session {
         Session {
+            video_seen: false,
             control: Arc::new(Control {
                 cancel: AtomicBool::new(false),
                 held: None,
@@ -387,6 +447,9 @@ mod tests {
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
                 seekable: AtomicBool::new(true),
+                hls_origin: OnceLock::new(),
+                hls_live: AtomicBool::new(false),
+                hls_request: AtomicU64::new(0),
                 duration_us: AtomicI64::new(0),
                 seek: Mutex::new(None),
                 mailbox: Mutex::new(Mailbox::default()),
