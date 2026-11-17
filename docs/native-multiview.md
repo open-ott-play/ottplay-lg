@@ -73,18 +73,18 @@ source, decoder or renderer stage. A new source attempt clears the old reason.
 
 ## Using local scenes
 
-Open **Settings → Multiview** and choose a layout. On the video surface,
-press Back to open its controls, then use **Choose video / active slot** to pick
-a source for each window. The slot menu also selects the active video and audio owner. On the
-video surface, the shared focus controls and Magic Remote pointer use the same
-rectangles as rendering. Back opens the Multiview controls; Close restores the
-previous ordinary source only after retirement and fresh authorization.
-Inside those controls, Back returns from source selection to Videos, then to
-Layouts and audio, then to the initiating menu. Each return retires the old
-selection receipt and focuses the same window or the Videos control in its
-parent. If its source is no longer authorized, Back safely leaves
-the controls. A nonempty window also offers **Stop**, which retires only that
-window and leaves the other videos and the saved ordinary provider alone.
+Open **Settings → Multiview** and choose a layout. Move the highlight with the
+arrow keys, then press **OK** to activate that window and open its **Channel
+list**. With the Magic Remote pointer, click the window to do the same. Clicking
+near the top of a window opens its **Menu**. Both gestures follow the same
+rectangles as rendering, including the inset in picture-in-picture.
+
+Press **Yellow** or **M** for the active window's **Menu**. It offers source
+selection, play or pause, previous and next, restart, audio selection and stop
+when those actions are available. **Blue** or **I** reveals the active
+window's **Info** footer. **Back** closes the list or menu to the same grid.
+Selecting a different source changes only that window. **Close multiview**
+restores the previous ordinary source after retirement and fresh authorization.
 
 On a build that advertises these capabilities, the existing CLI uses windows
 1–9 (the wire protocol uses 0–8):

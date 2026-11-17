@@ -18,6 +18,12 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
     // stale refusal. A later fresh publication must not be hidden by the cache.
     runtime.multiview_ui.published = None;
     let local = runtime.multiview_local.active();
+    use plx_appkit::multiview_chrome::Event::{OpenWindowChannels, OpenWindowMenu};
+    let window_action = match event {
+        OpenWindowChannels { slot, .. } => Some((slot, false)),
+        OpenWindowMenu { slot, .. } => Some((slot, true)),
+        _ => None,
+    };
     let owned = if local {
         runtime.multiview_local.owns_ui(&runtime, app)
     } else {
@@ -25,7 +31,8 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
             plx_media::route::playback_identity_matches(&app.player.session, identity)
         })
     };
-    if !owned {
+    if !owned || (window_action.is_some()
+        && !multiview_local_menu::can_open_window(&runtime, app)) {
         app.bridge.publish_multiview_offer(None);
         app.ott = Some(runtime);
         return;
@@ -46,6 +53,14 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
             if transition.effects.len() <= UI_EFFECT_RESERVE {
                 runtime.multiview_effects.extend(transition.effects);
                 runtime.changed();
+                if let Some((slot, menu)) = window_action {
+                    if let Some(slot) = plx_data::ott::multiview::SlotId::new(slot) {
+                        if let Err(error) = multiview_local_menu::open_window(&mut runtime, app, slot, menu) {
+                            runtime.status = error.into();
+                            runtime.changed();
+                        }
+                    }
+                }
             } else {
                 runtime.status = "Multiview control is unavailable".into();
             }
@@ -157,6 +172,7 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
     };
     match project_frame(plan, &views, state) {
         Ok(mut frame) => {
+            if runtime.multiview_local.active() { frame.enable_window_actions(); }
             runtime.multiview_ui.footers.project(&mut frame);
             for (index, notice) in publication.notices.iter().enumerate() {
                 if let Some(notice) = notice { frame.set_provider_notice(index as u8, *notice); }

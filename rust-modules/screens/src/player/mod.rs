@@ -961,14 +961,24 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
         // Page-owned modal entries receive input before this screen. The local
         // repair sheet above also wins; only an explicit scene-selection offer
         // can take directions/confirmation from the ordinary transport.
-        if let Some(frame) = H::multiview_offer(cx).filter(|frame| frame.state().input_owned) {
+        if let Some(frame) = H::multiview_offer(cx).filter(|frame| frame.state().input_owned
+            && cx.owner == plx_machine::machine::InputOwner::Entry(self.entry)) {
             match ev {
                 ScreenEvent::Input(input) => if let Some(event) = multiview_input(&frame, &input.kind) {
-                    if let Some(event) = event {
-                        use plx_appkit::multiview_chrome::Event::{ActivateSlot, FocusSlot};
-                        let (ActivateSlot { slot, .. } | FocusSlot { slot, .. }) = event;
-                        self.reveal_multiview_footer(slot, cx.tick.ms);
-                        fx.push(Fx::App(AppFx::Player(PlayerReq::Multiview(event))));
+                    match event {
+                        Some(WindowInput::Scene(event)) => {
+                            use plx_appkit::multiview_chrome::Event::*;
+                            let (ActivateSlot { slot, .. } | FocusSlot { slot, .. }
+                                | OpenWindowChannels { slot, .. } | OpenWindowMenu { slot, .. }) = event;
+                            self.reveal_multiview_footer(slot, cx.tick.ms);
+                            fx.push(Fx::App(AppFx::Player(PlayerReq::Multiview(event))));
+                        }
+                        Some(WindowInput::Info(slot)) => self.reveal_multiview_footer(slot, cx.tick.ms),
+                        Some(WindowInput::Back) => {
+                            if let Some(footers) = &mut self.window_footers { footers.dismiss(); }
+                            plx_machine::idle::invalidate();
+                        }
+                        None => {}
                     }
                     return Handled::Yes;
                 },
@@ -1151,14 +1161,35 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
 
 /// `Some(None)` consumes a scene-selection edge without falling through to
 /// transport (key-up or a boundary); `None` leaves unrelated controls untouched.
+enum WindowInput {
+    Scene(plx_appkit::multiview_chrome::Event),
+    Info(u8),
+    Back,
+}
+
 fn multiview_input(frame: &plx_appkit::multiview_chrome::ChromeFrame,
-    kind: &InputKind<u32>) -> Option<Option<plx_appkit::multiview_chrome::Event>>
+    kind: &InputKind<u32>) -> Option<Option<WindowInput>>
 {
     use plx_appkit::multiview_chrome::Input;
     use plx_appkit::multiview_layout::{PointerAction, PointerMap};
     match *kind {
         InputKind::Key { key, sym, wcode, edge, at_edge } => {
-            let input = match consts::classify_input(key, sym, wcode) {
+            let classified = consts::classify_input(key, sym, wcode);
+            let fresh = edge == Edge::Down && !at_edge;
+            if frame.window_actions() {
+                use consts::RemoteButton;
+                let remote = consts::remote_button(sym, wcode);
+                if classified == consts::Key::Back {
+                    return Some(fresh.then_some(WindowInput::Back));
+                }
+                if remote == Some(RemoteButton::Yellow) || sym == u32::from(b'm') {
+                    return Some(if fresh { frame.window_menu().map(WindowInput::Scene) } else { None });
+                }
+                if remote == Some(RemoteButton::Blue) || sym == u32::from(b'i') {
+                    return Some(if fresh { frame.state().active.map(WindowInput::Info) } else { None });
+                }
+            }
+            let input = match classified {
                 consts::Key::Up => Input::Direction(Dir::Up),
                 consts::Key::Down => Input::Direction(Dir::Down),
                 consts::Key::Left { alt: false } => Input::Direction(Dir::Left),
@@ -1168,12 +1199,12 @@ fn multiview_input(frame: &plx_appkit::multiview_chrome::ChromeFrame,
             };
             Some(if edge != Edge::Up && !at_edge
                 && (!matches!(input, Input::Confirm) || edge == Edge::Down)
-                { frame.input(input) } else { None })
+                { frame.input(input).map(WindowInput::Scene) } else { None })
         }
         InputKind::Click { x, y, .. } => {
             let viewport = frame.layout().viewport();
             let map = PointerMap::contain(viewport, viewport).ok()?;
-            Some(frame.pointer(&map, PointerAction::PrimaryClick, x, y))
+            Some(frame.pointer(&map, PointerAction::PrimaryClick, x, y).map(WindowInput::Scene))
         }
         _ => None,
     }

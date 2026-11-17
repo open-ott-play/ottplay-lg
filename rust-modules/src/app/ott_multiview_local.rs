@@ -103,7 +103,9 @@ impl Default for Driver {
 impl Driver {
     #[cfg(all(test, feature = "hostsim"))]
     pub(super) fn active_layout_for_test(layout: Layout) -> Self {
-        Self { layout: Some(layout), ..Self::default() }
+        let mut driver = Self::default();
+        driver.layout = Some(layout);
+        driver
     }
 
     pub fn owns_ui(&self, runtime: &Runtime, app: &App) -> bool {

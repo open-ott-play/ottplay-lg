@@ -537,7 +537,9 @@ impl Coordinator {
         let scene = self.scene.as_ref().ok_or(Error::SceneInactive)?;
         let (event_revision, slot) = match event {
             plx_appkit::multiview_chrome::Event::FocusSlot { revision, slot }
-            | plx_appkit::multiview_chrome::Event::ActivateSlot { revision, slot } => {
+            | plx_appkit::multiview_chrome::Event::ActivateSlot { revision, slot }
+            | plx_appkit::multiview_chrome::Event::OpenWindowChannels { revision, slot }
+            | plx_appkit::multiview_chrome::Event::OpenWindowMenu { revision, slot } => {
                 (revision, slot)
             }
         };
@@ -565,6 +567,15 @@ impl Coordinator {
             plx_appkit::multiview_chrome::Event::ActivateSlot { .. } => {
                 self.ui_focused = slot;
                 self.focus(slot)
+            }
+            plx_appkit::multiview_chrome::Event::OpenWindowChannels { .. }
+            | plx_appkit::multiview_chrome::Event::OpenWindowMenu { .. } => {
+                self.ui_focused = slot;
+                if scene.active_slot() == slot {
+                    Ok(Transition::new(scene))
+                } else {
+                    self.focus(slot)
+                }
             }
         }
     }

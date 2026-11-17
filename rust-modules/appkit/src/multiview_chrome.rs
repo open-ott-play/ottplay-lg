@@ -61,6 +61,8 @@ pub enum Input { Direction(Dir), Confirm, Other }
 pub enum Event {
     FocusSlot { revision: u64, slot: SlotId },
     ActivateSlot { revision: u64, slot: SlotId },
+    OpenWindowChannels { revision: u64, slot: SlotId },
+    OpenWindowMenu { revision: u64, slot: SlotId },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +90,7 @@ pub struct ChromeFrame {
     layout: Layout,
     state: ViewState,
     slots: Vec<SlotChrome>,
+    window_actions: bool,
 }
 
 impl ChromeFrame {
@@ -130,17 +133,32 @@ impl ChromeFrame {
                 footer: None, notice: None, identity: None, decoder: None, wall_now_s: None,
             }
         }).collect();
-        Ok(Self { layout, state, slots })
+        Ok(Self { layout, state, slots, window_actions: false })
     }
 
     pub fn slots(&self) -> &[SlotChrome] { &self.slots }
     pub fn layout(&self) -> &Layout { &self.layout }
     pub fn state(&self) -> ViewState { self.state }
+    pub fn enable_window_actions(&mut self) { self.window_actions = true; }
+    pub fn window_actions(&self) -> bool { self.window_actions && self.state.input_owned }
+
+    pub fn window_menu(&self) -> Option<Event> {
+        if !self.window_actions() { return None; }
+        self.state.active.map(|slot| Event::OpenWindowMenu { revision: self.state.revision, slot })
+    }
 
     pub fn pointer(&self, map: &PointerMap, action: PointerAction, x: f32, y: f32) -> Option<Event> {
         if !self.state.input_owned { return None; }
-        self.layout.activate_pointer(map, action, x, y).map(|slot|
-            Event::ActivateSlot { revision: self.state.revision, slot })
+        let slot = self.layout.activate_pointer(map, action, x, y)?;
+        let revision = self.state.revision;
+        if !self.window_actions() { return Some(Event::ActivateSlot { revision, slot }); }
+        let (_, y) = map.to_logical(x, y)?;
+        let bounds = self.layout.slot(slot)?.bounds;
+        Some(if y < bounds.y + bounds.h * 0.2 {
+            Event::OpenWindowMenu { revision, slot }
+        } else {
+            Event::OpenWindowChannels { revision, slot }
+        })
     }
 
     /// These are semantic overlay inputs, not a global remote-key hook. Ordinary
@@ -152,7 +170,11 @@ impl ChromeFrame {
             Input::Direction(direction) => self.layout.neighbor(from, direction)
                 .map(|slot| Event::FocusSlot { revision: self.state.revision, slot }),
             Input::Confirm => self.state.focused.or(self.state.active)
-                .map(|slot| Event::ActivateSlot { revision: self.state.revision, slot }),
+                .map(|slot| {
+                    let revision = self.state.revision;
+                    if self.window_actions() { Event::OpenWindowChannels { revision, slot } }
+                    else { Event::ActivateSlot { revision, slot } }
+                }),
             Input::Other => None,
         }
     }
@@ -204,6 +226,9 @@ pub struct WindowFooters {
 impl WindowFooters {
     pub fn reveal(&mut self, id: SlotId, now: u32) {
         if let Some(slot) = self.slots.get_mut(usize::from(id)) { slot.shown_at = Some(now); }
+    }
+    pub fn dismiss(&mut self) {
+        for slot in &mut self.slots { slot.shown_at = None; }
     }
 
     pub fn visible_mask(&self, now: u32, timeout_ms: u32) -> u16 {
