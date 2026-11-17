@@ -159,6 +159,14 @@ fn pending_current(runtime: &Runtime, app: Option<&App>, after_native: bool) -> 
         && pending.play_generation == runtime.play_generation && pending.playback_epoch == runtime.playback_epoch
         && runtime.transient.accepted.as_ref().map(transient::TransientMedia::owner) == Some(pending.owner)
         && runtime.transient.candidate.is_none()
+        && pending.request.local_selection.as_ref().is_none_or(|selected| {
+            let Some(base) = runtime.transient.numeric.base.as_ref() else { return false; };
+            base.profile.kind == ProviderKind::Local
+                && plx_data::ott::http_url(&base.profile.source).is_none()
+                && runtime.local_profile_selection(&base.profile).as_ref() == Some(selected)
+                && runtime.capture_local_source(selected).is_some_and(|read|
+                    runtime.local_source_read_is_current(&read))
+        })
         && runtime.play_target.as_ref() == Some(&pending.request)
         && runtime.pending_play.as_ref().is_some_and(|invocation| invocation.id == pending.invocation.id
             && invocation.action == pending.invocation.action && invocation.params == pending.invocation.params
@@ -197,7 +205,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation, qu
         let profile = base.profile.clone();
         let mut request = PlaybackRequest::ordinary(&entry.id, 0);
         request.advance_on_failure = false;
-        if profile.kind == ProviderKind::Local {
+        if profile.kind == ProviderKind::Local && plx_data::ott::http_url(&profile.source).is_none() {
             request.local_selection = Some(runtime.local_profile_selection(&profile).ok_or(CHANGED)?);
         }
         // The common preparation policy validates parental/kiosk/source authority
@@ -251,10 +259,13 @@ pub(super) fn finish(runtime: &mut Runtime, app: &App, result: Result<(), &'stat
     let base = runtime.transient.numeric.base.take()?;
     let entry = base.catalog.entries.get(pending.index)?;
     let response = ok(json!({"dispatched":true,"channel":{"id":entry.id,"name":entry.title,"number":pending.index + 1}}));
-    // The decoder accepted the fresh source. Only now may the old queue retire.
+    // Native admission accepted the fresh source. Only now may the old producer
+    // retire: a progressive Local worker can still have queued Batch/Finished
+    // events. The existing cancellation boundary fences those by generation,
+    // without changing the admitted native/play request or Ready root grants.
+    runtime.cancel_catalog();
     transient::note_stop(runtime);
     runtime.transient.accepted = None;
-    runtime.retire_parental_source();
     runtime.catalog = base.catalog;
     runtime.catalog_complete = true;
     runtime.catalog_loading = false;
@@ -265,7 +276,13 @@ pub(super) fn finish(runtime: &mut Runtime, app: &App, result: Result<(), &'stat
     runtime.page = "channels";
     runtime.continuity = continuity::Continuity::new(runtime.generation, None);
     runtime.continuity.initial_admitted(runtime.generation, &pending.request.id);
+    // Publication preserves an already validated identical source grant, while
+    // the existing context fence revokes a genuinely changed source/policy.
     runtime.parental_source_installed();
+    if let Some(playing) = runtime.playing.as_ref().filter(|playing| playing.profile == base.profile) {
+        let (profile, entry) = (playing.profile.clone(), playing.entry.clone());
+        runtime.request_metadata(profile, entry);
+    }
     runtime.changed();
     Some(response)
 }
