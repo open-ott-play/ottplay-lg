@@ -5,6 +5,7 @@
 use crate::multiview_layout::{GeometryError, Layout, PointerAction, PointerMap, RasterPlan, SlotId};
 use crate::player_hud::{model::OsdOpacity, pending::PendingFooter};
 use plx_data::metadata::NowPlaying;
+use plx_data::ott::multiview::{MediaRef, SourceRef};
 use plx_machine::machine::{Measure, UiMode};
 use plx_ui::{screen::Dir, Painter, Rect, Zoom};
 use std::sync::Arc;
@@ -54,6 +55,7 @@ pub struct SlotChrome {
     pub audio: bool,
     pub focused: bool,
     footer: Option<Arc<NowPlaying>>,
+    identity: Option<(SourceRef, MediaRef)>,
     decoder: Option<(i64, i64)>,
     wall_now_s: Option<i64>,
 
@@ -103,7 +105,7 @@ impl ChromeFrame {
                 active: state.active == Some(slot.id),
                 audio: state.audio == Some(slot.id),
                 focused: state.focused == Some(slot.id),
-                footer: None, decoder: None, wall_now_s: None,
+                footer: None, identity: None, decoder: None, wall_now_s: None,
             }
         }).collect();
         Ok(Self { layout, state, slots })
@@ -139,6 +141,12 @@ impl ChromeFrame {
             slot.footer = Some(Arc::new(playing));
         }
     }
+    pub fn set_footer_identity(&mut self, id: SlotId, source: SourceRef, media: MediaRef) {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id) {
+            slot.identity = Some((source, media));
+        }
+    }
+
     pub fn set_footer_clock(&mut self, id: SlotId, decoder: Option<(i64, i64)>, wall_now_s: Option<i64>) {
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id) {
             slot.decoder = decoder.filter(|(position, duration)| *position >= 0 && *duration > 0);
@@ -150,6 +158,7 @@ impl ChromeFrame {
 #[derive(Default)]
 struct FooterSlot {
     source: Option<Arc<NowPlaying>>,
+    identity: Option<(SourceRef, MediaRef)>,
     shown_at: Option<u32>,
     renderer: Option<Box<PendingFooter>>,
 }
@@ -189,12 +198,13 @@ impl WindowFooters {
         for (index, slot) in frame.slots.iter().enumerate() {
             let state = &mut self.slots[usize::from(slot.id)];
             let Some(source) = &slot.footer else { *state = FooterSlot::default(); continue; };
-            if !state.source.as_ref().is_some_and(|prev| Arc::ptr_eq(prev, source)
-                || (prev.title == source.title && prev.detail_rk == source.detail_rk
+            if state.identity != slot.identity || !state.source.as_ref().is_some_and(|prev| slot.identity.is_some()
+                || Arc::ptr_eq(prev, source) || (prev.title == source.title && prev.detail_rk == source.detail_rk
                     && prev.ep_title == source.ep_title && prev.index == source.index
                     && prev.season == source.season)) {
                 state.shown_at = Some(now);
             }
+            state.identity = slot.identity;
             state.source = Some(Arc::clone(source));
             if !state.shown_at.is_some_and(|since| now.wrapping_sub(since) < timeout_ms) {
                 state.shown_at = None;

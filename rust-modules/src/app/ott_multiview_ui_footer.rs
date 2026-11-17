@@ -205,6 +205,7 @@ impl Footers {
         for footer in self.slots.iter().flatten() {
             let slot = footer.ticket.slot().index() as u8;
             frame.set_footer(slot, footer.playing.clone());
+            frame.set_footer_identity(slot, footer.ticket.source(), footer.ticket.media());
             frame.set_footer_clock(slot, footer.decoder_ns, footer.wall_s);
         }
     }

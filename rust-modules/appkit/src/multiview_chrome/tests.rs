@@ -86,6 +86,13 @@ fn each_theme_uses_its_single_player_footer_and_new_epg_does_not_rearm_it() {
         frame.set_footer(0, metadata("Breaking news"));
         assert!(paint(&mut state, &frame, 4_999).iter().any(|run| run.text.contains("Breaking news")));
         assert!(paint(&mut state, &frame, 5_020).is_empty());
+        // Two listings can have the same title. Their provider and media identities still differ.
+        let token = |value| std::num::NonZeroU64::new(value).unwrap();
+        frame.set_footer_identity(0, SourceRef::from_opaque(token(1)), MediaRef::from_opaque(token(2)));
+        assert!(!paint(&mut state, &frame, 6_000).is_empty());
+        assert!(paint(&mut state, &frame, 11_000).is_empty());
+        frame.set_footer_identity(0, SourceRef::from_opaque(token(1)), MediaRef::from_opaque(token(3)));
+        assert!(!paint(&mut state, &frame, 12_000).is_empty());
     }
 }
 
