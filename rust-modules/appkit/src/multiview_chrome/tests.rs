@@ -57,6 +57,39 @@ fn occupied_window_paints_the_shared_footer_to_scale_until_the_configured_deadli
 }
 
 #[test]
+fn each_theme_uses_its_single_player_footer_and_new_epg_does_not_rearm_it() {
+    use plx_data::metadata::{OttLivePlaying, OttNowNext, OttNowPlaying, OttGuideProgramme};
+    let programme = |title: &str| Some(OttGuideProgramme { title: title.into(),
+        description: String::new(), start_s: 100, end_s: 200 });
+    let metadata = |title| {
+        let mut item = playing("Evening channel");
+        item.ott = Some(OttNowPlaying { live: Some(OttLivePlaying { channel_title: item.title.clone(),
+            ordinal: Some(62), guide: Some(OttNowNext { now_s: 150, current: programme(title), next: None }) }),
+            archive: None, collection_label: String::new(), confirmed_start_unix_ms: None,
+            next: None, art: None });
+        item
+    };
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut frame = frame();
+        let mut state = WindowFooters::default();
+        frame.set_footer(0, metadata("Evening news"));
+        frame.set_footer_clock(0, None, Some(150));
+        let paint = |state: &mut WindowFooters, frame: &ChromeFrame, now| draw_census::capture_runs(|| state.draw(
+            frame, Painter::recording(), &FixtureMeasure, mode, OsdOpacity::default(), None, now, 5_000));
+        let grid = paint(&mut state, &frame, 20);
+        let mut single = PendingFooter::default();
+        let normal = draw_census::capture_runs(|| single.draw(Painter::recording(), &metadata("Evening news"),
+            Some(150), OsdOpacity::default(), mode, &FixtureMeasure));
+        assert!(grid.iter().any(|run| run.text.contains("Evening news")));
+        assert_eq!(grid.iter().map(|r| &r.text).collect::<Vec<_>>(),
+            normal.iter().map(|r| &r.text).collect::<Vec<_>>());
+        frame.set_footer(0, metadata("Breaking news"));
+        assert!(paint(&mut state, &frame, 4_999).iter().any(|run| run.text.contains("Breaking news")));
+        assert!(paint(&mut state, &frame, 5_020).is_empty());
+    }
+}
+
+#[test]
 fn pointer_activation_is_topmost_revision_bound_and_never_scroll_or_hover() {
     let layout = Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap();
     let view = ViewState { revision: 99, active: Some(0), ..Default::default() };
