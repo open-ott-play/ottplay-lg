@@ -90,7 +90,6 @@ fn inspection_cause(reason: &str) -> Cause {
         "Native HLS does not support HEVC video without audio"
         | "Native HLS does not support HEVC video with E-AC-3 audio"
         | "Native HLS does not support HEVC video with MP2 audio"
-        | "Native HLS does not support H.264 video with AC-3 audio"
         | "Native HLS does not support H.264 video with E-AC-3 audio"
         | "Native HLS does not support H.264 video with MP2 audio"
         | "Native HLS does not support H.264 video with MP3 audio"
