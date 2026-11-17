@@ -415,6 +415,12 @@ fn select_variant(url: &str, text: &str) -> Result<Option<String>, Error> {
 
     Ok(selected.map(|(_, url)| url))
 }
+fn poll_wait(checked: Instant, target: Duration, now: Instant) -> Duration {
+    // Decoding the last segment may already have spent this entire interval.
+    // Only an unchanged, recently checked edge needs a delay.
+    (checked + target.min(Duration::from_secs(2)) / 2).saturating_duration_since(now)
+}
+
 struct Hls {
     remote: Remote,
     url: String,
@@ -426,6 +432,7 @@ struct Hls {
     delivered_segment: bool,
     reprobe: bool,
     refreshed: Instant,
+    checked: Instant,
     cap: usize,
 }
 impl Hls {
@@ -457,6 +464,7 @@ impl Hls {
             playlist.segments.len().saturating_sub(2)
         };
         let next = playlist.segments[start].sequence;
+        let checked = Instant::now();
         Ok(Self {
             remote,
             url,
@@ -467,7 +475,8 @@ impl Hls {
             init_sent: false,
             delivered_segment: false,
             reprobe: false,
-            refreshed: Instant::now(),
+            refreshed: checked,
+            checked,
             cap,
         })
     }
@@ -477,8 +486,9 @@ impl Hls {
         if fresh.init != self.playlist.init {
             return Err(Error::Unsupported);
         }
+        self.checked = Instant::now();
         if fresh.segments.last().map(|s| s.sequence) > self.playlist.segments.last().map(|s| s.sequence) {
-            self.refreshed = Instant::now();
+            self.refreshed = self.checked;
         }
         self.url = manifest.effective_url;
         self.playlist = fresh;
@@ -560,7 +570,7 @@ impl Hls {
             if self.refreshed.elapsed() >= Duration::from_secs(30) {
                 return Err(Error::Source);
             }
-            if !c.wait(self.playlist.target.min(Duration::from_secs(2)) / 2) {
+            if !c.wait(poll_wait(self.checked, self.playlist.target, Instant::now())) {
                 return Err(Error::Cancelled);
             }
             self.refresh_retry(c, &mut remaining)?;
@@ -1201,6 +1211,16 @@ mod tests {
         assert_eq!(dimensions(3, 3, l), Ok((3, 3, 2, 2)));
         assert!(dimensions(-1, 100, l).is_err());
     }
+    #[test]
+    fn live_poll_counts_time_since_the_previous_manifest_response() {
+        let checked = Instant::now();
+        let target = Duration::from_secs(2);
+        assert_eq!(poll_wait(checked, target, checked), Duration::from_secs(1));
+        assert_eq!(poll_wait(checked, target, checked + Duration::from_millis(800)), Duration::from_millis(200));
+        assert!(poll_wait(checked, target, checked + target).is_zero());
+        assert_eq!(poll_wait(checked, Duration::from_secs(10), checked), Duration::from_secs(1));
+    }
+
     #[test]
     fn playlist_rejects_cipher_ranges_and_discontinuity() {
         let base = "https://example.test/p/list.m3u8";
