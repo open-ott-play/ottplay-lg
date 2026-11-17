@@ -26,6 +26,8 @@ fn playlist_header(bytes: &[u8]) -> bool {
 }
 const INTERRUPTED_RESPONSE: &[u8] = b"The request is interrupted by main process";
 const DENIED_RESPONSE: &[u8] = b"Forbidden (No client found)";
+const MISSING_STREAM_HTML: &[u8] = b"<h1>No stream id found</h1>";
+const TRANSITIONAL_HTML: &[u8] = b"<h1>Forbidden</h1>";
 
 /// Only exact known control replies are meaningful. Arbitrary HTML or media
 /// bytes never authorize a retry or appear in a diagnostic.
@@ -103,20 +105,20 @@ impl Remote {
     /// denial opening the source itself, and an arbitrary HTML body retain their ordinary errors.
     fn provider_error(&self, bytes: &[u8], existing: Option<&str>, c: &Control) -> Option<Error> {
         let error = provider_reply(bytes)?;
-        let lost = matches!(bytes.trim_ascii(), b"<h1>No stream id found</h1>"
+        let lost = matches!(bytes.trim_ascii(), MISSING_STREAM_HTML
             | b"<h1>Forbidden (No client found)</h1>" | b"<h1>Forbidden (No client session found)</h1>");
-        if lost && self.source.status() == 200 && c.video_decoded.load(Ordering::Acquire)
-            && c.hls_live.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
-        {
-            if let (Some(request), Some(origin)) = (existing, c.hls_origin.get()) {
-                if crate::local_multiview::hls_handoff_origin(request).as_ref() == Some(origin)
-                    && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
-                {
-                    return Some(Error::LostProviderLease);
-                }
-            }
+        if lost && existing.is_some_and(|url| self.played_gateway_resource(url, c)) {
+            return Some(Error::LostProviderLease);
         }
         Some(error)
+    }
+
+    fn played_gateway_resource(&self, url: &str, c: &Control) -> bool {
+        let Some(origin) = c.hls_origin.get() else { return false; };
+        self.source.status() == 200 && c.video_decoded.load(Ordering::Acquire)
+            && c.hls_live.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
+            && crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(origin)
+            && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
     }
 
     fn fetch(&mut self, url: &str, cap: usize, is_segment: bool, c: &Control) -> Result<Vec<u8>, Error> {
@@ -243,10 +245,14 @@ impl Manifest {
         Self::read(remote, None, c)
     }
     fn read(remote: &mut Remote, existing: Option<&str>, c: &Control) -> Result<Self, Error> {
+        let manifest = Self::raw(remote, c)?;
+        if let Some(error) = remote.provider_error(&manifest.bytes, existing, c) { return Err(error); }
+        Ok(manifest)
+    }
+    fn raw(remote: &mut Remote, c: &Control) -> Result<Self, Error> {
         let effective_url = remote.source.effective_url().to_owned();
         resource(&effective_url)?;
         let bytes = collect(remote, 512 * 1024, c)?;
-        if let Some(error) = remote.provider_error(&bytes, existing, c) { return Err(error); }
         Ok(Self { effective_url, bytes })
     }
     fn fetch(remote: &mut Remote, url: &str, c: &Control) -> Result<Self, Error> {
@@ -479,6 +485,7 @@ struct Hls {
     pos: usize,
     init_sent: bool,
     delivered_segment: bool,
+    teardown_checked: bool,
     reprobe: bool,
     checked: Instant,
     cap: usize,
@@ -539,14 +546,37 @@ impl Hls {
             pos: 0,
             init_sent: false,
             delivered_segment: false,
+            teardown_checked: false,
             reprobe: false,
             checked,
             cap,
         })
     }
     fn refresh(&mut self, c: &Control) -> Result<(), Error> {
-        let order = admission_read_started(&self.url, c);
-        let manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
+        let mut order = admission_read_started(&self.url, c);
+        let mut manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
+        // The source can briefly report this text while retiring a previously verified leaf.
+        // Check the same leaf once. Only an independent, explicit missing-stream reply can
+        // authorize a new session; an HTTP denial or another generic page remains terminal.
+        if manifest.bytes == TRANSITIONAL_HTML && !self.teardown_checked
+            && self.checked.elapsed() < Duration::from_secs(100)
+            && c.hls_request.load(Ordering::Acquire) != 0 && self.remote.played_gateway_resource(&self.url, c)
+        {
+            self.teardown_checked = true;
+            let pause = Duration::from_millis(800);
+            if self.remote.deadline().saturating_duration_since(Instant::now()) <= pause {
+                return Err(Error::Playlist);
+            }
+            if !c.wait(pause) { return Err(Error::Cancelled); }
+            if c.paused.load(Ordering::Acquire) { return Err(Error::Playlist); }
+            order = admission_read_started(&self.url, c);
+            self.remote.reopen(&self.url, c)?;
+            manifest = Manifest::raw(&mut self.remote, c)?;
+            if manifest.bytes.trim_ascii() == MISSING_STREAM_HTML && self.remote.played_gateway_resource(&self.url, c) {
+                return Err(Error::LostProviderLease);
+            }
+            if let Some(error) = provider_reply(&manifest.bytes) { return Err(error); }
+        }
         let fresh = manifest.media()?;
         if fresh.init != self.playlist.init {
             return Err(Error::Unsupported);
@@ -578,8 +608,10 @@ impl Hls {
     fn refresh_retry(&mut self, c: &Control, remaining: &mut u8, deadline: &mut Instant) -> Result<(), Error> {
         loop {
             self.arm_request(c, deadline)?;
+            let verified_before = self.teardown_checked;
             match self.refresh(c) {
-                Err(error) if *remaining > 0 && (error == Error::SourceInterrupted
+                Err(error) if *remaining > 0 && verified_before == self.teardown_checked
+                    && (error == Error::SourceInterrupted
                     || (error == Error::Source && self.remote.retryable())) => {
                     *remaining -= 1;
                     if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
@@ -1259,6 +1291,43 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transitional_gateway_body_rechecks_only_the_existing_recently_playing_leaf_once() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let opt_in = "OTT-Multiview-Admission: refresh-peers-v1\r\n";
+        for (confirmation, expected) in [
+            (Reply::ok("", MISSING_STREAM_HTML), Err(Error::LostProviderLease)),
+            (Reply::ok("", TRANSITIONAL_HTML), Err(Error::Playlist)),
+            (Reply::ok("", b"<h1>Forbidden (No client found)</h1>"), Err(Error::SourceDenied)),
+            (Reply { status: 403, ..Reply::ok("", MISSING_STREAM_HTML) }, Err(Error::SourceDenied)),
+            (Reply { status: 503, ..Reply::ok("", b"unavailable") }, Err(Error::Source)),
+            (Reply::ok("", live), Ok(())),
+        ] {
+            let server = SessionServer::new(vec![
+                Reply::ok(opt_in, master), Reply::ok("", live), Reply::ok("", live),
+                Reply::ok("", TRANSITIONAL_HTML), confirmation, Reply::ok("", TRANSITIONAL_HTML),
+            ]);
+            let c = Control::default();
+            let mut hls = Hls::open(format!("{}/channel.m3u8", server.base), 1024, &c).unwrap();
+            c.video_decoded.store(true, Ordering::Release);
+            hls.refresh(&c).unwrap();
+            let before = Instant::now();
+            let mut deadline = before + Duration::from_secs(15);
+            let mut attempts = 2;
+            assert_eq!(hls.refresh_retry(&c, &mut attempts, &mut deadline), expected);
+            assert_eq!(attempts, 2, "a failed verification cannot make a third request");
+            assert!(before.elapsed() >= Duration::from_millis(790));
+            assert_eq!(server.heads().len(), 5);
+            assert_eq!(hls.refresh(&c), Err(Error::Playlist));
+            let heads = server.heads();
+            assert_eq!(heads.len(), 6, "one verification at most per worker");
+            assert!(heads[1..].iter().all(|r| r.starts_with("GET /leaf.m3u8 ")));
+        }
+    }
 
     #[test]
     fn expired_established_leaf_is_distinct_from_denial_and_does_not_reopen_the_master() {
