@@ -4,7 +4,6 @@ use super::*;
 use crate::local_multiview::{ColorMatrix, ColorRange, Control, Error, FrameYuv, Limits, PcmChunk};
 use plx_base::checkpoint::{Checkpoint, Flow};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub(crate) fn available() -> bool {
@@ -27,7 +26,6 @@ fn playlist_header(bytes: &[u8]) -> bool {
 }
 struct Remote {
     source: Box<crate::curlio::CurlSource>,
-    _abort: Arc<crate::curlio::Abort>,
     position: i64,
     prefix: std::collections::VecDeque<u8>,
 }
@@ -35,10 +33,13 @@ impl Remote {
     fn open(url: &str, owned: bool, c: &Control) -> Result<Self, Error> {
         let deadline = Some(Instant::now() + Duration::from_secs(15));
         let mut check = Check(c);
-        let (source, abort) = if owned {
+        let source = if owned {
             crate::curlio::CurlSource::open_owned_private_checked(url, 0, deadline, &mut check)
+                .map(|(source, _)| source)
         } else {
-            crate::curlio::CurlSource::open_private_checked(url, 0, deadline, &mut check)
+            // Each window owns a fresh private context. A sniffed master can issue a
+            // cookie on its first response, before we know the source is HLS.
+            crate::curlio::CurlSource::open_hls_private_checked(url, deadline, &mut check)
         }
         .map_err(|_| Error::Source)?;
         if !(200..300).contains(&source.status()) {
@@ -46,10 +47,23 @@ impl Remote {
         }
         Ok(Self {
             source,
-            _abort: abort,
             position: 0,
             prefix: Default::default(),
         })
+    }
+    fn reopen(&mut self, url: &str, c: &Control) -> Result<(), Error> {
+        let deadline = Some(Instant::now() + Duration::from_secs(15));
+        self.source.reopen_until(url, deadline, &mut Check(c)).map_err(|_| Error::Source)?;
+        if !(200..300).contains(&self.source.status()) {
+            return Err(Error::Source);
+        }
+        self.position = 0;
+        self.prefix.clear();
+        Ok(())
+    }
+    fn fetch(&mut self, url: &str, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
+        self.reopen(url, c)?;
+        collect(self, cap, c)
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
         let mut bytes = Vec::new();
@@ -93,10 +107,7 @@ impl Remote {
         }
     }
 }
-fn fetch(url: &str, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
-    collect(Remote::open(url, false, c)?, cap, c)
-}
-fn collect(mut r: Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
+fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut scratch = [0; 16 * 1024];
     let expires = Instant::now() + Duration::from_secs(15);
@@ -121,7 +132,7 @@ struct Manifest {
     bytes: Vec<u8>,
 }
 impl Manifest {
-    fn from_remote(remote: Remote, c: &Control) -> Result<Self, Error> {
+    fn from_remote(remote: &mut Remote, c: &Control) -> Result<Self, Error> {
         let effective_url = remote.source.effective_url().to_owned();
         resource(&effective_url)?;
         Ok(Self {
@@ -129,8 +140,9 @@ impl Manifest {
             bytes: collect(remote, 512 * 1024, c)?,
         })
     }
-    fn fetch(url: &str, c: &Control) -> Result<Self, Error> {
-        Self::from_remote(Remote::open(url, false, c)?, c)
+    fn fetch(remote: &mut Remote, url: &str, c: &Control) -> Result<Self, Error> {
+        remote.reopen(url, c)?;
+        Self::from_remote(remote, c)
     }
     fn text(&self) -> Result<&str, Error> {
         std::str::from_utf8(&self.bytes).map_err(|_| Error::Playlist)
@@ -323,6 +335,7 @@ fn select_variant(url: &str, text: &str) -> Result<Option<String>, Error> {
     Ok(selected.map(|(_, url)| url))
 }
 struct Hls {
+    remote: Remote,
     url: String,
     playlist: Playlist,
     next: u64,
@@ -343,12 +356,13 @@ impl Hls {
         first: Option<Remote>,
     ) -> Result<Self, Error> {
         // At most one master indirection. Every response carries its own validated base.
-        let first = match first {
-            Some(remote) => Manifest::from_remote(remote, c)?,
-            None => Manifest::fetch(&url, c)?,
+        let mut remote = match first {
+            Some(remote) => remote,
+            None => Remote::open(&url, false, c)?,
         };
+        let first = Manifest::from_remote(&mut remote, c)?;
         let manifest = if let Some(child) = first.variant()? {
-            Manifest::fetch(&child, c)?
+            Manifest::fetch(&mut remote, &child, c)?
         } else {
             first
         };
@@ -361,6 +375,7 @@ impl Hls {
         };
         let next = playlist.segments[start].sequence;
         Ok(Self {
+            remote,
             url,
             playlist,
             next,
@@ -379,7 +394,7 @@ impl Hls {
             if !self.init_sent {
                 self.init_sent = true;
                 if let Some(url) = &self.playlist.init {
-                    self.bytes = fetch(url, self.cap, c)?;
+                    self.bytes = self.remote.fetch(url, self.cap, c)?;
                     self.pos = 0;
                     if !self.bytes.is_empty() {
                         break;
@@ -392,7 +407,7 @@ impl Hls {
                 .iter()
                 .find(|s| s.sequence == self.next)
             {
-                self.bytes = fetch(&segment.url, self.cap, c)?;
+                self.bytes = self.remote.fetch(&segment.url, self.cap, c)?;
                 self.pos = 0;
                 self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
                 if !self.bytes.is_empty() {
@@ -414,7 +429,7 @@ impl Hls {
             if !c.wait(self.playlist.target.min(Duration::from_secs(2)) / 2) {
                 return Err(Error::Cancelled);
             }
-            let manifest = Manifest::fetch(&self.url, c)?;
+            let manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
             let fresh = manifest.media()?;
             if fresh.init != self.playlist.init {
                 return Err(Error::Unsupported);
@@ -987,6 +1002,34 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_slot_keeps_its_private_cookie_through_segment_and_playlist_refresh() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let server = SessionServer::new(vec![
+            Reply::ok("Set-Cookie: mv=first; Path=/\r\n", b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25\nmedia.m3u8\n"),
+            Reply::ok("", b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\na.ts\n").requiring("mv=first"),
+            Reply::ok("Set-Cookie: mv=next; Path=/\r\n", b"A").requiring("mv=first"),
+            Reply::ok("", b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:11\n#EXTINF:1,\nb.ts\n").requiring("mv=next"),
+            Reply::ok("", b"B").requiring("mv=next"),
+            Reply::ok("", b"second window"),
+        ]);
+        let control = Control::default();
+        let url = format!("{}/start", server.base);
+        let mut first = Remote::open(&url, false, &control).unwrap();
+        assert!(first.sniff_hls(&control).unwrap());
+        let mut hls = Hls::open_response(url.clone(), 1024, &control, Some(first)).unwrap();
+        let mut byte = [0];
+        assert_eq!(hls.read(&mut byte, &control).unwrap(), 1);
+        assert_eq!(byte, [b'A']);
+        assert_eq!(hls.read(&mut byte, &control).unwrap(), 1);
+        assert_eq!(byte, [b'B']);
+        let _independent = Remote::open(&url, false, &control).unwrap();
+        let requests = server.heads();
+        assert_eq!(requests.len(), 6);
+        assert!(!requests[5].contains("Cookie:"));
+    }
     #[test]
     fn seek_audio_floor_uses_the_actual_chunk_and_fails_closed_on_unknown_or_overflow() {
         let floor = Some((7, 4_300_000));
