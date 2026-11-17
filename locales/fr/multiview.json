@@ -1,5 +1,7 @@
 {
   "multiview.empty": "Vide",
   "multiview.loading": "Chargement…",
-  "multiview.failed": "Lecture indisponible"
+  "multiview.failed": "Lecture indisponible",
+  "multiview.provider_session_denied": "Le fournisseur a refusé cette session de lecture.",
+  "multiview.provider_interrupted": "Le fournisseur a interrompu ce flux."
 }

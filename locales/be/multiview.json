@@ -1,5 +1,7 @@
 {
   "multiview.empty": "Пуста",
   "multiview.loading": "Загрузка…",
-  "multiview.failed": "Прайграванне недаступнае"
+  "multiview.failed": "Прайграванне недаступнае",
+  "multiview.provider_session_denied": "Правайдар адхіліў сеанс прайгравання.",
+  "multiview.provider_interrupted": "Правайдар перапыніў гэты паток."
 }

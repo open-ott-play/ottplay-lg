@@ -10,5 +10,13 @@
   "multiview.failed": {
     "value": "Playback unavailable",
     "description": "A multi-view video slot cannot currently play; no raw server error is shown."
+  },
+  "multiview.provider_session_denied": {
+    "value": "The provider rejected this playback session.",
+    "description": "Per-window notice for a recognized provider response."
+  },
+  "multiview.provider_interrupted": {
+    "value": "The provider interrupted this stream.",
+    "description": "Per-window notice for a recognized provider response."
   }
 }

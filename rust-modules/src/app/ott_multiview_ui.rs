@@ -70,6 +70,7 @@ struct Publication {
     geometry: plx_appkit::multiview_layout::RasterPlan,
     focused: Option<plx_data::ott::multiview::SlotId>,
     audio: Option<plx_data::ott::multiview::SlotId>,
+    notices: [Option<plx_appkit::multiview_chrome::ProviderNotice>; 9],
 }
 
 /// Publish controls only for the current local scene or an admitted service
@@ -95,6 +96,11 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
             geometry,
             focused: runtime.multiview.focused_slot(),
             audio: runtime.multiview.audio_route_state().applied,
+            notices: std::array::from_fn(|i| {
+                let slot = plx_data::ott::multiview::SlotId::new(i as u8)?;
+                if !runtime.multiview_local.active() { return None; }
+                plx_appkit::multiview_chrome::ProviderNotice::from_stop(runtime.multiview_local.last_stop(slot))
+            }),
         })
     })();
     let mut footers = std::mem::take(&mut runtime.multiview_ui.footers);
@@ -152,6 +158,9 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
     match project_frame(plan, &views, state) {
         Ok(mut frame) => {
             runtime.multiview_ui.footers.project(&mut frame);
+            for (index, notice) in publication.notices.iter().enumerate() {
+                if let Some(notice) = notice { frame.set_provider_notice(index as u8, *notice); }
+            }
             app.bridge.publish_multiview_offer(Some(frame));
             runtime.multiview_ui.published = Some(publication);
         }

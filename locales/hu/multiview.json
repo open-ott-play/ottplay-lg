@@ -1,5 +1,7 @@
 {
   "multiview.empty": "Üres",
   "multiview.loading": "Betöltés…",
-  "multiview.failed": "A lejátszás nem érhető el"
+  "multiview.failed": "A lejátszás nem érhető el",
+  "multiview.provider_session_denied": "A szolgáltató elutasította a lejátszási munkamenetet.",
+  "multiview.provider_interrupted": "A szolgáltató megszakította ezt az adatfolyamot."
 }

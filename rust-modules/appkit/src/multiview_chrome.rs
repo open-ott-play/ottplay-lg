@@ -13,6 +13,27 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotState { Empty, Loading, Playing, Failed }
 
+/// Closed provider outcomes suitable for display on a shared TV screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderNotice { SessionDenied, Interrupted }
+
+impl ProviderNotice {
+    pub fn from_stop(stop: Option<&str>) -> Option<Self> {
+        match stop {
+            Some("provider_session_denied") => Some(Self::SessionDenied),
+            Some("provider_interrupted") => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
+    fn message(self) -> &'static str {
+        use plx_platform::i18n::msg;
+        match self {
+            Self::SessionDenied => msg::multiview_provider_session_denied(),
+            Self::Interrupted => msg::multiview_provider_interrupted(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlotView {
     pub id: SlotId,
@@ -55,6 +76,7 @@ pub struct SlotChrome {
     pub audio: bool,
     pub focused: bool,
     footer: Option<Arc<NowPlaying>>,
+    notice: Option<ProviderNotice>,
     identity: Option<(SourceRef, MediaRef)>,
     decoder: Option<(i64, i64)>,
     wall_now_s: Option<i64>,
@@ -105,7 +127,7 @@ impl ChromeFrame {
                 active: state.active == Some(slot.id),
                 audio: state.audio == Some(slot.id),
                 focused: state.focused == Some(slot.id),
-                footer: None, identity: None, decoder: None, wall_now_s: None,
+                footer: None, notice: None, identity: None, decoder: None, wall_now_s: None,
             }
         }).collect();
         Ok(Self { layout, state, slots })
@@ -135,6 +157,12 @@ impl ChromeFrame {
         }
     }
 
+    pub fn set_provider_notice(&mut self, id: SlotId, notice: ProviderNotice) {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id && slot.state != SlotState::Playing) {
+            slot.notice = Some(notice);
+        }
+    }
+
     /// Attach only the target slot's verified catalogue/source facts.
     pub fn set_footer(&mut self, id: SlotId, playing: NowPlaying) {
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id && slot.state != SlotState::Empty) {
@@ -158,6 +186,7 @@ impl ChromeFrame {
 #[derive(Default)]
 struct FooterSlot {
     source: Option<Arc<NowPlaying>>,
+    notice: Option<ProviderNotice>,
     identity: Option<(SourceRef, MediaRef)>,
     shown_at: Option<u32>,
     renderer: Option<Box<PendingFooter>>,
@@ -179,7 +208,7 @@ impl WindowFooters {
 
     pub fn visible_mask(&self, now: u32, timeout_ms: u32) -> u16 {
         self.slots.iter().enumerate().fold(0, |mask, (slot, state)| {
-            if state.source.is_some() && state.shown_at.is_some_and(|at| now.wrapping_sub(at) < timeout_ms) {
+            if (state.source.is_some() || state.notice.is_some()) && state.shown_at.is_some_and(|at| now.wrapping_sub(at) < timeout_ms) {
                 mask | (1 << slot)
             } else { mask }
         })
@@ -197,28 +226,47 @@ impl WindowFooters {
         }
         for (index, slot) in frame.slots.iter().enumerate() {
             let state = &mut self.slots[usize::from(slot.id)];
-            let Some(source) = &slot.footer else { *state = FooterSlot::default(); continue; };
-            if state.identity != slot.identity || !state.source.as_ref().is_some_and(|prev| slot.identity.is_some()
-                || Arc::ptr_eq(prev, source) || (prev.title == source.title && prev.detail_rk == source.detail_rk
-                    && prev.ep_title == source.ep_title && prev.index == source.index
-                    && prev.season == source.season)) {
+            if slot.notice.is_none() && slot.footer.is_none() {
+                *state = FooterSlot::default();
+                continue;
+            }
+            let new_source = slot.footer.as_ref().is_some_and(|source| !state.source.as_ref()
+                .is_some_and(|prev| slot.identity.is_some() || Arc::ptr_eq(prev, source)
+                    || (prev.title == source.title && prev.detail_rk == source.detail_rk
+                        && prev.ep_title == source.ep_title && prev.index == source.index
+                        && prev.season == source.season)));
+            if state.notice != slot.notice || state.identity != slot.identity || new_source {
                 state.shown_at = Some(now);
             }
+            state.notice = slot.notice;
             state.identity = slot.identity;
-            state.source = Some(Arc::clone(source));
+            state.source.clone_from(&slot.footer);
             if !state.shown_at.is_some_and(|since| now.wrapping_sub(since) < timeout_ms) {
                 state.shown_at = None;
                 continue;
             }
             let bounds = slot.bounds;
             let scale = (bounds.w / Rect::FULL.w).min(bounds.h / Rect::FULL.h);
-            let footer = state.renderer.get_or_insert_with(Box::default);
             for clip in visible_regions(bounds, frame.slots[index + 1..].iter().map(|above| above.bounds)) {
                 let _scope = plx_ui::screen::ClipScope::open_in(painter, clip);
                 let target = painter.clipped(clip).translate(bounds.x + (bounds.w - Rect::FULL.w * scale) * 0.5,
                     bounds.y + bounds.h - Rect::FULL.h * scale).zoomed(Zoom { ox: 0.0, oy: 0.0, s: scale });
                 if painter.is_recording() { painter.clip(clip); }
-                footer.draw_with_clock(target, source, slot.wall_now_s.or(wall_now_s), slot.decoder, opacity, mode, measure);
+                if let Some(notice) = slot.notice {
+                    use plx_ui::{theme, text_view::TextView};
+                    let text = TextView::new(notice.message(), theme::size::OTT_FOOTER, theme::TEXT_PRIMARY)
+                        .max_lines(2).break_long_words().with_measure(measure);
+                    let pad = theme::space::LG;
+                    let width = Rect::FULL.w - 2.0 * pad;
+                    let height = text.measure_h(width) + 2.0 * pad;
+                    let ground = Rect::new(0.0, Rect::FULL.h - height, Rect::FULL.w, height);
+                    let color = theme::with_a(theme::CLASSIC_BACKGROUND, opacity.background_alpha(0.78));
+                    target.rect(ground, 0.0, color, color, 0.0);
+                    text.draw(target, Rect::new(pad, ground.y + pad, width, height - 2.0 * pad));
+                } else if let Some(source) = &slot.footer {
+                    let footer = state.renderer.get_or_insert_with(Box::default);
+                    footer.draw_with_clock(target, source, slot.wall_now_s.or(wall_now_s), slot.decoder, opacity, mode, measure);
+                }
                 if painter.is_recording() { painter.clip_clear(); }
             }
         }

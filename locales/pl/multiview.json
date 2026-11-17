@@ -1,5 +1,7 @@
 {
   "multiview.empty": "Puste",
   "multiview.loading": "Ładowanie…",
-  "multiview.failed": "Odtwarzanie niedostępne"
+  "multiview.failed": "Odtwarzanie niedostępne",
+  "multiview.provider_session_denied": "Dostawca odrzucił tę sesję odtwarzania.",
+  "multiview.provider_interrupted": "Dostawca przerwał ten strumień."
 }

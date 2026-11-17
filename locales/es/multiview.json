@@ -1,5 +1,7 @@
 {
   "multiview.empty": "Vacío",
   "multiview.loading": "Cargando…",
-  "multiview.failed": "Reproducción no disponible"
+  "multiview.failed": "Reproducción no disponible",
+  "multiview.provider_session_denied": "El proveedor rechazó esta sesión de reproducción.",
+  "multiview.provider_interrupted": "El proveedor interrumpió esta emisión."
 }

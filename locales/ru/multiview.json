@@ -1,5 +1,7 @@
 {
   "multiview.empty": "Пусто",
   "multiview.loading": "Загрузка…",
-  "multiview.failed": "Воспроизведение недоступно"
+  "multiview.failed": "Воспроизведение недоступно",
+  "multiview.provider_session_denied": "Провайдер отклонил сеанс воспроизведения.",
+  "multiview.provider_interrupted": "Провайдер прервал этот поток."
 }

@@ -30,6 +30,26 @@ fn bare_grid_has_no_slot_numbers_labels_badges_or_dividers() {
 }
 
 #[test]
+fn only_recognized_provider_failures_draw_a_timed_notice_in_the_affected_slot() {
+    assert_eq!(ProviderNotice::from_stop(Some("private URL or server response")), None);
+    let mut scene = frame();
+    let denied = ProviderNotice::from_stop(Some("provider_session_denied")).unwrap();
+    let interrupted = ProviderNotice::from_stop(Some("provider_interrupted")).unwrap();
+    scene.set_provider_notice(2, denied);
+    // An old terminal event cannot cover a healthy picture.
+    scene.set_provider_notice(0, interrupted);
+    let mut state = WindowFooters::default();
+    let draw = |state: &mut WindowFooters, frame: &ChromeFrame, now| draw_census::capture_runs(|| state.draw(
+        frame, Painter::recording(), &FixtureMeasure, UiMode::Classic, OsdOpacity::default(), None, now, 3_000));
+    let runs = draw(&mut state, &scene, 100);
+    assert!(runs.iter().any(|r| r.text == denied.message()));
+    assert!(runs.iter().all(|r| r.clip == Some(scene.slots()[2].bounds)));
+    assert!(draw(&mut state, &scene, 3_100).is_empty());
+    scene.set_provider_notice(2, interrupted);
+    assert!(draw(&mut state, &scene, 3_101).iter().any(|r| r.text == interrupted.message()));
+}
+
+#[test]
 fn occupied_window_paints_the_shared_footer_to_scale_until_the_configured_deadline() {
     for mode in [Mode::Grid4, Mode::Grid9, Mode::Perimeter { satellites: 8 }] {
         let mut f = ChromeFrame::new(Layout::new(Rect::FULL, mode, 1.0).unwrap(), &views(), state()).unwrap();
