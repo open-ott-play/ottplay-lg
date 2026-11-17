@@ -693,6 +693,7 @@ fn established_live_presentation_stall_queues_a_fresh_same_channel_attempt() {
     let _serial = plx_base::testlock::serial();
     let _reset = ResetMedia;
     let mut app = fixture();
+    app.running = true;
     app.ott.as_mut().unwrap().saving = true;
     make_live(&mut app);
     admit(&mut app, "first");
