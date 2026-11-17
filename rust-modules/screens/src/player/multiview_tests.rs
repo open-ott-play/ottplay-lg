@@ -30,9 +30,14 @@ impl MetadataLike for TestHost {
     fn metadata<'a>(cx: &Cx<'a, Self>) -> plx_data::metadata::MetadataView<'a> { cx.views.metadata }
 }
 fn frame(owned: bool) -> ChromeFrame {
-    ChromeFrame::new(Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap(),
-        &[SlotView { id: 0, title: "Admitted fixture main".into(), state: SlotState::Playing }],
-        ViewState { revision: 415, geometry_revision: 19, active: Some(0), audio: Some(0), focused: Some(0), input_owned: owned }).unwrap()
+    let mut frame = ChromeFrame::new(Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap(),
+        &[SlotView { id: 0, title: "Legacy window label".into(), state: SlotState::Playing }],
+        ViewState { revision: 415, geometry_revision: 19, active: Some(0), audio: Some(0), focused: Some(0), input_owned: owned }).unwrap();
+    frame.set_footer(0, plx_data::metadata::NowPlaying { title: "Admitted fixture main".into(),
+        ott: None, is_episode: false, is_real_episode: false, ep_title: String::new(), season: 0,
+        index: 0, summary: String::new(), year: 0, dur_ms: 0, rating: String::new(),
+        thumb: String::new(), detail_rk: String::new() });
+    frame
 }
 fn key(sym: u32, edge: Edge) -> InputKind<u32> {
     InputKind::Key { key: Key::Other, sym, wcode: 0, edge, at_edge: false }
@@ -122,6 +127,7 @@ fn real_player_draw_uses_admitted_frame_and_absence_draws_no_slot_chrome() {
             Screen::<TestHost>::draw(&mut page, &mut draw);
         });
         assert_eq!(runs.iter().any(|run| run.text == "Admitted fixture main"), offer.is_some());
+        assert!(!runs.iter().any(|run| run.text == "Legacy window label"));
     }
 }
 
