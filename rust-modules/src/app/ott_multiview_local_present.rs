@@ -106,6 +106,7 @@ pub(super) struct State {
     audio: Option<(SlotId, ResolveTicket, OwnerToken)>,
     serial: u64,
     error: Option<&'static str>,
+    audio_epoch: u64,
     pending_pcm: Option<(SlotId, ResolveTicket, plx_media::local_multiview::PcmChunk)>,
 }
 impl Default for State {
@@ -124,6 +125,7 @@ impl Default for State {
             audio: None,
             serial: 0,
             error: None,
+            audio_epoch: 0,
             pending_pcm: None,
         }
     }
@@ -153,9 +155,7 @@ impl State {
         let Some((slot, ticket, token)) = self.audio else {
             return false;
         };
-        if runtime.multiview_local.audio_owner() != Some(slot)
-            || runtime.multiview_local.slot_ticket(slot) != Some(ticket)
-        {
+        if runtime.multiview_local.output_ticket(runtime.multiview_local.audio_owner()) != Some((slot, ticket)) {
             return false;
         }
         let Some(sink) = self.sink.as_mut() else {
@@ -367,7 +367,19 @@ impl State {
             }
             return;
         }
-        if let Some((_scene, _revision, owner)) = runtime.multiview_local.audio_request() {
+        let output_epoch = runtime.multiview_local.audio_epoch();
+        if self.audio_epoch != output_epoch {
+            self.audio_epoch = output_epoch;
+            self.pending_pcm = None;
+            if let Some(sink) = self.sink.as_mut() {
+                sink.clear(app.adapters.player.mt());
+            }
+        }
+        let request = runtime.multiview_local.audio_request();
+        let owner = request.map(|(_, _, slot)| slot).unwrap_or_else(|| runtime.multiview_local.audio_owner());
+        let expected = runtime.multiview_local.output_ticket(owner);
+        let current = self.audio.map(|(slot, ticket, _)| (slot, ticket));
+        if request.is_some() || current != expected {
             let Some(next_serial) = self.serial.checked_add(1) else {
                 if let Some(sink) = self.sink.as_mut() {
                     sink.clear(app.adapters.player.mt());
@@ -379,20 +391,12 @@ impl State {
                 return;
             };
             self.serial = next_serial;
-            let next = owner.and_then(|slot| {
-                runtime.multiview_local.slot_ticket(slot).map(|ticket| {
-                    (
-                        slot,
-                        ticket,
-                        OwnerToken {
-                            scene: self.serial,
-                            slot: slot.index() as u8,
-                            generation: self.serial,
-                        },
-                    )
-                })
-            });
-            let result = if owner.is_none() {
+            let next = expected.map(|(slot, ticket)| (slot, ticket, OwnerToken {
+                scene: self.serial,
+                slot: slot.index() as u8,
+                generation: self.serial,
+            }));
+            let result = if owner.is_none() || (expected.is_none() && runtime.multiview_local.mixing_audio()) {
                 if let Some(sink) = self.sink.as_mut() {
                     sink.set_owner(app.adapters.player.mt(), None)
                 } else {
@@ -425,12 +429,15 @@ impl State {
             }
             self.audio = if accepted { next } else { None };
             let mut driver = std::mem::take(&mut runtime.multiview_local);
-            driver.confirm_audio(runtime, accepted);
+            if request.is_some() {
+                driver.confirm_audio(runtime, accepted);
+            } else if !accepted {
+                driver.audio_output_failed(runtime);
+            }
             runtime.multiview_local = driver;
         }
         if self.audio.is_some_and(|(slot, ticket, _)| {
-            runtime.multiview_local.audio_owner() != Some(slot)
-                || runtime.multiview_local.slot_ticket(slot) != Some(ticket)
+            runtime.multiview_local.output_ticket(runtime.multiview_local.audio_owner()) != Some((slot, ticket))
         }) {
             if let Some(sink) = self.sink.as_mut() {
                 let _ = sink.set_owner(app.adapters.player.mt(), None);
@@ -443,10 +450,12 @@ impl State {
             return;
         }
         for _ in 0..16 {
+            let Some(sink) = self.sink.as_ref() else { break };
+            let queued_frames = (sink.queued_bytes(app.adapters.player.mt()) / 4) as usize;
             let Some((slot, ticket, chunk)) = self
                 .pending_pcm
                 .take()
-                .or_else(|| runtime.multiview_local.take_audio())
+                .or_else(|| runtime.multiview_local.take_audio(queued_frames))
             else {
                 break;
             };
