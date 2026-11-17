@@ -142,6 +142,7 @@ pub struct PlayerScreen {
     /// The control row's focus springs, its label-width memo and the resume clock
     /// (`player_hud`'s `ROW_POP`/`MEMO`/`PLAY_AT`/`PAUSE_SEEN`).
     pub row: HudMotion,
+    window_footers: Option<Box<plx_appkit::multiview_chrome::WindowFooters>>,
     /// The Up Next auto-advance countdown (`up_next`'s `DEADLINE`/`CANCELLED`).
     pub up_next: Countdown,
     /// This frame's control-row occupant, sampled ONCE by the loop and pushed here (`slot()`'s own
@@ -203,6 +204,7 @@ impl PlayerScreen {
             seek_burst: player_hud::seek_jump::SeekBurst::IDLE,
             transport_tap: false,
             row: HudMotion::new(),
+            window_footers: Default::default(),
             up_next: Countdown::default(),
             slot: ControlSlot::Discs(player_hud::Controls::NONE),
             busy: plx_appkit::player_hud::Busy::None,
@@ -641,6 +643,11 @@ impl PlayerScreen {
             // digest, and the cost is paid on every frame of the route.
             h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
         };
+        if let Some(footers) = &self.window_footers {
+            let visible = footers.visible_mask(now, self.hud.info_timeout().milliseconds());
+            mix(u64::from(visible));
+            if visible != 0 { mix(self.model.wall_now_s.unwrap_or_default() as u64); }
+        }
         mix(u64::from(self.pending_channel_display_stamp.is_some()));
         if let Some((generation, play_generation, revision, clock_ready)) = self.pending_channel_display_stamp {
             mix(generation); mix(play_generation); mix(revision); mix(u64::from(clock_ready));
@@ -808,6 +815,28 @@ impl PlayerScreen {
 
     /// Is the transport actually DRAWN this frame? Whenever the captions lift for it, unless the
     /// repair alert has the screen.
+    pub fn reveal_multiview_footer(&mut self, slot: u8, now: u32) {
+        self.window_footers.get_or_insert_with(Box::default).reveal(slot, now);
+        plx_machine::idle::invalidate();
+    }
+
+    fn draw_notices(&mut self, measure: &dyn plx_machine::machine::Measure) {
+        if self.volume_notice.visible() && !self.repair_alert.visible() && !self.reminder_notice.visible() {
+            self.volume_notice.draw(plx_platform::i18n::msg::settings_cancel_c(),
+                plx_platform::i18n::msg::settings_cancel_c(), measure);
+        }
+        if self.repair_alert.visible() {
+            self.repair_alert.draw_scrim();
+            let confirm = if self.reminder_sheet { plx_platform::i18n::msg::ott_reminder_switch_c() }
+                else { plx_platform::i18n::msg::widgets_repair_action_c() };
+            self.repair_alert.draw(plx_platform::i18n::msg::settings_cancel_c(), confirm, measure);
+        }
+        if self.reminder_notice.visible() {
+            self.reminder_notice.draw(plx_platform::i18n::msg::settings_cancel_c(),
+                plx_platform::i18n::msg::settings_cancel_c(), measure);
+        }
+    }
+
     fn hud_drawn(&self, ps: &plx_media::route::PlaybackSession, now: u32) -> bool {
         self.subs_lift(ps, now) && !self.repair_alert.visible()
     }
@@ -935,7 +964,12 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Machine<H> for PlayerScreen 
         if let Some(frame) = H::multiview_offer(cx).filter(|frame| frame.state().input_owned) {
             match ev {
                 ScreenEvent::Input(input) => if let Some(event) = multiview_input(&frame, &input.kind) {
-                    if let Some(event) = event { fx.push(Fx::App(AppFx::Player(PlayerReq::Multiview(event)))); }
+                    if let Some(event) = event {
+                        use plx_appkit::multiview_chrome::Event::{ActivateSlot, FocusSlot};
+                        let (ActivateSlot { slot, .. } | FocusSlot { slot, .. }) = event;
+                        self.reveal_multiview_footer(slot, cx.tick.ms);
+                        fx.push(Fx::App(AppFx::Player(PlayerReq::Multiview(event))));
+                    }
                     return Handled::Yes;
                 },
                 // A HUD press queued before scene selection acquired input may
@@ -2332,6 +2366,15 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         }
     }
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>) {
+        if let Some(frame) = H::multiview_offer(f.cx) {
+            self.window_footers.get_or_insert_with(Box::default).draw(&frame, f.painter, f.measure, H::ui_mode(&f.cx.views),
+                self.model.osd_opacity, self.model.wall_now_s, f.cx.tick.ms,
+                self.hud.info_timeout().milliseconds());
+            self.draw_notices(f.measure);
+            self.record_stops(f, false);
+            return;
+        }
+        self.window_footers = None;
         // The frame's publication of the playback session (spec §2.3) — see `AppViews::session`.
         let ps = H::session(f.cx);
         let now = f.cx.tick.ms;
@@ -2370,17 +2413,6 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
         // delivery, and the screen decides what the element means — including the scrubber, whose
         // meaning needs the click's `x` and so cannot be carried by a bare `ScreenEvent::Activate`
         // at all, and the tabs, which open a panel at once with no dip to wait for.
-        if let Some(frame) = H::multiview_offer(f.cx) {
-            let empty = plx_platform::i18n::msg::multiview_empty();
-            let loading = plx_platform::i18n::msg::multiview_loading();
-            for _ in frame.slots().iter().filter(|slot| slot.state == plx_appkit::multiview_chrome::SlotState::Loading) {
-                plx_ui::placeholder::note(f.painter, plx_ui::placeholder::Reason::WorkingReadout, loading);
-            }
-            let failed = plx_platform::i18n::msg::multiview_failed();
-            frame.draw(f.painter, f.measure, &plx_appkit::multiview_chrome::Labels {
-                empty, loading, failed,
-            });
-        }
         if self.permanent_clock_key().is_some() {
             let _ = self.render.osd_clock.draw(f.painter, &self.model, f.measure);
         }
@@ -2396,20 +2428,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Screen<H> for PlayerScreen {
             player_hud::Busy::None
         } else { self.busy };
         plx_appkit::player_hud::classic::draw_readout(ps, readout, now, 0, f.measure);
-        if self.volume_notice.visible() && !self.repair_alert.visible() && !self.reminder_notice.visible() {
-            self.volume_notice.draw(plx_platform::i18n::msg::settings_cancel_c(),
-                plx_platform::i18n::msg::settings_cancel_c(), f.measure);
-        }
-        if self.repair_alert.visible() {
-            self.repair_alert.draw_scrim();
-            let confirm = if self.reminder_sheet { plx_platform::i18n::msg::ott_reminder_switch_c() }
-                else { plx_platform::i18n::msg::widgets_repair_action_c() };
-            self.repair_alert.draw(plx_platform::i18n::msg::settings_cancel_c(), confirm, f.measure);
-        }
-        if self.reminder_notice.visible() {
-            self.reminder_notice.draw(plx_platform::i18n::msg::settings_cancel_c(),
-                plx_platform::i18n::msg::settings_cancel_c(), f.measure);
-        }
+        self.draw_notices(f.measure);
         self.record_stops(f, hud_drawn);
     }
     fn render(&self) -> RenderStrategy {

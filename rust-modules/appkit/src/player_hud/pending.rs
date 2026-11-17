@@ -14,17 +14,24 @@ impl Default for PendingFooter {
 impl PendingFooter {
     pub fn draw(&mut self, painter: Painter, playing: &NowPlaying, wall_now_s: Option<i64>,
         opacity: OsdOpacity, mode: UiMode, measure: &dyn Measure) {
+        self.draw_with_clock(painter, playing, wall_now_s, None, opacity, mode, measure);
+    }
+
+    /// Draw the ordinary information band with a playback clock from this source only.
+    pub fn draw_with_clock(&mut self, painter: Painter, playing: &NowPlaying, wall_now_s: Option<i64>,
+        decoder: Option<(i64, i64)>, opacity: OsdOpacity, mode: UiMode, measure: &dyn Measure) {
         let slot = ControlSlot::Discs(Controls::NONE);
         let busy = Busy::Readout(plx_ui::widgets::StatusKind::Working, c"");
         self.motion.ott_clock_labels.refresh_raster((0, 0));
         self.motion.ott_clock_labels.refresh_media_rate(None);
-        if mode == UiMode::Modern {
+        let rail = if mode == UiMode::Modern {
             let geometry = classic::geometry(slot, &self.motion, 0, measure);
             let layout = modern::compose(geometry, slot, &self.motion, None, "",
                 Some(playing), wall_now_s, measure);
             modern::draw_panel(painter, &layout, opacity);
             modern::draw_information(painter, &layout, Some(playing), wall_now_s,
                 &mut self.motion.ott_clock_labels, measure, busy, TransportMark::None);
+            layout.geometry.playbar
         } else {
             let layout = classic::ott_classic_layout(slot, &self.motion, 0, Some(playing), measure);
             let color = theme::with_a(plx_ui::palette::color(plx_ui::palette::Role::Background,
@@ -32,15 +39,16 @@ impl PendingFooter {
             painter.rect(layout.panel, 0.0, color, color, 0.0);
             super::ott_footer::draw_classic(painter, playing, playing.ott.as_ref(),
                 &mut self.motion.ott_clock_labels, &layout, measure, wall_now_s,
-                None, busy, TransportMark::None);
-            // Only real programme timing can supply a pending live rail. No
-            // outgoing decoder duration or synthetic playback position is used.
-            if let Some((pos_ns, dur_ns)) = super::ott_footer::live_timeline(playing, wall_now_s) {
-                classic::draw_playbar_track(painter, classic::Playbar {
-                    pos_ns, dur_ns, knob: classic::Knob::Tick,
-                    mark: TransportMark::None, now: 0, clock_grow: 0.0,
-                }, layout.geometry.playbar);
-            }
+                decoder, busy, TransportMark::None);
+            layout.geometry.playbar
+        };
+        let timeline = decoder.filter(|(pos, dur)| *pos >= 0 && *dur > 0)
+            .or_else(|| super::ott_footer::live_timeline(playing, wall_now_s));
+        if let Some((pos_ns, dur_ns)) = timeline {
+            classic::draw_playbar_track(painter, classic::Playbar {
+                pos_ns, dur_ns, knob: classic::Knob::Tick,
+                mark: TransportMark::None, now: 0, clock_grow: 0.0,
+            }, rail);
         }
     }
 }

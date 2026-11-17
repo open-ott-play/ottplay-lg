@@ -3,8 +3,11 @@
 //! opens media, changes audio, stores configuration, or enables multi-view.
 
 use crate::multiview_layout::{GeometryError, Layout, PointerAction, PointerMap, RasterPlan, SlotId};
-use plx_machine::machine::Measure;
-use plx_ui::{icons::{self, Icon}, label::HAlign, screen::Dir, text_view::TextView, Painter, Rect};
+use crate::player_hud::{model::OsdOpacity, pending::PendingFooter};
+use plx_data::metadata::NowPlaying;
+use plx_machine::machine::{Measure, UiMode};
+use plx_ui::{screen::Dir, Painter, Rect, Zoom};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotState { Empty, Loading, Playing, Failed }
@@ -41,9 +44,6 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeError { Geometry(GeometryError), InvalidSlot, DuplicateSlot, InvalidRevision, TitleTooLong }
 
-/// Already localized by the host. A failed slot never paints a raw server error.
-pub struct Labels<'a> { pub empty: &'a str, pub loading: &'a str, pub failed: &'a str }
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlotChrome {
     pub id: SlotId,
@@ -53,12 +53,10 @@ pub struct SlotChrome {
     pub active: bool,
     pub audio: bool,
     pub focused: bool,
-    pub title_band: Rect,
-    pub title_text: Rect,
-    pub body: Rect,
-    pub active_marker: Option<Rect>,
-    pub audio_marker: Option<Rect>,
-    pub border: [Rect; 4],
+    footer: Option<Arc<NowPlaying>>,
+    decoder: Option<(i64, i64)>,
+    wall_now_s: Option<i64>,
+
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,36 +93,19 @@ impl ChromeFrame {
             if std::mem::replace(&mut seen[usize::from(view.id)], true) { return Err(ChromeError::DuplicateSlot); }
             if view.title.len() > 4096 { return Err(ChromeError::TitleTooLong); }
         }
-        let scale = layout.chrome_scale();
-        let mut slots = Vec::with_capacity(layout.slots().len());
-        for slot in layout.slots() {
+        let slots = layout.slots().iter().map(|slot| {
             let view = views.iter().find(|view| view.id == slot.id);
-            let r = slot.bounds;
-            let pad = (8.0 * f64::from(scale)).min(f64::from(r.w.min(r.h)) * 0.04) as f32;
-            let height = (36.0 * f64::from(scale)).min(f64::from(r.h) * 0.25) as f32;
-            let title_band = Rect::new(r.x + pad, r.y + pad, r.w - 2.0 * pad, height);
-            let mark = (20.0 * f64::from(scale)).min(f64::from(height))
-                .min(f64::from(title_band.w) * 0.15) as f32;
-            let active = state.active == Some(slot.id);
-            let audio = state.audio == Some(slot.id);
-            let mut right = title_band.x + title_band.w - pad;
-            let mut marker = || { right -= mark;
-                let rect = Rect::new(right, title_band.cy() - mark * 0.5, mark, mark);
-                right -= pad; rect };
-            let audio_marker = audio.then(&mut marker);
-            let active_marker = active.then(&mut marker);
-            let title_text = Rect::new(title_band.x + pad, title_band.y,
-                (right - title_band.x - pad).max(0.0), title_band.h);
-            let body = Rect::new(r.x + pad, title_band.y + height + pad,
-                r.w - 2.0 * pad, (r.y + r.h - pad - title_band.y - height - pad).max(0.0));
-            let title = view.map(|view| view.title.chars().filter(|c| !c.is_control()).take(256).collect())
-                .unwrap_or_default();
-            slots.push(SlotChrome { id: slot.id, bounds: r, title,
-                state: view.map_or(SlotState::Empty, |view| view.state), active, audio,
-                focused: state.focused == Some(slot.id), title_band, title_text, body,
-                active_marker, audio_marker,
-                border: layout.active_border(slot.id).ok_or(ChromeError::Geometry(GeometryError::InvalidViewport))? });
-        }
+            SlotChrome {
+                id: slot.id,
+                bounds: slot.bounds,
+                title: view.map(|view| view.title.chars().filter(|c| !c.is_control()).take(256).collect()).unwrap_or_default(),
+                state: view.map_or(SlotState::Empty, |view| view.state),
+                active: state.active == Some(slot.id),
+                audio: state.audio == Some(slot.id),
+                focused: state.focused == Some(slot.id),
+                footer: None, decoder: None, wall_now_s: None,
+            }
+        }).collect();
         Ok(Self { layout, state, slots })
     }
 
@@ -152,39 +133,83 @@ impl ChromeFrame {
         }
     }
 
-    /// Paint chrome only. A Playing slot stays transparent over its video except
-    /// for its title and markers; placeholders cover unavailable/stale pictures.
-    pub fn draw(&self, painter: Painter, measure: &dyn Measure, labels: &Labels<'_>) {
-        const WHITE: [f32; 4] = [0.95, 0.97, 1.0, 1.0];
-        const ACTIVE: [f32; 4] = [0.22, 0.56, 1.0, 1.0];
-        for (index, slot) in self.slots.iter().enumerate() {
-            // Native video is already composed below this transparent UI plane.
-            // Painting a lower placeholder over a higher Playing slot cannot be
-            // undone by subsequently drawing that slot's transparent chrome.
-            let visible = visible_regions(slot.bounds, self.slots[index + 1..].iter().map(|slot| slot.bounds));
-            for clip in visible {
-                painter.clip(clip);
-                if slot.state != SlotState::Playing {
-                    painter.rect(clip, 0.0, [0.025, 0.035, 0.05, 1.0], [0.025, 0.035, 0.05, 1.0], 0.0);
-                }
-                painter.rect(slot.title_band, 0.0, [0.0, 0.0, 0.0, 0.72], [0.0, 0.0, 0.0, 0.72], 0.0);
-                let text = if slot.title.is_empty() { format!("{}", slot.id + 1) } else { slot.title.clone() };
-                TextView::new(&text, 18, WHITE).bold().max_lines(1).break_long_words()
-                    .with_measure(measure).h(HAlign::Start).draw(painter, slot.title_text);
-                let placeholder = match slot.state { SlotState::Empty => Some(labels.empty),
-                    SlotState::Loading => Some(labels.loading), SlotState::Failed => Some(labels.failed),
-                    SlotState::Playing => None };
-                if let Some(label) = placeholder {
-                    let view = TextView::new(label, 18, WHITE).max_lines(2).break_long_words()
-                        .with_measure(measure).h(HAlign::Center);
-                    let height = view.measure_h(slot.body.w).min(slot.body.h);
-                    view.draw(painter, Rect::new(slot.body.x, slot.body.cy() - height * 0.5, slot.body.w, height));
-                }
-                if let Some(rect) = slot.active_marker { icons::draw(painter, Icon::Check, rect, ACTIVE); }
-                if let Some(rect) = slot.audio_marker { icons::draw(painter, Icon::Audio, rect, [1.0, 0.80, 0.24, 1.0]); }
-                let border = if slot.active { ACTIVE } else if slot.focused { WHITE } else { [0.26, 0.30, 0.37, 1.0] };
-                for band in slot.border { painter.rect(band, 0.0, border, border, 0.0); }
-                painter.clip_clear();
+    /// Attach only the target slot's verified catalogue/source facts.
+    pub fn set_footer(&mut self, id: SlotId, playing: NowPlaying) {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id && slot.state != SlotState::Empty) {
+            slot.footer = Some(Arc::new(playing));
+        }
+    }
+    pub fn set_footer_clock(&mut self, id: SlotId, decoder: Option<(i64, i64)>, wall_now_s: Option<i64>) {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == id) {
+            slot.decoder = decoder.filter(|(position, duration)| *position >= 0 && *duration > 0);
+            slot.wall_now_s = wall_now_s;
+        }
+    }
+}
+
+#[derive(Default)]
+struct FooterSlot {
+    source: Option<Arc<NowPlaying>>,
+    shown_at: Option<u32>,
+    renderer: Option<Box<PendingFooter>>,
+}
+
+/// State travels with the player screen. Routine status and EPG publications
+/// refresh their content without extending the user's normal OSD timeout.
+#[derive(Default)]
+pub struct WindowFooters {
+    slots: [FooterSlot; 9],
+    focused: Option<SlotId>,
+    active: Option<SlotId>,
+}
+
+impl WindowFooters {
+    pub fn reveal(&mut self, id: SlotId, now: u32) {
+        if let Some(slot) = self.slots.get_mut(usize::from(id)) { slot.shown_at = Some(now); }
+    }
+
+    pub fn visible_mask(&self, now: u32, timeout_ms: u32) -> u16 {
+        self.slots.iter().enumerate().fold(0, |mask, (slot, state)| {
+            if state.source.is_some() && state.shown_at.is_some_and(|at| now.wrapping_sub(at) < timeout_ms) {
+                mask | (1 << slot)
+            } else { mask }
+        })
+    }
+
+    pub fn draw(&mut self, frame: &ChromeFrame, painter: Painter, measure: &dyn Measure,
+        mode: UiMode, opacity: OsdOpacity, wall_now_s: Option<i64>, now: u32, timeout_ms: u32) {
+        if self.active != frame.state.active {
+            if let Some(id) = frame.state.active { self.reveal(id, now); }
+            self.active = frame.state.active;
+        }
+        if self.focused != frame.state.focused {
+            if let Some(id) = frame.state.focused { self.reveal(id, now); }
+            self.focused = frame.state.focused;
+        }
+        for (index, slot) in frame.slots.iter().enumerate() {
+            let state = &mut self.slots[usize::from(slot.id)];
+            let Some(source) = &slot.footer else { *state = FooterSlot::default(); continue; };
+            if !state.source.as_ref().is_some_and(|prev| Arc::ptr_eq(prev, source)
+                || (prev.title == source.title && prev.detail_rk == source.detail_rk
+                    && prev.ep_title == source.ep_title && prev.index == source.index
+                    && prev.season == source.season)) {
+                state.shown_at = Some(now);
+            }
+            state.source = Some(Arc::clone(source));
+            if !state.shown_at.is_some_and(|since| now.wrapping_sub(since) < timeout_ms) {
+                state.shown_at = None;
+                continue;
+            }
+            let bounds = slot.bounds;
+            let scale = (bounds.w / Rect::FULL.w).min(bounds.h / Rect::FULL.h);
+            let footer = state.renderer.get_or_insert_with(Box::default);
+            for clip in visible_regions(bounds, frame.slots[index + 1..].iter().map(|above| above.bounds)) {
+                let _scope = plx_ui::screen::ClipScope::open_in(painter, clip);
+                let target = painter.clipped(clip).translate(bounds.x + (bounds.w - Rect::FULL.w * scale) * 0.5,
+                    bounds.y + bounds.h - Rect::FULL.h * scale).zoomed(Zoom { ox: 0.0, oy: 0.0, s: scale });
+                if painter.is_recording() { painter.clip(clip); }
+                footer.draw_with_clock(target, source, slot.wall_now_s.or(wall_now_s), slot.decoder, opacity, mode, measure);
+                if painter.is_recording() { painter.clip_clear(); }
             }
         }
     }
