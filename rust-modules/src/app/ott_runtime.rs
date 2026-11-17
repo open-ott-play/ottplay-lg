@@ -38,6 +38,8 @@ mod archive_play;
 mod archive_programme;
 #[path = "ott_commands.rs"]
 mod commands;
+#[path = "ott_numeric_remote.rs"]
+mod numeric_remote;
 #[path = "ott_guide_projection.rs"]
 mod guide_projection;
 #[path = "ott_hosted_epg_settings.rs"]
@@ -4458,6 +4460,7 @@ impl Runtime {
         if self.multiview_local.active() || self.multiview_local.has_work() || multiview_local_present::has_owned_work(self) {
             return Err("Close multiview before starting fullscreen playback");
         }
+        numeric_remote::before_native(self, app)?;
         parental_runtime::observe_session(self, app);
         profile_rename::guard(self, profile)?;
         managed::guard_profile(self, app, profile)?;
@@ -4471,7 +4474,8 @@ impl Runtime {
             .ok_or("Playback request is no longer current")?
             .clone();
         let (bound, bound_profile, bound_entry, favorite) =
-            match transient::staged_native_binding(self, &request) {
+            match numeric_remote::staged_binding(self, &request)
+                .or_else(|| transient::staged_native_binding(self, &request)) {
                 Some(result) => {
                     let (profile, entry) = result?;
                     (request.clone(), profile, Some(entry), None)
@@ -4706,6 +4710,27 @@ impl Runtime {
                 let binding = match self.row_owner() {
                     Some(selection::SelectionOwner::LocalRoot(root)) => {
                         Some(self.bind_local_selection(root)?)
+                    }
+                    Some(selection::SelectionOwner::Profile(owner))
+                        if owner == &profile && profile.kind == ProviderKind::Local
+                            && plx_data::ott::http_url(&profile.source).is_none()
+                            && request.local_selection.is_some() =>
+                    {
+                        // An addressed handoff may already hold a Folder receipt.
+                        // Retain that exact live grant through deferred Load instead
+                        // of silently replacing it with an unbound ordinary request.
+                        let selected = request.local_selection.as_ref().ok_or("Local source binding is missing")?;
+                        let root = self.current_local_root(selected).ok_or("Local source changed before playback")?;
+                        if root.canonical_path.as_deref() != Some(profile.source.as_str())
+                            || !matches!(&entry.media, MediaLocator::Local { .. })
+                        {
+                            return Err("Local source profile changed before playback");
+                        }
+                        if self.local_profile_selection(&profile).as_ref() != Some(selected) {
+                            return Err("Local source is unavailable or ambiguous");
+                        }
+                        self.capture_local_root(selected).ok_or("Local source binding changed before playback")?;
+                        Some(selected.clone())
                     }
                     _ => None,
                 };
@@ -6468,6 +6493,7 @@ fn tick_with_start(
                     }
                     Err(error) => {
                         let keep_previous_lease = (parental_runtime::is_pin_required(error) || catalog_failure || startup_retry
+                            || numeric_remote::has_pending(&runtime)
                             || transient::plex_remote::target_current(&runtime).is_some())
                             && runtime
                                 .active_lease
@@ -6484,7 +6510,8 @@ fn tick_with_start(
                     }
                 };
                 let reply =
-                    transient::finish_native(&mut runtime, app, response, native_start.as_ref())
+                    numeric_remote::finish(&mut runtime, app, response, native_start.as_ref())
+                        .or_else(|| transient::finish_native(&mut runtime, app, response, native_start.as_ref()))
                         .unwrap_or(reply);
                 // Local errors use a rejected envelope with state:error.
                 // A catalogue warning must not replace their domain failure.

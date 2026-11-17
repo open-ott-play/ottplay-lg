@@ -38,11 +38,11 @@ fn finite_switches_reuse_contexts_but_epoch_detects_aba() {
         }
     }
     assert_eq!(registry.contexts.iter().filter(|slot| slot.get().is_some()).count(), SHIPPED.len() + 1);
-    let pointers: Vec<_> = registry.contexts.iter().map(|slot| slot.get().unwrap() as *const _).collect();
+    let pointers: Vec<_> = registry.contexts.iter().map(|slot| slot.get().unwrap().as_ref() as *const _).collect();
     for preference in std::iter::once(Preference::System).chain(SHIPPED) {
         registry.publish(registry.prepare(preference).unwrap()).unwrap();
     }
-    assert_eq!(pointers, registry.contexts.iter().map(|slot| slot.get().unwrap() as *const _).collect::<Vec<_>>());
+    assert_eq!(pointers, registry.contexts.iter().map(|slot| slot.get().unwrap().as_ref() as *const _).collect::<Vec<_>>());
 }
 
 #[test]
@@ -116,4 +116,43 @@ fn english_diagnostic_and_nested_test_overrides_keep_precedence() {
         assert_eq!(current().language(), Language::Fr);
     });
     assert_eq!(current().language(), Language::Ru);
+}
+
+
+/// Cold global initialization must fit the same worker budget as Plex source
+/// resolution. A fresh process prevents unrelated locale tests warming it first.
+#[test]
+fn cold_locale_initialization_and_publication_fit_a_small_worker() {
+    const CHILD: &str = "PLX_I18N_COLD_SMALL_WORKER_TEST";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(super::super::CURRENT.get().is_none(), "child must start with a cold registry");
+        std::thread::Builder::new().name("cold-locale-worker".into())
+            .stack_size(256 * 1024).spawn(|| {
+                // This is the original process-global current()->registry()->
+                // Registry::new path reached by Plex's cold request worker.
+                let initial = current();
+                assert_eq!(initial.language(), Language::En);
+                assert_eq!(initial.decimal(45, 1), "4.5");
+                assert_eq!(initial.month_day(3, 12, MonthWidth::Long).as_deref(), Some("12 March"));
+                assert!(std::ptr::eq(initial, current()));
+                // A fresh independent registry also exercises lazy slot allocation
+                // and immutable context reuse on this unchanged small stack.
+                let registry = registry();
+                let english = registry.current() as *const _;
+                registry.publish(registry.prepare(Preference::Ru).unwrap()).unwrap();
+                assert_eq!(registry.current().language(), Language::Ru);
+                assert_eq!(registry.current().decimal(45, 1), "4,5");
+                registry.publish(registry.prepare(Preference::En).unwrap()).unwrap();
+                assert_eq!(registry.current() as *const _, english);
+            }).unwrap().join().unwrap();
+        return;
+    }
+    // The marker only selects the fresh-process arm; no locale, stack-size
+    // environment override, production warmup, or global preference is changed.
+    let module = module_path!().split_once("::").unwrap().1;
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .env(CHILD, "1")
+        .arg("--exact").arg(format!("{module}::cold_locale_initialization_and_publication_fit_a_small_worker"))
+        .arg("--nocapture").status().unwrap();
+    assert!(status.success(), "cold locale initialization failed on the ordinary small worker stack");
 }
