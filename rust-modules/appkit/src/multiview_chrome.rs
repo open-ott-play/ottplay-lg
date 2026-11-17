@@ -15,13 +15,14 @@ pub enum SlotState { Empty, Loading, Playing, Failed }
 
 /// Closed provider outcomes suitable for display on a shared TV screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderNotice { SessionDenied, Interrupted }
+pub enum ProviderNotice { SessionDenied, Interrupted, RefreshTimeout }
 
 impl ProviderNotice {
     pub fn from_stop(stop: Option<&str>) -> Option<Self> {
         match stop {
             Some("provider_session_denied") => Some(Self::SessionDenied),
             Some("provider_interrupted") => Some(Self::Interrupted),
+            Some("provider_refresh_timeout") => Some(Self::RefreshTimeout),
             _ => None,
         }
     }
@@ -30,6 +31,7 @@ impl ProviderNotice {
         match self {
             Self::SessionDenied => msg::multiview_provider_session_denied(),
             Self::Interrupted => msg::multiview_provider_interrupted(),
+            Self::RefreshTimeout => msg::multiview_provider_refresh_timeout(),
         }
     }
 }

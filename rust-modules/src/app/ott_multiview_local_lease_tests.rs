@@ -5,7 +5,7 @@ use multiview_sources::{Snapshot, SourceHandle};
 use plx_data::ott::multiview::{Scene, SceneId};
 use std::num::NonZeroU64;
 
-fn receipt() -> (App, Runtime, Snapshot, SourceHandle, LocalResolved) {
+pub(super) fn receipt() -> (App, Runtime, Snapshot, SourceHandle, LocalResolved) {
     let mut app = crate::app::run::lifecycle_regression_tests::app();
     app.running = true;
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());

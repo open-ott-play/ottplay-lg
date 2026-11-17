@@ -3,5 +3,6 @@
   "multiview.loading": "A carregar…",
   "multiview.failed": "Reprodução indisponível",
   "multiview.provider_session_denied": "O fornecedor recusou esta sessão de reprodução.",
-  "multiview.provider_interrupted": "O fornecedor interrompeu esta transmissão."
+  "multiview.provider_interrupted": "O fornecedor interrompeu esta transmissão.",
+  "multiview.provider_refresh_timeout": "Não foi possível mudar de canal enquanto as outras transmissões aguardavam dados."
 }

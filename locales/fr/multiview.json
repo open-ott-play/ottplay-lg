@@ -3,5 +3,6 @@
   "multiview.loading": "Chargement…",
   "multiview.failed": "Lecture indisponible",
   "multiview.provider_session_denied": "Le fournisseur a refusé cette session de lecture.",
-  "multiview.provider_interrupted": "Le fournisseur a interrompu ce flux."
+  "multiview.provider_interrupted": "Le fournisseur a interrompu ce flux.",
+  "multiview.provider_refresh_timeout": "Impossible de changer de chaîne pendant que les autres flux attendaient des données."
 }

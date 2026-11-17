@@ -18,5 +18,9 @@
   "multiview.provider_interrupted": {
     "value": "The provider interrupted this stream.",
     "description": "Per-window notice for a recognized provider response."
+  },
+  "multiview.provider_refresh_timeout": {
+    "value": "Couldn’t switch channels while the other streams were waiting for data.",
+    "description": "Shown only in the window whose channel could not safely be changed on a session-limited HLS provider."
   }
 }

@@ -3,5 +3,6 @@
   "multiview.loading": "Betöltés…",
   "multiview.failed": "A lejátszás nem érhető el",
   "multiview.provider_session_denied": "A szolgáltató elutasította a lejátszási munkamenetet.",
-  "multiview.provider_interrupted": "A szolgáltató megszakította ezt az adatfolyamot."
+  "multiview.provider_interrupted": "A szolgáltató megszakította ezt az adatfolyamot.",
+  "multiview.provider_refresh_timeout": "Nem sikerült csatornát váltani, amíg a többi adatfolyam adatokra várt."
 }

@@ -3,5 +3,6 @@
   "multiview.loading": "Загрузка…",
   "multiview.failed": "Воспроизведение недоступно",
   "multiview.provider_session_denied": "Провайдер отклонил сеанс воспроизведения.",
-  "multiview.provider_interrupted": "Провайдер прервал этот поток."
+  "multiview.provider_interrupted": "Провайдер прервал этот поток.",
+  "multiview.provider_refresh_timeout": "Не удалось переключить канал, пока другие потоки ожидали данные."
 }

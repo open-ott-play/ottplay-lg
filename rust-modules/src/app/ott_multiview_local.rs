@@ -9,6 +9,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 #[path = "ott_multiview_local_commands.rs"]
 mod commands;
+#[path = "ott_multiview_local_handoff.rs"]
+mod handoff;
 #[path = "ott_multiview_local_transport.rs"]
 mod transport;
 pub(super) use transport::player_request;
@@ -47,6 +49,7 @@ struct LeaseWork {
 }
 pub(super) struct Driver {
     pictures: [Option<Picture>; 9],
+    handoff: handoff::Handoff,
     last_stop: [Option<&'static str>; 9],
     workers: [Option<Work>; 9],
     stopping: [Option<ResolveTicket>; 9],
@@ -75,6 +78,7 @@ impl Default for Driver {
         let (tx, rx) = mpsc::channel();
         Self {
             pictures: std::array::from_fn(|_| None),
+            handoff: Default::default(),
             last_stop: [None; 9],
             workers: std::array::from_fn(|_| None),
             stopping: [None; 9],
@@ -230,7 +234,8 @@ impl Driver {
         self.layout.is_some()
     }
     pub fn has_work(&self) -> bool {
-        self.workers.iter().any(Option::is_some)
+        self.handoff.has_waiters()
+            || self.workers.iter().any(Option::is_some)
             || self.pictures.iter().any(Option::is_some)
             || self.stopping.iter().any(Option::is_some)
             || self.replacements.iter().any(Option::is_some)
@@ -557,6 +562,7 @@ impl Driver {
     fn slot_drained(&self, index: usize) -> bool {
         self.pictures[index].is_none()
             && self.workers[index].is_none()
+            && !self.handoff.waiting(index)
             && self.leases[index].is_empty()
     }
     fn finish_lease_if_ready(&mut self, runtime: &mut Runtime, index: usize) {
@@ -597,6 +603,10 @@ impl Driver {
                         .multiview
                         .backend_start_completed(ticket, AdmissionOutcome::Rejected);
                     self.queue(runtime, t);
+                    return;
+                }
+                if let Some(origin) = self.wait_for_handoff(&receipt) {
+                    self.handoff.hold(ticket, receipt, origin);
                     return;
                 }
                 match open(receipt.source.clone()) {
@@ -836,6 +846,7 @@ impl Driver {
             });
             if retired && self.workers[index].is_none() {
                 if let Some(mut picture) = self.pictures[index].take() {
+                    self.retired_handoff(&picture);
                     if let Some(lease) = picture.receipt.lease.take() {
                         self.retain_lease(index, lease);
                     }
@@ -879,7 +890,9 @@ impl Driver {
                 }
             }
         }
+        self.poll_handoffs(runtime, app);
         if self.closing && !self.has_work() {
+            self.handoff = Default::default();
             self.layout = None;
             self.closing = false;
             self.restore_ready = std::mem::take(&mut self.restore_previous) && !self.cleanup_failed;

@@ -3,5 +3,6 @@
   "multiview.loading": "Загрузка…",
   "multiview.failed": "Прайграванне недаступнае",
   "multiview.provider_session_denied": "Правайдар адхіліў сеанс прайгравання.",
-  "multiview.provider_interrupted": "Правайдар перапыніў гэты паток."
+  "multiview.provider_interrupted": "Правайдар перапыніў гэты паток.",
+  "multiview.provider_refresh_timeout": "Не ўдалося пераключыць канал, пакуль іншыя патокі чакалі даных."
 }
