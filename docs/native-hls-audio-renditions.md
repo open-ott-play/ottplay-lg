@@ -1,3 +1,5 @@
+> Vendored from the shared release toolkit; edit the canonical copy, not this file.
+
 # Native HLS audio renditions
 
 The native player can join a video-only HLS VOD playlist with one of the external
