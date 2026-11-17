@@ -2358,3 +2358,6 @@ fn parental_protected_transient_plex_pin_scope_requires_its_configured_source_an
         assert!(app.ott.as_mut().unwrap().require_parental_entry(&profile, Some(&entry)).is_err(), "{change}");
     }
 }
+
+#[path = "numeric_remote.rs"]
+mod numeric_remote_tests;

@@ -79,6 +79,7 @@ impl Drop for Inventory {
 }
 #[derive(Default)]
 pub(super) struct State {
+    pub numeric: numeric_remote::State,
     pub accepted: Option<TransientMedia>,
     pub candidate: Option<Candidate>,
 }

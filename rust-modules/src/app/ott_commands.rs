@@ -1855,6 +1855,9 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 .map(str::to_owned)
                 .or_else(|| p["query"].as_u64().map(|n| n.to_string()))
                 .unwrap_or_default();
+            if numeric_remote::handles(runtime, &query) {
+                return numeric_remote::command(runtime, app, inv, &query);
+            }
             let Some(id) = controls::resolve(&controls::channels(runtime), &query) else {
                 return Some(rejected("Choose one unambiguous channel by name or number"));
             };
