@@ -159,6 +159,7 @@ pub struct OttEditor {
     /// Raw application fallback for Setting; captured unformatted scope for Search.
     pub title: String,
     pub value: String,
+    /// Mask the local draft for credentials. Every editor is private to diagnostics.
     pub secret: bool,
     pub limit: usize,
 }
@@ -2222,7 +2223,7 @@ mod tests {
     }
     fn editor_session(screen: &mut OttScreen, value: &str, session: u64) {
         let spec = Arc::new(OttEditor { session, kind: OttEditorKind::Setting, text_policy: OttTextPolicy::Literal, key: "profile.source".into(), title: "Source".into(),
-            value: value.into(), secret: true, limit: 64 });
+            value: value.into(), secret: false, limit: 64 });
         deliver(screen, ScreenEvent::App(AppMsg::OttEditor(spec)));
     }
     fn deliver(screen: &mut OttScreen, event: ScreenEvent<TestHost>) {
@@ -2366,7 +2367,7 @@ mod tests {
         deliver(&mut screen, ScreenEvent::App(AppMsg::OttEditor(Arc::new(OttEditor {
             session: 7, kind: OttEditorKind::Setting, text_policy: OttTextPolicy::Literal,
             key: "profile.media".into(), title: "Media library link".into(),
-            value: original.clone(), secret: true, limit: 16384,
+            value: original.clone(), secret: false, limit: 16384,
         }))));
         assert_eq!(screen.editor.as_ref().unwrap().draft.text(), original);
         effects(|fx| screen.edit(&TextEdit::Backspace, fx));

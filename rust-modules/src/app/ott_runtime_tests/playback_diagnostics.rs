@@ -689,6 +689,66 @@ fn live_transport_recovery_requires_precise_closed_transient_cause() {
 }
 
 #[test]
+fn established_live_presentation_stall_queues_a_fresh_same_channel_attempt() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    let mut app = fixture();
+    app.running = true;
+    app.ott.as_mut().unwrap().saving = true;
+    make_live(&mut app);
+    admit(&mut app, "first");
+    install_owned_engine(&mut app);
+    let mut runtime = app.ott.take().unwrap();
+    let start = runtime.clock_sample.unwrap();
+    let shared = &plx_media::player::SHARED;
+    plx_media::player::swap_state_for_test(PlaybackState::Playing);
+    shared.seen_frame.store(true, Ordering::Release);
+    for second in 0..=11 {
+        runtime.clock_sample = Some(start.advance_for_test(std::time::Duration::from_secs(second)));
+        if second < 2 {
+            shared.playpos_ns.store(second as i64 * 1_000_000_000, Ordering::Release);
+            shared.frames.store(second as i32 + 1, Ordering::Release);
+        }
+        runtime.observe_live_health(&mut app);
+        if second < 11 { assert!(runtime.playing.is_some()); }
+    }
+    assert!(runtime.playing.is_none(), "the stalled native owner must be retired");
+    let retry = runtime.continuity.pending_retry().expect("same-channel cooldown");
+    assert_eq!(retry.after, "first");
+    let decision = runtime.retry_continuity(retry.not_before_ms, &["first", "second"], true);
+    runtime.apply_continuity(decision);
+    let request = runtime.play_target.as_ref().unwrap();
+    assert_eq!(request.id, "first");
+    assert!(!request.advance_on_failure);
+}
+
+#[test]
+fn direct_live_transfer_failure_recovers_the_selected_channel_only_for_a_known_network_cause() {
+    let _serial = plx_base::testlock::serial();
+    let _reset = ResetMedia;
+    for (transport, should_retry) in [
+        (TransportClass::Partial, true), (TransportClass::RecvError, true),
+        (TransportClass::SendError, true), (TransportClass::GotNothing, true),
+        (TransportClass::Timeout, true), (TransportClass::Http2, true),
+        (TransportClass::None, false), (TransportClass::Other, false),
+        (TransportClass::ReopenFailed, false),
+    ] {
+        let mut app = live_failure_with(IoFailureDetails::SourceIo { transport });
+        let runtime = app.ott.as_mut().unwrap();
+        let retry = runtime.continuity.pending_retry();
+        assert_eq!(retry.is_some(), should_retry, "{transport:?}");
+        if let Some(retry) = retry {
+            assert_eq!(retry.after, "first");
+            let decision = runtime.retry_continuity(retry.not_before_ms, &["first", "second"], true);
+            runtime.apply_continuity(decision);
+            let request = runtime.play_target.as_ref().unwrap();
+            assert_eq!(request.id, "first");
+            assert!(!request.advance_on_failure);
+        }
+    }
+}
+
+#[test]
 fn owned_live_playlist_refresh_failure_retains_bounded_same_channel_recovery() {
     let _serial = plx_base::testlock::serial();
     let _reset = ResetMedia;

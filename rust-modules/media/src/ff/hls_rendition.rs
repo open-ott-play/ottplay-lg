@@ -320,6 +320,7 @@ pub(super) unsafe fn read_segment(
     aq: *mut AuQueue,
     net: &mut HlsNet,
     acquisition: SegmentAcquisition,
+    transport: HlsSegmentTransport,
 ) -> Result<TimedLaneSegment, HlsExit> {
     if !ABI_OK.load(Ordering::Relaxed) {
         return Err(HlsExit::Failed("Bundled media demuxer is unavailable"));
@@ -331,7 +332,7 @@ pub(super) unsafe fn read_segment(
         .map_err(|_| HlsExit::Failed("Invalid HLS rendition duration"))?;
     let output = hls_demux_segment_path(
         segment,
-        HlsSegmentRequest { path: &segment.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(BODY_LIMIT),
+        HlsSegmentRequest { path: &segment.resource.path, transport, body_limit: Some(BODY_LIMIT),
             audio: None, rendition: Some(&mut capture), video: HlsVideoEntry::Independent, mp2: None },
         &mut clock, aq, net, "aac", acquisition,
     )?;

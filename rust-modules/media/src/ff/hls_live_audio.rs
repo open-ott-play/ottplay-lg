@@ -102,17 +102,21 @@ pub(super) fn inspect(source_url: &str, master_url: &str, master: Master, landed
     Ok(info)
 }
 
-fn refresh_valid(previous: &Window, current: &Window, next: u64) -> Result<(), &'static str> {
-    if previous.media.url != current.media.url { return Err("Live HLS rendition source changed"); }
-    if current.media.segments[0].segment.sequence > next { return Err("Live HLS rendition window advanced past playback"); }
-    if current.last_sequence() < previous.last_sequence() { return Err("Live HLS rendition playlist regressed"); }
-    if previous.ended && current.last_sequence() > previous.last_sequence() { return Err("Live HLS rendition grew after end"); }
+fn window_advanced() -> HlsExit {
+    HlsExit::OpenFailed { reason: "HLS live window advanced past playback", outcome: TraceOutcome::ServerState }
+}
+
+fn refresh_valid(previous: &Window, current: &Window, next: u64) -> Result<(), HlsExit> {
+    if previous.media.url != current.media.url { return Err(HlsExit::Failed("Live HLS rendition source changed")); }
+    if current.media.segments[0].segment.sequence > next { return Err(window_advanced()); }
+    if current.last_sequence() < previous.last_sequence() { return Err(HlsExit::Failed("Live HLS rendition playlist regressed")); }
+    if previous.ended && current.last_sequence() > previous.last_sequence() { return Err(HlsExit::Failed("Live HLS rendition grew after end")); }
     for (i, segment) in current.media.segments.iter().enumerate() {
         if let Some(old) = previous.index(segment.segment.sequence) {
             let before = &previous.media.segments[old];
             if before.segment != segment.segment || previous.epochs[old] != current.epochs[i]
                 || before.explicit_precision_ns.is_some() && segment.explicit_precision_ns.is_some() && before.pdt_ns != segment.pdt_ns
-            { return Err("Live HLS rendition overlap changed"); }
+            { return Err(HlsExit::Failed("Live HLS rendition overlap changed")); }
         }
     }
     Ok(())
@@ -124,10 +128,10 @@ struct Refresh {
 }
 impl Refresh {
     fn new(window: Window) -> Self { Self { window, due: Instant::now(), progress: Instant::now() } }
-    fn ensure_epoch(&mut self, epoch: u64, next: u64, aq: *mut AuQueue) -> Result<(), HlsExit> {
-        self.ensure_epoch_until(epoch, next, aq, Instant::now() + Duration::from_secs(30))
+    fn ensure_epoch(&mut self, epoch: u64, next: u64, aq: *mut AuQueue, net: &mut HlsNet) -> Result<(), HlsExit> {
+        self.ensure_epoch_until(epoch, next, aq, net, Instant::now() + Duration::from_secs(30))
     }
-    fn ensure_epoch_until(&mut self, epoch: u64, next: u64, aq: *mut AuQueue, deadline: Instant) -> Result<(), HlsExit> {
+    fn ensure_epoch_until(&mut self, epoch: u64, next: u64, aq: *mut AuQueue, net: &mut HlsNet, deadline: Instant) -> Result<(), HlsExit> {
         loop {
             if Instant::now() >= deadline { return Err(HlsExit::Failed("Live HLS matching audio epoch timed out")); }
             stopped(aq)?;
@@ -141,15 +145,15 @@ impl Refresh {
                 crate::ff::hls_wait(aq, delay, None, &mut crate::ff::external_hls::Owner::Playback(aq))?;
                 continue;
             }
-            let (landed, text) = crate::ff::external_hls::fetch(&self.window.media.url,
-                &mut crate::ff::external_hls::Owner::Playback(aq)).map_err(HlsExit::Failed)?;
+            let (landed, text) = crate::ff::external_hls::refresh_rendition(
+                &self.window.media.url, aq, net, deadline)?;
             let candidate = parse(&landed, &text).map_err(HlsExit::Failed)?;
             // At an epoch boundary old pending audio is discarded; permit the
             // publisher to retire it only when the requested epoch is present.
             let cursor = if candidate.anchor(epoch).is_ok() {
                 candidate.media.segments[0].segment.sequence.max(next)
             } else { next };
-            refresh_valid(&self.window, &candidate, cursor).map_err(HlsExit::Failed)?;
+            refresh_valid(&self.window, &candidate, cursor)?;
             if candidate.last_sequence() > self.window.last_sequence() { self.progress = Instant::now(); }
             self.window = candidate;
             self.due = Instant::now() + self.window.cadence();
@@ -157,12 +161,12 @@ impl Refresh {
             if self.progress.elapsed() > limit { return Err(HlsExit::Failed("Live HLS rendition stopped advancing")); }
         }
     }
-    fn get(&mut self, sequence: u64, aq: *mut AuQueue) -> Result<Option<usize>, HlsExit> {
+    fn get(&mut self, sequence: u64, aq: *mut AuQueue, net: &mut HlsNet) -> Result<Option<usize>, HlsExit> {
         loop {
             stopped(aq)?;
             if let Some(index) = self.window.index(sequence) { return Ok(Some(index)); }
             if sequence < self.window.media.segments[0].segment.sequence {
-                return Err(HlsExit::Failed("Live HLS rendition window advanced past playback"));
+                return Err(window_advanced());
             }
             if self.window.ended { return Ok(None); }
             if Instant::now() < self.due {
@@ -170,10 +174,10 @@ impl Refresh {
                 crate::ff::hls_wait(aq, delay, None, &mut crate::ff::external_hls::Owner::Playback(aq))?;
                 continue;
             }
-            let (landed, text) = crate::ff::external_hls::fetch(&self.window.media.url,
-                &mut crate::ff::external_hls::Owner::Playback(aq)).map_err(HlsExit::Failed)?;
+            let (landed, text) = crate::ff::external_hls::refresh_rendition(
+                &self.window.media.url, aq, net, Instant::now() + Duration::from_secs(15))?;
             let mut candidate = parse(&landed, &text).map_err(HlsExit::Failed)?;
-            refresh_valid(&self.window, &candidate, sequence).map_err(HlsExit::Failed)?;
+            refresh_valid(&self.window, &candidate, sequence)?;
             if candidate.last_sequence() > self.window.last_sequence() { self.progress = Instant::now(); }
             candidate.ended |= self.window.ended;
             self.window = candidate;
@@ -196,7 +200,7 @@ fn read(window: &Window, index: usize, binding: &Binding, clock: &mut LaneClock,
     stopped(aq)?;
     let segment = &window.media.segments[index];
     let raw = unsafe { crate::ff::hls_rendition::read_segment(&segment.segment, binding.lane(), Some(binding),
-        aq, net, SegmentAcquisition::for_cursor(None)) }?;
+        aq, net, SegmentAcquisition::for_cursor(None), HlsSegmentTransport::ExternalLive) }?;
     stopped(aq)?;
     clock.map(raw, segment.pdt_ns, origin, segment.explicit_precision_ns).map_err(HlsExit::Failed)
 }
@@ -268,13 +272,13 @@ pub(in crate::ff) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut A
     let mut net = HlsNet { hs, curl: None };
     loop {
         stopped(aq)?;
-        let Some(index) = video.get(next_video, aq)? else { return Ok(()); };
+        let Some(index) = video.get(next_video, aq, &mut net)? else { return Ok(()); };
         let current_epoch = video.window.epochs[index];
         let new_epoch = epoch != Some(current_epoch);
         if new_epoch {
             // Both lanes must explicitly describe the same epoch. Never align
             // unrelated media sequence numbers or extrapolate across a reset.
-            audio.ensure_epoch(current_epoch, next_audio, aq)?;
+            audio.ensure_epoch(current_epoch, next_audio, aq, &mut net)?;
             let va = video.window.anchor(current_epoch).map_err(HlsExit::Failed)?;
             let aa = audio.window.anchor(current_epoch).map_err(HlsExit::Failed)?;
             let video_pdt = video.window.media.segments[va].pdt_ns;
@@ -300,7 +304,7 @@ pub(in crate::ff) fn demux(playback: &HlsPlayback, aq: *mut AuQueue, aqa: *mut A
         while !joined.covers(&frames) {
             reads += 1;
             if reads > AUDIO_READ_LIMIT { return Err(HlsExit::Failed("Live HLS audio coverage exceeds work limit")); }
-            let Some(ai) = audio.get(next_audio, aq)? else { return Err(HlsExit::Failed("Live HLS audio ended before video")); };
+            let Some(ai) = audio.get(next_audio, aq, &mut net)? else { return Err(HlsExit::Failed("Live HLS audio ended before video")); };
             if audio.window.epochs[ai] != current_epoch { return Err(HlsExit::Failed("Live HLS lane epochs disagree")); }
             let mapped = read(&audio.window, ai, &playback.audio_binding, &mut audio_clock, origin, aq, &mut net)?;
             joined.push_audio(mapped).map_err(HlsExit::Failed)?;

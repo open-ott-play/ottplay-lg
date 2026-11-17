@@ -464,6 +464,15 @@ fn fetch_in_session(url: &str, owner: &mut Owner<'_>,
     fetch_with_retry(&mut io, deadline, stage)
 }
 
+/// A rolling rendition refresh runs inside its playback worker's deadline and
+/// shares the segment connection and teardown handle for this source.
+pub(super) fn refresh_rendition(url: &str, aq: *mut AuQueue, net: &mut HlsNet, deadline: Instant)
+    -> Result<(String, String), HlsExit>
+{
+    fetch_in_session(url, &mut Owner::Playback(aq), &mut net.curl, deadline, PlaylistStage::Playback, 0)
+        .map_err(FetchFailure::into_hls)
+}
+
 /// The same manifest request owns every attempt. No retry selects a variant,
 /// resolves another source or changes the producer's committed A/V state.
 /// Shared VOD/caption readers keep their existing single-request policy.
@@ -533,6 +542,16 @@ impl PlaylistFetchIo for PlaylistFetch<'_, '_> {
     }
 }
 
+pub(super) fn playback_context(url: &str, aq: *mut AuQueue)
+    -> Result<Box<crate::curlio::CurlSource>, crate::curlio::OpenErr>
+{
+    let reserved = crate::curlio::CurlSource::reserve_open()?;
+    if unsafe { crate::aq::aq_is_aborted(aq) } {
+        return Err(crate::curlio::OpenErr::Aborted);
+    }
+    crate::curlio::CurlSource::new_hls_reserved(url, reserved)
+}
+
 fn fetch_traced_attempt(url: &str, owner: &mut Owner<'_>,
     transport: &mut Option<Box<crate::curlio::CurlSource>>, deadline: Instant, stage: PlaylistStage, depth: u8)
     -> Result<(String, String), FetchFailure>
@@ -544,11 +563,7 @@ fn fetch_traced_attempt(url: &str, owner: &mut Owner<'_>,
     if transport.is_none() {
         let source = match owner {
             Owner::Inspect(_) => crate::curlio::CurlSource::new_hls_private(url),
-            Owner::Playback(_) => {
-                let reserved = crate::curlio::CurlSource::reserve_open().map_err(|error| trace.open_error(error))?;
-                if owner.stopped() { return Err(trace.open_error(crate::curlio::OpenErr::Stopped)); }
-                crate::curlio::CurlSource::new_hls_reserved(url, reserved)
-            }
+            Owner::Playback(aq) => playback_context(url, *aq),
         }.map_err(|error| trace.open_error(error))?;
         *transport = Some(source);
     }
@@ -949,10 +964,15 @@ pub(super) fn demux_video_for_epoch(
             } else { None };
             let subtitle_segment = super::hls_observed_worker::begin_subtitle_segment(
                 url, &landed, segment.discontinuity_sequence, segment.inner.sequence);
+            let transport = if media.ended {
+                HlsSegmentTransport::External
+            } else {
+                HlsSegmentTransport::ExternalLive
+            };
             let output = unsafe {
                 hls_demux_segment_path(
                     &segment.inner,
-                    HlsSegmentRequest { path: &segment.inner.resource.path, transport: HlsSegmentTransport::External, body_limit: Some(search_limit.unwrap_or(64 * 1024 * 1024)), audio, rendition: None,
+                    HlsSegmentRequest { path: &segment.inner.resource.path, transport, body_limit: Some(search_limit.unwrap_or(64 * 1024 * 1024)), audio, rendition: None,
                         video: match &mut candidate {
                             VideoState::H264(state) => HlsVideoEntry::External(state),
                             VideoState::Hevc(state) => HlsVideoEntry::ExternalHevc(state),

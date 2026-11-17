@@ -97,6 +97,56 @@ impl<I: Clone + Eq> Tracker<I> {
     }
 }
 
+/// Startup and deliberate holds are excluded by the caller. Once this
+/// particular Load has made progress, watch both the position and callbacks.
+/// A busy main loop, clock jump or replacement cannot count as observed silence.
+#[derive(Clone, Copy)]
+pub(super) struct PresentationSample {
+    pub generation: u64,
+    pub play_generation: u64,
+    pub epoch: u32,
+    pub now_ms: u64,
+    pub position_ms: u64,
+    pub callbacks: i32,
+}
+
+pub(super) struct PresentationWatch {
+    previous: PresentationSample,
+    first_callbacks: i32,
+    first_position_ms: u64,
+    activity_ms: u64,
+}
+
+impl PresentationWatch {
+    pub(super) fn stopped(state: &mut Option<Self>, sample: Option<PresentationSample>) -> bool {
+        let Some(s) = sample.filter(|s| s.callbacks > 0) else {
+            *state = None;
+            return false;
+        };
+        let Some(old) = state.as_mut().filter(|old| {
+            let p = old.previous;
+            p.generation == s.generation && p.play_generation == s.play_generation && p.epoch == s.epoch
+                && s.now_ms.checked_sub(p.now_ms).is_some_and(|gap| gap <= MAX_SAMPLE_GAP_MS)
+                && s.position_ms >= p.position_ms && s.callbacks >= p.callbacks
+        }) else {
+            *state = Some(Self { previous: s, first_callbacks: s.callbacks, first_position_ms: s.position_ms,
+                activity_ms: s.now_ms });
+            return false;
+        };
+        let before = old.previous;
+        old.previous = s;
+        if s.position_ms != before.position_ms || s.callbacks != before.callbacks {
+            old.activity_ms = s.now_ms;
+        }
+        // At the measured 5 Hz position-callback cadence this requires around
+        // 50 missed callbacks, as well as a playhead that never advanced.
+        let stopped = s.position_ms > old.first_position_ms && s.callbacks > old.first_callbacks
+            && s.now_ms - old.activity_ms >= 10_000;
+        if stopped { *state = None; }
+        stopped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +154,36 @@ mod tests {
     fn sample(now_ms: u64, position_ms: u64) -> Sample<'static, u64> {
         Sample { generation: 7, play_generation: 12, selection_id: "channel", identity: &19,
             position_ms, now_ms }
+    }
+
+    #[test]
+    fn stopped_presentation_requires_observed_progress_and_ten_seconds_of_both_clocks_stopping() {
+        for boundary in ["none", "callbacks", "position", "new load", "new request",
+            "new catalog", "held", "late poll", "never advanced"] {
+            let mut watch = None;
+            let mut s = PresentationSample { generation: 1, play_generation: 3, epoch: 4,
+                now_ms: 0, position_ms: 100, callbacks: 1 };
+            assert!(!PresentationWatch::stopped(&mut watch, Some(s)));
+            s.now_ms = 200;
+            if boundary != "never advanced" { s.callbacks += 1; s.position_ms += 200; }
+            for i in 0..=10 {
+                if i == 5 {
+                    match boundary {
+                        "callbacks" => s.callbacks += 1,
+                        "position" => s.position_ms += 200,
+                        "new load" => s.epoch += 1,
+                        "new request" => s.play_generation += 1,
+                        "new catalog" => s.generation += 1,
+                        "held" => { assert!(!PresentationWatch::stopped(&mut watch, None)); }
+                        "late poll" => s.now_ms += MAX_SAMPLE_GAP_MS,
+                        _ => {}
+                    }
+                }
+                assert_eq!(PresentationWatch::stopped(&mut watch, Some(s)),
+                    boundary == "none" && i == 10, "{boundary}, step {i}");
+                s.now_ms += 1_000;
+            }
+        }
     }
 
     #[test]

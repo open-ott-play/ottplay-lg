@@ -137,3 +137,62 @@ fn external_hls_single_window_stopped_advancing_has_bounded_recovery() {
     let requests = seen.load(Ordering::Relaxed);
     assert!((2..=64).contains(&requests), "target/2 poll wait must bound requests: {requests}");
 }
+
+#[test]
+#[ignore = "requires bundled host FFmpeg and ffmpeg CLI; localhost only"]
+fn rolling_live_feed_survives_repeated_fragment_outages() {
+    check_rolling_fragment_outages(84);
+}
+
+#[test]
+#[ignore = "two hours of generated media; bundled host FFmpeg and ffmpeg CLI; localhost only"]
+fn rolling_live_two_hours_with_fragment_outages() {
+    check_rolling_fragment_outages(1440);
+}
+
+fn check_rolling_fragment_outages(segments: usize) {
+    // Five seconds of media per fragment, consumed in accelerated time.
+    const FRAMES_PER_SEGMENT: usize = 10;
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    let seconds = (segments * 5).to_string();
+    let pattern = dir.0.join("part-%d.ts");
+    let manifest = dir.0.join("generated.m3u8");
+    entry_fixture_command("ffmpeg", &[
+        "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=2",
+        "-t", &seconds, "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-g", "10", "-keyint_min", "10", "-sc_threshold", "0", "-bf", "0",
+        "-hls_time", "5", "-hls_list_size", "0", "-hls_segment_filename",
+        pattern.to_str().unwrap(), manifest.to_str().unwrap(),
+    ], true);
+    let faults = [3, segments / 2, segments - 5];
+    let failed = Mutex::new([false; 3]);
+    let next_segment = std::sync::atomic::AtomicUsize::new(0);
+    let http = HttpFixture::start_with(dir.0.clone(), move |request| {
+        let path = request.split_whitespace().nth(1)?;
+        if path == "/rolling.m3u8" {
+            let i = next_segment.fetch_add(1, Ordering::Relaxed).min(segments - 1);
+            let end = if i + 1 == segments { "#EXT-X-ENDLIST\n" } else { "" };
+            let body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:{i}\n#EXTINF:5,\npart-{i}.ts\n{end}");
+            return Some(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes());
+        }
+        let fragment = path.strip_prefix("/part-")?.strip_suffix(".ts")?.parse::<usize>().ok()?;
+        let index = faults.iter().position(|&i| i == fragment)?;
+        if std::mem::replace(&mut failed.lock().unwrap()[index], true) { return None; }
+        Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec())
+    });
+    let (result, aus, _) = entry_demux(&http, "rolling.m3u8", -1);
+    assert!(result.is_ok(), "live demux stopped: {result:?}");
+    assert_eq!(aus.len(), segments * FRAMES_PER_SEGMENT);
+    assert!(aus.windows(2).all(|pair| pair[1].0 - pair[0].0 == 500_000_000),
+        "all video samples must keep their half-second spacing across outages");
+    let requests = http.requests.lock().unwrap();
+    for i in 0..segments {
+        let path = format!("/part-{i}.ts");
+        assert_eq!(requests.iter().filter(|s| **s == path).count(),
+            if faults.contains(&i) { 2 } else { 1 }, "requests for fragment {i}");
+    }
+}

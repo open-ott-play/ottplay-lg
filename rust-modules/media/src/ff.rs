@@ -4495,6 +4495,8 @@ enum HlsSegmentTransport {
     Pms,
     /// Independent HTTP(S) sources use the same guarded curl path as inspection.
     External,
+    /// A rolling segment can retry temporary service errors before handing bytes to FFmpeg.
+    ExternalLive,
 }
 
 fn hls_open_segment_source(
@@ -4510,15 +4512,39 @@ fn hls_open_segment_source(
         HlsSegmentTransport::Pms => {
             hls_open_source(resource, request_path, aq, net, deadline, checkpoint)
         }
-        HlsSegmentTransport::External => {
+        HlsSegmentTransport::External | HlsSegmentTransport::ExternalLive => {
             if unsafe { crate::aq::aq_is_aborted(aq) } {
                 return Err(HlsExit::Aborted);
             }
             let url = format!("{}{}", resource.origin.base(), request_path);
+            if net.curl.is_none() && matches!(transport, HlsSegmentTransport::ExternalLive) {
+                // Paired renditions start with a prepared playlist and reach a
+                // segment first. Retain its cookies on the same terms as a
+                // live worker that opened its manifest first.
+                net.curl = Some(external_hls::playback_context(&url, aq).map_err(classify_curl_open_err)?);
+            }
             // Segments have no child URLs. Keep the requested resource, as the
             // existing HTTPS path does; curl validates each redirect hop itself.
-            hls_open_curl(&url, aq, net, deadline, checkpoint)
-                .map(|(src, size)| (src, size, resource.clone()))
+            // Keep the decoder, committed timeline, and original open deadline.
+            // This only retries an unaccepted response. Once the body is handed
+            // to FFmpeg, a retry cannot reuse its mutated decoder state.
+            let mut retries = 0_u32;
+            loop {
+                match hls_open_curl(&url, aq, net, deadline, checkpoint) {
+                    Err(error @ HlsExit::OpenFailed { outcome: TraceOutcome::ServerState, .. })
+                        if matches!(transport, HlsSegmentTransport::ExternalLive) && retries < 2
+                            && net.curl.as_ref().is_some_and(|cs| matches!(cs.status(), 500 | 502 | 503 | 504)) =>
+                    {
+                        retries += 1;
+                        let delay = std::time::Duration::from_millis(250 * u64::from(retries));
+                        if deadline.is_none_or(|at| at.saturating_duration_since(std::time::Instant::now()) <= delay) {
+                            return Err(error);
+                        }
+                        hls_wait(aq, delay, deadline, checkpoint)?;
+                    }
+                    result => return result.map(|(src, size)| (src, size, resource.clone())),
+                }
+            }
         }
     }
 }
@@ -5387,7 +5413,7 @@ unsafe fn hls_demux_segment_path(
 ) -> Result<HlsSegmentOutput, HlsExit> {
     let HlsSegmentRequest { path, transport, body_limit, audio, mut rendition, video, mut mp2 } = request;
     let lane = rendition.as_ref().map(|capture| capture.lane);
-    if mp2.is_some() && (!matches!(transport, HlsSegmentTransport::External) || lane.is_some() || acodec != "mp2") {
+    if mp2.is_some() && (matches!(transport, HlsSegmentTransport::Pms) || lane.is_some() || acodec != "mp2") {
         return Err(HlsExit::Failed("Invalid MP2 HLS transport declaration"));
     }
     if lane.is_some() && audio.is_some() {
@@ -5524,7 +5550,7 @@ unsafe fn hls_demux_segment_path(
         return Err(HlsExit::Failed("HLS segment exceeds size limit"));
     }
     let body_started = std::time::Instant::now();
-    let mut input = hls_input(src, size, aq, reserve_deadline, transport_watchdog, runtime, lane.is_some(), matches!(transport, HlsSegmentTransport::External) && lane.is_none(), &mut net.curl)?;
+    let mut input = hls_input(src, size, aq, reserve_deadline, transport_watchdog, runtime, lane.is_some(), !matches!(transport, HlsSegmentTransport::Pms) && lane.is_none(), &mut net.curl)?;
     if let Some(capture) = rendition.as_mut() {
         capture.begin(input.fmt).map_err(HlsExit::Failed)?;
     }
@@ -5575,7 +5601,7 @@ unsafe fn hls_demux_segment_path(
     // AVStream objects remain owned by the format context. Retain this object,
     // not the streams array: a late PMT can grow/reallocate the array during reads.
     let ast = if ai >= 0 { *streams.add(ai as usize) } else { std::ptr::null_mut() };
-    if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+    if !matches!(transport, HlsSegmentTransport::Pms) && lane.is_none() {
         if let Ok(inventory) = hls_bound_inventory(&input, vi) {
             hls_observed_worker::prepare_subtitle_segment(input.fmt, &inventory);
         } else { hls_observed_worker::abort_subtitle_segment(); }
@@ -5655,7 +5681,7 @@ unsafe fn hls_demux_segment_path(
             break;
         }
         let si = (*input.pkt).stream_index;
-        if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+        if !matches!(transport, HlsSegmentTransport::Pms) && lane.is_none() {
             hls_observed_worker::subtitle_packet(input.fmt, input.pkt);
         }
         if vi >= 0 && si == vi {
@@ -5980,7 +6006,7 @@ unsafe fn hls_demux_segment_path(
         let selected_audio_pid = (ai >= 0 && audio_packets > 0).then(|| stream_transport_pid(*streams.add(ai as usize))).flatten();
         hls_observed::Candidate::new(&table, &inventory, &pids, video_pid, selected_audio_pid).ok()
     });
-    if matches!(transport, HlsSegmentTransport::External) && lane.is_none() {
+    if !matches!(transport, HlsSegmentTransport::Pms) && lane.is_none() {
         if let Some(candidate) = &observed {
             hls_observed_worker::finish_subtitle_segment(input.fmt, candidate.inventory());
         } else { hls_observed_worker::abort_subtitle_segment(); }

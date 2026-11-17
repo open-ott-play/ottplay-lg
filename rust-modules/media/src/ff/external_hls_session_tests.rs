@@ -41,6 +41,60 @@ fn playback_master_child_segment_and_refresh_share_cookies_and_connection() {
     crate::aq::aq_destroy(aq);
 }
 
+// Drive the same open as the segment producer, retaining the manifest's cookie jar.
+fn segment_after_status(statuses: &[u16], open_budget: Duration, live: bool)
+    -> (Result<Vec<u8>, HlsExit>, usize)
+{
+    let mut replies = vec![Reply::ok("", MEDIA)];
+    for status in statuses {
+        let mut failed = Reply::ok("Set-Cookie: segment=retry; Path=/\r\n", b"");
+        failed.status = *status;
+        replies.push(failed);
+    }
+    replies.push(Reply::ok("", b"recovered").requiring("segment=retry"));
+    let server = SessionServer::new(replies);
+    let mut queue = crate::aq::aq_new(1024);
+    let aq = &mut *queue as *mut AuQueue;
+    let mut net = HlsNet { hs: std::ptr::null_mut(), curl: None };
+    let (_, media) = initial_playback_media(&format!("{}/live.m3u8", server.base), true,
+        Instant::now() + Duration::from_secs(3),
+        &mut PlaybackPlaylist { owner: Owner::Playback(aq), transport: &mut net.curl }).unwrap();
+    let part = &media.segments[0].inner.resource;
+    let transport = if live { HlsSegmentTransport::ExternalLive } else { HlsSegmentTransport::External };
+    let result = hls_open_segment_source(part, &part.path, aq, &mut net,
+        Some(Instant::now() + open_budget), &mut Owner::Playback(aq), transport)
+        .map(|(source, _, _)| match source {
+            Src::Curl(mut curl) => drain(&mut curl),
+            _ => panic!("expected HTTP segment"),
+        });
+    let heads = server.heads();
+    assert!(heads[1..].iter().all(|head| head.starts_with("GET /part.ts ")));
+    drop(net);
+    crate::aq::aq_destroy(aq);
+    (result, heads.len() - 1)
+}
+
+#[test]
+fn external_live_segment_retries_service_error_without_reopening_master_or_decoder() {
+    let _serial = curl();
+    let (result, attempts) = segment_after_status(&[503], Duration::from_secs(3), true);
+    assert_eq!(result.unwrap(), b"recovered");
+    assert_eq!(attempts, 2);
+}
+
+#[test]
+fn external_live_segment_respects_refusals_deadline_and_finite_playback() {
+    let _serial = curl();
+    for (status, budget, live) in [(403, 3000, true), (429, 3000, true), (503, 100, true), (503, 3000, false)] {
+        let (result, attempts) = segment_after_status(&[status], Duration::from_millis(budget), live);
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+    let (result, attempts) = segment_after_status(&[503, 502, 504], Duration::from_secs(3), true);
+    assert!(matches!(result, Err(HlsExit::OpenFailed { outcome: TraceOutcome::ServerState, .. })));
+    assert_eq!(attempts, 3);
+}
+
 #[test]
 fn first_http_failure_retains_issued_cookie_for_same_manifest_retry() {
     let _serial = curl();

@@ -80,6 +80,11 @@ fn addressed_source_editor_and_cancel_preserve_current_source_in_both_modes() {
             assert_eq!(runtime.active().unwrap().id, "a");
             assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
             assert!(!runtime.saving);
+            if matches!(kind, ProviderKind::M3u | ProviderKind::VPortal | ProviderKind::Local) {
+                let text = super::super::super::catalog_publication::painted_catalog(&mut app);
+                assert!(text.iter().any(|run| run.text == expected.source),
+                    "an opened source field must paint its editable value");
+            }
             press(&mut app, Key::Back);
             let runtime = app.ott.as_ref().unwrap();
             assert!(runtime.setup.is_none());
