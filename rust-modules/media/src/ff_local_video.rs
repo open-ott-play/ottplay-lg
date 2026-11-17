@@ -26,6 +26,8 @@ fn playlist_header(bytes: &[u8]) -> bool {
 }
 struct Remote {
     source: Box<crate::curlio::CurlSource>,
+    deadline: Option<Instant>,
+    failure: Option<crate::curlio::OpenErr>,
     position: i64,
     prefix: std::collections::VecDeque<u8>,
 }
@@ -47,14 +49,21 @@ impl Remote {
         }
         Ok(Self {
             source,
+            deadline: None,
+            failure: None,
             position: 0,
             prefix: Default::default(),
         })
     }
     fn reopen(&mut self, url: &str, c: &Control) -> Result<(), Error> {
-        let deadline = Some(Instant::now() + Duration::from_secs(15));
-        self.source.reopen_until(url, deadline, &mut Check(c)).map_err(|_| Error::Source)?;
+        self.failure = None;
+        let deadline = self.deadline();
+        self.source.reopen_until(url, Some(deadline), &mut Check(c)).map_err(|e| {
+            self.failure = Some(e);
+            if c.stopped() { Error::Cancelled } else { Error::Source }
+        })?;
         if !(200..300).contains(&self.source.status()) {
+            self.failure = Some(crate::curlio::OpenErr::Status(self.source.status()));
             return Err(Error::Source);
         }
         self.position = 0;
@@ -64,6 +73,14 @@ impl Remote {
     fn fetch(&mut self, url: &str, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
         self.reopen(url, c)?;
         collect(self, cap, c)
+    }
+    fn deadline(&self) -> Instant {
+        let request = Instant::now() + Duration::from_secs(15);
+        self.deadline.map_or(request, |overall| request.min(overall))
+    }
+    fn retryable(&self) -> bool {
+        self.failure.is_some_and(|e| matches!(hls_curl_open_outcome(e),
+            TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
         let mut bytes = Vec::new();
@@ -92,10 +109,11 @@ impl Remote {
     fn read_raw(&mut self, b: &mut [u8], c: &Control) -> Result<usize, Error> {
         let n = self.source.read_until(
             b,
-            Some(Instant::now() + Duration::from_secs(15)),
+            Some(self.deadline()),
             &mut Check(c),
         );
         if n < 0 {
+            self.failure = self.source.body_failure().map(|f| crate::curlio::OpenErr::Transport(f.rc));
             Err(if c.stopped() {
                 Error::Cancelled
             } else {
@@ -110,9 +128,10 @@ impl Remote {
 fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut scratch = [0; 16 * 1024];
-    let expires = Instant::now() + Duration::from_secs(15);
+    let expires = r.deadline();
     loop {
         if Instant::now() >= expires {
+            r.failure = Some(crate::curlio::OpenErr::Deadline);
             return Err(Error::Source);
         }
         let n = r.read(&mut scratch, c)?;
@@ -342,6 +361,8 @@ struct Hls {
     bytes: Vec<u8>,
     pos: usize,
     init_sent: bool,
+    delivered_segment: bool,
+    reprobe: bool,
     refreshed: Instant,
     cap: usize,
 }
@@ -382,68 +403,103 @@ impl Hls {
             bytes: Vec::new(),
             pos: 0,
             init_sent: false,
+            delivered_segment: false,
+            reprobe: false,
             refreshed: Instant::now(),
             cap,
         })
     }
+    fn refresh(&mut self, c: &Control) -> Result<(), Error> {
+        let manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
+        let fresh = manifest.media()?;
+        if fresh.init != self.playlist.init {
+            return Err(Error::Unsupported);
+        }
+        if fresh.segments.last().map(|s| s.sequence) > self.playlist.segments.last().map(|s| s.sequence) {
+            self.refreshed = Instant::now();
+        }
+        self.url = manifest.effective_url;
+        self.playlist = fresh;
+        Ok(())
+    }
+
+    fn refresh_retry(&mut self, c: &Control, remaining: &mut u8) -> Result<(), Error> {
+        loop {
+            match self.refresh(c) {
+                Err(Error::Source) if self.remote.retryable() && *remaining > 0 => {
+                    *remaining -= 1;
+                    if !c.wait(Duration::from_millis(200)) { return Err(Error::Cancelled); }
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        self.remote.deadline = Some(deadline);
+        let mut remaining = 2;
         while self.pos == self.bytes.len() {
             if c.stopped() {
                 return Err(Error::Cancelled);
             }
+            if self.reprobe || Instant::now() >= deadline {
+                return Err(Error::Source);
+            }
             if !self.init_sent {
-                self.init_sent = true;
                 if let Some(url) = &self.playlist.init {
                     self.bytes = self.remote.fetch(url, self.cap, c)?;
+                    if self.bytes.is_empty() { return Err(Error::Source); }
                     self.pos = 0;
-                    if !self.bytes.is_empty() {
+                }
+                self.init_sent = true;
+                if !self.bytes.is_empty() { break; }
+            }
+            if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
+                let result = self.remote.fetch(&segment.url, self.cap, c);
+                match result {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        self.bytes = bytes;
+                        self.pos = 0;
+                        self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
+                        self.delivered_segment = true;
                         break;
                     }
+                    Err(Error::Source) if !self.playlist.ended && remaining > 0
+                        && (self.remote.retryable() || matches!(self.remote.failure,
+                            Some(crate::curlio::OpenErr::Status(404 | 410)))) => {
+                        // Do not spend another request on a stale signed URI until
+                        // the selected playlist has supplied a current segment.
+                        remaining -= 1;
+                        if !c.wait(Duration::from_millis(200)) { return Err(Error::Cancelled); }
+                        self.refresh_retry(c, &mut remaining)?;
+                        continue;
+                    }
+                    Ok(_) => return Err(Error::Source),
+                    Err(e) => return Err(e),
                 }
             }
-            if let Some(segment) = self
-                .playlist
-                .segments
-                .iter()
-                .find(|s| s.sequence == self.next)
-            {
-                self.bytes = self.remote.fetch(&segment.url, self.cap, c)?;
-                self.pos = 0;
-                self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
-                if !self.bytes.is_empty() {
-                    break;
+            if let Some(first) = self.playlist.segments.first().filter(|s| s.sequence > self.next) {
+                self.next = first.sequence;
+                if self.delivered_segment {
+                    // A raw splice would leave reference pictures and audio
+                    // clocks from the skipped interval in FFmpeg. Reopen just
+                    // this decoder, retaining the selected session and cookie.
+                    self.reprobe = true;
+                    return Err(Error::Source);
                 }
-                return Err(Error::Source);
+                continue;
             }
             if self.playlist.ended {
                 return Ok(0);
             }
-            if self
-                .playlist
-                .segments
-                .first()
-                .is_some_and(|s| s.sequence > self.next)
-            {
-                return Err(Error::Playlist);
+            if self.refreshed.elapsed() >= Duration::from_secs(30) {
+                return Err(Error::Source);
             }
             if !c.wait(self.playlist.target.min(Duration::from_secs(2)) / 2) {
                 return Err(Error::Cancelled);
             }
-            let manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
-            let fresh = manifest.media()?;
-            if fresh.init != self.playlist.init {
-                return Err(Error::Unsupported);
-            }
-            if fresh.segments.last().map(|s| s.sequence)
-                > self.playlist.segments.last().map(|s| s.sequence)
-            {
-                self.refreshed = Instant::now();
-            }
-            if self.refreshed.elapsed() > Duration::from_secs(30) {
-                return Err(Error::Source);
-            }
-            self.url = manifest.effective_url;
-            self.playlist = fresh;
+            self.refresh_retry(c, &mut remaining)?;
         }
         let n = out.len().min(self.bytes.len() - self.pos);
         out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
@@ -457,7 +513,7 @@ enum Input {
     Hls(Hls),
 }
 struct Io<'a> {
-    input: Input,
+    input: &'a mut Input,
     control: &'a Control,
     error: Option<Error>,
 }
@@ -637,7 +693,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     if !available() {
         return Err(Error::Unavailable);
     }
-    let input = match source {
+    let mut input = match source {
         ExternalSource::HeldLocal(file) => {
             Input::Local(file_source::FileSource::held(&file).map_err(|_| Error::Source)?)
         }
@@ -658,6 +714,31 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         ExternalSource::Hls(url) => Input::Hls(Hls::open(url, limits.max_object_bytes, c)?),
         ExternalSource::Local(_) => return Err(Error::Unsupported),
     };
+    let mut reopens = std::collections::VecDeque::new();
+    loop {
+        let result = decode_input(&mut input, limits, c);
+        let Input::Hls(hls) = &mut input else { return result };
+        if !hls.reprobe || c.stopped() { return result; }
+        let now = Instant::now();
+        while reopens.front().is_some_and(|then: &Instant| now.duration_since(*then) >= Duration::from_secs(30)) {
+            reopens.pop_front();
+        }
+        if reopens.len() >= 3 { return Err(Error::Source); }
+        reopens.push_back(now);
+        hls.reprobe = false;
+        hls.delivered_segment = false;
+        hls.init_sent = false;
+        hls.bytes.clear();
+        hls.pos = 0;
+        c.timeline.fetch_add(1, Ordering::AcqRel);
+        c.audio_generation.fetch_add(1, Ordering::AcqRel);
+        let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+        mailbox.video = None;
+        mailbox.audio.clear();
+    }
+}
+
+unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result<(), Error> {
     let seekable = match &input {
         Input::Local(_) => true,
         Input::Http(remote) => remote.source.supports_byte_ranges(),
@@ -846,8 +927,9 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         {
             return Err(Error::Budget);
         }
-        if read_result < 0 && read_result != AVERROR_EOF {
-            return Err(io.error.unwrap_or(Error::Source));
+        if read_result < 0 {
+            if let Some(error) = io.error { return Err(error); }
+            if read_result != AVERROR_EOF { return Err(Error::Source); }
         }
         if read_result == AVERROR_EOF {
             if flushing {

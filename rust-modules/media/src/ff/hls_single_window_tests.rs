@@ -196,3 +196,60 @@ fn check_rolling_fragment_outages(segments: usize) {
             if faults.contains(&i) { 2 } else { 1 }, "requests for fragment {i}");
     }
 }
+
+#[test]
+#[ignore = "requires the bundled software decoder, ffmpeg CLI and localhost"]
+fn local_window_reprobes_the_same_session_after_a_missing_live_segment() {
+    use crate::local_multiview::{Event, Limits, Session};
+    use std::sync::atomic::AtomicUsize;
+
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    entry_fixture_with_length(&dir.0, "10", true, "5", 5);
+    let manifests = Arc::new(AtomicUsize::new(0));
+    let media = Arc::new(AtomicUsize::new(0));
+    let expired = Arc::new(AtomicUsize::new(0));
+    let (m, f, e) = (manifests.clone(), media.clone(), expired.clone());
+    let http = HttpFixture::start_with(dir.0.clone(), move |request| {
+        let error = |status| format!("HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes();
+        match request.split_whitespace().nth(1)? {
+            "/window.m3u8" => {
+                let count = m.fetch_add(1, Ordering::Relaxed);
+                if count == 2 { return Some(error(503)); }
+                let (seq, paths, end) = if count == 0 {
+                    (50, vec!["part-0.ts"], "")
+                } else if count == 1 {
+                    (51, vec!["expired.ts"], "")
+                } else {
+                    (53, vec!["part-3.ts", "part-4.ts"], "#EXT-X-ENDLIST\n")
+                };
+                let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{seq}\n");
+                for path in paths { body.push_str(&format!("#EXTINF:1,\n{path}\n")); }
+                body.push_str(end);
+                Some(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes())
+            }
+            "/expired.ts" => { e.fetch_add(1, Ordering::Relaxed); Some(error(410)) }
+            "/part-3.ts" => { f.fetch_add(1, Ordering::Relaxed); None }
+            _ => None,
+        }
+    });
+    let mut session = Session::open(ExternalSource::Hls(format!("{}/window.m3u8", http.url)), Limits::default()).unwrap();
+    let mut recovered = 0;
+    let deadline = Instant::now() + Duration::from_secs(14);
+    while Instant::now() < deadline && recovered < 4 {
+        match session.poll() {
+            Some(Event::Video(frame)) if frame.pts_us >= 4_400_000 => recovered += 1,
+            Some(Event::Failure(error)) => panic!("live window lost its slot: {error}"),
+            Some(Event::Ended) => break,
+            _ => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    session.cancel();
+    assert!(recovered >= 4, "fresh keyframes were not presented on the original session");
+    assert_eq!(expired.load(Ordering::Relaxed), 1);
+    assert_eq!(media.load(Ordering::Relaxed), 1);
+    assert_eq!(manifests.load(Ordering::Relaxed), 4);
+}
