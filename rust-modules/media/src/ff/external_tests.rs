@@ -573,7 +573,7 @@ fn hls_rendition_lane_extraction_keeps_source_timing_and_rejects_shape_changes()
             sequence: 7, duration: Duration::from_secs(1),
             resource: crate::hls::Resource::new(parsed.origin, parsed.path).unwrap(),
         };
-        unsafe { hls_rendition::read_segment(&source, lane, expected, aq, net, SegmentAcquisition::for_cursor(None)) }
+        unsafe { hls_rendition::read_segment(&source, lane, expected, aq, net, SegmentAcquisition::for_cursor(None), HlsSegmentTransport::External) }
     };
     let actual_audio = fetch("audio.ts", Lane::Audio, None, &mut *aq, &mut net)
         .unwrap_or_else(|error| panic!("audio-only TS refused: {error:?}"));

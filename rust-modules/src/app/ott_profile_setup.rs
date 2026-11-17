@@ -66,7 +66,7 @@ const EDEM_FIELDS: &[Field] = &[
     NAME,
     Field {key:"profile.setup.key",title:"Access key",secret:true,limit:512,text_policy:OttTextPolicy::Literal},
     Field {key:"profile.setup.list",title:"List template (0–3)",secret:false,limit:1,text_policy:OttTextPolicy::Literal},
-    Field {key:"profile.setup.portal",title:"VPortal link",secret:true,limit:8192,text_policy:OttTextPolicy::Literal},
+    Field {key:"profile.setup.portal",title:"VPortal link",secret:false,limit:8192,text_policy:OttTextPolicy::Literal},
 ];
 const STALKER_FIELDS: &[Field] = &[
     NAME,
@@ -89,7 +89,7 @@ const STALKER_FIELDS: &[Field] = &[
     },
 ];
 
-const OPERATOR_PLAYLIST: Field = Field {key:"profile.setup.playlist",title:"Playlist URL",secret:true,limit:8192,text_policy:OttTextPolicy::Literal};
+const OPERATOR_PLAYLIST: Field = Field {key:"profile.setup.playlist",title:"Playlist URL",secret:false,limit:8192,text_policy:OttTextPolicy::Literal};
 const OPERATOR_MODE: Field = Field {key:"profile.setup.mode",title:"Stream format (0–2)",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
 const OPERATOR_MODE_BINARY: Field = Field {key:"profile.setup.mode",title:"Stream format: 0 HLS, 1 MPEGTS",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
 const OPERATOR_LIST: Field = Field {key:"profile.setup.list",title:"Playlist (0–2)",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
@@ -97,12 +97,18 @@ const OPERATOR_MAC: Field = Field {key:"profile.setup.mac",title:"Device MAC",se
 const OPERATOR_URL_FIELDS: &[Field] = &[NAME,OPERATOR_PLAYLIST];
 const OPERATOR_LOGIN_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[2],XTREAM_FIELDS[3]];
 const OPERATOR_MAC_FIELDS: &[Field] = &[NAME,OPERATOR_MAC,OPERATOR_LIST];
-const OPERATOR_KEY_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[2],OPERATOR_MODE];
+// These providers store a bearer key in the legacy username slot.
+const OPERATOR_ACCESS_KEY: Field = Field {
+    title: "Access key",
+    secret: true,
+    ..XTREAM_FIELDS[2]
+};
+const OPERATOR_KEY_FIELDS: &[Field] = &[NAME,OPERATOR_ACCESS_KEY,OPERATOR_MODE];
 const SHURA_SERVER: Field = Field {key:"profile.setup.server",title:"Server number (1, 2, 3, 5)",secret:false,limit:1,text_policy:OttTextPolicy::Literal};
 const OTTCLUB_SERVER: Field = Field {key:"profile.setup.server",title:"Server host[:port]",secret:false,limit:8192,text_policy:OttTextPolicy::Literal};
-const SHURA_FIELDS: &[Field] = &[NAME,SHURA_SERVER,XTREAM_FIELDS[2],OPERATOR_MODE_BINARY];
-const OTTCLUB_FIELDS: &[Field] = &[NAME,OTTCLUB_SERVER,XTREAM_FIELDS[2],OPERATOR_MODE_BINARY];
-const ANTIFRIZ_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[2],OPERATOR_MODE_BINARY];
+const SHURA_FIELDS: &[Field] = &[NAME,SHURA_SERVER,OPERATOR_ACCESS_KEY,OPERATOR_MODE_BINARY];
+const OTTCLUB_FIELDS: &[Field] = &[NAME,OTTCLUB_SERVER,OPERATOR_ACCESS_KEY,OPERATOR_MODE_BINARY];
+const ANTIFRIZ_FIELDS: &[Field] = &[NAME,OPERATOR_ACCESS_KEY,OPERATOR_MODE_BINARY];
 const OPERATOR_GENERIC_FIELDS: &[Field] = &[NAME,XTREAM_FIELDS[1],XTREAM_FIELDS[2],XTREAM_FIELDS[3],OPERATOR_PLAYLIST];
 fn operator_fields(id:plx_data::ott::OperatorId)->&'static [Field] {
     match id.canonical_id() {
@@ -629,6 +635,19 @@ mod tests {
         assert!(draft.field("profile.setup.password").unwrap().secret);
         let stalker = Draft::new(&profile(ProviderKind::Stalker, "")).unwrap();
         assert!(stalker.field("profile.setup.mac").unwrap().secret);
+        let edem = Draft::new(&profile(ProviderKind::Edem, "")).unwrap();
+        assert!(edem.field("profile.setup.key").unwrap().secret);
+        assert!(!edem.field("profile.setup.portal").unwrap().secret);
+        let tvteam = ProviderKind::Operator(plx_data::ott::OperatorId::from_id("tvteam").unwrap());
+        let playlist = Draft::new(&profile(tvteam, "")).unwrap();
+        assert!(!playlist.field("profile.setup.playlist").unwrap().secret);
+        for id in ["only4", "itv", "shura", "ottclub", "antifriz"] {
+            let kind = ProviderKind::Operator(plx_data::ott::OperatorId::from_id(id).unwrap());
+            let draft = Draft::new(&profile(kind, "")).unwrap();
+            let key = draft.field("profile.setup.username").unwrap();
+            assert!(key.secret);
+            assert_eq!(key.title, "Access key");
+        }
     }
     #[test]
     fn every_setup_field_declares_its_text_semantics() {

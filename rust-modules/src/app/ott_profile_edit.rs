@@ -87,7 +87,7 @@ impl Runtime {
         self.open_setting_editor(app, OttEditor {
             kind: plx_screens::ott::OttEditorKind::Setting, session: 0,
             title: "Source address or folder".into(), key: "profile.source".into(),
-            value, secret: true, limit: 16384, text_policy: OttTextPolicy::Literal,
+            value, secret: false, limit: 16384, text_policy: OttTextPolicy::Literal,
         })?;
         if save_only { self.profile_edit_save_only = self.edit_session.clone(); }
         Ok(())
