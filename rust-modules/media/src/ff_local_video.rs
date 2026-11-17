@@ -648,6 +648,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         Input::Http(remote) => remote.source.supports_byte_ranges(),
         Input::Hls(_) => false,
     };
+    let has_finite_duration = !matches!(&input, Input::Hls(_));
     let mut io = Box::new(Io {
         input,
         control: c,
@@ -760,6 +761,9 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     } else {
         ColorMatrix::Bt601
     };
+    if has_finite_duration {
+        c.duration_us.store(fmt_duration(d.fmt).max(0), Ordering::Release);
+    }
     c.seekable.store(seekable, Ordering::Release);
     c.mailbox.lock().unwrap_or_else(|e| e.into_inner()).ready = true;
     let mut clock: Option<(i64, Instant)> = None;

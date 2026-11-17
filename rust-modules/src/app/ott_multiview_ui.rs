@@ -2,6 +2,9 @@
 //! event; they cannot choose a source, claim a decoder or change audio directly.
 use super::*;
 
+#[path = "ott_multiview_ui_footer.rs"]
+mod footer;
+
 const EFFECT_LIMIT: usize = 64;
 // Highlight emits no backend command. Activation emits at most Focus+AudioOwner.
 const UI_EFFECT_RESERVE: usize = 2;
@@ -59,6 +62,7 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
 #[derive(Default)]
 pub(super) struct State {
     published: Option<Publication>,
+    footers: footer::Footers,
 }
 #[derive(PartialEq, Eq)]
 struct Publication {
@@ -93,19 +97,28 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
             audio: runtime.multiview.audio_route_state().applied,
         })
     })();
+    let mut footers = std::mem::take(&mut runtime.multiview_ui.footers);
+    let footer_scene = publication.as_ref().filter(|_| {
+        runtime.multiview_local.active() || multiview_output::owns_footer_picture(runtime, app)
+    });
+    let changed = footers.refresh(runtime, footer_scene.map(|status| &status.scene));
+    runtime.multiview_ui.footers = footers;
     let Some(publication) = publication else {
         runtime.multiview_ui.published = None;
         app.bridge.publish_multiview_offer(None);
         return;
     };
-    if runtime.multiview_ui.published.as_ref() == Some(&publication)
-        && app.bridge.multiview_offer().is_some()
-    {
+    let existing = app.bridge.multiview_offer().filter(|_| {
+        runtime.multiview_ui.published.as_ref() == Some(&publication)
+    });
+    if existing.is_some() && !changed {
         return;
     }
     use plx_appkit::multiview_chrome as chrome;
     let plan = &publication.geometry;
-    let Ok(offer) = runtime.multiview.publish_ui_offer() else {
+    let Ok(revision) = existing.map(|frame| frame.state().revision).map(Ok).unwrap_or_else(|| {
+        runtime.multiview.publish_ui_offer().map(|offer| offer.ui_serial)
+    }) else {
         app.bridge.publish_multiview_offer(None);
         return;
     };
@@ -129,7 +142,7 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
         })
         .collect();
     let state = chrome::ViewState {
-        revision: offer.ui_serial,
+        revision,
         geometry_revision: plan.revision(),
         active: runtime.multiview.active_slot().map(|s| s.index() as u8),
         audio: publication.audio.map(|s| s.index() as u8),
@@ -137,7 +150,8 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
         input_owned: true,
     };
     match project_frame(plan, &views, state) {
-        Ok(frame) => {
+        Ok(mut frame) => {
+            runtime.multiview_ui.footers.project(&mut frame);
             app.bridge.publish_multiview_offer(Some(frame));
             runtime.multiview_ui.published = Some(publication);
         }

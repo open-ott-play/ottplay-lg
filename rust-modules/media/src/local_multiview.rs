@@ -2,7 +2,7 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::time::Duration;
@@ -95,6 +95,7 @@ pub(crate) struct Mailbox {
     pub audio: std::collections::VecDeque<(u64, PcmChunk)>,
     pub terminal: Option<Result<(), Error>>,
 }
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
     held: Option<crate::ff::HeldLocalFile>,
@@ -106,6 +107,7 @@ pub(crate) struct Control {
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
     pub seekable: AtomicBool,
+    pub duration_us: AtomicI64,
     pub seek: Mutex<Option<(u64, i64)>>,
     pub mailbox: Mutex<Mailbox>,
 }
@@ -194,6 +196,7 @@ impl Session {
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
             seekable: AtomicBool::new(false),
+            duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
         });
@@ -265,6 +268,13 @@ impl Session {
             Err(e) => Event::Failure(e),
         })
     }
+    /// Native demux duration for this exact input. A live or unknown timeline
+    /// has no duration; catalogue metadata remains a separate caller fallback.
+    pub fn duration_us(&self) -> Option<i64> {
+        let duration = self.control.duration_us.load(Ordering::Acquire);
+        (duration > 0).then_some(duration)
+    }
+
     pub fn set_audio(&mut self, on: bool) {
         if self.control.audio.swap(on, Ordering::AcqRel) == on {
             return;
@@ -375,12 +385,23 @@ mod tests {
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
                 seekable: AtomicBool::new(true),
+                duration_us: AtomicI64::new(0),
                 seek: Mutex::new(None),
                 mailbox: Mutex::new(Mailbox::default()),
             }),
             worker: None,
         }
     }
+    #[test]
+    fn duration_is_private_to_the_open_decoder() {
+        let first = manual_session();
+        let second = manual_session();
+        assert_eq!(first.duration_us(), None);
+        first.control.duration_us.store(90_000_000, Ordering::Release);
+        assert_eq!(first.duration_us(), Some(90_000_000));
+        assert_eq!(second.duration_us(), None);
+    }
+
     #[test]
     fn repeated_audio_owner_preserves_pcm_but_owner_change_withdraws_it() {
         let mut s = manual_session();
