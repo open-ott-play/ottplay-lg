@@ -16,12 +16,17 @@ layout. It does not create nine instances of the single global hardware player.
 
 The same scene supports PiP, four equal windows, nine equal windows, and a large
 central window with up to eight satellites. Rendering and Magic Remote hit tests
-share one pixel layout. Selecting a window changes the active input; one audio
-owner feeds the queued SDL output. Owner changes, pause, seek and scene retirement
-flush queued audio. One player volume/mute setting applies to the acknowledged
-audio owner through the software sink. It does not change the television's
-hardware volume. Commands accepted for an earlier scene cannot change a later
-scene or ordinary playback.
+share one pixel layout. In **Follows focus**, the active window plays at full
+player gain and other windows play at the background level (20% by default).
+Set that level in **Settings → Interface → Multiview background volume** or run
+`ott l_ setting multiviewBackgroundVolume 15`. A value of 0 gives audio
+only to the focused window. Selecting one explicit audio window isolates its
+sound. The player mixes decoded PCM into one SDL output and applies the ordinary
+volume and mute controls before playback.
+
+Each occupied window uses the current Classic or Modern player footer. Selecting
+a new item reveals that window's information for the configured display time.
+Empty windows leave the video area clear.
 
 Local source choices combine captured saved Favorites and the current catalog.
 They retain provider and profile identities, so M3U, VPortal, Plex and authorized
