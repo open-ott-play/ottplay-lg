@@ -819,6 +819,23 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
         Input::Hls(_) => false,
     };
     let has_finite_duration = !matches!(&input, Input::Hls(_));
+    // On nonseekable TS the header reader consumes its full byte probe even when
+    // PAT and PMT are present. Fit discovery within the downloaded live segment:
+    // reading future segments here can make the next sequence expire while the
+    // decoder plays its queued probe packets. Local files and fMP4 keep their budget.
+    let mut probe_bytes = 1024 * 1024;
+    if let Input::Hls(hls) = input {
+        if !hls.playlist.ended && hls.playlist.init.is_none() {
+            hls.read(&mut [], c)?;
+            if hls.bytes.first() == Some(&0x47)
+                && hls.bytes.get(188) == Some(&0x47)
+                && hls.bytes.get(376) == Some(&0x47)
+            {
+                probe_bytes = (hls.bytes.len() / 2).clamp(2048, probe_bytes);
+            }
+        }
+    }
+    let probe_bytes = CString::new(probe_bytes.to_string()).map_err(|_| Error::Budget)?;
     let mut io = Box::new(Io {
         input,
         control: c,
@@ -854,7 +871,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
     }
     (*d.fmt).pb = d.avio;
     let mut opts = std::ptr::null_mut();
-    let bounded = av_dict_set(&mut opts, c"probesize".as_ptr(), c"1048576".as_ptr(), 0) >= 0
+    let bounded = av_dict_set(&mut opts, c"probesize".as_ptr(), probe_bytes.as_ptr(), 0) >= 0
         && av_dict_set(
             &mut opts,
             c"analyzeduration".as_ptr(),

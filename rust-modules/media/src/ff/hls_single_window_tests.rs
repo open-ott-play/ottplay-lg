@@ -316,3 +316,38 @@ fn local_startup_retries_only_the_recognized_interruption_with_slot_cookies() {
         assert_eq!(counter.load(Ordering::Relaxed), expected);
     }
 }
+
+#[test]
+#[ignore = "requires the bundled software decoder, ffmpeg CLI and localhost"]
+fn local_live_ts_produces_the_first_picture_before_another_segment_exists() {
+    use crate::local_multiview::{Event, Limits, Session};
+
+    let _serial = plx_base::testlock::serial();
+    let _ff = super::super::image_subtitle_tests::bind_host_ffmpeg();
+    assert!(plx_net::net::global_init());
+    crate::curlio::boot();
+    let dir = Scratch::new();
+    entry_fixture_with_length(&dir.0, "10", true, "2", 2);
+    let http = HttpFixture::start_with(dir.0.clone(), |request| {
+        request.starts_with("GET /station.m3u8 ").then(|| response(100, 0, false))
+    });
+    // This live station publishes a real, complete H264/AAC TS but never
+    // publishes a second segment. FFmpeg must discover and play the first.
+    let mut session = Session::open(
+        ExternalSource::Hls(format!("{}/station.m3u8", http.url)),
+        Limits::default(),
+    ).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        assert!(Instant::now() < deadline, "discovery waited for a future segment");
+        match session.poll() {
+            Some(Event::Video(frame)) => {
+                assert_eq!((frame.width, frame.height), (160, 90));
+                break;
+            }
+            Some(Event::Ended | Event::Failure(_)) => panic!("first segment was not played"),
+            _ => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    session.cancel();
+}
