@@ -4,7 +4,6 @@ use super::*;
 use crate::local_multiview::{ColorMatrix, ColorRange, Control, Error, FrameYuv, Limits, PcmChunk};
 use plx_base::checkpoint::{Checkpoint, Flow};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub(crate) fn available() -> bool {
@@ -25,9 +24,51 @@ impl Checkpoint for Check<'_> {
 fn playlist_header(bytes: &[u8]) -> bool {
     bytes.starts_with(b"#EXTM3U") || bytes.starts_with(b"\xef\xbb\xbf#EXTM3U")
 }
+const INTERRUPTED_RESPONSE: &[u8] = b"The request is interrupted by main process";
+const DENIED_RESPONSE: &[u8] = b"Forbidden (No client found)";
+const MISSING_STREAM_HTML: &[u8] = b"<h1>No stream id found</h1>";
+const TRANSITIONAL_HTML: &[u8] = b"<h1>Forbidden</h1>";
+const UPSTREAM_TIMEOUT: &[u8] = b"ESOCKETTIMEDOUT";
+
+/// Only exact known control replies are meaningful. Arbitrary HTML or media
+/// bytes never authorize a retry or appear in a diagnostic.
+fn provider_reply(bytes: &[u8]) -> Option<Error> {
+    if bytes.len() > 128 { return None; }
+    let text = bytes.trim_ascii();
+    if text == INTERRUPTED_RESPONSE {
+        return Some(Error::SourceInterrupted);
+    }
+    let text = text.strip_prefix(b"<h1>").and_then(|t| t.strip_suffix(b"</h1>")).unwrap_or(text);
+    match text {
+        DENIED_RESPONSE | b"Forbidden (No client session found)" => Some(Error::SourceDenied),
+        b"No stream id found" => Some(Error::Source),
+        _ => None,
+    }
+}
+
+fn open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
+    if c.stopped() { Error::Cancelled }
+    else if matches!(error, crate::curlio::OpenErr::Status(401 | 403 | 429)) { Error::SourceDenied }
+    else { Error::Source }
+}
+
+// A restore coordinator can schedule a later ordinary request only from these explicit facts.
+// Certificate, permission, rate-limit, DNS, parse and unspecified transport failures stay final.
+fn temporarily_unavailable(error: crate::curlio::OpenErr) -> bool {
+    use crate::curlio::OpenErr;
+    matches!(error, OpenErr::Status(502 | 503 | 504) | OpenErr::Deadline | OpenErr::Transport(28))
+}
+
+fn startup_open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
+    if !c.stopped() && temporarily_unavailable(error) { Error::SourceTemporarilyUnavailable }
+    else { open_error(error, c) }
+}
+
 struct Remote {
     source: Box<crate::curlio::CurlSource>,
-    _abort: Arc<crate::curlio::Abort>,
+    deadline: Option<Instant>,
+    failure: Option<crate::curlio::OpenErr>,
+    startup_retries: u8,
     position: i64,
     prefix: std::collections::VecDeque<u8>,
 }
@@ -35,21 +76,105 @@ impl Remote {
     fn open(url: &str, owned: bool, c: &Control) -> Result<Self, Error> {
         let deadline = Some(Instant::now() + Duration::from_secs(15));
         let mut check = Check(c);
-        let (source, abort) = if owned {
+        let source = if owned {
             crate::curlio::CurlSource::open_owned_private_checked(url, 0, deadline, &mut check)
+                .map(|(source, _)| source)
         } else {
-            crate::curlio::CurlSource::open_private_checked(url, 0, deadline, &mut check)
+            // Each window owns a fresh private context. A sniffed master can issue a
+            // cookie on its first response, before we know the source is HLS.
+            crate::curlio::CurlSource::open_hls_private_checked(url, deadline, &mut check)
         }
-        .map_err(|_| Error::Source)?;
+        .map_err(|e| startup_open_error(e, c))?;
         if !(200..300).contains(&source.status()) {
-            return Err(Error::Source);
+            return Err(startup_open_error(crate::curlio::OpenErr::Status(source.status()), c));
         }
         Ok(Self {
             source,
-            _abort: abort,
+            deadline: None,
+            failure: None,
+            startup_retries: 2,
             position: 0,
             prefix: Default::default(),
         })
+    }
+    fn reopen(&mut self, url: &str, c: &Control) -> Result<(), Error> {
+        self.failure = None;
+        let deadline = self.deadline();
+        self.source.reopen_until(url, Some(deadline), &mut Check(c)).map_err(|e| {
+            self.failure = Some(e);
+            open_error(e, c)
+        })?;
+        if !(200..300).contains(&self.source.status()) {
+            let error = crate::curlio::OpenErr::Status(self.source.status());
+            self.failure = Some(error);
+            return Err(open_error(error, c));
+        }
+        self.position = 0;
+        self.prefix.clear();
+        Ok(())
+    }
+    /// A successful lookup of an already-playing gateway session can return one of these exact
+    /// HTML bodies after the provider stopped that stream. An authentication/limit status, a
+    /// denial opening the source itself, and an arbitrary HTML body retain their ordinary errors.
+    fn provider_error(&self, bytes: &[u8], existing: Option<&str>, c: &Control) -> Option<Error> {
+        if existing.is_none() && self.source.status() == 200 && bytes == UPSTREAM_TIMEOUT {
+            return Some(Error::SourceTemporarilyUnavailable);
+        }
+        let error = provider_reply(bytes)?;
+        let lost = matches!(bytes.trim_ascii(), MISSING_STREAM_HTML
+            | b"<h1>Forbidden (No client found)</h1>" | b"<h1>Forbidden (No client session found)</h1>");
+        if lost && existing.is_some_and(|url| self.played_gateway_resource(url, c)) {
+            return Some(Error::LostProviderLease);
+        }
+        Some(error)
+    }
+
+    fn played_gateway_resource(&self, url: &str, c: &Control) -> bool {
+        let Some(origin) = c.hls_origin.get() else { return false; };
+        self.source.status() == 200 && c.video_decoded.load(Ordering::Acquire)
+            && c.hls_live.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
+            && crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(origin)
+            && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
+    }
+
+    fn fetch(&mut self, url: &str, cap: usize, is_segment: bool, c: &Control) -> Result<Vec<u8>, Error> {
+        self.reopen(url, c)?;
+        let bytes = collect(self, cap, c)?;
+        if let Some(error) = self.provider_error(&bytes, is_segment.then_some(url), c) { return Err(error); }
+        Ok(bytes)
+    }
+    fn deadline(&self) -> Instant {
+        let request = Instant::now() + Duration::from_secs(15);
+        self.deadline.map_or(request, |overall| request.min(overall))
+    }
+    fn retryable(&self) -> bool {
+        self.failure.is_some_and(|e| matches!(hls_curl_open_outcome(e),
+            TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
+    }
+    /// The root and selected variant share a retry allowance and private
+    /// transfer context. Reopening preserves cookies received during redirects.
+    fn startup<T>(&mut self, url: &str, mut open: bool, c: &Control,
+        parse: impl Fn(&mut Self, &Control) -> Result<T, Error>) -> Result<T, Error> {
+        let previous_deadline = self.deadline;
+        self.deadline = Some(self.deadline());
+        let result = loop {
+            let result = (if open { self.reopen(url, c) } else { Ok(()) })
+                .and_then(|()| parse(self, c));
+            let transient = matches!(&result, Err(Error::SourceInterrupted))
+                || (matches!(&result, Err(Error::Source)) && self.retryable());
+            let delay = Duration::from_millis(if self.startup_retries == 2 { 400 } else { 1000 });
+            if !transient || self.startup_retries == 0 || self.deadline().saturating_duration_since(Instant::now()) <= delay {
+                break result;
+            }
+            if !c.wait(delay) { break Err(Error::Cancelled); }
+            self.startup_retries -= 1;
+            open = true;
+        };
+        self.deadline = previous_deadline;
+        if matches!(&result, Err(Error::Source)) && !c.stopped() && self.failure.is_some_and(temporarily_unavailable) {
+            return Err(Error::SourceTemporarilyUnavailable);
+        }
+        result
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
         let mut bytes = Vec::new();
@@ -62,6 +187,21 @@ impl Remote {
             bytes.extend_from_slice(&head[..n]);
         }
         let hls = playlist_header(&bytes);
+        // Most progressive files need just the first 16 bytes. Read a small
+        // potential control body to EOF before recognizing its exact meaning.
+        let head = bytes.trim_ascii_start();
+        if !head.is_empty() && !hls && (INTERRUPTED_RESPONSE.starts_with(head)
+            || DENIED_RESPONSE.starts_with(head) || UPSTREAM_TIMEOUT.starts_with(head) || head.starts_with(b"<h1>")) {
+            while bytes.len() < 128 {
+                let mut rest = [0; 128];
+                let n = self.read_raw(&mut rest[..128 - bytes.len()], c)?;
+                if n == 0 {
+                    if let Some(error) = self.provider_error(&bytes, None, c) { return Err(error); }
+                    break;
+                }
+                bytes.extend_from_slice(&rest[..n]);
+            }
+        }
         self.prefix.extend(bytes);
         Ok(hls)
     }
@@ -76,12 +216,15 @@ impl Remote {
         self.read_raw(b, c)
     }
     fn read_raw(&mut self, b: &mut [u8], c: &Control) -> Result<usize, Error> {
+        let deadline = self.deadline();
         let n = self.source.read_until(
             b,
-            Some(Instant::now() + Duration::from_secs(15)),
+            Some(deadline),
             &mut Check(c),
         );
         if n < 0 {
+            self.failure = self.source.body_failure().map(|f| crate::curlio::OpenErr::Transport(f.rc))
+                .or_else(|| (Instant::now() >= deadline).then_some(crate::curlio::OpenErr::Deadline));
             Err(if c.stopped() {
                 Error::Cancelled
             } else {
@@ -93,15 +236,13 @@ impl Remote {
         }
     }
 }
-fn fetch(url: &str, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
-    collect(Remote::open(url, false, c)?, cap, c)
-}
-fn collect(mut r: Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
+fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut scratch = [0; 16 * 1024];
-    let expires = Instant::now() + Duration::from_secs(15);
+    let expires = r.deadline();
     loop {
         if Instant::now() >= expires {
+            r.failure = Some(crate::curlio::OpenErr::Deadline);
             return Err(Error::Source);
         }
         let n = r.read(&mut scratch, c)?;
@@ -121,16 +262,23 @@ struct Manifest {
     bytes: Vec<u8>,
 }
 impl Manifest {
-    fn from_remote(remote: Remote, c: &Control) -> Result<Self, Error> {
+    fn from_remote(remote: &mut Remote, c: &Control) -> Result<Self, Error> {
+        Self::read(remote, None, c)
+    }
+    fn read(remote: &mut Remote, existing: Option<&str>, c: &Control) -> Result<Self, Error> {
+        let manifest = Self::raw(remote, c)?;
+        if let Some(error) = remote.provider_error(&manifest.bytes, existing, c) { return Err(error); }
+        Ok(manifest)
+    }
+    fn raw(remote: &mut Remote, c: &Control) -> Result<Self, Error> {
         let effective_url = remote.source.effective_url().to_owned();
         resource(&effective_url)?;
-        Ok(Self {
-            effective_url,
-            bytes: collect(remote, 512 * 1024, c)?,
-        })
+        let bytes = collect(remote, 512 * 1024, c)?;
+        Ok(Self { effective_url, bytes })
     }
-    fn fetch(url: &str, c: &Control) -> Result<Self, Error> {
-        Self::from_remote(Remote::open(url, false, c)?, c)
+    fn fetch(remote: &mut Remote, url: &str, c: &Control) -> Result<Self, Error> {
+        remote.reopen(url, c)?;
+        Self::read(remote, Some(url), c)
     }
     fn text(&self) -> Result<&str, Error> {
         std::str::from_utf8(&self.bytes).map_err(|_| Error::Playlist)
@@ -322,14 +470,45 @@ fn select_variant(url: &str, text: &str) -> Result<Option<String>, Error> {
 
     Ok(selected.map(|(_, url)| url))
 }
+fn poll_wait(checked: Instant, target: Duration, now: Instant) -> Duration {
+    // Decoding the last segment may already have spent this entire interval.
+    // Only an unchanged, recently checked edge needs a delay.
+    (checked + target.min(Duration::from_secs(2)) / 2).saturating_duration_since(now)
+}
+
+fn admission_read_started(url: &str, c: &Control) -> Option<u64> {
+    if !c.hls_live.load(Ordering::Acquire) { return None; }
+    let admitted = c.hls_origin.get()?;
+    (crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(admitted))
+        .then(crate::local_multiview::hls_request_started)
+}
+
+fn finish_admission_read(order: Option<u64>, effective_url: &str, c: &Control) {
+    if let Some(order) = order {
+        if !c.stopped() && crate::local_multiview::hls_handoff_origin(effective_url).as_ref() == c.hls_origin.get() {
+            c.hls_request.store(order, Ordering::Release);
+        }
+    }
+}
+
+fn media_segment_bytes(bytes: &[u8]) -> bool {
+    // A 200 HTML or text reply is not a media read. Confirm MPEG-TS sync or a fragmented MP4 box.
+    (bytes.len() >= 188 * 2 && bytes[0] == 0x47 && bytes[188] == 0x47)
+        || (bytes.len() >= 8 && matches!(&bytes[4..8], b"styp" | b"sidx" | b"moof" | b"mdat"))
+}
+
 struct Hls {
+    remote: Remote,
     url: String,
     playlist: Playlist,
     next: u64,
     bytes: Vec<u8>,
     pos: usize,
     init_sent: bool,
-    refreshed: Instant,
+    delivered_segment: bool,
+    teardown_checked: bool,
+    reprobe: bool,
+    checked: Instant,
     cap: usize,
 }
 impl Hls {
@@ -343,92 +522,195 @@ impl Hls {
         first: Option<Remote>,
     ) -> Result<Self, Error> {
         // At most one master indirection. Every response carries its own validated base.
-        let first = match first {
-            Some(remote) => Manifest::from_remote(remote, c)?,
-            None => Manifest::fetch(&url, c)?,
+        let mut remote = match first {
+            Some(remote) => remote,
+            None => Remote::open(&url, false, c)?,
         };
+        let first = remote.startup(&url, false, c, Manifest::from_remote)?;
+        let source_origin = crate::local_multiview::hls_handoff_origin(&url);
+        let advertised = remote.source.multiview_refresh_peers()
+            && source_origin.is_some()
+            && crate::local_multiview::hls_handoff_origin(&first.effective_url) == source_origin;
         let manifest = if let Some(child) = first.variant()? {
-            Manifest::fetch(&child, c)?
+            if advertised {
+                if let Some(origin) = &source_origin {
+                    c.hls_origin.get_or_init(|| origin.clone());
+                    c.hls_live.store(true, Ordering::Release);
+                }
+            }
+            remote.startup(&child, true, c, Manifest::from_remote)?
         } else {
             first
         };
         url = manifest.effective_url.clone();
         let playlist = manifest.media()?;
+        let admitted_origin = source_origin.filter(|origin| {
+            !playlist.ended && (advertised || remote.source.multiview_refresh_peers())
+                && crate::local_multiview::hls_handoff_origin(&url).as_ref() == Some(origin)
+        });
+        let admitted = admitted_origin.is_some();
+        if let Some(origin) = admitted_origin { let _ = c.hls_origin.set(origin); }
+        c.hls_live.store(admitted, Ordering::Release);
         let start = if playlist.ended {
             0
         } else {
             playlist.segments.len().saturating_sub(2)
         };
         let next = playlist.segments[start].sequence;
+        let checked = Instant::now();
         Ok(Self {
+            remote,
             url,
             playlist,
             next,
             bytes: Vec::new(),
             pos: 0,
             init_sent: false,
-            refreshed: Instant::now(),
+            delivered_segment: false,
+            teardown_checked: false,
+            reprobe: false,
+            checked,
             cap,
         })
     }
-    fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
-        while self.pos == self.bytes.len() {
-            if c.stopped() {
-                return Err(Error::Cancelled);
+    fn refresh(&mut self, c: &Control) -> Result<(), Error> {
+        let mut order = admission_read_started(&self.url, c);
+        let mut manifest = Manifest::fetch(&mut self.remote, &self.url, c)?;
+        // The source can briefly report this text while retiring a previously verified leaf.
+        // Check the same leaf once. Only an independent, explicit missing-stream reply can
+        // authorize a new session; an HTTP denial or another generic page remains terminal.
+        if manifest.bytes == TRANSITIONAL_HTML && !self.teardown_checked
+            && self.checked.elapsed() < Duration::from_secs(100)
+            && c.hls_request.load(Ordering::Acquire) != 0 && self.remote.played_gateway_resource(&self.url, c)
+        {
+            self.teardown_checked = true;
+            let pause = Duration::from_millis(800);
+            if self.remote.deadline().saturating_duration_since(Instant::now()) <= pause {
+                return Err(Error::Playlist);
             }
+            if !c.wait(pause) { return Err(Error::Cancelled); }
+            if c.paused.load(Ordering::Acquire) { return Err(Error::Playlist); }
+            order = admission_read_started(&self.url, c);
+            self.remote.reopen(&self.url, c)?;
+            manifest = Manifest::raw(&mut self.remote, c)?;
+            if manifest.bytes.trim_ascii() == MISSING_STREAM_HTML && self.remote.played_gateway_resource(&self.url, c) {
+                return Err(Error::LostProviderLease);
+            }
+            if let Some(error) = provider_reply(&manifest.bytes) { return Err(error); }
+        }
+        let fresh = manifest.media()?;
+        if fresh.init != self.playlist.init {
+            return Err(Error::Unsupported);
+        }
+        if fresh.ended { c.hls_live.store(false, Ordering::Release); }
+        else { finish_admission_read(order, &manifest.effective_url, c); }
+        self.checked = Instant::now();
+        self.url = manifest.effective_url;
+        self.playlist = fresh;
+        Ok(())
+    }
+
+    // Budget only the current demand for more bytes. A paused decoder can
+    // still be inside AVIO when the UI suspends it between manifest requests.
+    fn arm_request(&mut self, c: &Control, deadline: &mut Instant) -> Result<(), Error> {
+        if c.paused.load(Ordering::Acquire) {
+            let paused = Instant::now();
+            while c.paused.load(Ordering::Acquire) {
+                if !c.wait(Duration::from_millis(10)) { return Err(Error::Cancelled); }
+            }
+            *deadline += paused.elapsed();
+        }
+        if c.stopped() { return Err(Error::Cancelled); }
+        if Instant::now() >= *deadline { return Err(Error::Source); }
+        self.remote.deadline = Some(*deadline);
+        Ok(())
+    }
+
+    fn refresh_retry(&mut self, c: &Control, remaining: &mut u8, deadline: &mut Instant) -> Result<(), Error> {
+        loop {
+            self.arm_request(c, deadline)?;
+            let verified_before = self.teardown_checked;
+            match self.refresh(c) {
+                Err(error) if *remaining > 0 && verified_before == self.teardown_checked
+                    && (error == Error::SourceInterrupted
+                    || (error == Error::Source && self.remote.retryable())) => {
+                    *remaining -= 1;
+                    if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
+        self.read_with_budget(out, c, Duration::from_secs(30))
+    }
+
+    fn read_with_budget(&mut self, out: &mut [u8], c: &Control, budget: Duration) -> Result<usize, Error> {
+        if c.stopped() { return Err(Error::Cancelled); }
+        let mut deadline = Instant::now() + budget;
+        let mut remaining = 2;
+        while self.pos == self.bytes.len() {
+            if self.reprobe { return Err(Error::Source); }
+            self.arm_request(c, &mut deadline)?;
             if !self.init_sent {
-                self.init_sent = true;
                 if let Some(url) = &self.playlist.init {
-                    self.bytes = fetch(url, self.cap, c)?;
+                    self.bytes = self.remote.fetch(url, self.cap, false, c)?;
+                    if self.bytes.is_empty() { return Err(Error::Source); }
                     self.pos = 0;
-                    if !self.bytes.is_empty() {
+                }
+                self.init_sent = true;
+                if !self.bytes.is_empty() { break; }
+            }
+            if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
+                let order = admission_read_started(&segment.url, c);
+                let result = self.remote.fetch(&segment.url, self.cap, true, c);
+                match result {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        if order.is_some() && media_segment_bytes(&bytes) {
+                            finish_admission_read(order, self.remote.source.effective_url(), c);
+                        }
+                        self.bytes = bytes;
+                        self.pos = 0;
+                        self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
+                        self.delivered_segment = true;
                         break;
                     }
+                    Err(error) if !self.playlist.ended && remaining > 0
+                        && (error == Error::SourceInterrupted || (error == Error::Source
+                            && (self.remote.retryable() || matches!(self.remote.failure,
+                                Some(crate::curlio::OpenErr::Status(404 | 410)))))) => {
+                        // Do not spend another request on a stale signed URI until
+                        // the selected playlist has supplied a current segment.
+                        remaining -= 1;
+                        if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
+                        self.refresh_retry(c, &mut remaining, &mut deadline)?;
+                        continue;
+                    }
+                    Ok(_) => return Err(Error::Source),
+                    Err(e) => return Err(e),
                 }
             }
-            if let Some(segment) = self
-                .playlist
-                .segments
-                .iter()
-                .find(|s| s.sequence == self.next)
-            {
-                self.bytes = fetch(&segment.url, self.cap, c)?;
-                self.pos = 0;
-                self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
-                if !self.bytes.is_empty() {
-                    break;
+            if let Some(first) = self.playlist.segments.first().filter(|s| s.sequence > self.next) {
+                self.next = first.sequence;
+                if self.delivered_segment {
+                    // A raw splice would leave reference pictures and audio
+                    // clocks from the skipped interval in FFmpeg. Reopen just
+                    // this decoder, retaining the selected session and cookie.
+                    self.reprobe = true;
+                    return Err(Error::Source);
                 }
-                return Err(Error::Source);
+                continue;
             }
             if self.playlist.ended {
                 return Ok(0);
             }
-            if self
-                .playlist
-                .segments
-                .first()
-                .is_some_and(|s| s.sequence > self.next)
-            {
-                return Err(Error::Playlist);
-            }
-            if !c.wait(self.playlist.target.min(Duration::from_secs(2)) / 2) {
+            let now = Instant::now();
+            let wait = poll_wait(self.checked, self.playlist.target, now).min(deadline.saturating_duration_since(now));
+            if !c.wait(wait) {
                 return Err(Error::Cancelled);
             }
-            let manifest = Manifest::fetch(&self.url, c)?;
-            let fresh = manifest.media()?;
-            if fresh.init != self.playlist.init {
-                return Err(Error::Unsupported);
-            }
-            if fresh.segments.last().map(|s| s.sequence)
-                > self.playlist.segments.last().map(|s| s.sequence)
-            {
-                self.refreshed = Instant::now();
-            }
-            if self.refreshed.elapsed() > Duration::from_secs(30) {
-                return Err(Error::Source);
-            }
-            self.url = manifest.effective_url;
-            self.playlist = fresh;
+            self.refresh_retry(c, &mut remaining, &mut deadline)?;
         }
         let n = out.len().min(self.bytes.len() - self.pos);
         out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
@@ -442,7 +724,7 @@ enum Input {
     Hls(Hls),
 }
 struct Io<'a> {
-    input: Input,
+    input: &'a mut Input,
     control: &'a Control,
     error: Option<Error>,
 }
@@ -622,13 +904,13 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     if !available() {
         return Err(Error::Unavailable);
     }
-    let input = match source {
+    let mut input = match source {
         ExternalSource::HeldLocal(file) => {
             Input::Local(file_source::FileSource::held(&file).map_err(|_| Error::Source)?)
         }
         ExternalSource::Http(url) => {
             let mut remote = Remote::open(&url, false, c)?;
-            if remote.sniff_hls(c)? {
+            if remote.startup(&url, false, c, Remote::sniff_hls)? {
                 Input::Hls(Hls::open_response(
                     url,
                     limits.max_object_bytes,
@@ -643,11 +925,54 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         ExternalSource::Hls(url) => Input::Hls(Hls::open(url, limits.max_object_bytes, c)?),
         ExternalSource::Local(_) => return Err(Error::Unsupported),
     };
+    let mut reopens = std::collections::VecDeque::new();
+    loop {
+        let result = decode_input(&mut input, limits, c);
+        let Input::Hls(hls) = &mut input else { return result };
+        if !hls.reprobe || c.stopped() { return result; }
+        let now = Instant::now();
+        while reopens.front().is_some_and(|then: &Instant| now.duration_since(*then) >= Duration::from_secs(30)) {
+            reopens.pop_front();
+        }
+        if reopens.len() >= 3 { return Err(Error::Source); }
+        reopens.push_back(now);
+        hls.reprobe = false;
+        hls.delivered_segment = false;
+        hls.init_sent = false;
+        hls.bytes.clear();
+        hls.pos = 0;
+        c.timeline.fetch_add(1, Ordering::AcqRel);
+        c.audio_generation.fetch_add(1, Ordering::AcqRel);
+        let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+        mailbox.video = None;
+        mailbox.audio.clear();
+    }
+}
+
+unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result<(), Error> {
     let seekable = match &input {
         Input::Local(_) => true,
         Input::Http(remote) => remote.source.supports_byte_ranges(),
         Input::Hls(_) => false,
     };
+    let has_finite_duration = !matches!(&input, Input::Hls(_));
+    // On nonseekable TS the header reader consumes its full byte probe even when
+    // PAT and PMT are present. Fit discovery within the downloaded live segment:
+    // reading future segments here can make the next sequence expire while the
+    // decoder plays its queued probe packets. Local files and fMP4 keep their budget.
+    let mut probe_bytes = 1024 * 1024;
+    if let Input::Hls(hls) = input {
+        if !hls.playlist.ended && hls.playlist.init.is_none() {
+            hls.read(&mut [], c)?;
+            if hls.bytes.first() == Some(&0x47)
+                && hls.bytes.get(188) == Some(&0x47)
+                && hls.bytes.get(376) == Some(&0x47)
+            {
+                probe_bytes = (hls.bytes.len() / 2).clamp(2048, probe_bytes);
+            }
+        }
+    }
+    let probe_bytes = CString::new(probe_bytes.to_string()).map_err(|_| Error::Budget)?;
     let mut io = Box::new(Io {
         input,
         control: c,
@@ -683,7 +1008,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     }
     (*d.fmt).pb = d.avio;
     let mut opts = std::ptr::null_mut();
-    let bounded = av_dict_set(&mut opts, c"probesize".as_ptr(), c"1048576".as_ptr(), 0) >= 0
+    let bounded = av_dict_set(&mut opts, c"probesize".as_ptr(), probe_bytes.as_ptr(), 0) >= 0
         && av_dict_set(
             &mut opts,
             c"analyzeduration".as_ptr(),
@@ -760,6 +1085,9 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     } else {
         ColorMatrix::Bt601
     };
+    if has_finite_duration {
+        c.duration_us.store(fmt_duration(d.fmt).max(0), Ordering::Release);
+    }
     c.seekable.store(seekable, Ordering::Release);
     c.mailbox.lock().unwrap_or_else(|e| e.into_inner()).ready = true;
     let mut clock: Option<(i64, Instant)> = None;
@@ -827,8 +1155,9 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         {
             return Err(Error::Budget);
         }
-        if read_result < 0 && read_result != AVERROR_EOF {
-            return Err(io.error.unwrap_or(Error::Source));
+        if read_result < 0 {
+            if let Some(error) = io.error { return Err(error); }
+            if read_result != AVERROR_EOF { return Err(Error::Source); }
         }
         if read_result == AVERROR_EOF {
             if flushing {
@@ -983,6 +1312,235 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_startup_outages_are_typed_without_retrying_a_cold_source() {
+        use crate::curlio::{cookie_tests::{curl, Reply, SessionServer}, OpenErr};
+        let _serial = curl();
+        let c = Control::default();
+        for (status, expected) in [(502, Error::SourceTemporarilyUnavailable), (503, Error::SourceTemporarilyUnavailable),
+            (504, Error::SourceTemporarilyUnavailable), (401, Error::SourceDenied), (403, Error::SourceDenied),
+            (429, Error::SourceDenied), (404, Error::Source), (500, Error::Source)]
+        {
+            let server = SessionServer::new(vec![Reply { status, ..Reply::ok("", b"") }]);
+            assert!(matches!(Hls::open(format!("{}/source.m3u8", server.base), 1024, &c), Err(e) if e == expected));
+            assert_eq!(server.heads().len(), 1);
+        }
+        let server = SessionServer::new(vec![
+            Reply::ok("", UPSTREAM_TIMEOUT), Reply::ok("", UPSTREAM_TIMEOUT),
+            Reply::ok("", b"ESOCKETTIMEDOUT\n"), Reply::ok("", b"<h1>ESOCKETTIMEDOUT</h1>"),
+        ]);
+        let url = format!("{}/source.m3u8", server.base);
+        assert!(matches!(Hls::open(url.clone(), 1024, &c), Err(Error::SourceTemporarilyUnavailable)));
+        let mut sniff = Remote::open(&url, false, &c).unwrap();
+        assert_eq!(sniff.sniff_hls(&c), Err(Error::SourceTemporarilyUnavailable));
+        for _ in 0..2 {
+            assert!(matches!(Hls::open(url.clone(), 1024, &c), Err(Error::Playlist)));
+        }
+        assert_eq!(server.heads().len(), 4);
+        for error in [OpenErr::Deadline, OpenErr::Transport(28)] {
+            assert_eq!(startup_open_error(error, &c), Error::SourceTemporarilyUnavailable);
+        }
+        for error in [OpenErr::Transport(6), OpenErr::Transport(7), OpenErr::Transport(60)] {
+            assert_eq!(startup_open_error(error, &c), Error::Source);
+        }
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let outage = || Reply { status: 503, ..Reply::ok("", b"") };
+        let server = SessionServer::new(vec![Reply::ok("", master), outage(), outage(), outage()]);
+        assert!(matches!(Hls::open(format!("{}/source.m3u8", server.base), 1024, &c), Err(Error::SourceTemporarilyUnavailable)));
+        let heads = server.heads();
+        assert_eq!(heads.len(), 4);
+        assert!(heads[1..].iter().all(|r| r.starts_with("GET /leaf.m3u8 ")));
+    }
+
+    #[test]
+    fn transitional_gateway_body_rechecks_only_the_existing_recently_playing_leaf_once() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let opt_in = "OTT-Multiview-Admission: refresh-peers-v1\r\n";
+        for (confirmation, expected) in [
+            (Reply::ok("", MISSING_STREAM_HTML), Err(Error::LostProviderLease)),
+            (Reply::ok("", TRANSITIONAL_HTML), Err(Error::Playlist)),
+            (Reply::ok("", b"<h1>Forbidden (No client found)</h1>"), Err(Error::SourceDenied)),
+            (Reply { status: 403, ..Reply::ok("", MISSING_STREAM_HTML) }, Err(Error::SourceDenied)),
+            (Reply { status: 503, ..Reply::ok("", b"unavailable") }, Err(Error::Source)),
+            (Reply::ok("", live), Ok(())),
+        ] {
+            let server = SessionServer::new(vec![
+                Reply::ok(opt_in, master), Reply::ok("", live), Reply::ok("", live),
+                Reply::ok("", TRANSITIONAL_HTML), confirmation, Reply::ok("", TRANSITIONAL_HTML),
+            ]);
+            let c = Control::default();
+            let mut hls = Hls::open(format!("{}/channel.m3u8", server.base), 1024, &c).unwrap();
+            c.video_decoded.store(true, Ordering::Release);
+            hls.refresh(&c).unwrap();
+            let before = Instant::now();
+            let mut deadline = before + Duration::from_secs(15);
+            let mut attempts = 2;
+            assert_eq!(hls.refresh_retry(&c, &mut attempts, &mut deadline), expected);
+            assert_eq!(attempts, 2, "a failed verification cannot make a third request");
+            assert!(before.elapsed() >= Duration::from_millis(790));
+            assert_eq!(server.heads().len(), 5);
+            assert_eq!(hls.refresh(&c), Err(Error::Playlist));
+            let heads = server.heads();
+            assert_eq!(heads.len(), 6, "one verification at most per worker");
+            assert!(heads[1..].iter().all(|r| r.starts_with("GET /leaf.m3u8 ")));
+        }
+    }
+
+    #[test]
+    fn expired_established_leaf_is_distinct_from_denial_and_does_not_reopen_the_master() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let opt_in = "OTT-Multiview-Admission: refresh-peers-v1\r\n";
+        let missing = b"<h1>No stream id found</h1>";
+        let missing_viewer = b"<h1>Forbidden (No client found)</h1>";
+        let missing_session = b"<h1>Forbidden (No client session found)</h1>";
+        let server = SessionServer::new(vec![
+            Reply::ok(opt_in, master), Reply::ok("", live),
+            Reply::ok("", missing_viewer), Reply::ok("", missing),
+            Reply::ok("", missing_session), Reply::ok("", missing_viewer), Reply::ok("", missing),
+            Reply::ok("", b"<h1>Forbidden</h1>"),
+            Reply { status: 403, ..Reply::ok("", missing_viewer) },
+            Reply { status: 429, ..Reply::ok("", missing_viewer) },
+            Reply { status: 401, ..Reply::ok("", missing_viewer) },
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/source.m3u8", server.base), 1024, &c).unwrap();
+        assert_eq!(hls.refresh(&c), Err(Error::SourceDenied), "never-played lease");
+        c.video_decoded.store(true, Ordering::Release);
+        c.paused.store(true, Ordering::Release);
+        assert_eq!(hls.refresh(&c), Err(Error::Source), "paused reader");
+        c.paused.store(false, Ordering::Release);
+        assert_eq!(hls.refresh(&c), Err(Error::LostProviderLease));
+        assert_eq!(hls.read(&mut [0], &c), Err(Error::LostProviderLease));
+        assert_eq!(hls.refresh(&c), Err(Error::LostProviderLease));
+        assert_eq!(hls.refresh(&c), Err(Error::Playlist), "unspecified forbidden body");
+        for _ in 0..3 { assert_eq!(hls.read(&mut [0], &c), Err(Error::SourceDenied)); }
+        let heads = server.heads();
+        assert_eq!(heads.len(), 11, "one request per case, no retry of refusal");
+        assert_eq!(heads.iter().filter(|line| line.starts_with("GET /source.m3u8 ")).count(), 1);
+
+        let server = SessionServer::new(vec![Reply::ok("", live), Reply::ok("", missing)]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &c).unwrap();
+        c.video_decoded.store(true, Ordering::Release);
+        assert_eq!(hls.refresh(&c), Err(Error::Source), "unmarked source");
+        let server = SessionServer::new(vec![Reply::ok(opt_in, missing_viewer)]);
+        assert!(matches!(Hls::open(format!("{}/source.m3u8", server.base), 1024, &c), Err(Error::SourceDenied)));
+    }
+
+    #[test]
+    fn handoff_reports_only_real_live_reads_started_after_retirement() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        use crate::local_multiview::hls_handoff_barrier;
+        let _serial = curl();
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25\nleaf.m3u8\n";
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let mut ts = [0; 376];
+        ts[0] = 0x47;
+        ts[188] = 0x47;
+        let server = SessionServer::new(vec![
+            Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\n", master),
+            Reply::ok("", live), Reply::ok("", &ts), Reply::ok("", live),
+            Reply::ok("", b"<h1>Forbidden (No client found)</h1>"),
+            Reply::ok("", &[&live[..], b"#EXT-X-ENDLIST\n"].concat()),
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/source.m3u8?private=1", server.base), 1024, &c).unwrap();
+        assert_eq!(c.hls_origin.get(), Some(&server.base));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), 0, "opening a session is not a refresh");
+        let old = admission_read_started(&hls.url, &c);
+        let fence = hls_handoff_barrier();
+        finish_admission_read(old, &hls.url, &c);
+        assert!(c.hls_request.load(Ordering::Acquire) <= fence, "in-flight GET began before retirement");
+        assert_eq!(admission_read_started("https://other.example/leaf.m3u8", &c), None);
+        let mut out = [0];
+        assert_eq!(hls.read(&mut out, &c), Ok(1));
+        let received = c.hls_request.load(Ordering::Acquire);
+        assert!(received > fence);
+        assert_eq!(hls.read(&mut out, &c), Ok(1));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), received, "cached bytes are not another GET");
+        hls.refresh(&c).unwrap();
+        let refreshed = c.hls_request.load(Ordering::Acquire);
+        assert!(refreshed > received);
+        assert_eq!(hls.refresh(&c), Err(Error::SourceDenied));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), refreshed);
+        hls.refresh(&c).unwrap();
+        assert!(!c.hls_live.load(Ordering::Acquire));
+        assert_eq!(c.hls_request.load(Ordering::Acquire), refreshed);
+    }
+
+    #[test]
+    fn handoff_requires_approved_response_on_original_origin_and_live_media() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n";
+        let ended = [&live[..], b"#EXT-X-ENDLIST\n"].concat();
+        for (header, playlist) in [
+            ("", &live[..]), ("OTT-Multiview-Admission: other\r\n", &live[..]),
+            ("OTT-Multiview-Admission: refresh-peers-v1\r\n", &ended[..]),
+        ] {
+            let server = SessionServer::new(vec![Reply::ok(header, playlist)]);
+            let c = Control::default();
+            Hls::open(format!("{}/master.m3u8", server.base), 1024, &c).unwrap();
+            assert!(c.hls_origin.get().is_none());
+        }
+        let redirect = Reply {
+            status: 302,
+            headers: "Location: /final.m3u8\r\nOTT-Multiview-Admission: refresh-peers-v1\r\n".into(),
+            body: vec![], required: None,
+        };
+        let server = SessionServer::new(vec![redirect, Reply::ok("", live)]);
+        let c = Control::default();
+        Hls::open(format!("{}/redirect.m3u8", server.base), 1024, &c).unwrap();
+        assert!(c.hls_origin.get().is_none(), "a redirect cannot opt in its destination");
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25\nvod.m3u8\n";
+        let server = SessionServer::new(vec![
+            Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\n", master), Reply::ok("", &ended),
+        ]);
+        let c = Control::default();
+        Hls::open(format!("{}/master.m3u8", server.base), 1024, &c).unwrap();
+        assert!(!c.hls_live.load(Ordering::Acquire), "a finite leaf withdraws provisional master admission");
+        use crate::local_multiview::hls_handoff_origin as origin;
+        assert_eq!(origin("https://Example.org:443/private/abc?token=value"), Some("https://example.org:443".to_owned()));
+        for url in ["https://user:password@example.org/path", "ftp://host/file", "https://example.org/a#x"] {
+            assert_eq!(origin(url), None);
+        }
+        assert!(!media_segment_bytes(b"<h1>No stream id found</h1>"));
+    }
+
+    #[test]
+    fn local_slot_keeps_its_private_cookie_through_segment_and_playlist_refresh() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let server = SessionServer::new(vec![
+            Reply::ok("Set-Cookie: mv=first; Path=/\r\n", b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25\nmedia.m3u8\n"),
+            Reply::ok("", b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\na.ts\n").requiring("mv=first"),
+            Reply::ok("Set-Cookie: mv=next; Path=/\r\n", b"A").requiring("mv=first"),
+            Reply::ok("", b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:11\n#EXTINF:1,\nb.ts\n").requiring("mv=next"),
+            Reply::ok("", b"B").requiring("mv=next"),
+            Reply::ok("", b"second window"),
+        ]);
+        let control = Control::default();
+        let url = format!("{}/start", server.base);
+        let mut first = Remote::open(&url, false, &control).unwrap();
+        assert!(first.sniff_hls(&control).unwrap());
+        let mut hls = Hls::open_response(url.clone(), 1024, &control, Some(first)).unwrap();
+        let mut byte = [0];
+        assert_eq!(hls.read(&mut byte, &control).unwrap(), 1);
+        assert_eq!(byte, [b'A']);
+        assert_eq!(hls.read(&mut byte, &control).unwrap(), 1);
+        assert_eq!(byte, [b'B']);
+        let _independent = Remote::open(&url, false, &control).unwrap();
+        let requests = server.heads();
+        assert_eq!(requests.len(), 6);
+        assert!(!requests[5].contains("Cookie:"));
+    }
     #[test]
     fn seek_audio_floor_uses_the_actual_chunk_and_fails_closed_on_unknown_or_overflow() {
         let floor = Some((7, 4_300_000));
@@ -1008,6 +1566,92 @@ mod tests {
         assert_eq!(dimensions(3, 3, l), Ok((3, 3, 2, 2)));
         assert!(dimensions(-1, 100, l).is_err());
     }
+    #[test]
+    fn late_live_read_refreshes_after_a_pause_or_two_long_segments() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let initial = b"#EXTM3U\n#EXT-X-TARGETDURATION:20\n#EXT-X-MEDIA-SEQUENCE:41\n#EXTINF:20,\na.ts\n#EXTINF:20,\nb.ts\n";
+        let fresh = b"#EXTM3U\n#EXT-X-TARGETDURATION:20\n#EXT-X-MEDIA-SEQUENCE:43\n#EXTINF:20,\nc.ts\n";
+        for paused in [false, true] {
+            let server = SessionServer::new(vec![Reply::ok("", initial), Reply::ok("", b"aa"),
+                Reply::ok("", b"b"), Reply::ok("", fresh), Reply::ok("", b"c")]);
+            let control = Control::default();
+            let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+            let mut data = [0];
+            assert_eq!(hls.read(&mut data, &control), Ok(1));
+            if paused { control.paused.store(true, Ordering::Release); }
+            // Position the last real response 35s into a pause, or two full
+            // 20s segments in the past, without making the test sleep.
+            hls.checked = Instant::now() - Duration::from_secs(if paused { 35 } else { 40 });
+            control.paused.store(false, Ordering::Release);
+            for expected in [b'a', b'b', b'c'] {
+                assert_eq!(hls.read(&mut data, &control), Ok(1));
+                assert_eq!(data[0], expected);
+            }
+            let heads = server.heads();
+            assert_eq!(heads.len(), 5);
+            assert!(heads[3].starts_with("GET /live.m3u8 "));
+        }
+    }
+
+    #[test]
+    fn late_live_read_paused_inside_avio_waits_for_resume_without_using_its_request_budget() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let server = SessionServer::new(vec![
+            Reply::ok("", b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\na.ts\n"),
+            Reply::ok("", b"a"),
+            Reply::ok("", b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:2\n#EXTINF:1,\nb.ts\n"),
+            Reply::ok("", b"b"),
+        ]);
+        let control = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+        let mut byte = [0];
+        assert_eq!(hls.read(&mut byte, &control), Ok(1));
+        hls.checked = Instant::now() - Duration::from_secs(35);
+        control.paused.store(true, Ordering::Release);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(600));
+                // Release before asserting so a failed test cannot strand the reader.
+                let visits = server.heads().len();
+                control.paused.store(false, Ordering::Release);
+                assert_eq!(visits, 2);
+            });
+            assert_eq!(hls.read_with_budget(&mut byte, &control, Duration::from_millis(400)), Ok(1));
+        });
+        assert_eq!(&byte, b"b");
+    }
+
+    #[test]
+    fn late_live_read_bounds_an_unchanged_edge_and_stops_on_cancel() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let edge = b"#EXTM3U\n#EXT-X-TARGETDURATION:20\n#EXT-X-MEDIA-SEQUENCE:99\n#EXTINF:20,\na.ts\n";
+        let server = SessionServer::new(vec![Reply::ok("", edge), Reply::ok("", b"a"), Reply::ok("", edge)]);
+        let control = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+        let mut data = [0];
+        assert_eq!(hls.read(&mut data, &control), Ok(1));
+        hls.checked = Instant::now() - Duration::from_secs(35);
+        assert_eq!(hls.read_with_budget(&mut data, &control, Duration::from_millis(300)), Err(Error::Source));
+        assert_eq!(server.heads().len(), 3);
+        control.paused.store(true, Ordering::Release);
+        control.cancel.store(true, Ordering::Release);
+        assert_eq!(hls.read(&mut data, &control), Err(Error::Cancelled));
+        assert_eq!(server.heads().len(), 3);
+    }
+
+    #[test]
+    fn live_poll_counts_time_since_the_previous_manifest_response() {
+        let checked = Instant::now();
+        let target = Duration::from_secs(2);
+        assert_eq!(poll_wait(checked, target, checked), Duration::from_secs(1));
+        assert_eq!(poll_wait(checked, target, checked + Duration::from_millis(800)), Duration::from_millis(200));
+        assert!(poll_wait(checked, target, checked + target).is_zero());
+        assert_eq!(poll_wait(checked, Duration::from_secs(10), checked), Duration::from_secs(1));
+    }
+
     #[test]
     fn playlist_rejects_cipher_ranges_and_discontinuity() {
         let base = "https://example.test/p/list.m3u8";

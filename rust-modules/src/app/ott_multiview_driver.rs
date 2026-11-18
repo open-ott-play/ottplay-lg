@@ -2803,6 +2803,29 @@ impl Driver {
             self.candidate_source_pairs(runtime, &session.status, &session.bindings, None)
         })
     }
+
+    /// Called after admitted_geometry and the installed picture's current proof
+    /// have checked the entire service snapshot.
+    pub(super) fn footer_input(
+        &self,
+        runtime: &Runtime,
+        slot: SlotId,
+    ) -> Option<(&sources::AuthorizedInput, Option<u64>, Option<u64>)> {
+        let session = self.session.as_ref()?;
+        let input = self.inputs[slot.index()].as_deref()?;
+        let status = session
+            .status
+            .slots
+            .iter()
+            .find(|status| usize::from(status.slot_id) == slot.index())?;
+        if input.ticket.slot() != slot
+            || runtime.multiview.require_current_ticket(input.ticket).is_err()
+            || !matches!(status.state, service::SlotState::Playing | service::SlotState::Stalled)
+        {
+            return None;
+        }
+        Some((input, status.position_ms, status.duration_ms))
+    }
     /// Retaining an already admitted old canvas cannot retain a removed or
     /// replaced input. Geometry/output generations are checked by the output owner.
     pub fn retained_output_sources_current(

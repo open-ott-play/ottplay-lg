@@ -247,7 +247,6 @@ fn all_actual_closed_hls_codec_refusals_map_exactly_without_matching_private_ext
         "Native HLS does not support HEVC video without audio",
         "Native HLS does not support HEVC video with E-AC-3 audio",
         "Native HLS does not support HEVC video with MP2 audio",
-        "Native HLS does not support H.264 video with AC-3 audio",
         "Native HLS does not support H.264 video with E-AC-3 audio",
         "Native HLS does not support H.264 video with MP2 audio",
         "Native HLS does not support H.264 video with MP3 audio",

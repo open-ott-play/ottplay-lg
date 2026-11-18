@@ -30,9 +30,14 @@ impl MetadataLike for TestHost {
     fn metadata<'a>(cx: &Cx<'a, Self>) -> plx_data::metadata::MetadataView<'a> { cx.views.metadata }
 }
 fn frame(owned: bool) -> ChromeFrame {
-    ChromeFrame::new(Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap(),
-        &[SlotView { id: 0, title: "Admitted fixture main".into(), state: SlotState::Playing }],
-        ViewState { revision: 415, geometry_revision: 19, active: Some(0), audio: Some(0), focused: Some(0), input_owned: owned }).unwrap()
+    let mut frame = ChromeFrame::new(Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap(),
+        &[SlotView { id: 0, title: "Legacy window label".into(), state: SlotState::Playing }],
+        ViewState { revision: 415, geometry_revision: 19, active: Some(0), audio: Some(0), focused: Some(0), input_owned: owned }).unwrap();
+    frame.set_footer(0, plx_data::metadata::NowPlaying { title: "Admitted fixture main".into(),
+        ott: None, is_episode: false, is_real_episode: false, ep_title: String::new(), season: 0,
+        index: 0, summary: String::new(), year: 0, dur_ms: 0, rating: String::new(),
+        thumb: String::new(), detail_rk: String::new() });
+    frame
 }
 fn key(sym: u32, edge: Edge) -> InputKind<u32> {
     InputKind::Key { key: Key::Other, sym, wcode: 0, edge, at_edge: false }
@@ -71,6 +76,37 @@ fn admitted_multiview_primary_click_and_keys_emit_revision_bound_events() {
     let (_, requests) = deliver(&mut page, Some(&frame), key(consts::SDLK_RIGHT, Edge::Down));
     assert_eq!(requests, vec![PlayerReq::Multiview(Event::FocusSlot { revision: 415, slot: 1 })]);
     assert_eq!(frame.state().active, Some(0), "renderer events never commit active media");
+}
+
+#[test]
+fn local_window_actions_share_keyboard_and_magic_remote_targets() {
+    let _lock = plx_base::testlock::serial();
+    let mut frame = frame(true);
+    frame.enable_window_actions();
+    let mut page = PlayerScreen::new(EntryId(53));
+    let key_code = |wcode, edge| InputKind::Key { key: Key::Other, sym: 0, wcode, edge, at_edge: false };
+    assert_eq!(deliver(&mut page, Some(&frame), key(consts::SDLK_RETURN, Edge::Down)).1,
+        vec![PlayerReq::Multiview(Event::OpenWindowChannels { revision: 415, slot: 0 })]);
+    let inset = frame.layout().slot(1).unwrap().bounds;
+    for (y, expected) in [
+        (inset.cy(), Event::OpenWindowChannels { revision: 415, slot: 1 }),
+        (inset.y + inset.h * 0.1, Event::OpenWindowMenu { revision: 415, slot: 1 }),
+    ] {
+        assert_eq!(deliver(&mut page, Some(&frame), InputKind::Click { x: inset.cx(), y, hit: None }).1,
+            vec![PlayerReq::Multiview(expected)]);
+    }
+    assert_eq!(deliver(&mut page, Some(&frame), key_code(consts::WCODE_YELLOW, Edge::Down)).1,
+        vec![PlayerReq::Multiview(Event::OpenWindowMenu { revision: 415, slot: 0 })]);
+    for wcode in [consts::WCODE_YELLOW, consts::WCODE_BLUE, consts::WCODE_BACK] {
+        for edge in [Edge::Repeat, Edge::Up] {
+            assert_eq!(deliver(&mut page, Some(&frame), key_code(wcode, edge)), (Handled::Yes, Vec::new()));
+        }
+    }
+    let mut fresh = PlayerScreen::new(EntryId(53));
+    assert!(fresh.window_footers.is_none());
+    assert_eq!(deliver(&mut fresh, Some(&frame), key_code(consts::WCODE_BLUE, Edge::Down)), (Handled::Yes, Vec::new()));
+    assert!(fresh.window_footers.is_some());
+    assert_eq!(deliver(&mut fresh, Some(&frame), key_code(consts::WCODE_BACK, Edge::Down)), (Handled::Yes, Vec::new()));
 }
 #[test]
 fn absent_or_nonowning_offer_retains_identical_ordinary_fullscreen_input() {
@@ -122,6 +158,7 @@ fn real_player_draw_uses_admitted_frame_and_absence_draws_no_slot_chrome() {
             Screen::<TestHost>::draw(&mut page, &mut draw);
         });
         assert_eq!(runs.iter().any(|run| run.text == "Admitted fixture main"), offer.is_some());
+        assert!(!runs.iter().any(|run| run.text == "Legacy window label"));
     }
 }
 

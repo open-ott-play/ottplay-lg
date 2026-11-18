@@ -9,6 +9,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 #[path = "ott_multiview_local_commands.rs"]
 mod commands;
+#[path = "ott_multiview_local_handoff.rs"]
+mod handoff;
+#[path = "ott_multiview_local_recovery.rs"]
+mod recovery;
 #[path = "ott_multiview_local_transport.rs"]
 mod transport;
 pub(super) use transport::player_request;
@@ -47,6 +51,9 @@ struct LeaseWork {
 }
 pub(super) struct Driver {
     pictures: [Option<Picture>; 9],
+    handoff: handoff::Handoff,
+    recovery: [recovery::Budget; 9],
+    last_stop: [Option<&'static str>; 9],
     workers: [Option<Work>; 9],
     stopping: [Option<ResolveTicket>; 9],
     leases: [std::collections::VecDeque<LeaseWork>; 9],
@@ -57,6 +64,10 @@ pub(super) struct Driver {
     audio_request: Option<(SceneId, u64, Option<SlotId>)>,
     audio_applied: Option<SlotId>,
     audio: std::collections::VecDeque<(SlotId, ResolveTicket, PcmChunk)>,
+    mixer: plx_media::local_pcm_mix::Mixer,
+    background_audio_percent: u8,
+    mixing: bool,
+    audio_epoch: u64,
     serial: u64,
     sources: Vec<commands::SourceReceipt>,
     replacements: [Option<multiview_sources::SourceHandle>; 9],
@@ -70,6 +81,9 @@ impl Default for Driver {
         let (tx, rx) = mpsc::channel();
         Self {
             pictures: std::array::from_fn(|_| None),
+            handoff: Default::default(),
+            recovery: Default::default(),
+            last_stop: [None; 9],
             workers: std::array::from_fn(|_| None),
             stopping: [None; 9],
             leases: std::array::from_fn(|_| Default::default()),
@@ -80,6 +94,10 @@ impl Default for Driver {
             audio_request: None,
             audio_applied: None,
             audio: Default::default(),
+            mixer: Default::default(),
+            background_audio_percent: 20,
+            mixing: false,
+            audio_epoch: 0,
             serial: 0,
             sources: Vec::new(),
             replacements: [None; 9],
@@ -91,6 +109,13 @@ impl Default for Driver {
     }
 }
 impl Driver {
+    #[cfg(all(test, feature = "hostsim"))]
+    pub(super) fn active_layout_for_test(layout: Layout) -> Self {
+        let mut driver = Self::default();
+        driver.layout = Some(layout);
+        driver
+    }
+
     pub fn owns_ui(&self, runtime: &Runtime, app: &App) -> bool {
         self.active()
             && !self.closing
@@ -126,6 +151,9 @@ impl Driver {
         };
         runtime.multiview = coordinator;
         runtime.multiview_effects.extend(result?.effects);
+        if self.layout.is_none() {
+            self.last_stop = [None; 9];
+        }
         self.layout = Some(layout);
         self.cleanup_failed = false;
         self.restore_ready = false;
@@ -210,7 +238,9 @@ impl Driver {
         self.layout.is_some()
     }
     pub fn has_work(&self) -> bool {
-        self.workers.iter().any(Option::is_some)
+        self.handoff.has_waiters()
+            || self.recovery.iter().any(recovery::Budget::pending)
+            || self.workers.iter().any(Option::is_some)
             || self.pictures.iter().any(Option::is_some)
             || self.stopping.iter().any(Option::is_some)
             || self.replacements.iter().any(Option::is_some)
@@ -270,6 +300,7 @@ impl Driver {
         }
         runtime.multiview.validate_active_owner(runtime, app)?;
         let index = slot.index();
+        self.recovery[index] = Default::default();
         if self.stopping[index].is_some() || self.replacements[index].is_some() {
             self.replacements[index] = Some(handle);
             return Ok(());
@@ -292,7 +323,19 @@ impl Driver {
             runtime.multiview_effects.extend(transition.effects);
             return Ok(());
         }
+        self.start_source(runtime, app, slot, handle)
+    }
+
+    fn start_source(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        slot: SlotId,
+        handle: multiview_sources::SourceHandle,
+    ) -> Result<(), multiview::Error> {
+        let index = slot.index();
         let t = runtime.multiview.bind_source(slot, handle)?;
+        self.last_stop[index] = None;
         runtime.multiview_effects.extend(t.effects);
         let mut coordinator = std::mem::take(&mut runtime.multiview);
         let result = coordinator.begin_play_local(runtime, app, slot);
@@ -323,7 +366,7 @@ impl Driver {
             .map_err(|_| "Window playback changed before pause")?;
         p.decoder.set_paused(paused);
         p.paused = paused;
-        self.audio.clear();
+        self.clear_slot_audio(slot);
         runtime.multiview_effects.extend(transition.effects);
         runtime.changed();
         Ok(())
@@ -352,7 +395,7 @@ impl Driver {
             .map_err(|_| "This slot cannot seek")?;
         p.position_us = position_us;
         p.frame = None;
-        self.audio.clear();
+        self.clear_slot_audio(slot);
         Ok(())
     }
     pub fn take_frame(&mut self, slot: SlotId) -> Option<FrameYuv> {
@@ -365,16 +408,70 @@ impl Driver {
     pub fn slot_ticket(&self, slot: SlotId) -> Option<ResolveTicket> {
         self.pictures[slot.index()]
             .as_ref()
-            .filter(|p| p.admitted && !p.receipt.input.is_cancelled())
+            .filter(|p| p.admitted && !p.terminal && self.stopping[slot.index()].is_none() && !p.receipt.input.is_cancelled())
             .map(|p| p.ticket)
     }
+    pub fn last_stop(&self, slot: SlotId) -> Option<&'static str> {
+        self.last_stop[slot.index()]
+    }
+    pub fn texture_failed(&mut self, slot: SlotId) {
+        self.last_stop[slot.index()] = Some("texture_upload");
+    }
+    pub fn set_background_audio_percent(&mut self, percent: u8) {
+        let percent = percent.min(100);
+        if self.background_audio_percent != percent {
+            self.background_audio_percent = percent;
+            self.reset_audio();
+        }
+    }
+
+    pub fn mixing_audio(&self) -> bool {
+        self.mixing
+    }
+
+    pub fn audio_epoch(&self) -> u64 {
+        self.audio_epoch
+    }
+
+    fn reset_audio(&mut self) {
+        self.audio.clear();
+        self.mixer.clear();
+        self.audio_epoch = self.audio_epoch.wrapping_add(1);
+    }
+
+    fn clear_slot_audio(&mut self, slot: SlotId) {
+        self.mixer.clear_slot(slot.index());
+        self.audio.retain(|(s, _, _)| *s != slot);
+        if self.mixing || self.audio_applied == Some(slot) {
+            self.audio_epoch = self.audio_epoch.wrapping_add(1);
+        }
+    }
+
+    /// A silent/empty focused slot has no receipt. Its admitted neighbours
+    /// can still contribute at background level through a current output ticket.
+    pub fn output_ticket(&self, owner: Option<SlotId>) -> Option<(SlotId, ResolveTicket)> {
+        let slot = owner?;
+        if let Some(ticket) = self.slot_ticket(slot) {
+            return Some((slot, ticket));
+        }
+        if self.mixing {
+            for picture in self.pictures.iter().flatten() {
+                let slot = picture.ticket.slot();
+                if let Some(ticket) = self.slot_ticket(slot) {
+                    return Some((slot, ticket));
+                }
+            }
+        }
+        None
+    }
+
     pub fn audio_owner(&self) -> Option<SlotId> {
         self.audio_applied
     }
     pub fn audio_output_failed(&mut self, runtime: &mut Runtime) {
         self.audio_applied = None;
         self.audio_request = None;
-        self.audio.clear();
+        self.reset_audio();
         let transition = runtime
             .multiview
             .set_audio_policy(plx_data::ott::multiview::AudioPolicy::Explicit(None));
@@ -394,14 +491,25 @@ impl Driver {
             .is_ok()
         {
             self.audio_applied = if accepted { owner } else { None };
-            self.audio.clear();
+            if !accepted || owner.is_none() {
+                self.reset_audio();
+            }
         }
     }
-    pub fn take_audio(&mut self) -> Option<(SlotId, ResolveTicket, PcmChunk)> {
-        self.audio.pop_front()
+    pub fn take_audio(&mut self, queued_frames: usize) -> Option<(SlotId, ResolveTicket, PcmChunk)> {
+        if !self.mixing {
+            return self.audio.pop_front();
+        }
+        let focus = self.audio_applied?;
+        let (slot, ticket) = self.output_ticket(Some(focus))?;
+        let chunk = self.mixer.pull(focus.index(), self.background_audio_percent, queued_frames)?;
+        Some((slot, ticket, chunk))
     }
     fn queue(&mut self, runtime: &mut Runtime, transition: Result<Transition, multiview::Error>) {
         if let Ok(transition) = transition {
+            for issue in transition.issues {
+                self.last_stop[issue.slot.index()].get_or_insert(issue.issue.token());
+            }
             runtime.multiview_effects.extend(transition.effects);
         }
     }
@@ -471,6 +579,7 @@ impl Driver {
     fn slot_drained(&self, index: usize) -> bool {
         self.pictures[index].is_none()
             && self.workers[index].is_none()
+            && !self.handoff.waiting(index)
             && self.leases[index].is_empty()
     }
     fn finish_lease_if_ready(&mut self, runtime: &mut Runtime, index: usize) {
@@ -513,6 +622,10 @@ impl Driver {
                     self.queue(runtime, t);
                     return;
                 }
+                if let Some(origin) = self.wait_for_handoff(&receipt) {
+                    self.handoff.hold(ticket, receipt, origin);
+                    return;
+                }
                 match open(receipt.source.clone()) {
                     Ok(mut decoder) => {
                         decoder.set_audio(false);
@@ -547,6 +660,7 @@ impl Driver {
     pub fn revoke(&mut self, runtime: &mut Runtime) {
         self.restore_previous = false;
         self.replacements = [None; 9];
+        self.recovery = Default::default();
         if !self.closing {
             self.closing = true;
             let transition = runtime.multiview.close_scene();
@@ -554,7 +668,7 @@ impl Driver {
         }
         self.audio_applied = None;
         self.audio_request = None;
-        self.audio.clear();
+        self.reset_audio();
         self.sources.clear();
         for work in self.workers.iter().flatten() {
             work.cancel.store(true, Ordering::Release);
@@ -570,6 +684,12 @@ impl Driver {
         }
     }
     pub fn tick(&mut self, runtime: &mut Runtime, app: &App) {
+        let mixing = self.background_audio_percent > 0
+            && runtime.multiview.audio_policy() == Some(plx_data::ott::multiview::AudioPolicy::FollowsFocus);
+        if self.mixing != mixing {
+            self.mixing = mixing;
+            self.reset_audio();
+        }
         for index in 0..9 {
             self.finish_lease_if_ready(runtime, index);
         }
@@ -631,10 +751,13 @@ impl Driver {
             if picture.receipt.input.reauthorize(runtime, app).is_err()
                 && self.stopping[index].is_none()
             {
+                self.last_stop[index] = Some("authorization_changed");
                 let transition = runtime.multiview.close_slot(picture.ticket.slot());
                 if let Ok(transition) = transition {
                     runtime.multiview_effects.extend(transition.effects);
                 }
+                self.mixer.clear_slot(index);
+                self.audio_epoch = self.audio_epoch.wrapping_add(1);
                 picture.decoder.cancel();
                 picture.frame = None;
                 picture
@@ -643,9 +766,12 @@ impl Driver {
                     .cancellation()
                     .store(true, Ordering::Release);
             }
-            picture.decoder.set_audio(
-                self.audio_applied == Some(picture.ticket.slot()) && self.stopping[index].is_none(),
-            );
+            let routing_mix = self.mixing && (self.audio_applied.is_some()
+                || self.audio_request.is_some_and(|(_, _, owner)| owner.is_some()));
+            let audible = (routing_mix || self.audio_applied == Some(picture.ticket.slot()))
+                && self.stopping[index].is_none() && !picture.terminal && !picture.paused
+                && !picture.receipt.input.is_cancelled();
+            picture.decoder.set_audio(audible);
             for _ in 0..8 {
                 let Some(event) = picture.decoder.poll() else {
                     break;
@@ -661,6 +787,7 @@ impl Driver {
                                 AdmissionOutcome::Admitted,
                             );
                             picture.admitted = transition.is_ok();
+                            if picture.admitted { self.recovery[index].resumed(); }
                             if let Ok(t) = transition {
                                 runtime.multiview_effects.extend(t.effects);
                             }
@@ -672,26 +799,57 @@ impl Driver {
                         }
                     }
                     Event::Audio(chunk)
-                        if self.audio_applied == Some(picture.ticket.slot())
-                            && picture.admitted
+                        if audible && picture.admitted
                             && self.stopping[index].is_none()
                             && !picture.receipt.input.is_cancelled() =>
                     {
-                        if self.audio.len() >= 8 {
-                            self.audio.pop_front();
+                        if self.mixing {
+                            self.mixer.push(index, chunk);
+                        } else {
+                            if self.audio.len() >= 8 {
+                                self.audio.pop_front();
+                            }
+                            self.audio.push_back((picture.ticket.slot(), picture.ticket, chunk));
                         }
-                        self.audio
-                            .push_back((picture.ticket.slot(), picture.ticket, chunk));
                     }
                     Event::Failure(_) | Event::Ended => {
+                        let retry_requested = !self.closing
+                            && !self.cleanup_failed
+                            && self.stopping[index].is_none()
+                            && self.replacements[index].is_none()
+                            && !picture.paused
+                            && !picture.receipt.input.is_cancelled()
+                            && self.recovery[index].on_failure(&event, picture, runtime);
+                        if self.stopping[index].is_none() {
+                            use plx_media::local_multiview::Error;
+                            self.last_stop[index] = Some(match event {
+                                Event::Failure(Error::Unavailable) => "unavailable",
+                                Event::Failure(Error::InvalidLimits) => "invalid_limits",
+                                Event::Failure(Error::Unsupported) => "unsupported",
+                                Event::Failure(Error::Source) => "source_read",
+                                Event::Failure(Error::SourceDenied) => "provider_session_denied",
+                                Event::Failure(Error::SourceInterrupted) => "provider_interrupted",
+                                Event::Failure(Error::LostProviderLease) => "provider_lease_expired",
+                                Event::Failure(Error::SourceTemporarilyUnavailable) => "source_temporarily_unavailable",
+                                Event::Failure(Error::Playlist) => "playlist",
+                                Event::Failure(Error::Decode) => "decode",
+                                Event::Failure(Error::Budget) => "resource_limit",
+                                Event::Failure(Error::Cancelled) => "cancelled",
+                                Event::Failure(Error::Thread) => "worker_unavailable",
+                                _ => "ended",
+                            });
+                        }
                         picture.terminal = true;
                         picture.frame = None;
                         picture.decoder.cancel();
-                        if self.audio_applied == Some(picture.ticket.slot()) {
+                        self.mixer.clear_slot(index);
+                        if self.mixing {
+                            self.audio_epoch = self.audio_epoch.wrapping_add(1);
+                        } else if self.audio_applied == Some(picture.ticket.slot()) {
                             self.audio_applied = None;
                             self.audio.clear();
                         }
-                        let transition = if picture.admitted {
+                        let transition = if picture.admitted || retry_requested {
                             runtime.multiview.close_slot(picture.ticket.slot())
                         } else {
                             runtime
@@ -716,6 +874,7 @@ impl Driver {
             });
             if retired && self.workers[index].is_none() {
                 if let Some(mut picture) = self.pictures[index].take() {
+                    self.retired_handoff(&picture);
                     if let Some(lease) = picture.receipt.lease.take() {
                         self.retain_lease(index, lease);
                     }
@@ -755,11 +914,15 @@ impl Driver {
                         if let Some(slot) = SlotId::new(index as u8) {
                             let _ = self.play_source(runtime, app, slot, handle);
                         }
+                    } else if self.recovery[index].pending() {
+                        self.recover_drained_slot(runtime, app, index, std::time::Instant::now());
                     }
                 }
             }
         }
+        self.poll_handoffs(runtime, app);
         if self.closing && !self.has_work() {
+            self.handoff = Default::default();
             self.layout = None;
             self.closing = false;
             self.restore_ready = std::mem::take(&mut self.restore_previous) && !self.cleanup_failed;
@@ -869,9 +1032,9 @@ impl Driver {
                     p.decoder.cancel();
                     p.frame = None;
                 }
-                if self.audio_applied == Some(ticket.slot()) {
+                self.clear_slot_audio(ticket.slot());
+                if !self.mixing && self.audio_applied == Some(ticket.slot()) {
                     self.audio_applied = None;
-                    self.audio.clear();
                 }
             }
             Effect::Backend(BackendIntent::Layout { layout, .. }) => {
@@ -883,7 +1046,9 @@ impl Driver {
                 audio_revision,
                 owner,
             }) => {
-                self.audio.clear();
+                if !self.mixing || owner.is_none() {
+                    self.reset_audio();
+                }
                 self.audio_applied = None;
                 self.audio_request = Some((scene, audio_revision, owner));
             }

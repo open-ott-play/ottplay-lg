@@ -1638,6 +1638,11 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
                 playback_failure::Version::V3 => runtime.playback_failure.snapshot_version(version),
             });
             value["video_evidence"] = json!(video_evidence::snapshot(runtime, app));
+            if matches!(version, playback_failure::Version::V3) {
+                if let Some(evidence) = super::multiview_local_present::video_evidence(runtime) {
+                    value["multiview_video_evidence"] = evidence;
+                }
+            }
             Some(ok(value))
         }
         "capabilities" => {

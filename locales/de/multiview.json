@@ -1,5 +1,8 @@
 {
   "multiview.empty": "Leer",
   "multiview.loading": "Wird geladen…",
-  "multiview.failed": "Wiedergabe nicht verfügbar"
+  "multiview.failed": "Wiedergabe nicht verfügbar",
+  "multiview.provider_session_denied": "Der Anbieter hat diese Wiedergabesitzung abgelehnt.",
+  "multiview.provider_interrupted": "Der Anbieter hat diesen Stream unterbrochen.",
+  "multiview.provider_refresh_timeout": "Der Kanal konnte nicht gewechselt werden, während die anderen Streams auf Daten warteten."
 }

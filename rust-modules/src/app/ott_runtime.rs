@@ -7310,6 +7310,7 @@ fn tick_with_start(
         }
         multiview_local_present::tick(&mut runtime, app);
         let mut driver = std::mem::take(&mut runtime.multiview_local);
+        driver.set_background_audio_percent(runtime.multiview_background_volume());
         driver.tick(&mut runtime, app);
         runtime.multiview_local = driver;
         multiview_local_present::tick(&mut runtime, app);

@@ -50,6 +50,17 @@ enum Page {
     Root,
     Slots,
     Sources(SlotId, usize),
+    WindowChannels(SlotId, Option<usize>),
+    WindowMenu(SlotId),
+}
+
+impl Page {
+    fn window(self) -> Option<SlotId> {
+        match self {
+            Self::WindowChannels(slot, _) | Self::WindowMenu(slot) => Some(slot),
+            _ => None,
+        }
+    }
 }
 
 impl State {
@@ -66,7 +77,7 @@ impl State {
             return (None, "menu");
         };
         let parent = match pending.page {
-            Page::Root => None,
+            Page::Root | Page::WindowChannels(..) | Page::WindowMenu(_) => None,
             Page::Slots => Some(Page::Root),
             Page::Sources(..) => Some(Page::Slots),
         };
@@ -80,6 +91,10 @@ enum Choice {
     Source(SlotId, multiview_sources::SourceHandle),
     Focus(SlotId),
     Stop(SlotId),
+    Pause(SlotId, bool),
+    Step(SlotId, i64),
+    Info(SlotId),
+    KeepPlaying,
     Audio(AudioPolicy),
     Off,
 }
@@ -97,7 +112,7 @@ pub(super) fn entry(runtime: &Runtime) -> OttRow {
         && (runtime.multiview.layout().is_none() || runtime.multiview_local.active())
         && runtime.loaded
         && !runtime.saving
-        && plx_media::local_multiview::available()
+        && (runtime.multiview_local.active() || plx_media::local_multiview::available())
         && input_policy::navigation(runtime).is_ok()
         && matches!(
             runtime.track_selection_kiosk(),
@@ -118,7 +133,11 @@ fn issue(
     if runtime.multiview_local.active() && !runtime.multiview_local.owns_ui(runtime, app) {
         return Err("Multiview source changed");
     }
+    if page.window().is_some_and(|slot| runtime.multiview.active_slot() != Some(slot)) {
+        return Err("Active window changed");
+    }
     let mut choices = Vec::new();
+    let mut selected = None;
     let title = match page {
         Page::Root => {
             for (name, layout) in [
@@ -199,21 +218,34 @@ fn issue(
             ));
             "Multiview videos".to_owned()
         }
-        Page::Sources(slot, offset) => {
+        Page::Sources(slot, _) | Page::WindowChannels(slot, _) => {
             let mut driver = std::mem::take(&mut runtime.multiview_local);
             let result = driver.refresh_sources(runtime, app);
             runtime.multiview_local = driver;
             result.map_err(|_| "Multiview sources are unavailable")?;
-            let sources = runtime.multiview.source_options();
-            for source in sources.iter().skip(offset).take(PAGE_SIZE) {
-                if source.support == multiview_sources::Support::Unavailable {
-                    continue;
-                }
+            let sources: Vec<_> = runtime.multiview.source_options().into_iter()
+                .filter(|source| source.support != multiview_sources::Support::Unavailable)
+                .collect();
+            let window = page.window().and_then(|_| runtime.multiview.scene_status(runtime))
+                .and_then(|scene| scene.slots.into_iter().find(|entry| entry.slot == slot));
+            let current_index = window.as_ref().and_then(|window| window.source.as_ref())
+                .and_then(|current| sources.iter().position(|source| source.source_id == current.source_id));
+            let offset = match page {
+                Page::Sources(_, offset) | Page::WindowChannels(_, Some(offset)) => offset,
+                _ => current_index.map_or(0, |index| index / PAGE_SIZE * PAGE_SIZE),
+            };
+            let adjacent = |offset| if page.window().is_some() { Page::WindowChannels(slot, Some(offset)) }
+                else { Page::Sources(slot, offset) };
+            for (index, source) in sources.iter().enumerate().skip(offset).take(PAGE_SIZE) {
                 if let Some(handle) = runtime.multiview.source_handle(&source.source_id) {
+                    let current = current_index == Some(index);
+                    if current { selected = Some(choices.len()); }
+                    let keep = current && window.as_ref().is_some_and(|window|
+                        matches!(window.status, "playing" | "paused"));
                     choices.push((
                         source.label.clone(),
                         format!("{} · {}", source.provider, source.profile),
-                        Choice::Source(slot, handle),
+                        if keep { Choice::KeepPlaying } else { Choice::Source(slot, handle) },
                     ));
                 }
             }
@@ -221,22 +253,45 @@ fn issue(
                 choices.push((
                     "Previous sources".into(),
                     String::new(),
-                    Choice::Page(Page::Sources(slot, offset.saturating_sub(PAGE_SIZE))),
+                    Choice::Page(adjacent(offset.saturating_sub(PAGE_SIZE))),
                 ));
             }
             if offset.saturating_add(PAGE_SIZE) < sources.len() {
                 choices.push((
                     "More sources".into(),
                     String::new(),
-                    Choice::Page(Page::Sources(slot, offset + PAGE_SIZE)),
+                    Choice::Page(adjacent(offset + PAGE_SIZE)),
                 ));
             }
-            choices.push((
-                "Back to videos".into(),
-                String::new(),
-                Choice::Page(Page::Slots),
-            ));
-            format!("Choose source for video {}", slot.index() + 1)
+            if page.window().is_some() {
+                "Channel list".into()
+            } else {
+                choices.push(("Back to videos".into(), String::new(), Choice::Page(Page::Slots)));
+                format!("Choose source for video {}", slot.index() + 1)
+            }
+        }
+        Page::WindowMenu(slot) => {
+            let scene = runtime.multiview.scene_status(runtime).ok_or("Multiview source changed")?;
+            let window = scene.slots.into_iter().find(|entry| entry.slot == slot)
+                .ok_or("Window is no longer visible")?;
+            choices.push(("Channel list".into(), String::new(), Choice::Page(Page::WindowChannels(slot, None))));
+            if let Some(source) = window.source.and_then(|source| runtime.multiview.source_handle(&source.source_id)) {
+                if matches!(window.status, "playing" | "paused") {
+                    let pause = window.status == "playing";
+                    let label = if pause { "Pause" } else { "Play" };
+                    choices.push((label.into(), String::new(), Choice::Pause(slot, pause)));
+                    choices.push(("Info".into(), String::new(), Choice::Info(slot)));
+                }
+                choices.extend([
+                    ("Previous".into(), String::new(), Choice::Step(slot, -1)),
+                    ("Next".into(), String::new(), Choice::Step(slot, 1)),
+                    ("Restart".into(), String::new(), Choice::Source(slot, source)),
+                    ("Use audio from this window".into(), String::new(), Choice::Audio(AudioPolicy::Explicit(Some(slot)))),
+                    ("Stop this window".into(), String::new(), Choice::Stop(slot)),
+                ]);
+            }
+            choices.push(("Close multiview".into(), "Restore previous video".into(), Choice::Off));
+            "Menu".into()
         }
     };
     let serial = runtime
@@ -255,12 +310,49 @@ fn issue(
         page,
         title,
         choices,
-        selected: None,
+        selected,
     });
     runtime.page = PAGE;
     runtime.status.clear();
     runtime.changed();
     Ok(())
+}
+
+pub(super) fn can_open_window(runtime: &Runtime, app: &App) -> bool {
+    use plx_machine::machine::InputOwner;
+    runtime.page != PAGE
+        && entry(runtime).enabled
+        && runtime.multiview_local.owns_ui(runtime, app)
+        && !app.pages.has_pending_navigation()
+        && !app.pages.has_pending_surface_navigation()
+        && !app.bridge.is_controlled_replay()
+        && !matches!(app.rec, super::super::recorder::Recplay::Replaying(_))
+        && app.pages.nav.top_page().is_some_and(|page| {
+            matches!(page.arg, AppArg::Player)
+                && app.pages.nav.input_owner() == Some(InputOwner::Entry(page.id))
+                && page.inst.as_ref().is_some_and(|body| !body.staged)
+        })
+}
+
+pub(super) fn open_window(
+    runtime: &mut Runtime,
+    app: &mut App,
+    slot: SlotId,
+    menu: bool,
+) -> Result<(), &'static str> {
+    if !can_open_window(runtime, app) {
+        return Err("Active window changed");
+    }
+    let page = if menu { Page::WindowMenu(slot) } else { Page::WindowChannels(slot, None) };
+    issue(runtime, app, page, runtime.page)?;
+    player_browse::present(runtime, app, None, PAGE);
+    Ok(())
+}
+
+fn dismiss_window_panel(app: &mut App) {
+    if let Some(entry) = bridge::ott_catalog_surface(&app.pages) {
+        app.pages.request(MachineId::Nav, plx_machine::machine::NavOp::Dismiss(entry));
+    }
 }
 
 pub(super) fn view(runtime: &Runtime) -> Option<OttView> {
@@ -314,7 +406,21 @@ fn current(runtime: &Runtime, pending: &Pending) -> bool {
         && runtime.now_ms() < pending.until
         && runtime.multiview_local_profile_epoch == pending.profile_epoch
         && runtime.multiview_authority_epoch == pending.authority_epoch
-        && runtime.multiview.scene_status(runtime).map(fence) == pending.scene
+        && if let Some(slot) = pending.page.window() {
+            runtime.multiview.active_slot() == Some(slot)
+                && runtime.multiview.scene_status(runtime).map(fence)
+                    .zip(pending.scene.as_ref())
+                    .is_some_and(|(current, offered)| same_window(&current, offered, slot))
+        } else {
+            runtime.multiview.scene_status(runtime).map(fence) == pending.scene
+        }
+}
+
+fn same_window(current: &Fence, offered: &Fence, slot: SlotId) -> bool {
+    current.scene == offered.scene
+        && current.layout == offered.layout
+        && offered.slots.iter().find(|entry| entry.0 == slot)
+            .is_some_and(|entry| current.slots.contains(entry))
 }
 
 pub(super) fn action(runtime: &mut Runtime, app: &mut App, action: &OttAction) -> bool {
@@ -322,6 +428,11 @@ pub(super) fn action(runtime: &mut Runtime, app: &mut App, action: &OttAction) -
         let from = runtime.multiview_menu.pending.as_ref().map(|pending| pending.page);
         let (parent, return_page) = runtime.multiview_menu.back_destination();
         runtime.page = return_page;
+        if from.and_then(Page::window).is_some() {
+            dismiss_window_panel(app);
+            runtime.changed();
+            return true;
+        }
         if let Some(parent) = parent {
             // Reissue the parent through the ordinary ownership/policy gate.
             // A retired source can still leave the menu without reviving it.
@@ -358,7 +469,7 @@ pub(super) fn action(runtime: &mut Runtime, app: &mut App, action: &OttAction) -
     true
 }
 
-fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static str> {
+fn select(runtime: &mut Runtime, app: &mut App, key: &str) -> Result<(), &'static str> {
     let pending = runtime
         .multiview_menu
         .pending
@@ -378,6 +489,10 @@ fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static st
         .ok_or("Multiview selection changed")?
         .2;
     let return_page = pending.return_page;
+    let window = pending.page.window();
+    if window.is_some() && bridge::ott_catalog_surface(&app.pages).is_none() {
+        return Err("Window menu is no longer open");
+    }
     // One-shot issuance: even a backend refusal cannot be replayed against a new slot.
     if runtime.multiview_effects.len() > 56 {
         return Err("Multiview control is busy");
@@ -386,6 +501,9 @@ fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static st
     runtime.page = return_page;
     if let Choice::Page(page) = choice {
         return issue(runtime, app, page, return_page);
+    }
+    if window.is_some() {
+        dismiss_window_panel(app);
     }
     let mut driver = std::mem::take(&mut runtime.multiview_local);
     let result = match choice {
@@ -410,10 +528,32 @@ fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static st
             if !driver.owns_ui(runtime, app) {
                 Err(multiview::Error::NotReady)
             } else {
-                runtime.multiview.close_slot(slot)
-                    .map(|transition| runtime.multiview_effects.extend(transition.effects))
+                driver.stop_slot(runtime, slot)
             }
         }
+        Choice::Pause(slot, paused) => {
+            if runtime.multiview.active_slot() != Some(slot) {
+                Err(multiview::Error::NotReady)
+            } else {
+                driver.set_active_paused(runtime, app, paused).map_err(|_| multiview::Error::NotReady)
+            }
+        }
+        Choice::Step(slot, offset) => {
+            if runtime.multiview.active_slot() != Some(slot) {
+                Err(multiview::Error::NotReady)
+            } else {
+                driver.step_active(runtime, app, offset)
+            }
+        }
+        Choice::Info(slot) => {
+            if let Some(player) = bridge::player_mut(&mut app.pages) {
+                player.reveal_multiview_footer(slot.index() as u8, clock::now());
+                Ok(())
+            } else {
+                Err(multiview::Error::NotReady)
+            }
+        }
+        Choice::KeepPlaying => Ok(()),
         Choice::Audio(policy) => {
             if !driver.owns_ui(runtime, app) {
                 Err(multiview::Error::NotReady)
@@ -436,6 +576,86 @@ fn select(runtime: &mut Runtime, app: &App, key: &str) -> Result<(), &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hostsim")]
+    #[test]
+    fn window_panel_returns_to_the_same_grid_and_selects_only_its_bound_slot() {
+        use plx_appkit::multiview_chrome::Event;
+        use plx_machine::machine::Tick;
+        let _serial = plx_base::testlock::serial();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        app.running = true;
+        bridge::show_page(&mut app.pages, AppArg::Player);
+        let settle = |app: &mut App| {
+            for _ in 0..24 {
+                app.loop_t = app.loop_t.wrapping_add(25);
+                let tick = Tick { ms: app.loop_t, dt_us: 25_000 };
+                bridge::frame(&mut app.pages, &mut app.bridge, tick, vec![]);
+            }
+        };
+        settle(&mut app);
+        let player = app.pages.top_page().unwrap();
+        let mut runtime = Box::new(Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test()));
+        runtime.clock_sample = Some(plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap());
+        runtime.remote = Remote::disabled_for_test("dev_window_menu", "fixture");
+        runtime.loaded = true;
+        runtime.state_load = StateLoad::Idle;
+        runtime.entropy = Some([9; 16]);
+        runtime.resume_source_work();
+        runtime.page = "channels";
+        runtime.provider = ProviderKind::M3u;
+        let profile = ProviderProfile {
+            id: "window-fixture".into(), name: "Window fixture".into(),
+            kind: ProviderKind::M3u, source: "https://fixture.invalid/fixture.m3u".into(),
+            source_alias: "Synthetic".into(), enabled: true,
+        };
+        runtime.saved.profiles.active_profile = Some(profile.id.clone());
+        runtime.saved.profiles.profiles.push(profile);
+        for (id, title) in [("existing", "Existing picture"), ("choice", "Replacement choice")] {
+            runtime.catalog.entries.push(CatalogEntry {
+                id: id.into(), title: title.into(), category: String::new(),
+                description: String::new(), poster: String::new(), synopsis: None,
+                protection: Some(false), media: MediaLocator::Http {
+                    url: format!("https://fixture.invalid/{id}.m3u8"),
+                }, duration_ms: None, provider_id: None, provider_id_field: None, live: None,
+            });
+        }
+        // The normal coordinator admits the grid. The host UI fixture does
+        // not load FFmpeg or execute decoder effects.
+        let mut coordinator = std::mem::take(&mut runtime.multiview);
+        let layout = coordinator.activate_local(&runtime, &app, Layout::Grid4).unwrap();
+        runtime.multiview = coordinator;
+        runtime.multiview_effects.extend(layout.effects);
+        runtime.multiview_local = multiview_local::Driver::active_layout_for_test(Layout::Grid4);
+        let sibling = runtime.multiview.source_rows()[0].handle;
+        runtime.multiview.bind_source(SlotId::SLOT_0, sibling).unwrap();
+        let saved = serde_json::to_value(&runtime.saved).unwrap();
+        let initial = runtime.multiview.scene_status(&runtime).unwrap();
+        for accept in [false, true] {
+            super::super::multiview_ui::publish(&mut runtime, &mut app);
+            let revision = app.bridge.multiview_offer().unwrap().state().revision;
+            app.ott = Some(runtime);
+            super::super::multiview_ui::player_action(&mut app, Event::OpenWindowChannels { revision, slot: 1 });
+            runtime = app.ott.take().unwrap();
+            assert_eq!(runtime.multiview.active_slot(), Some(SlotId::SLOT_1));
+            settle(&mut app);
+            assert!(bridge::ott_catalog_surface(&app.pages).is_some());
+            let list = view(&runtime).unwrap();
+            let choice = list.rows.iter().find(|row| row.title == "Replacement choice").unwrap().action.clone();
+            assert_eq!(list.title, "Channel list");
+            assert!(action(&mut runtime, &mut app, if accept { &choice } else { &OttAction::Back }));
+            settle(&mut app);
+            assert_eq!(app.pages.top_page(), Some(player));
+            assert!(bridge::ott_catalog_surface(&app.pages).is_none());
+            let now = runtime.multiview.scene_status(&runtime).unwrap();
+            assert_eq!(now.slots[0], initial.slots[0]);
+            assert_eq!(now.slots[1].source.as_ref().map(|source| source.label.as_str()),
+                accept.then_some("Replacement choice"));
+            assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
+            assert!(runtime.multiview_menu.pending.is_none());
+        }
+    }
+
     fn pending(page: Page) -> Pending {
         Pending {
             serial: 7,
@@ -458,6 +678,8 @@ mod tests {
             (Page::Slots, Some(Page::Root)),
             (Page::Sources(SlotId::SLOT_0, 0), Some(Page::Slots)),
             (Page::Sources(SlotId::new(8).unwrap(), PAGE_SIZE), Some(Page::Slots)),
+            (Page::WindowChannels(SlotId::SLOT_1, Some(PAGE_SIZE)), None),
+            (Page::WindowMenu(SlotId::SLOT_1), None),
         ] {
             let mut state = State { serial: 7, pending: Some(pending(page)) };
             assert_eq!(state.back_destination(), (parent, "settings"));
@@ -497,7 +719,7 @@ mod tests {
     #[test]
     fn stale_stop_rows_cannot_queue_transport_or_change_the_ordinary_source() {
         let _serial = plx_base::testlock::serial();
-        let app = crate::app::run::lifecycle_regression_tests::app();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
         for stale in ["expired", "profile", "authority", "scene", "serial"] {
             let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
             runtime.clock_sample = Some(plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).unwrap());
@@ -515,7 +737,7 @@ mod tests {
             runtime.multiview_menu.pending = Some(offered);
             let saved = serde_json::to_value(&runtime.saved).unwrap();
             let key = if stale == "serial" { "localmv.select:6:0" } else { "localmv.select:7:0" };
-            assert!(select(&mut runtime, &app, key).is_err(), "{stale}");
+            assert!(select(&mut runtime, &mut app, key).is_err(), "{stale}");
             assert!(runtime.multiview_effects.is_empty(), "{stale}");
             assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved, "{stale}");
             assert_eq!(runtime.page, PAGE, "{stale}");
@@ -573,6 +795,21 @@ mod tests {
         let mut relayout = scene();
         relayout.layout_revision = "layout2".into();
         assert_ne!(fence(relayout), original);
+    }
+    #[test]
+    fn window_picker_survives_sibling_updates_and_requires_its_own_generation() {
+        let mut offered_scene = scene();
+        let mut sibling = offered_scene.slots[0].clone();
+        sibling.slot = SlotId::SLOT_1;
+        offered_scene.slots.push(sibling);
+        let offered = fence(offered_scene.clone());
+        offered_scene.slots[1].slot_generation = "sibling-replaced".into();
+        offered_scene.audio_revision = "audio-settled".into();
+        assert!(same_window(&fence(offered_scene.clone()), &offered, SlotId::SLOT_0));
+        offered_scene.slots[0].source_revision = "target-replaced".into();
+        assert!(!same_window(&fence(offered_scene.clone()), &offered, SlotId::SLOT_0));
+        offered_scene.slots.remove(0);
+        assert!(!same_window(&fence(offered_scene), &offered, SlotId::SLOT_0));
     }
     #[test]
     fn asynchronous_playing_status_does_not_expire_source_picker() {

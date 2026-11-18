@@ -293,11 +293,8 @@ impl Driver {
                     runtime.multiview_effects.extend(t.effects);
                 }
                 wire::Operation::Stop(slot) => {
-                    let t = runtime
-                        .multiview
-                        .close_slot(SlotId::new(slot.slot_id).ok_or(wire::Reason::InvalidRequest)?)
+                    self.stop_slot(runtime, SlotId::new(slot.slot_id).ok_or(wire::Reason::InvalidRequest)?)
                         .map_err(reason)?;
-                    runtime.multiview_effects.extend(t.effects);
                 }
                 wire::Operation::Off(wire::OffMode::RestorePrevious) => {
                     self.close_restore_previous(runtime, app).map_err(reason)?;

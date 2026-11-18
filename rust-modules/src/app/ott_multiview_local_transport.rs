@@ -12,6 +12,28 @@ fn target(runtime: &Runtime, driver: &Driver, offset_us: i64) -> Result<i64, &'s
         .clamp(0, duration.unwrap_or(24 * 60 * 60 * 1_000_000)))
 }
 impl Driver {
+    pub(in crate::app::ott_runtime) fn footer_input(
+        &self,
+        runtime: &Runtime,
+        slot: SlotId,
+    ) -> Option<(&super::super::multiview_sources::AuthorizedInput, i64, Option<u64>)> {
+        let picture = self.pictures[slot.index()].as_ref()?;
+        if !picture.admitted
+            || picture.terminal
+            || self.stopping[slot.index()].is_some()
+            || picture.ticket.slot() != slot
+            || picture.receipt.input.ticket != picture.ticket
+            || runtime.multiview.require_current_ticket(picture.ticket).is_err()
+            || !picture.receipt.input.current_for(runtime)
+        {
+            return None;
+        }
+        let duration_ms = picture.decoder.duration_us()
+            .and_then(|us| u64::try_from(us / 1_000).ok())
+            .filter(|ms| *ms > 0);
+        Some((&picture.receipt.input, picture.position_us, duration_ms))
+    }
+
     pub fn seek_relative(
         &mut self,
         runtime: &mut Runtime,

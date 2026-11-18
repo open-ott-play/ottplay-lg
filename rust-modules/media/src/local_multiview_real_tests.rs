@@ -438,6 +438,72 @@ fn paused_seek_lands_without_resuming(readers: &mut Readers, seen: &mut [Seen], 
     });
 }
 
+/// Decode four independent fixture tones through the same held/HTTP/HLS
+/// readers as the renderer. Check all frequencies after each focus change;
+/// a mixer which forwards only one input cannot pass this measurement.
+fn check_four_window_audio(readers: &mut Readers) {
+    const CAPTURE: usize = 12 * 1024;
+    let mut pcm: [Vec<i16>; 4] = std::array::from_fn(|_| Vec::new());
+    for reader in &mut readers.0[..4] {
+        reader.set_audio(true);
+    }
+    let until = Instant::now() + Duration::from_secs(6);
+    while pcm.iter().any(|samples| samples.len() < CAPTURE * 2) {
+        assert!(Instant::now() < until, "four decoders did not publish audio");
+        for (lane, reader) in pcm.iter_mut().zip(&mut readers.0) {
+            while let Some(event) = reader.poll() {
+                match event {
+                    Event::Audio(chunk) => {
+                        let remaining = (CAPTURE * 2).saturating_sub(lane.len());
+                        lane.extend(chunk.samples.into_iter().take(remaining));
+                    }
+                    Event::Failure(error) => panic!("four-window qualification: {error}"),
+                    Event::Ended => panic!("fixture ended before producing enough audio"),
+                    _ => {},
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for reader in &mut readers.0[1..4] {
+        reader.set_audio(false);
+    }
+    let mut mixer = crate::local_pcm_mix::Mixer::default();
+    for focus in [0, 2] {
+        let mut output = Vec::new();
+        let start = if focus == 0 { 0 } else { CAPTURE / 2 };
+        for offset in (start..start + CAPTURE / 2).step_by(1024) {
+            for (slot, lane) in pcm.iter().enumerate() {
+                mixer.push(slot, PcmChunk {
+                    samples: lane[offset * 2..(offset + 1024) * 2].to_vec(),
+                    pts_us: (offset as i64) * 1_000_000 / 48_000,
+                });
+            }
+            while let Some(chunk) = mixer.pull(focus, 20, 0) {
+                output.extend(chunk.samples.chunks_exact(2).map(|pair| f64::from(pair[0])));
+            }
+        }
+        let steady = &output[1024..]; // omit the focus ramp and AAC entry delay
+        let tones: [f64; 4] = std::array::from_fn(|slot| {
+            let omega = std::f64::consts::TAU * (300 + slot * 37) as f64 / 48_000.0;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, &sample) in steady.iter().enumerate() {
+                let t = i as f64;
+                let window = 0.5 - 0.5 * (std::f64::consts::TAU * t / steady.len() as f64).cos();
+                re += sample * window * (omega * t).cos();
+                im += sample * window * (omega * t).sin();
+            }
+            re.hypot(im)
+        });
+        for (slot, amplitude) in tones.iter().enumerate() {
+            if slot != focus {
+                let ratio = amplitude / tones[focus];
+                assert!((0.13..0.29).contains(&ratio), "focus {focus}, slot {slot}, ratio {ratio}");
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "Explicit real bundled-decoder qualification; requires generated fixtures and PLXNATIVE_APP_DIR"]
 fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
@@ -470,6 +536,7 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         ),
         "live worker bound not enforced"
     );
+    check_four_window_audio(&mut readers);
     readers.0[0].set_audio(true);
     let mut seen: Vec<Seen> = (0..9).map(|_| Seen::default()).collect();
     until(&mut readers, &mut seen, Duration::from_secs(6), None, |s| {

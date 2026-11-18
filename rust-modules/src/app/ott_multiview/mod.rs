@@ -81,6 +81,11 @@ pub(super) enum Issue {
     BackendRejected,
     BackendUnsupported,
 }
+impl Issue {
+    pub(super) fn token(self) -> &'static str {
+        slot_failure_token(slot_failure(self))
+    }
+}
 
 /// A per-slot failure that the UI may show alongside successful neighboring slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,6 +381,20 @@ impl Coordinator {
             (self.source_id(row.handle).as_deref() == Some(id)).then_some(row.handle)
         })
     }
+    pub(super) fn live_recovery_source(&self, ticket: ResolveTicket) -> Option<SourceHandle> {
+        self.require_current_ticket(ticket).ok()?;
+        self.sources[ticket.slot().index()]
+    }
+
+    pub(super) fn ready_after_retirement(&self, ticket: ResolveTicket) -> bool {
+        let slot = ticket.slot();
+        self.lifecycle == Lifecycle::Active
+            && self.scene_id == Some(ticket.scene())
+            && self.tickets[slot.index()].is_none()
+            && self.stopping[slot.index()].is_none()
+            && self.slot_status(slot) == Ok(SlotStatus::Empty)
+    }
+
     pub fn local_step_source(
         &self,
         slot: SlotId,
@@ -532,7 +551,9 @@ impl Coordinator {
         let scene = self.scene.as_ref().ok_or(Error::SceneInactive)?;
         let (event_revision, slot) = match event {
             plx_appkit::multiview_chrome::Event::FocusSlot { revision, slot }
-            | plx_appkit::multiview_chrome::Event::ActivateSlot { revision, slot } => {
+            | plx_appkit::multiview_chrome::Event::ActivateSlot { revision, slot }
+            | plx_appkit::multiview_chrome::Event::OpenWindowChannels { revision, slot }
+            | plx_appkit::multiview_chrome::Event::OpenWindowMenu { revision, slot } => {
                 (revision, slot)
             }
         };
@@ -560,6 +581,15 @@ impl Coordinator {
             plx_appkit::multiview_chrome::Event::ActivateSlot { .. } => {
                 self.ui_focused = slot;
                 self.focus(slot)
+            }
+            plx_appkit::multiview_chrome::Event::OpenWindowChannels { .. }
+            | plx_appkit::multiview_chrome::Event::OpenWindowMenu { .. } => {
+                self.ui_focused = slot;
+                if scene.active_slot() == slot {
+                    Ok(Transition::new(scene))
+                } else {
+                    self.focus(slot)
+                }
             }
         }
     }
@@ -1219,7 +1249,7 @@ impl Coordinator {
         Ok(())
     }
 
-    fn require_current_ticket(&self, ticket: ResolveTicket) -> Result<(), Error> {
+    pub(super) fn require_current_ticket(&self, ticket: ResolveTicket) -> Result<(), Error> {
         let index = ticket.slot().index();
         if self.lifecycle != Lifecycle::Active
             || self.tickets[index] != Some(ticket)

@@ -780,6 +780,13 @@ pub(super) fn owns_picture(runtime: &Runtime, app: &App) -> bool {
         .is_some_and(|receipt| admitted_route_current(runtime, app, &receipt.identity))
 }
 
+/// Metadata for a newer service output cannot annotate an older retained canvas.
+pub(super) fn owns_footer_picture(runtime: &Runtime, app: &App) -> bool {
+    owns_picture(runtime, app)
+        && runtime.multiview_output.admission.as_ref()
+            .is_some_and(|receipt| receipt_current(receipt, runtime, app))
+}
+
 /// A process-local composite descriptor owns the footer only while its exact
 /// native route identity does. The OTT marker also fences late Plex Detail
 /// publication; no loading/inspection event fabricates a confirmed first frame.

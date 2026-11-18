@@ -2,6 +2,9 @@
 //! event; they cannot choose a source, claim a decoder or change audio directly.
 use super::*;
 
+#[path = "ott_multiview_ui_footer.rs"]
+mod footer;
+
 const EFFECT_LIMIT: usize = 64;
 // Highlight emits no backend command. Activation emits at most Focus+AudioOwner.
 const UI_EFFECT_RESERVE: usize = 2;
@@ -15,6 +18,12 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
     // stale refusal. A later fresh publication must not be hidden by the cache.
     runtime.multiview_ui.published = None;
     let local = runtime.multiview_local.active();
+    use plx_appkit::multiview_chrome::Event::{OpenWindowChannels, OpenWindowMenu};
+    let window_action = match event {
+        OpenWindowChannels { slot, .. } => Some((slot, false)),
+        OpenWindowMenu { slot, .. } => Some((slot, true)),
+        _ => None,
+    };
     let owned = if local {
         runtime.multiview_local.owns_ui(&runtime, app)
     } else {
@@ -22,7 +31,8 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
             plx_media::route::playback_identity_matches(&app.player.session, identity)
         })
     };
-    if !owned {
+    if !owned || (window_action.is_some()
+        && !multiview_local_menu::can_open_window(&runtime, app)) {
         app.bridge.publish_multiview_offer(None);
         app.ott = Some(runtime);
         return;
@@ -43,6 +53,14 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
             if transition.effects.len() <= UI_EFFECT_RESERVE {
                 runtime.multiview_effects.extend(transition.effects);
                 runtime.changed();
+                if let Some((slot, menu)) = window_action {
+                    if let Some(slot) = plx_data::ott::multiview::SlotId::new(slot) {
+                        if let Err(error) = multiview_local_menu::open_window(&mut runtime, app, slot, menu) {
+                            runtime.status = error.into();
+                            runtime.changed();
+                        }
+                    }
+                }
             } else {
                 runtime.status = "Multiview control is unavailable".into();
             }
@@ -59,6 +77,7 @@ pub(super) fn player_action(app: &mut App, event: plx_appkit::multiview_chrome::
 #[derive(Default)]
 pub(super) struct State {
     published: Option<Publication>,
+    footers: footer::Footers,
 }
 #[derive(PartialEq, Eq)]
 struct Publication {
@@ -66,6 +85,7 @@ struct Publication {
     geometry: plx_appkit::multiview_layout::RasterPlan,
     focused: Option<plx_data::ott::multiview::SlotId>,
     audio: Option<plx_data::ott::multiview::SlotId>,
+    notices: [Option<plx_appkit::multiview_chrome::ProviderNotice>; 9],
 }
 
 /// Publish controls only for the current local scene or an admitted service
@@ -91,21 +111,35 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
             geometry,
             focused: runtime.multiview.focused_slot(),
             audio: runtime.multiview.audio_route_state().applied,
+            notices: std::array::from_fn(|i| {
+                let slot = plx_data::ott::multiview::SlotId::new(i as u8)?;
+                if !runtime.multiview_local.active() { return None; }
+                plx_appkit::multiview_chrome::ProviderNotice::from_stop(runtime.multiview_local.last_stop(slot))
+            }),
         })
     })();
+    let mut footers = std::mem::take(&mut runtime.multiview_ui.footers);
+    let footer_scene = publication.as_ref().filter(|_| {
+        runtime.multiview_local.active() || multiview_output::owns_footer_picture(runtime, app)
+    });
+    let changed = footers.refresh(runtime, footer_scene.map(|status| &status.scene));
+    runtime.multiview_ui.footers = footers;
     let Some(publication) = publication else {
         runtime.multiview_ui.published = None;
         app.bridge.publish_multiview_offer(None);
         return;
     };
-    if runtime.multiview_ui.published.as_ref() == Some(&publication)
-        && app.bridge.multiview_offer().is_some()
-    {
+    let existing = app.bridge.multiview_offer().filter(|_| {
+        runtime.multiview_ui.published.as_ref() == Some(&publication)
+    });
+    if existing.is_some() && !changed {
         return;
     }
     use plx_appkit::multiview_chrome as chrome;
     let plan = &publication.geometry;
-    let Ok(offer) = runtime.multiview.publish_ui_offer() else {
+    let Ok(revision) = existing.map(|frame| frame.state().revision).map(Ok).unwrap_or_else(|| {
+        runtime.multiview.publish_ui_offer().map(|offer| offer.ui_serial)
+    }) else {
         app.bridge.publish_multiview_offer(None);
         return;
     };
@@ -129,7 +163,7 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
         })
         .collect();
     let state = chrome::ViewState {
-        revision: offer.ui_serial,
+        revision,
         geometry_revision: plan.revision(),
         active: runtime.multiview.active_slot().map(|s| s.index() as u8),
         audio: publication.audio.map(|s| s.index() as u8),
@@ -137,7 +171,12 @@ pub(super) fn publish(runtime: &mut Runtime, app: &mut App) {
         input_owned: true,
     };
     match project_frame(plan, &views, state) {
-        Ok(frame) => {
+        Ok(mut frame) => {
+            if runtime.multiview_local.active() { frame.enable_window_actions(); }
+            runtime.multiview_ui.footers.project(&mut frame);
+            for (index, notice) in publication.notices.iter().enumerate() {
+                if let Some(notice) = notice { frame.set_provider_notice(index as u8, *notice); }
+            }
             app.bridge.publish_multiview_offer(Some(frame));
             runtime.multiview_ui.published = Some(publication);
         }

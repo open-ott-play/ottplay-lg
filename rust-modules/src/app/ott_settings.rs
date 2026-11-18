@@ -31,6 +31,7 @@ enum Setting {
     FontScale,
     UiColors,
     VolumeStep,
+    MultiviewBackgroundVolume,
     Player,
     Interface,
     Appearance(appearance::Field),
@@ -44,7 +45,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Self; 47] = [Self::FontScale, Self::Player, Self::Interface,
+    const ALL: [Self; 48] = [Self::FontScale, Self::Player, Self::Interface,
         Self::Appearance(appearance::Field::ALL[0]), Self::Appearance(appearance::Field::ALL[1]),
         Self::Appearance(appearance::Field::ALL[2]), Self::Appearance(appearance::Field::ALL[3]),
         Self::Menu(MenuItem::Providers), Self::Menu(MenuItem::Profiles), Self::Menu(MenuItem::Catalog),
@@ -60,13 +61,14 @@ impl Setting {
         Self::Classic(classic::Field::ALL[4]), Self::Classic(classic::Field::ALL[5]),
         Self::Classic(classic::Field::ALL[6]), Self::Classic(classic::Field::ALL[7]),
         Self::Classic(classic::Field::ALL[8]), Self::UiColors,
-        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe, Self::MultiviewService, Self::MultiviewBackend];
+        Self::SubtitleSelection(selection::Field::Mode), Self::SubtitleSelection(selection::Field::Language), Self::HostedEpg, Self::NativeInputProbe, Self::MultiviewService, Self::MultiviewBackend, Self::MultiviewBackgroundVolume];
 
     fn find(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|setting| setting.id() == if id == "sUiColorConfig" { "uiColorConfig" } else { id })
     }
 
     fn local_choice(id: &str) -> Option<Self> {
+        if id == Self::MultiviewBackgroundVolume.id() { return Some(Self::MultiviewBackgroundVolume); }
         osd::Field::find(id).map(Self::Osd).or_else(||
             classic::Field::ALL.into_iter().find(|field| field.id() == id).map(Self::Classic))
     }
@@ -81,6 +83,7 @@ impl Setting {
             Self::FontScale => "uiFontScale",
             Self::UiColors => plx_ui::palette::KEY,
             Self::VolumeStep => "volumeStep",
+            Self::MultiviewBackgroundVolume => "multiviewBackgroundVolume",
             Self::Player => "players",
             Self::Interface => "interfaceMode",
             Self::Sleep => "sleepTimeout",
@@ -99,7 +102,7 @@ impl Setting {
             Self::MultiviewBackend => json!("local"),
             Self::NativeInputProbe | Self::HostedEpg | Self::UiColors | Self::MultiviewService => json!(""),
             Self::InfoTimeout => json!(plx_screens::player::input::InfoTimeout::DEFAULT.seconds()),
-            Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::Player => json!(0), Self::Interface => json!(0),
+            Self::FontScale => json!(100), Self::VolumeStep => json!(5), Self::MultiviewBackgroundVolume => json!(20), Self::Player => json!(0), Self::Interface => json!(0),
             Self::Appearance(field) => field.default_value(),
             Self::Geometry(field) => field.default_value(),
             Self::SubtitleSelection(field) => field.default_value(),
@@ -131,6 +134,7 @@ impl Setting {
                 Self::FontScale => u16::try_from(number).ok()
                     .and_then(plx_machine::machine::FontScale::from_percent).is_some(),
                 Self::VolumeStep => (3..=10).contains(&number),
+                Self::MultiviewBackgroundVolume => number <= 100,
                 Self::InfoTimeout => plx_screens::player::input::InfoTimeout::from_seconds(number).is_some(),
                 Self::Player => number == 0,
                 Self::Interface => plx_machine::machine::UiMode::from_index(number).is_some(),
@@ -141,12 +145,12 @@ impl Setting {
     }
 
     fn writable(self) -> bool {
-        matches!(self, Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
+        matches!(self, Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::MultiviewBackgroundVolume | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_))
     }
 
     fn reason(self) -> &'static str {
         match self {
-            Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
+            Self::MultiviewService | Self::MultiviewBackend | Self::HostedEpg | Self::FontScale | Self::UiColors | Self::InfoTimeout | Self::VolumeStep | Self::MultiviewBackgroundVolume | Self::Interface | Self::Sleep | Self::M3uMedia | Self::Appearance(_) | Self::Geometry(_) | Self::SubtitleSelection(_) | Self::Osd(_) | Self::Classic(_) | Self::Menu(_) => "unsupported",
             Self::NativeInputProbe => "unsupported",
             Self::Player => "device_forced_auto",
         }
@@ -203,6 +207,11 @@ impl Setting {
                 result["constraints"] = json!({"minimum":plx_machine::machine::FontScale::MIN_PERCENT,
                     "maximum":plx_machine::machine::FontScale::MAX_PERCENT});
                 result["description"] = json!("Interface text scale.");
+                result["unit"] = json!("percent");
+            }
+            Self::MultiviewBackgroundVolume => {
+                result["constraints"] = json!({"minimum":0,"maximum":100});
+                result["description"] = json!("Volume of other windows when audio follows focus on this TV.");
                 result["unit"] = json!("percent");
             }
             Self::VolumeStep => {
@@ -560,6 +569,8 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
             result["setting"]["effective_value"] = json!(app.bridge.ui_font_scale_percent());
         } else if matches!(setting, Setting::UiColors) {
             result["setting"]["effective_value"] = json!(plx_ui::palette::current().encode());
+        } else if matches!(setting, Setting::MultiviewBackgroundVolume) {
+            result["setting"]["effective_value"] = json!(runtime.multiview_background_volume());
         } else if matches!(setting, Setting::VolumeStep) {
             result["setting"]["effective_value"] = json!(runtime.volume_step());
         } else if matches!(setting, Setting::InfoTimeout) {
@@ -705,7 +716,7 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
         true,
         now,
     );
-    if matches!(setting, Setting::HostedEpg | Setting::FontScale | Setting::UiColors | Setting::InfoTimeout | Setting::VolumeStep | Setting::Interface | Setting::Sleep | Setting::Osd(_) | Setting::Classic(_) | Setting::Menu(_)) {
+    if matches!(setting, Setting::HostedEpg | Setting::FontScale | Setting::UiColors | Setting::InfoTimeout | Setting::VolumeStep | Setting::MultiviewBackgroundVolume | Setting::Interface | Setting::Sleep | Setting::Osd(_) | Setting::Classic(_) | Setting::Menu(_)) {
         result["setting"]["effective_value"] = params["value"].clone();
     }
     let saving = if matches!(setting, Setting::Interface) {
@@ -798,6 +809,7 @@ impl Runtime {
         let value = match Setting::local_choice(id)? {
             Setting::Osd(field) => field.value(osd::preferences(&self.saved)),
             Setting::Classic(field) => field.value(self.classic_preferences()),
+            Setting::MultiviewBackgroundVolume => json!(self.multiview_background_volume()),
             _ => return None,
         };
         Some(value.as_u64()?.to_string())
@@ -826,6 +838,8 @@ impl Runtime {
         let value = match setting {
             Setting::Osd(field) => field.parse_text(text)?,
             Setting::Classic(field) => field.parse_text(text)?,
+            Setting::MultiviewBackgroundVolume => text.parse::<u8>().ok().filter(|n| *n <= 100)
+                .map(Value::from).ok_or("Enter a percentage from 0 to 100")?,
             _ => return Err("Unknown on-screen display setting"),
         };
         let mut saved = self.saved.clone();
@@ -862,6 +876,11 @@ impl Runtime {
 
     pub(in crate::app::ott_runtime) fn font_scale_percent(&self) -> u16 {
         stored(&self.saved, Setting::FontScale)["value"].as_u64().unwrap_or(100) as u16
+    }
+
+    pub(in crate::app::ott_runtime) fn multiview_background_volume(&self) -> u8 {
+        self.saved.settings.get(Setting::MultiviewBackgroundVolume.id())
+            .and_then(Value::as_u64).filter(|n| *n <= 100).unwrap_or(20) as u8
     }
 
     pub(in crate::app::ott_runtime) fn volume_step(&self) -> i32 {
@@ -1211,7 +1230,7 @@ mod menu_tests {
     }
     #[test]
     fn menu_fields_extend_existing_paginated_schema_without_reordering_it() {
-        assert_eq!(Setting::ALL.len(), 32 + MenuItem::ALL.len());
+        assert_eq!(Setting::ALL.len(), 33 + MenuItem::ALL.len());
         assert_eq!(Setting::ALL[45].id(), "nativeMultiviewService");
         assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
         assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");

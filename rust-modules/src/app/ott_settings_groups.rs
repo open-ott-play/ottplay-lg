@@ -70,6 +70,7 @@ fn field(key: &'static str) -> draft::Field {
         "uiColorConfig" => Some("settingRevision:uiColorConfig"),
         "uiFontScale" => Some("settingRevision:uiFontScale"),
         "volumeStep" => Some("settingRevision:volumeStep"),
+        "multiviewBackgroundVolume" => Some("settingRevision:multiviewBackgroundVolume"),
         "sleepTimeout" => Some("settingRevision:sleepTimeout"),
         "infoTimeout" => Some("settingRevision:infoTimeout"),
         "osdOpacity" => Some("settingRevision:osdOpacity"),
