@@ -57,7 +57,7 @@ fn grids_represent_all_empty_cells_and_cardinal_navigation_does_not_wrap() {
 }
 
 #[test]
-fn perimeter_order_is_clockwise_and_new_satellites_do_not_move_existing_targets() {
+fn perimeter_slots_keep_their_clockwise_anchor_as_the_ring_fills() {
     let full = Layout::new(Rect::FULL, Mode::Perimeter { satellites: 8 }, 1.0).unwrap();
     let center = full.slot(0).unwrap().bounds;
     let sign = |value: f32| if value < 0.0 { -1 } else if value > 0.0 { 1 } else { 0 };
@@ -66,7 +66,10 @@ fn perimeter_order_is_clockwise_and_new_satellites_do_not_move_existing_targets(
     assert_eq!(positions, [(0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)]);
     for satellites in 0..=8 {
         let partial = Layout::new(Rect::FULL, Mode::Perimeter { satellites }, 1.0).unwrap();
-        assert_eq!(partial.slots(), &full.slots()[..=usize::from(satellites)]);
+        for slot in &full.slots()[..=usize::from(satellites)] {
+            assert_eq!(partial.hit_test(slot.bounds.cx(), slot.bounds.cy()), Some(slot.id));
+        }
+        if satellites == 0 { assert_eq!(partial.slots()[0].bounds, Rect::FULL); }
     }
     assert_eq!(full.neighbor(0, Dir::Up), Some(1));
     assert_eq!(full.neighbor(0, Dir::Right), Some(3));
@@ -77,18 +80,22 @@ fn perimeter_order_is_clockwise_and_new_satellites_do_not_move_existing_targets(
 }
 
 #[test]
-fn pip_hit_testing_selects_the_foreground_and_gaps_are_not_targets() {
+fn pip_sits_flush_to_the_corner_and_shared_grid_edges_have_one_target() {
     let layout = Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap();
     let inset = layout.slot(1).unwrap();
     assert!(inset.layer > layout.slot(0).unwrap().layer);
     assert_eq!(layout.hit_test(inset.bounds.cx(), inset.bounds.cy()), Some(1));
     assert_eq!(layout.hit_test(Rect::FULL.cx(), Rect::FULL.cy()), Some(0));
     assert_eq!(layout.hit_test(inset.bounds.x, inset.bounds.y), Some(1));
-    assert_eq!(layout.hit_test(inset.bounds.x + inset.bounds.w, inset.bounds.cy()), Some(0));
+    assert_eq!(inset.bounds.x + inset.bounds.w, Rect::FULL.w);
+    assert_eq!(inset.bounds.y + inset.bounds.h, Rect::FULL.h);
+    assert_eq!(layout.hit_test(inset.bounds.x - 0.5, inset.bounds.cy()), Some(0));
+    assert_eq!(layout.hit_test(inset.bounds.x + inset.bounds.w, inset.bounds.cy()), None);
     assert_eq!(layout.neighbor(0, Dir::Right), Some(1));
     assert_eq!(layout.neighbor(1, Dir::Left), Some(0));
     let grid = Layout::new(Rect::FULL, Mode::Grid4, 1.0).unwrap();
-    assert_eq!(grid.hit_test(Rect::FULL.cx(), Rect::FULL.cy()), None);
+    assert_eq!(grid.hit_test(Rect::FULL.cx(), Rect::FULL.cy()), Some(3));
+    assert_eq!(grid.hit_test(Rect::FULL.cx() - 0.5, Rect::FULL.cy()), Some(2));
     assert_eq!(layout.hit_test(1920.0, 100.0), None);
     assert_eq!(layout.hit_test(-1.0, 100.0), None);
 }
@@ -150,7 +157,11 @@ fn even_raster_plans_preserve_ids_layers_and_actual_hit_targets() {
                 for (before, after) in layout.slots().iter().zip(plan.slots()) {
                     assert_eq!((before.id, before.layer), (after.id, after.layer));
                     assert!([after.x, after.y, after.width, after.height].iter().all(|v| v % 2 == 0));
-                    assert!(inside(before.bounds, after.bounds()), "quantization is inward");
+                    let a = before.bounds;
+                    let b = after.bounds();
+                    for delta in [a.x - b.x, a.y - b.y, (a.x + a.w) - (b.x + b.w), (a.y + a.h) - (b.y + b.h)] {
+                        assert!(delta.abs() <= 1.001, "an even edge moves at most one pixel");
+                    }
                     let r = after.bounds();
                     let hit = actual.hit_test(r.cx(), r.cy());
                     assert_eq!(hit, Some(if mode == Mode::Pip && before.id == 0 { 0 } else { before.id }));
@@ -186,4 +197,37 @@ fn malformed_or_collapsed_rasters_never_become_input_geometry() {
         assert_eq!(RasterPlan::checked(0, 960, 540, Mode::Grid4, slots), Err(GeometryError::InvalidRaster));
     }
     assert!(RasterPlan::checked(1, 960, 540, Mode::Pip, good.slots()[..2].to_vec()).is_err());
+}
+
+#[test]
+fn every_pixel_belongs_to_a_window_at_display_and_encoder_sizes() {
+    for (width, height) in [(1280, 720), (1920, 1080), (3840, 2160), (1366, 768),
+        (1279, 719), (1921, 1081), (3841, 2159), (321, 181)] {
+        for mode in modes() {
+            let layout = Layout::new(Rect::new(0.0, 0.0, width as f32, height as f32), mode, 1.0).unwrap();
+            let mut plans = vec![layout.rasterize_pixels(9).unwrap()];
+            if width % 2 == 0 && height % 2 == 0 { plans.push(layout.rasterize_even(9).unwrap()); }
+            for plan in plans {
+                let actual = Layout::from_raster(&plan, 1.0).unwrap();
+                // RasterPlan already checked that disjoint slots do not overlap.
+                // Equal area proves complete coverage with no internal or outer gutters.
+                let area: u32 = plan.slots().iter().map(|s| s.width * s.height).sum();
+                if mode == Mode::Pip {
+                    let inset = plan.slots()[1];
+                    assert_eq!(area, width * height + inset.width * inset.height);
+                    assert_eq!((inset.x + inset.width, inset.y + inset.height), (width, height));
+                } else {
+                    assert_eq!(area, width * height, "{width}x{height} {mode:?}");
+                }
+                for tile in plan.slots() {
+                    for (x, y) in [(tile.x, tile.y), (tile.x + tile.width - 1, tile.y + tile.height - 1)] {
+                        let expected = if mode == Mode::Pip && x >= plan.slots()[1].x && y >= plan.slots()[1].y {
+                            1
+                        } else { tile.id };
+                        assert_eq!(actual.hit_test(x as f32 + 0.5, y as f32 + 0.5), Some(expected));
+                    }
+                }
+            }
+        }
+    }
 }
