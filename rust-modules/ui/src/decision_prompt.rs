@@ -32,8 +32,7 @@ impl DecisionPrompt {
         cancel_label: &'static CStr, affirm_label: &'static CStr) {
         self.cancel_label = cancel_label;
         self.affirm_label = affirm_label;
-        self.alert.reconcile_card(question, vec![std::borrow::Cow::Borrowed(body)],
-            crate::decision_alert::Answers::Two);
+        self.alert.reconcile_with_body(question, body);
     }
     /// Withdraw an obsolete question without manufacturing an answer.
     pub fn dismiss(&mut self) { self.alert.dismiss(); }

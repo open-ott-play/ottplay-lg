@@ -388,6 +388,12 @@ pub(super) fn reconcile_strict_presentation(runtime: &mut Runtime, app: &mut App
     }
 }
 
+fn direct_categories_parent(runtime: &Runtime, app: &App) -> Option<InstanceId> {
+    let (player, epoch) = runtime.direct_categories?;
+    (runtime.page == "categories" && classic_navigation::active(runtime, app)
+        && app.pages.top_page() == Some(player) && runtime.navigation_epoch == epoch).then_some(player)
+}
+
 /// Close only the outer catalog layer. The reader/editor/Browse picker handles
 /// its own Back first; guide and setup retain their existing inner navigation.
 pub(super) fn back(runtime: &mut Runtime, app: &mut App, action: &OttAction)
@@ -406,7 +412,8 @@ pub(super) fn back(runtime: &mut Runtime, app: &mut App, action: &OttAction)
         return Some(Ok(()));
     }
     let entry = bridge::ott_catalog_surface(&app.pages)?;
-    if matches!(runtime.page, "guide" | "guide-programme" | "organization") {
+    if matches!(runtime.page, "guide" | "guide-programme" | "organization")
+        || runtime.page.starts_with("torrent-") || runtime.page.starts_with("stremio-") {
         return None;
     }
     // Closing read-only browsing remains available to a normal pinned source.
@@ -417,10 +424,7 @@ pub(super) fn back(runtime: &mut Runtime, app: &mut App, action: &OttAction)
         runtime.page = "profiles";
     } else if runtime.page == "actions" {
         return organization_runtime::list_order::action(runtime, app, action);
-    } else if (runtime.page == "categories"
-        && !(classic_navigation::active(runtime, app)
-            && runtime.direct_categories.is_some_and(|(player, epoch)|
-                Some(player) == app.pages.top_page() && epoch == runtime.navigation_epoch)))
+    } else if (runtime.page == "categories" && direct_categories_parent(runtime, app).is_none())
         || (classic_navigation::active(runtime, app) && matches!(runtime.page, "providers" | "settings"))
     {
         runtime.show_catalog();
@@ -449,6 +453,7 @@ pub(super) struct SettingsOrigin {
     mode: plx_machine::machine::UiMode,
     source: String,
     page: &'static str,
+    direct_categories_parent: Option<InstanceId>,
     memory: plx_screens::ott::Memory,
     returning: bool,
 }
@@ -496,13 +501,14 @@ pub(super) fn capture_settings(runtime: &Runtime, app: &App, owner: InstanceId, 
     } else if matches!(app.route(), AppArg::Ott) { None } else { return None; };
     let origin = SettingsOrigin { entry, owner, player, session: app.bridge.auth_read().0.flow_epoch,
         mode: app.bridge.ui_mode(), source: settings_source(runtime), page: runtime.page,
-        memory, returning: false };
+        direct_categories_parent: direct_categories_parent(runtime, app), memory, returning: false };
     settings_origin_current(&origin, runtime, app, false).then_some(origin)
 }
 
 pub(super) fn reconcile_settings(runtime: &mut Runtime, app: &App) {
     let Some(origin) = runtime.browse_settings.as_ref() else { return; };
     let settings = matches!(runtime.page, "settings" | "menu-items" | "interface-mode" | "sleep-timer"
+        | "torrent-settings" | "stremio-settings"
         | "osd-opacity" | "permanent-clock" | "classic-page-size" | "classic-list-position"
         | "classic-list-arrows" | "numeric-seek-step" | "classic-show-number" | "classic-show-name"
         | "classic-show-program" | "classic-show-progress" | "classic-show-description");
@@ -516,6 +522,11 @@ pub(super) fn publish_settings_return(runtime: &mut Runtime, app: &mut App) -> b
     // Take even an undeliverable return: an old origin must never revive on a later visit.
     let origin = runtime.browse_settings.take().unwrap();
     if runtime.page != origin.page || !settings_origin_current(&origin, runtime, app, false) { return false; }
+    if let Some(player) = origin.direct_categories_parent {
+        // Settings and its return advance navigation. Restore the Categories parent
+        // only after the original panel, source, player and mode have been checked.
+        runtime.direct_categories = Some((player, runtime.navigation_epoch));
+    }
     app.pages.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(origin.owner),
         Delivery::Screen(plx_ui::screen::ScreenEvent::App(AppMsg::OttBrowseReturn {
             snapshot: Arc::new(runtime.view()), memory: origin.memory,

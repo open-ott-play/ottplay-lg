@@ -538,7 +538,7 @@ fn service_settings_refresh_returns_without_starting_metadata_in_the_wrong_page(
     let mut runtime = runtime();
     runtime.page = "torrent-settings";
     let adapter = runtime.companion_adapter.as_mut().unwrap();
-    adapter.stremio.service_return = true;
+    adapter.torrent_settings_parent = TorrentSettingsParent::StremioStreams;
     adapter.stremio.retry = Some(Operation::Streams {
         addons: vec![loaded()],
         media_ids: vec!["tt123".into()],
@@ -550,7 +550,7 @@ fn service_settings_refresh_returns_without_starting_metadata_in_the_wrong_page(
     assert_eq!(runtime.page, "stremio-streams");
     let adapter = runtime.companion_adapter.as_ref().unwrap();
     assert!(adapter.stremio.flight.is_none());
-    assert!(!adapter.stremio.service_return);
+    assert!(adapter.torrent_settings_parent != TorrentSettingsParent::StremioStreams);
 }
 #[test]
 fn cancelled_worker_still_owns_its_completion_slot_until_it_finishes() {
@@ -880,6 +880,68 @@ fn settings_input_queued_before_leaving_screen_cannot_change_the_saved_service()
     assert!(super::super::super::handle_action(&mut runtime,&mut app,stale).is_err());
     assert_eq!(runtime.saved.settings,saved);
     assert!(!runtime.saving);
+}
+
+#[cfg(feature = "hostsim")]
+#[test]
+fn stremio_settings_returns_to_the_opening_page_with_back_or_the_visible_row() {
+    let _serial = plx_base::testlock::serial();
+    let mut runtime = runtime();
+    let mut app = crate::app::run::lifecycle_regression_tests::app();
+    for parent in ["settings", "stremio-categories", "stremio-movies", "stremio-streams"] {
+        for visible_row in [false, true] {
+            runtime.page = parent;
+            action(&mut runtime, &mut app, &OttAction::EditSetting("stremio.settings".into())).unwrap().unwrap();
+            assert_eq!(runtime.page, "stremio-settings");
+            let back = if visible_row {
+                view(&runtime).unwrap().rows.into_iter().find(|row| row.id == "stremio.back").unwrap().action
+            } else { OttAction::Back };
+            action(&mut runtime, &mut app, &back).unwrap().unwrap();
+            assert_eq!(runtime.page, parent);
+        }
+    }
+}
+
+#[cfg(feature = "hostsim")]
+#[test]
+fn stremio_settings_keeps_the_settings_parent_but_retires_source_results_on_config_change() {
+    let _serial = plx_base::testlock::serial();
+    for (parent, expected) in [("settings", "settings"), ("stremio-streams", "stremio-categories")] {
+        let mut runtime = runtime();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        runtime.page = parent;
+        action(&mut runtime, &mut app, &OttAction::EditSetting("stremio.settings".into())).unwrap().unwrap();
+        let mut updated = config();
+        updated.language = "fr".into();
+        runtime.saved.settings.insert(KEY.into(), updated.to_value());
+        let mut adapter = runtime.companion_adapter.take().unwrap();
+        tick(&mut adapter, &mut runtime, &mut app);
+        runtime.companion_adapter = Some(adapter);
+        action(&mut runtime, &mut app, &OttAction::Back).unwrap().unwrap();
+        assert_eq!(runtime.page, expected);
+    }
+}
+
+#[cfg(feature = "hostsim")]
+#[test]
+fn stremio_settings_drops_parent_after_switching_source_or_leaving_the_page() {
+    let _serial = plx_base::testlock::serial();
+    for leave_page in [false, true] {
+        let mut runtime = runtime();
+        let mut app = crate::app::run::lifecycle_regression_tests::app();
+        runtime.page = "stremio-movies";
+        action(&mut runtime, &mut app, &OttAction::EditSetting("stremio.settings".into())).unwrap().unwrap();
+        if leave_page {
+            super::super::super::handle_action(&mut runtime, &mut app, OttAction::ShowProviders).unwrap();
+            super::super::tick(&mut runtime, &mut app);
+            // An unowned visit must use the ordinary fallback.
+            runtime.page = "stremio-settings";
+        } else {
+            runtime.generation += 1;
+        }
+        action(&mut runtime, &mut app, &OttAction::Back).unwrap().unwrap();
+        assert_eq!(runtime.page, "stremio-categories");
+    }
 }
 
 #[cfg(feature = "hostsim")]

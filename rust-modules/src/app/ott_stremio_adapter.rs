@@ -61,7 +61,7 @@ pub(super) struct State {
     flight: Option<Flight>,
     retry: Option<Operation>,
     choice: Option<usize>,
-    service_return: bool,
+    settings_parent: Option<(&'static str, u64)>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -80,7 +80,7 @@ impl Default for State {
             flight: None,
             retry: None,
             choice: None,
-            service_return: false,
+            settings_parent: None,
         }
     }
 }
@@ -408,6 +408,9 @@ fn begin(
     Ok(())
 }
 pub(super) fn tick(adapter: &mut Adapter, runtime: &mut Runtime, app: &mut App) {
+    if runtime.page != "stremio-settings" {
+        adapter.stremio.settings_parent = None;
+    }
     if !runtime.loaded || runtime.saving || runtime.persistence_uncertain {
         return;
     }
@@ -439,6 +442,9 @@ pub(super) fn tick(adapter: &mut Adapter, runtime: &mut Runtime, app: &mut App) 
         let config = Config::parse(&observed);
         adapter.stremio = State {
             observed: Some(observed),
+            // General Settings remains a valid parent after an add-on edit.
+            // A movie or stream list belonged to the discarded configuration.
+            settings_parent: adapter.stremio.settings_parent.filter(|(page, _)| *page == "settings"),
             ..State::default()
         };
         match config {
@@ -835,7 +841,10 @@ fn back(adapter: &mut Adapter, runtime: &mut Runtime, app: &mut App) {
     runtime.page = match page {
         "stremio-streams" => "stremio-movies",
         "torrent-files" | "torrent-settings" => "stremio-streams",
-        "stremio-movies" | "stremio-settings" => "stremio-categories",
+        "stremio-settings" => adapter.stremio.settings_parent.take()
+            .filter(|(_, generation)| *generation == runtime.generation)
+            .map(|(parent, _)| parent).unwrap_or("stremio-categories"),
+        "stremio-movies" => "stremio-categories",
         _ => "providers",
     };
     adapter.stremio.retry = match runtime.page {
@@ -851,7 +860,7 @@ fn back(adapter: &mut Adapter, runtime: &mut Runtime, app: &mut App) {
             .filter(|op| matches!(op, Operation::Streams { .. } | Operation::BuiltinStreams { .. })),
         _ => None,
     };
-    adapter.stremio.service_return = false;
+    adapter.torrent_settings_parent = TorrentSettingsParent::Settings;
     runtime.status.clear();
     runtime.changed();
 }
@@ -971,7 +980,7 @@ pub(super) fn action(
                     && matches!(runtime.page, "torrent-files" | "torrent-settings")
                     && runtime.companion_adapter.as_ref().is_some_and(|a| {
                         a.media_provider == "stremio" && runtime.page == "torrent-files"
-                            || a.stremio.service_return && runtime.page == "torrent-settings"
+                            || a.torrent_settings_parent == TorrentSettingsParent::StremioStreams && runtime.page == "torrent-settings"
                     }))
         }
         OttAction::SubmitSetting { session, key, .. } => {
@@ -982,7 +991,7 @@ pub(super) fn action(
                 || (matches!(runtime.page, "torrent-files" | "torrent-settings")
                     && runtime.companion_adapter.as_ref().is_some_and(|a| {
                         a.media_provider == "stremio" && runtime.page == "torrent-files"
-                            || a.stremio.service_return && runtime.page == "torrent-settings"
+                            || a.torrent_settings_parent == TorrentSettingsParent::StremioStreams && runtime.page == "torrent-settings"
                     }))
         }
         _ => false,
@@ -1055,7 +1064,7 @@ fn handle(
             runtime.status.clear();
         }
         OttAction::Refresh => {
-            if runtime.page == "torrent-settings" && adapter.stremio.service_return {
+            if runtime.page == "torrent-settings" && adapter.torrent_settings_parent == TorrentSettingsParent::StremioStreams {
                 back(adapter, runtime, app);
             } else if runtime.page == "torrent-files" {
                 let choice = adapter.stremio.choice.ok_or("Choose a source first")?;
@@ -1074,7 +1083,7 @@ fn handle(
             "stremio.back" => back(adapter, runtime, app),
             "stremio.service" => {
                 adapter.navigate(runtime, app);
-                adapter.stremio.service_return = true;
+                adapter.torrent_settings_parent = TorrentSettingsParent::StremioStreams;
                 runtime.page = "torrent-settings";
                 runtime.status.clear();
             }
@@ -1084,8 +1093,10 @@ fn handle(
                 play(adapter, runtime, app, i)?;
             }
             "stremio.settings" => {
+                let config = saved_config(runtime)?;
                 adapter.navigate(runtime, app);
-                adapter.stremio.config = saved_config(runtime)?;
+                adapter.stremio.config = config;
+                adapter.stremio.settings_parent = Some((runtime.page, runtime.generation));
                 runtime.page = "stremio-settings";
                 runtime.status.clear();
             }

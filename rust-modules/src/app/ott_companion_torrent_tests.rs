@@ -1022,6 +1022,13 @@ fn torrent_entry_stays_visible_and_unready_open_only_explains_service_setup() {
     assert_eq!(capabilities(&runtime), capabilities_before);
     assert!(runtime.companion_adapter.as_ref().unwrap().pending.is_empty());
     assert!(!runtime.companion.snapshot().ready);
+    let back = view(&runtime).unwrap().rows.into_iter().find(|row| row.id == "torrent.back").unwrap();
+    action(&mut runtime, &mut app, &back.action).unwrap().unwrap();
+    assert_eq!(runtime.page, "providers", "unconfigured Torrent returns to its provider chooser");
+    runtime.page = "settings";
+    action(&mut runtime, &mut app, &OttAction::EditSetting("torrent.settings".into())).unwrap().unwrap();
+    action(&mut runtime, &mut app, &OttAction::Back).unwrap().unwrap();
+    assert_eq!(runtime.page, "settings", "a later Settings visit replaces the previous caller");
 }
 
 #[test]

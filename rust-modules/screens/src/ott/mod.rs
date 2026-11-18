@@ -1827,7 +1827,7 @@ impl<H: AppLike<Memory = PageMemory>> Focusable<H> for OttScreen {
     }
     fn place(&self, key: &u32, cx: &Cx<'_, H>, at: At) -> Option<Placed> {
         if self.loading_cover() { return None; }
-        if let Some(placed) = self.exit.prompt.place(*key, cx.measure) { return placed; }
+        if let Some(placed) = self.exit.place(*key, cx.measure) { return placed; }
         if let Some(header) = self.header(cx.measure) {
             if let Some(placed) = header.focus(self.entry, navigation::GROUP, (self.header_scroll(), self.header_scroll()), navigation::clip()).place(*key, at) { return Some(placed); }
         }

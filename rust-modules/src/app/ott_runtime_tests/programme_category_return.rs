@@ -69,6 +69,41 @@ fn classic_direct_categories_one_back_returns_to_the_same_player() {
 }
 
 #[test]
+fn classic_categories_remembers_its_caller_after_menu_settings() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for direct in [true, false] {
+        let mut app = continuity_catalog_app(UiMode::Classic);
+        let before = retained_player(&app);
+        let player = app.pages.top_page().unwrap();
+        if direct {
+            open_direct_categories(&mut app);
+        } else {
+            open_more(&mut app);
+            choose_catalog(&mut app);
+            surface_action(&mut app, OttAction::ShowCategories);
+        }
+        let panel = ott_surface(&app).unwrap();
+        super::settings_back::open_browse_settings(&mut app);
+        key(&mut app, Key::Back);
+        assert_eq!(app.ott.as_ref().unwrap().page, "categories");
+        key(&mut app, Key::Back);
+        assert_eq!(app.ott.as_ref().unwrap().page, "categories", "Menu closes to Categories");
+        assert_eq!(ott_surface(&app), Some(panel), "Menu closes to Categories");
+        key(&mut app, Key::Back);
+        if direct {
+            assert_eq!(ott_surface(&app), None, "direct Categories returns to fullscreen");
+            assert_eq!(input_owner(&app), player);
+        } else {
+            assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+            assert_eq!(input_owner(&app), panel);
+        }
+        assert_eq!(retained_player(&app), before);
+        assert_no_player_replacement(&app);
+    }
+}
+
+#[test]
 fn classic_catalog_categories_back_returns_to_list_over_the_same_player() {
     let _serial = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));

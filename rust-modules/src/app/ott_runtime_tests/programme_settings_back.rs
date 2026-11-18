@@ -78,6 +78,25 @@ fn deliver_browse_request(app: &mut App, request: OttOut) {
     idle(app);
 }
 
+pub(super) fn open_browse_settings(app: &mut App) {
+    use plx_machine::machine::{Delivery, FocusKey};
+    use plx_ui::screen::{Enter, FocusTarget, ScreenEvent};
+    let owner = input_owner(app);
+    let entry = app.pages.nav.entry_of_instance(owner).unwrap();
+    for control in ["nav:browse", "nav:settings"] {
+        let plx_screens::registry::PageMemory::Ott(memory) = app.pages.return_state().memory else {
+            panic!("mounted OTT menu");
+        };
+        let target = FocusKey { entry, elem: memory.element_for_test(control).expect(control) };
+        app.pages.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(owner), Delivery::Screen(
+            ScreenEvent::Enter(Enter::Fresh { focus: FocusTarget::Elem(target) }))));
+        idle(app);
+        assert_eq!(app.pages.focus(), Some(target), "{control} must accept focus");
+        key(app, Key::Ok);
+    }
+    assert_eq!(app.ott.as_ref().unwrap().page, "settings");
+}
+
 #[test]
 fn browse_settings_return_preserves_player_and_has_a_finite_back_chain() {
     let _serial = plx_base::testlock::serial();
@@ -93,9 +112,7 @@ fn browse_settings_return_preserves_player_and_has_a_finite_back_chain() {
         let identity = route::playback_identity(&app.player.session);
         let epochs = { let r = app.ott.as_ref().unwrap(); (r.generation, r.play_generation, r.playback_epoch) };
         let saved = serde_json::to_value(&app.ott.as_ref().unwrap().saved).unwrap();
-        let request = browse_request(&mut app);
-        deliver_browse_request(&mut app, request);
-        assert_eq!(app.ott.as_ref().unwrap().page, "settings");
+        open_browse_settings(&mut app);
         assert!(app.ott.as_ref().unwrap().browse_settings.is_some());
         // Legitimate newer display publications must not invalidate the caller.
         app.ott.as_mut().unwrap().status = "Updated display status".into();
@@ -127,6 +144,71 @@ fn browse_settings_return_preserves_player_and_has_a_finite_back_chain() {
         assert_eq!(route::external_source(&app.player.session), source);
         assert!(app.adapters.player.is_live());
         assert!(app.player.pending_exit.is_none());
+    }
+}
+
+#[test]
+fn companion_settings_back_restores_settings_and_the_calling_menu() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for panel in [true, false] {
+        let mut app = catalog_app();
+        app.ott.as_mut().unwrap().saved.settings.insert("interfaceMode".into(), json!(UiMode::Classic.index()));
+        app.bridge.apply_ui_mode(UiMode::Classic);
+        if panel {
+            open_more(&mut app);
+            choose_catalog(&mut app);
+        } else {
+            bridge::show_page(&mut app.pages, AppArg::Ott);
+            idle(&mut app);
+        }
+        let caller = input_owner(&app);
+        open_browse_settings(&mut app);
+        for (id, page) in [("torrent.settings", "torrent-settings"), ("stremio.settings", "stremio-settings")] {
+            let service = app.ott.as_ref().unwrap().view().rows.into_iter()
+                .find(|row| row.id == id && row.enabled).unwrap();
+            app.pages.emit(MachineId::Instance(caller), Fx::App(AppFx::Ott(OttOut::Action {
+                reply: caller, action: service.action,
+            })));
+            idle(&mut app);
+            assert_eq!(app.ott.as_ref().unwrap().page, page);
+            key(&mut app, Key::Back);
+            assert_eq!(app.ott.as_ref().unwrap().page, "settings", "from {page}, panel={panel}");
+            key(&mut app, Key::Back);
+            assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+            assert_eq!(input_owner(&app), caller);
+            key(&mut app, Key::Ok);
+            assert_eq!(app.ott.as_ref().unwrap().page, "settings", "Menu restores Settings focus, panel={panel}");
+        }
+    }
+}
+
+#[test]
+fn player_panel_back_visits_companion_source_parents() {
+    let _serial = plx_base::testlock::serial();
+    let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
+    for (start, parents) in [
+        ("torrent-results", ["torrent-categories", "torrent-sources", "providers"]),
+        ("stremio-streams", ["stremio-movies", "stremio-categories", "providers"]),
+    ] {
+        let mut app = continuity_catalog_app(UiMode::Classic);
+        let identity = route::playback_identity(&app.player.session);
+        open_more(&mut app);
+        choose_catalog(&mut app);
+        let panel = input_owner(&app);
+        // Start with the adapter's published list, without querying an indexer.
+        let mut runtime = app.ott.take().unwrap();
+        runtime.page = start;
+        runtime.changed();
+        runtime.publish(&mut app);
+        app.ott = Some(runtime);
+        idle(&mut app);
+        for parent in parents {
+            key(&mut app, Key::Back);
+            assert_eq!(app.ott.as_ref().unwrap().page, parent, "starting from {start}");
+            assert_eq!(input_owner(&app), panel);
+        }
+        assert_eq!(route::playback_identity(&app.player.session), identity);
     }
 }
 

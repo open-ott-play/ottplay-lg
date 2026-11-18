@@ -7590,6 +7590,19 @@ impl PersonOwnerGateFixture {
         self.assertEqual(found, {("rust-modules/gfx/src/consumer.rs", n)
                                  for n in ("OWNED", "UNQUALIFIED", "VIA_EXPORT", "TWO")})
 
+    def test_heap_static_gate_distinguishes_inline_siblings_in_the_same_file(self):
+        found = self._heap_statics({
+            "gfx/src/lib.rs": (
+                "mod buffers { mod plain { pub struct Slot(pub usize); } "
+                "mod heap { pub struct Slot(pub String); }\n"
+                "static mut PLAIN: Option<crate::buffers::plain::Slot> = None;\n"
+                "static mut HEAP: Option<crate::buffers::heap::Slot> = None;\n"
+                "static mut BOTH: Option<(crate::buffers::plain::Slot, crate::buffers::heap::Slot)> = None;\n"
+                "}\n"
+            ),
+        })
+        self.assertEqual(found, {("rust-modules/gfx/src/lib.rs", name) for name in ("HEAP", "BOTH")})
+
     def test_heap_static_gate_does_not_resolve_a_name_to_an_associated_type(self):
         """`type Item = String;` inside an `impl`/`trait` block is an ASSOCIATED type, reachable only
         as `Self::Item`/`<T as Trait>::Item`; it is not what a bare `Item` names at module level. A

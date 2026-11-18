@@ -283,7 +283,13 @@ impl DecisionAlert {
         question: &'static core::ffi::CStr,
         body: &'static str,
     ) {
-        self.open_card(question, vec![Cow::Borrowed(body)], Answers::Two);
+        self.open(question);
+        self.reconcile_with_body(question, body);
+    }
+    pub(crate) fn reconcile_with_body(&mut self, question: &'static core::ffi::CStr, body: &'static str) {
+        // An empty TextView still occupies one line. A question alone has no body paragraph.
+        let paragraphs = if body.is_empty() { Vec::new() } else { vec![Cow::Borrowed(body)] };
+        self.reconcile_card(question, paragraphs, Answers::Two);
     }
     /// Open as a CARD: a title, any number of body paragraphs (each wrapped on its own, stacked
     /// [`PARA_GAP`] apart) and one or two answers. Focus starts on the cancel slot like every open;
@@ -548,6 +554,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_prompt_body_uses_question_only_button_geometry_even_after_relabel() {
+        use crate::decision_prompt::DecisionPrompt;
+        use plx_machine::machine::GroupId;
+
+        let _serial = plx_base::testlock::serial();
+        let measure = DisclosureMeasure;
+        let mut plain = DecisionAlert::new();
+        plain.open(c"Exit OTTPlay?");
+        let (cancel, _) = plain.frames(&measure);
+        plain.close();
+
+        let mut prompt = DecisionPrompt::new(GroupId(7), 30, 31, c"No", c"Yes");
+        prompt.open(c"Exit OTTPlay?", "");
+        let cancel_y = |prompt: &DecisionPrompt| prompt.place(30, &measure).unwrap().unwrap().rect.y;
+        assert_eq!(cancel_y(&prompt), cancel.y);
+        prompt.relabel(c"Exit OTTPlay?", "A paragraph.", c"No", c"Yes");
+        assert!(cancel_y(&prompt) > cancel.y);
+        prompt.relabel(c"Exit OTTPlay?", "", c"No", c"Yes");
+        assert_eq!(cancel_y(&prompt), cancel.y);
+        prompt.dismiss();
+    }
+
+    #[test]
     fn belarusian_delete_question_and_complete_scope_wrap_at_the_existing_text_sizes() {
         let _guard = plx_base::testlock::serial();
         let measure = DisclosureMeasure;
@@ -654,10 +683,7 @@ mod tests {
     /// completely at `body_h == 0.0` — not merely add a small gap. Written by computing the panel
     /// both ways and comparing.
     ///
-    /// Every shipping alert carries a body today — `ui::exit_alert`, which asked its question
-    /// alone, was retired on 2026-09-03 along with the root-BACK question itself — so this test is
-    /// the whole of what holds the body-free case. It stays for that reason rather than in spite of
-    /// it: arithmetic nothing exercises is arithmetic that drifts.
+    /// The OTTPlay exit question uses this compact layout.
     #[test]
     fn no_body_leaves_the_geometry_untouched() {
         let plain = layout(40.0, 0.0);
