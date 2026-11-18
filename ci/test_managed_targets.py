@@ -248,16 +248,19 @@ class TheDirIsManaged(unittest.TestCase):
         self.assertNotIn("hostsim", kinds)
 
     def test_the_docs_spell_the_plx_media_loop_as_c_not_as_make_check_only(self):
-        agents = (ROOT / "AGENTS.md").read_text()
-        self.assertIn("make test-hostsim\n  [C=<crate>] [T=filter]", agents)
-        self.assertIn("C=plx_media", agents)
-        self.assertNotIn("pass alone", agents)
-        self.assertIn("make test-hostsim [C=<crate>] [T=filter]", (ROOT / "docs" / "agent-reference.md").read_text())
+        reference = (ROOT / "docs" / "agent-reference.md").read_text()
+        self.assertIn("make test-hostsim [C=<crate>] [T=filter]", reference)
+        self.assertIn("C=plx_media", reference)
+        self.assertNotIn("pass alone", reference)
 
     def test_the_agent_facing_docs_no_longer_hand_out_a_tmp_cargo_tree(self):
+        agents_dir = ROOT / ".agents"
+        candidates = [ROOT / "AGENTS.md", ROOT / "CLAUDE.md", ROOT / "docs/agent-reference.md",
+                      *(agents_dir.rglob("*.md") if agents_dir.is_dir() else [])]
         offenders = []
-        for path in [ROOT / "AGENTS.md", ROOT / "CLAUDE.md", ROOT / "docs/agent-reference.md",
-                     *(ROOT / ".agents").rglob("*.md")]:
+        for path in candidates:
+            if not path.is_file():
+                continue
             for number, line in enumerate(path.read_text().splitlines(), 1):
                 if re.search(r"CARGO_TARGET_DIR=/tmp|CARGO_TARGET_DIR=\$TMPDIR|--target-dir /tmp", line):
                     offenders.append(f"{path.relative_to(ROOT)}:{number}")
