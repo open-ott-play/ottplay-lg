@@ -242,20 +242,9 @@ $1|$2
 # and include! files from Rust tokens. Test ownership propagates through descendants; any
 # production reference keeps a shared file in the scan. No filename suffix grants an exemption.
 wholly_test_files() {
-  python3 ci/rust_test_modules.py "$SRC"
-  python3 ci/rust_test_modules.py "$SRC_BASE"
-  python3 ci/rust_test_modules.py "$SRC_MACHINE"
-  python3 ci/rust_test_modules.py "$SRC_PLATFORM"
-  python3 ci/rust_test_modules.py "$SRC_GFX"
-  python3 ci/rust_test_modules.py "$SRC_NET"
-  python3 ci/rust_test_modules.py "$SRC_UI"
-  python3 ci/rust_test_modules.py "$SRC_PLEX"
-  python3 ci/rust_test_modules.py "$SRC_TELEMETRY"
-  python3 ci/rust_test_modules.py "$SRC_DATA"
-  python3 ci/rust_test_modules.py "$SRC_SESSION"
-  python3 ci/rust_test_modules.py "$SRC_MEDIA"
-  python3 ci/rust_test_modules.py "$SRC_APPKIT"
-  python3 ci/rust_test_modules.py "$SRC_SCREENS"
+  python3 ci/rust_test_modules.py "$SRC" "$SRC_BASE" "$SRC_MACHINE" "$SRC_PLATFORM" \
+    "$SRC_GFX" "$SRC_NET" "$SRC_UI" "$SRC_PLEX" "$SRC_TELEMETRY" "$SRC_DATA" \
+    "$SRC_SESSION" "$SRC_MEDIA" "$SRC_APPKIT" "$SRC_SCREENS"
 }
 
 # is_wholly_test <path>: the `wholly_test` list as a builtin lookup. Three gates below asked this
