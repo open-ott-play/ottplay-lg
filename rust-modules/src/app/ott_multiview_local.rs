@@ -11,6 +11,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 mod commands;
 #[path = "ott_multiview_local_handoff.rs"]
 mod handoff;
+#[path = "ott_multiview_local_recovery.rs"]
+mod recovery;
 #[path = "ott_multiview_local_transport.rs"]
 mod transport;
 pub(super) use transport::player_request;
@@ -50,6 +52,7 @@ struct LeaseWork {
 pub(super) struct Driver {
     pictures: [Option<Picture>; 9],
     handoff: handoff::Handoff,
+    recovery: [recovery::Budget; 9],
     last_stop: [Option<&'static str>; 9],
     workers: [Option<Work>; 9],
     stopping: [Option<ResolveTicket>; 9],
@@ -79,6 +82,7 @@ impl Default for Driver {
         Self {
             pictures: std::array::from_fn(|_| None),
             handoff: Default::default(),
+            recovery: Default::default(),
             last_stop: [None; 9],
             workers: std::array::from_fn(|_| None),
             stopping: [None; 9],
@@ -235,6 +239,7 @@ impl Driver {
     }
     pub fn has_work(&self) -> bool {
         self.handoff.has_waiters()
+            || self.recovery.iter().any(recovery::Budget::pending)
             || self.workers.iter().any(Option::is_some)
             || self.pictures.iter().any(Option::is_some)
             || self.stopping.iter().any(Option::is_some)
@@ -295,6 +300,7 @@ impl Driver {
         }
         runtime.multiview.validate_active_owner(runtime, app)?;
         let index = slot.index();
+        self.recovery[index] = Default::default();
         if self.stopping[index].is_some() || self.replacements[index].is_some() {
             self.replacements[index] = Some(handle);
             return Ok(());
@@ -317,6 +323,17 @@ impl Driver {
             runtime.multiview_effects.extend(transition.effects);
             return Ok(());
         }
+        self.start_source(runtime, app, slot, handle)
+    }
+
+    fn start_source(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        slot: SlotId,
+        handle: multiview_sources::SourceHandle,
+    ) -> Result<(), multiview::Error> {
+        let index = slot.index();
         let t = runtime.multiview.bind_source(slot, handle)?;
         self.last_stop[index] = None;
         runtime.multiview_effects.extend(t.effects);
@@ -643,6 +660,7 @@ impl Driver {
     pub fn revoke(&mut self, runtime: &mut Runtime) {
         self.restore_previous = false;
         self.replacements = [None; 9];
+        self.recovery = Default::default();
         if !self.closing {
             self.closing = true;
             let transition = runtime.multiview.close_scene();
@@ -769,6 +787,7 @@ impl Driver {
                                 AdmissionOutcome::Admitted,
                             );
                             picture.admitted = transition.is_ok();
+                            if picture.admitted { self.recovery[index].resumed(); }
                             if let Ok(t) = transition {
                                 runtime.multiview_effects.extend(t.effects);
                             }
@@ -794,6 +813,13 @@ impl Driver {
                         }
                     }
                     Event::Failure(_) | Event::Ended => {
+                        let retry_requested = !self.closing
+                            && !self.cleanup_failed
+                            && self.stopping[index].is_none()
+                            && self.replacements[index].is_none()
+                            && !picture.paused
+                            && !picture.receipt.input.is_cancelled()
+                            && self.recovery[index].on_failure(&event, picture, runtime);
                         if self.stopping[index].is_none() {
                             use plx_media::local_multiview::Error;
                             self.last_stop[index] = Some(match event {
@@ -803,6 +829,8 @@ impl Driver {
                                 Event::Failure(Error::Source) => "source_read",
                                 Event::Failure(Error::SourceDenied) => "provider_session_denied",
                                 Event::Failure(Error::SourceInterrupted) => "provider_interrupted",
+                                Event::Failure(Error::LostProviderLease) => "provider_lease_expired",
+                                Event::Failure(Error::SourceTemporarilyUnavailable) => "source_temporarily_unavailable",
                                 Event::Failure(Error::Playlist) => "playlist",
                                 Event::Failure(Error::Decode) => "decode",
                                 Event::Failure(Error::Budget) => "resource_limit",
@@ -821,7 +849,7 @@ impl Driver {
                             self.audio_applied = None;
                             self.audio.clear();
                         }
-                        let transition = if picture.admitted {
+                        let transition = if picture.admitted || retry_requested {
                             runtime.multiview.close_slot(picture.ticket.slot())
                         } else {
                             runtime
@@ -886,6 +914,8 @@ impl Driver {
                         if let Some(slot) = SlotId::new(index as u8) {
                             let _ = self.play_source(runtime, app, slot, handle);
                         }
+                    } else if self.recovery[index].pending() {
+                        self.recover_drained_slot(runtime, app, index, std::time::Instant::now());
                     }
                 }
             }

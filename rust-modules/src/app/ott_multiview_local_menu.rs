@@ -528,8 +528,7 @@ fn select(runtime: &mut Runtime, app: &mut App, key: &str) -> Result<(), &'stati
             if !driver.owns_ui(runtime, app) {
                 Err(multiview::Error::NotReady)
             } else {
-                runtime.multiview.close_slot(slot)
-                    .map(|transition| runtime.multiview_effects.extend(transition.effects))
+                driver.stop_slot(runtime, slot)
             }
         }
         Choice::Pause(slot, paused) => {

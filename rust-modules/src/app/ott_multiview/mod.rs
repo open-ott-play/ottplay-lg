@@ -381,6 +381,20 @@ impl Coordinator {
             (self.source_id(row.handle).as_deref() == Some(id)).then_some(row.handle)
         })
     }
+    pub(super) fn live_recovery_source(&self, ticket: ResolveTicket) -> Option<SourceHandle> {
+        self.require_current_ticket(ticket).ok()?;
+        self.sources[ticket.slot().index()]
+    }
+
+    pub(super) fn ready_after_retirement(&self, ticket: ResolveTicket) -> bool {
+        let slot = ticket.slot();
+        self.lifecycle == Lifecycle::Active
+            && self.scene_id == Some(ticket.scene())
+            && self.tickets[slot.index()].is_none()
+            && self.stopping[slot.index()].is_none()
+            && self.slot_status(slot) == Ok(SlotStatus::Empty)
+    }
+
     pub fn local_step_source(
         &self,
         slot: SlotId,

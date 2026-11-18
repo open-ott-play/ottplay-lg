@@ -101,7 +101,7 @@ impl Handoff {
     }
 }
 
-fn direct_hls(input: &LocalResolved) -> Option<&str> {
+pub(super) fn direct_hls(input: &LocalResolved) -> Option<&str> {
     if input.input.profile().kind != ProviderKind::M3u
         || input.input.entry.duration_ms.is_some_and(|ms| ms > 0)
     {
