@@ -71,6 +71,21 @@ These readings measure rendering inside the application. Verify audio and
 the visible panel separately. If a window stops, `last_stop` can identify the
 source, decoder or renderer stage. A new source attempt clears the old reason.
 
+### Replacing a channel on a session-limited HLS server
+
+Some HLS servers keep a session open briefly after its last request. On a
+four-session server, switching the fourth window can then evict another
+window. A gateway with this behavior can send the response header
+`OTT-Multiview-Admission: refresh-peers-v1` on its successful live HLS
+playlists. Configure the header on the device-specific media route.
+
+For direct M3U playback, OTTPlay then waits for the old reader to close and
+for the surviving windows on that origin to read their existing streams
+before opening the replacement. The other pictures and their audio keep
+playing. If the surviving sessions cannot confirm a read in time, the
+target window reports the timeout. Other HLS origins and TV-local files
+keep their usual start behavior.
+
 ## Using local scenes
 
 Open **Settings → Multiview** and choose a layout. Move the highlight with the
