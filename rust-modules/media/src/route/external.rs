@@ -477,7 +477,7 @@ fn install_external_source(
         && info.audio_codec == "mp2" && info.tracks.audio.first()
             .is_some_and(|track| crate::ff::hls_mp2::supported(track, &caps));
     if !info.audio_codec.is_empty() {
-        // AAC is native. Embedded MP2 is independently decoded to the admitted
+        // AAC and AC-3 are native. Embedded MP2 is independently decoded to the admitted
         // PCM sink; no native MPEG capability is inferred from decoder presence.
         if matches!(&source, ExternalSource::Hls(_))
             && !embedded_mp2
@@ -654,6 +654,38 @@ mod tests {
                 "external playback must not manufacture a server transcode contract");
             reset_player_control_for_test(&ps);
         }
+    }
+    #[test]
+    fn h264_ac3_live_hls_keeps_compressed_audio_and_respects_device_capabilities() {
+        let _serial = plx_base::testlock::serial();
+        let mut ps = PlaybackSession::IDLE;
+        reset_player_control_for_test(&ps);
+        let info = MediaInfo {
+            audio_codec: "ac3".into(),
+            audio_channels: 6,
+            audio_bit_depth: 0,
+            ..media()
+        };
+        let source = crate::ff::ExternalSource::Hls(
+            "https://example.invalid/live.m3u8".into());
+        request_external_source(&mut ps, &info, source, "Live", "M3U",
+            plx_platform::devcaps::assumed_shared()).unwrap();
+        assert!(is_segmented_hls(&ps));
+        assert_eq!(stream_vcodec(&ps), "h264");
+        assert_eq!(stream_acodec(&ps), "ac3");
+        assert_eq!(stream_achannels(&ps), 6);
+        assert!(stream_pcm(&ps).is_none());
+
+        let mut caps = plx_platform::devcaps::Caps::assumed();
+        caps.audio_channels.insert("ac3".into(), 2);
+        caps.native_ceiling.insert("ac3".into(), 2);
+        let previous = external_source(&ps);
+        let other = crate::ff::ExternalSource::Hls(
+            "https://example.invalid/other.m3u8".into());
+        assert_eq!(request_external_source(&mut ps, &info, other, "Other", "M3U",
+            std::sync::Arc::new(caps)), Err(ExternalError::UnsupportedAudio));
+        assert_eq!(external_source(&ps), previous);
+        reset_player_control_for_test(&ps);
     }
     #[test]
     fn invalid_input_does_not_replace_existing_source() {

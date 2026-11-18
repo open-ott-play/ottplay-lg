@@ -517,6 +517,7 @@ impl Snapshot {
             local_read,
             ticket,
             plex,
+            ordinal: binding.entry.as_ref().and_then(|entry| footer_ordinal(runtime, binding, entry)),
             binding: binding.clone(),
             permit,
             runtime: self.runtime.clone(),
@@ -541,6 +542,7 @@ pub(super) struct SourceWork {
     local_read: Option<transient::LocalSourceRead>,
     plex: Option<super::multiview_plex::Capture>,
     ticket: ResolveTicket,
+    ordinal: Option<u32>,
     binding: Binding,
     permit: Option<LocalFavoritePermit>,
     runtime: String,
@@ -692,6 +694,7 @@ impl PreparedMetadata {
         );
         Ok(AuthorizedInput {
             ticket: work.ticket,
+            ordinal: work.ordinal.or_else(|| footer_ordinal(runtime, &work.binding, &self.entry)),
             entry: self.entry,
             plex: self.plex,
             identity_digest: digest,
@@ -732,10 +735,32 @@ pub(super) struct AuthorizedInput {
     pub ticket: ResolveTicket,
     pub entry: CatalogEntry,
     pub plex: Option<super::multiview_plex::InputAuthority>,
+    pub(super) ordinal: Option<u32>,
     identity_digest: String,
     work: SourceWork,
 }
 impl AuthorizedInput {
+    pub(super) fn profile(&self) -> &ProviderProfile {
+        &self.work.binding.profile
+    }
+
+    pub(super) fn footer_collection<'a>(&'a self, runtime: &'a Runtime) -> &'a str {
+        if let (Some(read), MediaLocator::Local { relative_path }) =
+            (&self.work.local_read, &self.entry.media)
+        {
+            if plx_data::ott::valid_local_relative_path(relative_path) && !relative_path.contains('/')
+            {
+                if let Some(root) = runtime.current_local_root(&read.selection).filter(|root| {
+                    root.canonical_path.as_deref() == Some(self.profile().source.as_str())
+                        && plx_data::ott::valid_local_source_label(&root.name)
+                }) {
+                    return &root.name;
+                }
+            }
+        }
+        &self.entry.category
+    }
+
     /// Recheck expiring parental/source policy at the native Load boundary.
     /// A previously prepared descriptor is not a permanent permission grant.
     pub fn reauthorize(&self, runtime: &mut Runtime, app: &App) -> Result<(), Error> {
@@ -776,6 +801,20 @@ impl AuthorizedInput {
     pub fn current_for(&self, runtime: &Runtime) -> bool {
         self.work.current_for(runtime) && self.current_plex_authority()
     }
+}
+
+fn footer_ordinal(runtime: &Runtime, binding: &Binding, entry: &CatalogEntry) -> Option<u32> {
+    if !live_witness::live_source(&binding.profile, entry) {
+        return None;
+    }
+    live_label::captured_ordinal(entry, &binding.profile, binding.request.transient_owner,
+        live_label::CatalogSource {
+            profile: runtime.effective_profile()?,
+            entries: &runtime.catalog.entries,
+            transient_owner: runtime.transient.accepted.as_ref().map(transient::TransientMedia::owner),
+            source_current: runtime.loaded && !runtime.persistence_uncertain
+                && !runtime.cancel.load(Ordering::Acquire),
+        })
 }
 
 /// Fixture-only substitute for a metadata response after real capture. It cannot grant or open

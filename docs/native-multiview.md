@@ -16,12 +16,17 @@ layout. It does not create nine instances of the single global hardware player.
 
 The same scene supports PiP, four equal windows, nine equal windows, and a large
 central window with up to eight satellites. Rendering and Magic Remote hit tests
-share one pixel layout. Selecting a window changes the active input; one audio
-owner feeds the queued SDL output. Owner changes, pause, seek and scene retirement
-flush queued audio. One player volume/mute setting applies to the acknowledged
-audio owner through the software sink. It does not change the television's
-hardware volume. Commands accepted for an earlier scene cannot change a later
-scene or ordinary playback.
+share one pixel layout. In **Follows focus**, the active window plays at full
+player gain and other windows play at the background level (20% by default).
+Set that level in **Settings → Interface → Multiview background volume** or run
+`ott l_ setting multiviewBackgroundVolume 15`. A value of 0 gives audio
+only to the focused window. Selecting one explicit audio window isolates its
+sound. The player mixes decoded PCM into one SDL output and applies the ordinary
+volume and mute controls before playback.
+
+Each occupied window uses the current Classic or Modern player footer. Selecting
+a new item reveals that window's information for the configured display time.
+Empty windows leave the video area clear.
 
 Local source choices combine captured saved Favorites and the current catalog.
 They retain provider and profile identities, so M3U, VPortal, Plex and authorized
@@ -57,20 +62,44 @@ The feature must be qualified in stages: pure tests, actual concurrent decoding,
 GL and audio output, ARM packaging, then sustained playback on the target TV.
 Host compilation alone does not establish physical TV capacity or playback.
 
+To check a local grid, run `ott -j NAME status --details | jq .multiview_video_evidence`
+twice, several seconds apart. The slot IDs are zero-based. Compare the same
+scene and slot generation in both readings. Each successful GLES draw of a newly
+uploaded video frame increments `drawn_frames` once. `last_pts_us` gives its
+media timestamp. UI redraws of a held picture leave both values unchanged.
+These readings measure rendering inside the application. Verify audio and
+the visible panel separately. If a window stops, `last_stop` can identify the
+source, decoder or renderer stage. A new source attempt clears the old reason.
+
+### Replacing a channel on a session-limited HLS server
+
+Some HLS servers keep a session open briefly after its last request. On a
+four-session server, switching the fourth window can then evict another
+window. A gateway with this behavior can send the response header
+`OTT-Multiview-Admission: refresh-peers-v1` on its successful live HLS
+playlists. Configure the header on the device-specific media route.
+
+For direct M3U playback, OTTPlay then waits for the old reader to close and
+for the surviving windows on that origin to read their existing streams
+before opening the replacement. The other pictures and their audio keep
+playing. If the surviving sessions cannot confirm a read in time, the
+target window reports the timeout. Other HLS origins and TV-local files
+keep their usual start behavior.
+
 ## Using local scenes
 
-Open **Settings → Multiview** and choose a layout. On the video surface,
-press Back to open its controls, then use **Choose video / active slot** to pick
-a source for each window. The slot menu also selects the active video and audio owner. On the
-video surface, the shared focus controls and Magic Remote pointer use the same
-rectangles as rendering. Back opens the Multiview controls; Close restores the
-previous ordinary source only after retirement and fresh authorization.
-Inside those controls, Back returns from source selection to Videos, then to
-Layouts and audio, then to the initiating menu. Each return retires the old
-selection receipt and focuses the same window or the Videos control in its
-parent. If its source is no longer authorized, Back safely leaves
-the controls. A nonempty window also offers **Stop**, which retires only that
-window and leaves the other videos and the saved ordinary provider alone.
+Open **Settings → Multiview** and choose a layout. Move the highlight with the
+arrow keys, then press **OK** to activate that window and open its **Channel
+list**. With the Magic Remote pointer, click the window to do the same. Clicking
+near the top of a window opens its **Menu**. Both gestures follow the same
+rectangles as rendering, including the inset in picture-in-picture.
+
+Press **Yellow** or **M** for the active window's **Menu**. It offers source
+selection, play or pause, previous and next, restart, audio selection and stop
+when those actions are available. **Blue** or **I** reveals the active
+window's **Info** footer. **Back** closes the list or menu to the same grid.
+Selecting a different source changes only that window. **Close multiview**
+restores the previous ordinary source after retirement and fresh authorization.
 
 On a build that advertises these capabilities, the existing CLI uses windows
 1–9 (the wire protocol uses 0–8):
@@ -86,6 +115,23 @@ ott l mv focus 2
 ott l mv audio follows-focus
 ott l mv off restore_previous
 ```
+
+With a CLI that lists named selection in `ott PLAYER mv --help`, assign an
+M3U channel or an authorized TV-local file directly. In this example, replace
+the player alias and file name with your own:
+
+```sh
+ott l_ mv layout grid4
+ott l_ mv 1 m3u "VF Disney Movie"
+ott l_ mv 2 m3u "BCU Premiere HD"
+ott l_ mv 3 local "Movie.mp4"
+ott l_ mv sources 4 --provider m3u --search "РЕН ТВ HD"
+ott l_ mv window 4 play TICKET_FROM_WINDOW_4
+```
+
+Use the file's exact displayed name from the player's Local catalog or Favorites.
+Its spelling and case matter. When two channels share a name, choose the ticket
+for the intended entry or pass its `--source` ID with the named command.
 
 Repeat the source-list/play pair for `vportal` or `local`, or use a returned
 opaque profile token with `--profile`. Apply each fresh source ticket before

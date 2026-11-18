@@ -372,15 +372,19 @@ fn binding_fixture() -> service::ServiceBinding {
     service::ServiceBinding::from_protected_json(&json!({"server_id":"server_fixture","origin":"https://service.invalid",
         "audience":service::AUDIENCE,"installation_id":"dev_driver","control_bearer":"fixture-bearer-abcdefghijklmnopqrstuvwxyz"}).to_string()).unwrap().unwrap()
 }
-fn setup() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+// Recovery fixtures nest several setup steps on a normal host test thread.
+// Keep the two large owners on the heap as each step transfers them.
+type DriverFixture = (Driver, Box<App>, Box<Runtime>, Arc<Mutex<FixtureState>>);
+
+fn setup() -> DriverFixture {
     setup_with_capabilities(capabilities())
 }
-fn setup_with_capabilities(
-    advertised_capabilities: service::Capabilities,
-) -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
-    let mut app = crate::app::run::lifecycle_regression_tests::app();
+fn setup_with_capabilities(advertised_capabilities: service::Capabilities) -> DriverFixture {
+    let mut app = Box::new(crate::app::run::lifecycle_regression_tests::app());
     app.running = true;
-    let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
+    let mut runtime = Box::new(Runtime::unloaded(
+        crate::app::ott_companion::Supervisor::inert_for_test(),
+    ));
     runtime.loaded = true;
     runtime.state_load = StateLoad::Idle;
     runtime.entropy = Some([1; 16]);
@@ -1599,7 +1603,7 @@ fn finish_current_worker(driver: &mut Driver, runtime: &mut Runtime, app: &mut A
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-fn preparing_play_fixture(id: u64) -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+fn preparing_play_fixture(id: u64) -> DriverFixture {
     let (mut driver, mut app, mut runtime, state) = setup();
     driver.metadata_fixture = Some(metadata_fixture);
     layout(&mut driver, &mut runtime, &mut app, id, "grid4");
@@ -2114,7 +2118,7 @@ fn accepted_budget_play_slot(
     drive(driver, runtime, app);
     assert!(driver.inputs[slot].is_some());
 }
-fn accepted_budget_setup() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+fn accepted_budget_setup() -> DriverFixture {
     let (mut driver, mut app, mut runtime, state) = setup();
     driver.metadata_fixture = Some(metadata_fixture);
     layout(&mut driver, &mut runtime, &mut app, 900, "pip");
@@ -2497,7 +2501,7 @@ fn recovery_rejected_control_ack_never_becomes_successful_status_for_any_operati
     }
 }
 
-fn recovery_fixture() -> (Driver, App, Runtime, Arc<Mutex<FixtureState>>) {
+fn recovery_fixture() -> DriverFixture {
     let (mut driver, mut app, mut runtime, state) = accepted_budget_setup();
     runtime.multiview_connection.refresh();
     driver.tick(&mut runtime, &mut app);
@@ -3136,8 +3140,8 @@ fn review_admitted_picture() -> ReviewPictureRig {
     assert_eq!(runtime.multiview_output.status, "admitted");
     ReviewPictureRig {
         driver,
-        app: Box::new(app),
-        runtime: Box::new(runtime),
+        app,
+        runtime,
         state,
     }
 }

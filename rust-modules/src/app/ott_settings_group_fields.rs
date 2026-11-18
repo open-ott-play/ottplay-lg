@@ -51,7 +51,7 @@ impl Group {
         match self {
             // Interface mode has its own public preference writer, not this draft.
             Self::Interface => &[
-                "uiFontScale", "sleepTimeout", "osdOpacity", "volumeStep", "permanentTime",
+                "uiFontScale", "sleepTimeout", "osdOpacity", "volumeStep", "multiviewBackgroundVolume", "permanentTime",
             ],
             Self::Colors => &["uiColorConfig"],
             Self::Lists => &["pageSize", "listPosition"],
@@ -81,7 +81,7 @@ pub(super) fn candidate(
         "sleepTimeout" => sleep_timer::Choice::from_index(value)
             .map(|choice| runtime.sleep_timer_candidate(choice))
             .ok_or("Select a supported sleep timer duration"),
-        "osdOpacity" | "permanentTime" | "pageSize" | "listPosition" | "arrowFun"
+        "multiviewBackgroundVolume" | "osdOpacity" | "permanentTime" | "pageSize" | "listPosition" | "arrowFun"
         | "seek13Duration" | "showNumber" | "showName" | "showProgram" | "showDescription" | "showProgress" => {
             runtime.osd_setting_candidate(key, &value.to_string(), session)
         }
@@ -100,7 +100,7 @@ pub(super) fn value(runtime: &Runtime, key: &str) -> Option<Value> {
         "volumeStep" => Some(json!(runtime.volume_step())),
         "infoTimeout" => Some(json!(runtime.info_timeout().seconds())),
         "sleepTimeout" => Some(json!(runtime.sleep_timer_choice().index())),
-        "osdOpacity" | "permanentTime" | "pageSize" | "listPosition" | "arrowFun"
+        "multiviewBackgroundVolume" | "osdOpacity" | "permanentTime" | "pageSize" | "listPosition" | "arrowFun"
         | "seek13Duration" | "showNumber" | "showName" | "showProgram" | "showDescription" | "showProgress" => {
             runtime.osd_setting_value(key)?.parse::<u64>().ok().map(Value::from)
         }
@@ -115,6 +115,7 @@ pub(super) fn title(key: &str) -> &'static str {
         "sleepTimeout" => "Sleep timer",
         "osdOpacity" => "OSD background level",
         "volumeStep" => "Volume step (%)",
+        "multiviewBackgroundVolume" => "Multiview background volume (%)",
         "permanentTime" => "Permanent clock",
         "pageSize" => "Classic list rows",
         "listPosition" => "Classic list side",
@@ -137,6 +138,7 @@ pub(super) fn choices(key: &str) -> Vec<(u64, String)> {
     if let Some(field) = subtitle_settings::selection::Field::find(key) { return field.choices(); }
     match key {
         "uiFontScale" => (20..=200).map(|n| (n, format!("{n}%"))).collect(),
+        "multiviewBackgroundVolume" => (0..=100).map(|n| (n, format!("{n}%"))).collect(),
         "volumeStep" => (3..=10).map(|n| (n, format!("{n}%"))).collect(),
         "infoTimeout" => (3..=20).map(|n| (n, format!("{n} s"))).collect(),
         "pageSize" => (10..=30).map(|n| (n, n.to_string())).collect(),

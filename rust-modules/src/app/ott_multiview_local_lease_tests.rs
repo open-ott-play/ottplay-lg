@@ -5,7 +5,7 @@ use multiview_sources::{Snapshot, SourceHandle};
 use plx_data::ott::multiview::{Scene, SceneId};
 use std::num::NonZeroU64;
 
-fn receipt() -> (App, Runtime, Snapshot, SourceHandle, LocalResolved) {
+pub(super) fn receipt() -> (App, Runtime, Snapshot, SourceHandle, LocalResolved) {
     let mut app = crate::app::run::lifecycle_regression_tests::app();
     app.running = true;
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
@@ -359,4 +359,112 @@ fn pause_publication_is_ticket_bound_idempotent_and_visible_in_actual_scene_stat
     }).unwrap();
     runtime.multiview.stop_completed(stop, StopResult::Stopped).unwrap();
     assert!(runtime.multiview.set_paused(ticket, true).is_err(), "retired ticket cannot pause another attempt");
+}
+
+#[test]
+fn lost_playing_sessions_rebind_only_their_original_sources_after_a_long_gap() {
+    let _serial = plx_base::testlock::serial();
+    for count in [1, 3] {
+        let (app, mut runtime, _snapshot, _, _) = receipt();
+        let first = runtime.catalog.entries[0].clone();
+        for number in 1..4 {
+            let mut entry = first.clone();
+            entry.id = format!("channel-{number}");
+            entry.title = format!("Channel {number}");
+            entry.media = MediaLocator::Http { url: format!("https://fixture.invalid/{number}.m3u8") };
+            runtime.catalog.entries.push(entry);
+        }
+        let mut scene = std::mem::take(&mut runtime.multiview);
+        scene.activate_local(&runtime, &app, Layout::Grid4).unwrap();
+        runtime.multiview = scene;
+        let handles = runtime.multiview.source_rows().iter().map(|row| row.handle).collect::<Vec<_>>();
+        let mut driver = Driver::active_layout_for_test(Layout::Grid4);
+        let mut original = Vec::new();
+        for (i, handle) in handles.iter().copied().enumerate() {
+            let slot = SlotId::new(i as u8).unwrap();
+            driver.play_source(&mut runtime, &app, slot, handle).unwrap();
+            let j = runtime.multiview_effects.iter().position(|e| matches!(e, Effect::PrepareMetadata { .. })).unwrap();
+            let Effect::PrepareMetadata { ticket, work } = runtime.multiview_effects.remove(j).unwrap() else { unreachable!() };
+            resolve_attempt(&mut runtime, &app, work);
+            runtime.multiview.backend_start_completed(ticket, AdmissionOutcome::Admitted).unwrap();
+            original.push(ticket);
+        }
+        let loss = std::time::Instant::now() + std::time::Duration::from_secs(31);
+        runtime.multiview_effects.clear();
+        // Previously admitted leases disappear while the other windows remain healthy.
+        for (i, ticket) in original[..count].iter().copied().enumerate() {
+            let handle = runtime.multiview.live_recovery_source(ticket).unwrap();
+            driver.recovery[i].schedule(ticket, handle, loss);
+            runtime.multiview.close_slot(ticket.slot()).unwrap();
+            assert!(!runtime.multiview.ready_after_retirement(ticket));
+            runtime.multiview.stop_completed(ticket, StopResult::Stopped).unwrap();
+            assert!(runtime.multiview.ready_after_retirement(ticket));
+            driver.recover_drained_slot(&mut runtime, &app, i, loss);
+        }
+        assert!(runtime.multiview_effects.is_empty());
+        for i in 0..count {
+            driver.recover_drained_slot(&mut runtime, &app, i, loss + std::time::Duration::from_secs(2));
+        }
+        let mut recovered = vec![false; count];
+        for e in std::mem::take(&mut runtime.multiview_effects) {
+            if let Effect::PrepareMetadata { ticket, work } = e {
+                let i = ticket.slot().index();
+                assert!(!recovered[i]);
+                recovered[i] = true;
+                assert_ne!(ticket, original[i]);
+                assert_eq!(ticket.source(), handles[i].source_ref());
+                assert_eq!(ticket.media(), handles[i].media_ref());
+                resolve_attempt(&mut runtime, &app, work);
+                assert!(runtime.multiview_effects.iter().any(|e| matches!(e, Effect::Backend(BackendIntent::Load { ticket: t, .. }) if *t == ticket)));
+                runtime.multiview.backend_start_completed(ticket, AdmissionOutcome::Admitted).unwrap();
+            }
+        }
+        assert!(recovered.into_iter().all(|b| b));
+        for ticket in &original[count..] {
+            assert!(runtime.multiview.require_current_ticket(*ticket).is_ok());
+            assert!(matches!(runtime.multiview.slot_status(ticket.slot()),
+                Ok(plx_data::ott::multiview::SlotStatus::Playing { .. })));
+        }
+    }
+}
+
+#[test]
+fn user_stop_or_new_selection_supersedes_automatic_recovery() {
+    let _serial = plx_base::testlock::serial();
+    for stop in [true, false] {
+        let (app, mut runtime, mut driver, handles, ticket, work) = queued_local_attempt();
+        resolve_attempt(&mut runtime, &app, work);
+        runtime.multiview.backend_start_completed(ticket, AdmissionOutcome::Admitted).unwrap();
+        let now = std::time::Instant::now();
+        driver.recovery[0].schedule(ticket, handles[0], now);
+        runtime.multiview.close_slot(ticket.slot()).unwrap();
+        if stop { driver.stop_slot(&mut runtime, ticket.slot()).unwrap(); }
+        runtime.multiview.stop_completed(ticket, StopResult::Stopped).unwrap();
+        if !stop { driver.play_source(&mut runtime, &app, ticket.slot(), handles[1]).unwrap(); }
+        assert!(!driver.recovery[0].pending());
+        driver.recover_drained_slot(&mut runtime, &app, 0, now + std::time::Duration::from_secs(31));
+        let queued = runtime.multiview_effects.iter().filter_map(|effect| match effect {
+            Effect::PrepareMetadata { ticket, .. } => Some(ticket.source()), _ => None,
+        }).collect::<Vec<_>>();
+        if stop { assert!(queued.is_empty()); } else { assert_eq!(queued, [handles[1].source_ref()]); }
+    }
+}
+
+#[test]
+fn repeated_losses_have_a_rolling_budget_per_window() {
+    let _serial = plx_base::testlock::serial();
+    let (_, _, _, handle, receipt) = receipt();
+    let ticket = receipt.input.ticket;
+    let mut budget = recovery::Budget::default();
+    let now = std::time::Instant::now();
+    for elapsed in [0, 8] {
+        let start = now + std::time::Duration::from_secs(elapsed);
+        budget.schedule(ticket, handle, start);
+        assert!(budget.take_due(start).is_none());
+        assert_eq!(budget.take_due(start + std::time::Duration::from_secs(2)), Some((ticket, handle)));
+    }
+    budget.schedule(ticket, handle, now + std::time::Duration::from_secs(20));
+    assert!(!budget.pending());
+    budget.schedule(ticket, handle, now + std::time::Duration::from_secs(301));
+    assert!(budget.pending());
 }

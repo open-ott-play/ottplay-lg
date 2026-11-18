@@ -622,15 +622,14 @@ fn finish_playlist_response(source: &mut crate::curlio::CurlSource, mut bytes: V
     Ok((landed, text))
 }
 
-/// Keep the existing admission rule and expose only fixed codec-pair labels.
+/// Admit implemented compressed-stream pairings and expose only fixed codec-pair labels.
 /// Unknown probe strings must never carry source text into a player error.
 fn codec_refusal(video: &str, audio: &str) -> Option<&'static str> {
     Some(match (video, audio) {
-        ("h264", "" | "aac") | ("hevc", "aac" | "ac3") => return None,
+        ("h264", "" | "aac" | "ac3") | ("hevc", "aac" | "ac3") => return None,
         ("hevc", "") => "Native HLS does not support HEVC video without audio",
         ("hevc", "eac3") => "Native HLS does not support HEVC video with E-AC-3 audio",
         ("hevc", "mp2") => "Native HLS does not support HEVC video with MP2 audio",
-        ("h264", "ac3") => "Native HLS does not support H.264 video with AC-3 audio",
         ("h264", "eac3") => "Native HLS does not support H.264 video with E-AC-3 audio",
         ("h264", "mp2") => "Native HLS does not support H.264 video with MP2 audio",
         ("h264", "mp3") => "Native HLS does not support H.264 video with MP3 audio",
@@ -1146,12 +1145,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codec_admission_adds_only_hevc_with_native_aac_or_ac3_to_the_existing_rule() {
+    fn muxed_codec_admission_accepts_native_pairs_only() {
         for video in ["h264", "hevc", "mpeg2video", "H264", "", "https://private.invalid/source"] {
             for audio in ["", "aac", "ac3", "eac3", "mp2", "mp3", "opus", "AAC"] {
-                let previously_admitted = (video == "h264" && (audio.is_empty() || audio == "aac"))
+                let supported = (video == "h264" && matches!(audio, "" | "aac" | "ac3"))
                     || (video == "hevc" && matches!(audio, "aac" | "ac3"));
-                assert_eq!(codec_refusal(video, audio).is_none(), previously_admitted);
+                assert_eq!(codec_refusal(video, audio).is_none(), supported);
             }
         }
     }
@@ -1162,7 +1161,6 @@ mod tests {
             ("hevc", "", "HEVC video without audio"),
             ("hevc", "eac3", "HEVC video with E-AC-3 audio"),
             ("hevc", "mp2", "HEVC video with MP2 audio"),
-            ("h264", "ac3", "H.264 video with AC-3 audio"),
             ("h264", "eac3", "H.264 video with E-AC-3 audio"),
             ("h264", "mp2", "H.264 video with MP2 audio"),
             ("h264", "mp3", "H.264 video with MP3 audio"),

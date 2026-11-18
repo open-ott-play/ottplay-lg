@@ -552,6 +552,7 @@ struct Xfer {
     range_start: i64,
     /// Final response declaration only; reset at every response/redirect boundary.
     accepts_ranges: bool,
+    multiview_refresh_peers: bool,
     /// The `Location` of the response being read, as the server wrote it: empty when it sent none,
     /// when it was too long to keep ([`LOCATION_CAP`], so that a truncated URL is never requested) or
     /// when no response has begun. Cleared by each status line.
@@ -572,6 +573,7 @@ impl Xfer {
             range_total: -1,
             range_start: -1,
             accepts_ranges: false,
+            multiview_refresh_peers: false,
             location: Vec::new(),
             headers_done: false,
         }
@@ -585,6 +587,7 @@ impl Xfer {
         self.range_total = -1;
         self.range_start = -1;
         self.accepts_ranges = false;
+        self.multiview_refresh_peers = false;
         self.location.clear();
         self.headers_done = false;
     }
@@ -2065,6 +2068,10 @@ impl CurlSource {
         self.xfer.status
     }
 
+    pub(crate) fn multiview_refresh_peers(&self) -> bool {
+        self.xfer.headers_done && (200..300).contains(&self.status()) && self.xfer.multiview_refresh_peers
+    }
+
     /// What this transfer holds of the body beyond what the reader has taken. With nothing
     /// buffered, it first takes the one non-blocking transfer step [`read_until`](Self::read_until)
     /// would take next, so bytes already in the socket count as received here exactly as they
@@ -2653,6 +2660,7 @@ fn parse_header_line(x: &mut Xfer, line: &[u8]) {
         x.range_total = -1;
         x.range_start = -1;
         x.accepts_ranges = false;
+        x.multiview_refresh_peers = false;
         x.location.clear();
         x.headers_done = false;
         return;
@@ -2665,6 +2673,8 @@ fn parse_header_line(x: &mut Xfer, line: &[u8]) {
         x.range_total = total;
     } else if let Some(v) = header_value(t, b"accept-ranges:") {
         x.accepts_ranges = v.eq_ignore_ascii_case(b"bytes");
+    } else if let Some(v) = header_value(t, b"ott-multiview-admission:") {
+        if !x.headers_done { x.multiview_refresh_peers = v == b"refresh-peers-v1"; }
     } else if let Some(v) = header_value(t, b"location:") {
         // Too long to keep is as good as absent: the open fails rather than request a truncated URL.
         x.location = if v.len() <= LOCATION_CAP { v.to_vec() } else { Vec::new() };

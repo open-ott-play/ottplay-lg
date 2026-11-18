@@ -87,7 +87,7 @@ fn classic_settings_schema_appends_all_classic_fields_and_hides_duplicate_arrow_
         cursor = result["data"]["next_cursor"].clone();
         if cursor.is_null() { break; }
     }
-    assert_eq!(ids.len(), 47);
+    assert_eq!(ids.len(), 48);
     assert_eq!(ids[43], "nativeEpgApiV1");
     assert_eq!(ids[44], "nativeInputProbeV1");
     assert_eq!(ids[45], "nativeMultiviewService");

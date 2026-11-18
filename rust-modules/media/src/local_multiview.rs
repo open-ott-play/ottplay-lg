@@ -2,8 +2,8 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
 
@@ -13,6 +13,10 @@ pub enum Error {
     InvalidLimits,
     Unsupported,
     Source,
+    SourceDenied,
+    LostProviderLease,
+    SourceInterrupted,
+    SourceTemporarilyUnavailable,
     Playlist,
     Decode,
     Budget,
@@ -95,6 +99,27 @@ pub(crate) struct Mailbox {
     pub audio: std::collections::VecDeque<(u64, PcmChunk)>,
     pub terminal: Option<Result<(), Error>>,
 }
+/// A completed request counts after a retirement only if it also *started* afterwards.
+static HLS_REQUEST_ORDER: AtomicU64 = AtomicU64::new(0);
+
+/// Sample after the outgoing reader has fully retired. A sibling's receipt must exceed this value.
+pub fn hls_handoff_barrier() -> u64 {
+    HLS_REQUEST_ORDER.load(Ordering::SeqCst)
+}
+
+pub(crate) fn hls_request_started() -> u64 {
+    HLS_REQUEST_ORDER.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Canonical, credential-free origin shared by the scheduler and HLS transport.
+pub fn hls_handoff_origin(url: &str) -> Option<String> {
+    if url.contains('#') { return None; }
+    let url = plx_data::ott::http_url(url)?;
+    let (origin, _) = plx_net::net::origin::split(&url);
+    Some(origin.base().to_ascii_lowercase())
+}
+
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
     held: Option<crate::ff::HeldLocalFile>,
@@ -106,6 +131,11 @@ pub(crate) struct Control {
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
     pub seekable: AtomicBool,
+    pub hls_origin: OnceLock<String>,
+    pub hls_live: AtomicBool,
+    pub video_decoded: AtomicBool,
+    pub hls_request: AtomicU64,
+    pub duration_us: AtomicI64,
     pub seek: Mutex<Option<(u64, i64)>>,
     pub mailbox: Mutex<Mailbox>,
 }
@@ -194,6 +224,11 @@ impl Session {
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
             seekable: AtomicBool::new(false),
+            hls_origin: OnceLock::new(),
+            hls_live: AtomicBool::new(false),
+            video_decoded: AtomicBool::new(false),
+            hls_request: AtomicU64::new(0),
+            duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
         });
@@ -250,6 +285,7 @@ impl Session {
         }
         if let Some((generation, f)) = m.video.take() {
             if generation == self.control.timeline.load(Ordering::Acquire) {
+                self.control.video_decoded.store(true, Ordering::Release);
                 return Some(Event::Video(f));
             }
         }
@@ -265,6 +301,13 @@ impl Session {
             Err(e) => Event::Failure(e),
         })
     }
+    /// Native demux duration for this exact input. A live or unknown timeline
+    /// has no duration; catalogue metadata remains a separate caller fallback.
+    pub fn duration_us(&self) -> Option<i64> {
+        let duration = self.control.duration_us.load(Ordering::Acquire);
+        (duration > 0).then_some(duration)
+    }
+
     pub fn set_audio(&mut self, on: bool) {
         if self.control.audio.swap(on, Ordering::AcqRel) == on {
             return;
@@ -332,6 +375,21 @@ impl Session {
             && !self.control.retired.load(Ordering::Acquire)
             && self.control.seekable.load(Ordering::Acquire)
     }
+    /// An opted-in live HLS gateway and the latest completed leaf/segment GET's start order.
+    /// Origin discovery alone has a zero receipt. No path, query or playback ID escapes the worker.
+    pub fn hls_handoff(&self) -> Option<(String, u64)> {
+        if !self.control.video_decoded.load(Ordering::Acquire) { return None; }
+        self.hls_handoff_lease()
+    }
+
+    /// The gateway can register a confirmed master before its leaf or first picture arrives.
+    /// Keep that fact available for retirement while the decoder is still starting.
+    pub fn hls_handoff_lease(&self) -> Option<(String, u64)> {
+        if !self.control.hls_live.load(Ordering::Acquire) { return None; }
+        let origin = self.control.hls_origin.get()?;
+        Some((origin.clone(), self.control.hls_request.load(Ordering::Acquire)))
+    }
+
     pub fn is_retired(&self) -> bool {
         self.control.retired.load(Ordering::Acquire)
             && self.worker.as_ref().is_none_or(|w| w.is_finished())
@@ -345,6 +403,21 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn starting_live_gateway_has_a_retirement_lease_before_its_first_video() {
+        let session = manual_session();
+        assert!(session.hls_handoff_lease().is_none());
+        session.control.hls_origin.set("http://gateway.invalid:8080".into()).unwrap();
+        session.control.hls_live.store(true, Ordering::Release);
+        assert_eq!(session.hls_handoff_lease(), Some(("http://gateway.invalid:8080".into(), 0)));
+        assert!(session.hls_handoff().is_none());
+        session.control.video_decoded.store(true, Ordering::Release);
+        assert_eq!(session.hls_handoff(), session.hls_handoff_lease());
+        session.control.hls_live.store(false, Ordering::Release);
+        assert!(session.hls_handoff_lease().is_none());
+        assert!(session.hls_handoff().is_none());
+    }
+
     #[test]
     fn budgets_are_closed_and_bounded() {
         assert!(Limits::default().valid());
@@ -375,12 +448,27 @@ mod tests {
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
                 seekable: AtomicBool::new(true),
+                hls_origin: OnceLock::new(),
+                hls_live: AtomicBool::new(false),
+                video_decoded: AtomicBool::new(false),
+                hls_request: AtomicU64::new(0),
+                duration_us: AtomicI64::new(0),
                 seek: Mutex::new(None),
                 mailbox: Mutex::new(Mailbox::default()),
             }),
             worker: None,
         }
     }
+    #[test]
+    fn duration_is_private_to_the_open_decoder() {
+        let first = manual_session();
+        let second = manual_session();
+        assert_eq!(first.duration_us(), None);
+        first.control.duration_us.store(90_000_000, Ordering::Release);
+        assert_eq!(first.duration_us(), Some(90_000_000));
+        assert_eq!(second.duration_us(), None);
+    }
+
     #[test]
     fn repeated_audio_owner_preserves_pcm_but_owner_change_withdraws_it() {
         let mut s = manual_session();

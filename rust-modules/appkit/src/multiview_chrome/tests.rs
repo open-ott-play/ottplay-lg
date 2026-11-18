@@ -12,50 +12,107 @@ fn views() -> Vec<SlotView> {
 fn frame() -> ChromeFrame {
     ChromeFrame::new(Layout::new(Rect::FULL, Mode::Grid4, 1.0).unwrap(), &views(), state()).unwrap()
 }
-fn inside(a: Rect, b: Rect) -> bool {
-    b.x >= a.x && b.y >= a.y && b.x + b.w <= a.x + a.w && b.y + b.h <= a.y + a.h
+fn playing(title: &str) -> NowPlaying {
+    NowPlaying { title: title.into(), ott: None, is_episode: false, is_real_episode: false,
+        ep_title: String::new(), season: 0, index: 0, summary: String::new(), year: 0,
+        dur_ms: 0, rating: String::new(), thumb: String::new(), detail_rk: String::new() }
 }
 
 #[test]
-fn chrome_projection_keeps_active_audio_focus_and_placeholders_independent() {
-    let frame = frame();
-    assert_eq!(frame.slots().len(), 4);
-    for slot in frame.slots() {
-        assert_eq!(slot.active, slot.id == 0);
-        assert_eq!(slot.audio, slot.id == 1);
-        assert_eq!(slot.focused, slot.id == 2);
-        for r in [slot.title_band, slot.title_text, slot.body].into_iter()
-            .chain(slot.active_marker).chain(slot.audio_marker).chain(slot.border) {
-            assert!(inside(slot.bounds, r));
+fn bare_grid_has_no_slot_numbers_labels_badges_or_dividers() {
+    let f = frame();
+    let mut ui = WindowFooters::default();
+    let mut draw = || ui.draw(&f, Painter::recording(), &FixtureMeasure, UiMode::Classic,
+        OsdOpacity::default(), None, 700, 2_000);
+    assert!(draw_census::capture_runs(&mut draw).is_empty());
+    assert!(draw_census::capture_icons(&mut draw).is_empty());
+    assert!(draw_census::capture_rect_inks(&mut draw).is_empty());
+}
+
+#[test]
+fn only_recognized_provider_failures_draw_a_timed_notice_in_the_affected_slot() {
+    assert_eq!(ProviderNotice::from_stop(Some("private URL or server response")), None);
+    let mut scene = frame();
+    let denied = ProviderNotice::from_stop(Some("provider_session_denied")).unwrap();
+    let interrupted = ProviderNotice::from_stop(Some("provider_interrupted")).unwrap();
+    scene.set_provider_notice(2, denied);
+    // An old terminal event cannot cover a healthy picture.
+    scene.set_provider_notice(0, interrupted);
+    let mut state = WindowFooters::default();
+    let draw = |state: &mut WindowFooters, frame: &ChromeFrame, now| draw_census::capture_runs(|| state.draw(
+        frame, Painter::recording(), &FixtureMeasure, UiMode::Classic, OsdOpacity::default(), None, now, 3_000));
+    let runs = draw(&mut state, &scene, 100);
+    assert!(runs.iter().any(|r| r.text == denied.message()));
+    assert!(runs.iter().all(|r| r.clip == Some(scene.slots()[2].bounds)));
+    assert!(draw(&mut state, &scene, 3_100).is_empty());
+    scene.set_provider_notice(2, interrupted);
+    assert!(draw(&mut state, &scene, 3_101).iter().any(|r| r.text == interrupted.message()));
+}
+
+#[test]
+fn occupied_window_paints_the_shared_footer_to_scale_until_the_configured_deadline() {
+    for mode in [Mode::Grid4, Mode::Grid9, Mode::Perimeter { satellites: 8 }] {
+        let mut f = ChromeFrame::new(Layout::new(Rect::FULL, mode, 1.0).unwrap(), &views(), state()).unwrap();
+        f.set_footer(0, playing("Film A"));
+        f.set_footer(1, playing("Film B"));
+        f.set_footer(3, playing("Stale empty"));
+        let mut ui = WindowFooters::default();
+        let draw = |ui: &mut WindowFooters, now| draw_census::capture_runs(|| ui.draw(
+            &f, Painter::recording(), &FixtureMeasure, UiMode::Classic, OsdOpacity::default(),
+            None, now, 2_000));
+        let shown = draw(&mut ui, 10);
+        for (id, title) in [(0, "Film A"), (1, "Film B")] {
+            let bounds = f.slots()[id].bounds;
+            let run = shown.iter().find(|line| line.text == title).unwrap();
+            assert_eq!(run.clip, Some(bounds));
+            assert!(run.at.y > bounds.cy() && run.at.y < bounds.y + bounds.h);
         }
+        assert!(!shown.iter().any(|line| line.text.contains("Window") || line.text.contains("Stale")));
+        assert!(draw(&mut ui, 2_010).is_empty());
+        ui.reveal(1, 2_500);
+        let shown = draw(&mut ui, 2_501);
+        assert!(shown.iter().any(|line| line.text == "Film B"));
+        assert!(!shown.iter().any(|line| line.text == "Film A"));
     }
-    assert_eq!(frame.slots()[3].state, SlotState::Empty);
-    assert_eq!(frame.slots()[3].title, "");
-    let mut input = views(); input[0].title = "Title\n\0X".into();
-    let clean = ChromeFrame::new(frame.layout().clone(), &input, state()).unwrap();
-    assert_eq!(clean.slots()[0].title, "TitleX");
 }
 
 #[test]
-fn real_draw_paints_markers_and_closed_placeholders_without_covering_playing_video() {
-    let frame = frame();
-    let labels = Labels { empty: "Choose video", loading: "Loading", failed: "Unavailable" };
-    let draw = || frame.draw(Painter::recording(), &FixtureMeasure, &labels);
-    let icons = draw_census::capture_icons(draw);
-    assert_eq!(icons.len(), 2);
-    assert!(icons.iter().any(|(icon, rect)| *icon == Icon::Check && Some(*rect) == frame.slots()[0].active_marker));
-    assert!(icons.iter().any(|(icon, rect)| *icon == Icon::Audio && Some(*rect) == frame.slots()[1].audio_marker));
-    let runs = draw_census::capture_runs(draw);
-    for label in ["Window 1", "Loading", "Unavailable", "Choose video"] {
-        assert!(runs.iter().any(|run| run.text == label), "actual recorded text: {label}");
-    }
-    assert!(runs.iter().all(|run| run.clip.is_some_and(|clip|
-        frame.slots().iter().any(|slot| slot.bounds == clip))));
-    assert_eq!(draw_census::clip(), None);
-    let fills = draw_census::capture_rect_inks(draw);
-    assert!(!fills.iter().any(|(r, _, _)| *r == frame.slots()[0].bounds));
-    for slot in &frame.slots()[1..] {
-        assert!(fills.iter().any(|(r, top, bottom)| *r == slot.bounds && *top == 1.0 && *bottom == 1.0));
+fn each_theme_uses_its_single_player_footer_and_new_epg_does_not_rearm_it() {
+    use plx_data::metadata::{OttLivePlaying, OttNowNext, OttNowPlaying, OttGuideProgramme};
+    let programme = |title: &str| Some(OttGuideProgramme { title: title.into(),
+        description: String::new(), start_s: 100, end_s: 200 });
+    let metadata = |title| {
+        let mut item = playing("Evening channel");
+        item.ott = Some(OttNowPlaying { live: Some(OttLivePlaying { channel_title: item.title.clone(),
+            ordinal: Some(62), guide: Some(OttNowNext { now_s: 150, current: programme(title), next: None }) }),
+            archive: None, collection_label: String::new(), confirmed_start_unix_ms: None,
+            next: None, art: None });
+        item
+    };
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut frame = frame();
+        let mut state = WindowFooters::default();
+        frame.set_footer(0, metadata("Evening news"));
+        frame.set_footer_clock(0, None, Some(150));
+        let paint = |state: &mut WindowFooters, frame: &ChromeFrame, now| draw_census::capture_runs(|| state.draw(
+            frame, Painter::recording(), &FixtureMeasure, mode, OsdOpacity::default(), None, now, 5_000));
+        let grid = paint(&mut state, &frame, 20);
+        let mut single = PendingFooter::default();
+        let normal = draw_census::capture_runs(|| single.draw(Painter::recording(), &metadata("Evening news"),
+            Some(150), OsdOpacity::default(), mode, &FixtureMeasure));
+        assert!(grid.iter().any(|run| run.text.contains("Evening news")));
+        assert_eq!(grid.iter().map(|r| &r.text).collect::<Vec<_>>(),
+            normal.iter().map(|r| &r.text).collect::<Vec<_>>());
+        frame.set_footer(0, metadata("Breaking news"));
+        assert!(paint(&mut state, &frame, 4_999).iter().any(|run| run.text.contains("Breaking news")));
+        assert!(paint(&mut state, &frame, 5_020).is_empty());
+        // Two listings can have the same title. Their provider and media identities still differ.
+        let token = |value| std::num::NonZeroU64::new(value).unwrap();
+        frame.set_footer_identity(0, SourceRef::from_opaque(token(1)), MediaRef::from_opaque(token(2)));
+        assert!(!paint(&mut state, &frame, 6_000).is_empty());
+        assert!(paint(&mut state, &frame, 11_000).is_empty());
+        frame.set_footer_identity(0, SourceRef::from_opaque(token(1)), MediaRef::from_opaque(token(3)));
+        assert!(!paint(&mut state, &frame, 12_000).is_empty());
     }
 }
 
@@ -128,25 +185,6 @@ fn malformed_chrome_models_are_rejected_without_any_media_operation() {
 }
 
 #[test]
-fn chrome_bounds_remain_inside_every_slot_across_layouts_and_scales() {
-    for mode in [Mode::Pip, Mode::Grid4, Mode::Grid9, Mode::Perimeter { satellites: 8 }] {
-        for scale in [0.2, 1.0, 2.0] {
-            for viewport in [Rect::FULL, Rect::new(10.0, 20.0, 720.0, 1280.0)] {
-                let layout = Layout::new(viewport, mode, scale).unwrap();
-                let frame = ChromeFrame::new(layout, &[], ViewState { revision: 1, geometry_revision: 2, active: Some(0),
-                    audio: Some(0), focused: Some(1), input_owned: true }).unwrap();
-                for slot in frame.slots() {
-                    for rect in [slot.title_band, slot.title_text, slot.body].into_iter()
-                        .chain(slot.active_marker).chain(slot.audio_marker).chain(slot.border) {
-                        assert!(inside(slot.bounds, rect), "{mode:?} {scale}: {rect:?} outside {:?}", slot.bounds);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn new_ui_publication_keeps_actual_geometry_and_emits_only_its_own_serial() {
     let plan = Layout::new(Rect::new(0.0, 0.0, 960.0, 540.0), Mode::Grid4, 1.0)
         .unwrap().rasterize_even(31).unwrap();
@@ -162,38 +200,17 @@ fn new_ui_publication_keeps_actual_geometry_and_emits_only_its_own_serial() {
 }
 
 #[test]
-fn lower_pip_placeholder_never_covers_a_higher_playing_native_picture() {
-    let labels = Labels { empty: "Empty", loading: "Loading", failed: "Unavailable" };
-    for scale in [0.2, 1.0, 2.0] {
-        for state in [SlotState::Empty, SlotState::Loading, SlotState::Failed] {
-            let layout = Layout::new(Rect::FULL, Mode::Pip, scale).unwrap();
-            let inset = layout.slot(1).unwrap().bounds;
-            let frame = ChromeFrame::new(layout, &[
-                SlotView { id: 0, title: "Main".into(), state },
-                SlotView { id: 1, title: "Inset".into(), state: SlotState::Playing },
-            ], ViewState { revision: 800, geometry_revision: 31, active: Some(1),
-                audio: Some(1), focused: Some(1), input_owned: true }).unwrap();
-            let runs = draw_census::capture_runs(|| frame.draw(Painter::recording(), &FixtureMeasure, &labels));
-            assert!(runs.iter().any(|run| run.text == "Inset"));
-            let main_runs: Vec<_> = runs.iter().filter(|run| run.text == "Main").collect();
-            assert!(!main_runs.is_empty());
-            for run in main_runs {
-                let clip = run.clip.expect("lower painting is clipped");
-                assert!(clip.x + clip.w <= inset.x || clip.x >= inset.x + inset.w
-                    || clip.y + clip.h <= inset.y || clip.y >= inset.y + inset.h,
-                    "lower slot paint must never cover inset: {clip:?} / {inset:?}");
-            }
-            let regions = visible_regions(frame.slots()[0].bounds, std::iter::once(inset));
-            let fills = draw_census::capture_rect_inks(|| frame.draw(Painter::recording(), &FixtureMeasure, &labels));
-            assert!(!fills.iter().any(|(rect, _, _)| *rect == frame.slots()[0].bounds),
-                "no full-main opaque placeholder may cover the inset");
-            for region in &regions {
-                assert!(fills.iter().any(|(rect, top, bottom)| rect == region && *top == 1.0 && *bottom == 1.0));
-            }
-            let area: f64 = regions.iter().map(|r| f64::from(r.w) * f64::from(r.h)).sum();
-            let expected = f64::from(Rect::FULL.w) * f64::from(Rect::FULL.h) - f64::from(inset.w) * f64::from(inset.h);
-            assert!((area - expected).abs() < 1.0, "visible placeholder keeps all remaining main area");
-            assert_eq!(draw_census::clip(), None);
-        }
+fn pip_masks_the_main_footer_under_the_inset() {
+    let layout = Layout::new(Rect::FULL, Mode::Pip, 1.0).unwrap();
+    let inset = layout.slot(1).unwrap().bounds;
+    let frame = ChromeFrame::new(layout, &views()[..2], ViewState { revision: 80,
+        geometry_revision: 1, active: Some(1), ..Default::default() }).unwrap();
+    let regions = visible_regions(frame.slots()[0].bounds, std::iter::once(inset));
+    for clip in &regions {
+        assert!(clip.x + clip.w <= inset.x || clip.x >= inset.x + inset.w
+            || clip.y + clip.h <= inset.y || clip.y >= inset.y + inset.h);
     }
+    let area: f64 = regions.iter().map(|r| f64::from(r.w) * f64::from(r.h)).sum();
+    let expected = f64::from(Rect::FULL.w) * f64::from(Rect::FULL.h) - f64::from(inset.w) * f64::from(inset.h);
+    assert!((area - expected).abs() < 1.0);
 }

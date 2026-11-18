@@ -20,7 +20,7 @@ fn fixture() -> Runtime {
 }
 #[test]
 fn multiview_service_is_appended_without_reordering_existing_settings() {
-    assert_eq!(Setting::ALL.len(), 47);
+    assert_eq!(Setting::ALL.len(), 48);
     assert_eq!(Setting::ALL[43].id(), "nativeEpgApiV1");
     assert_eq!(Setting::ALL[44].id(), "nativeInputProbeV1");
     assert_eq!(Setting::ALL[45].id(), multiview::KEY);
@@ -39,6 +39,29 @@ fn multiview_service_is_appended_without_reordering_existing_settings() {
         {"value":"service","label":"External service","aliases":[]},
     ]));
 }
+#[test]
+fn background_volume_round_trips_through_the_same_local_and_remote_preference() {
+    let mut runtime = fixture();
+    let setting = Setting::MultiviewBackgroundVolume;
+    assert_eq!(Setting::ALL[47].id(), setting.id());
+    assert_eq!(runtime.multiview_background_volume(), 20);
+    assert_eq!(setting.descriptor()["constraints"], json!({"minimum":0,"maximum":100}));
+    assert!(setting.writable());
+    for value in [0, 20, 37, 100] {
+        let wire = json!(value);
+        assert!(setting.valid(&wire));
+        runtime.saved = runtime.osd_setting_candidate(setting.id(), &value.to_string(), 1).unwrap();
+        assert_eq!(stored(&runtime.saved, setting)["value"], wire);
+        assert_eq!(runtime.multiview_background_volume(), value);
+    }
+    for value in [-1, 101] {
+        assert!(!setting.valid(&json!(value)));
+        assert!(runtime.osd_setting_candidate(setting.id(), &value.to_string(), 1).is_err());
+    }
+    runtime.saved.settings.insert(setting.id().into(), json!(101));
+    assert_eq!(runtime.multiview_background_volume(), 20);
+}
+
 #[test]
 fn same_installation_candidate_preserves_every_other_setting_and_never_reloads() {
     let _lock = plx_base::testlock::serial();

@@ -2192,7 +2192,7 @@ pub struct OttLivePlaying {
 }
 
 /// A real next item from the playing source's order, not the currently browsed list.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttNextPlaying {
     pub title: String,
     /// An estimate only when the current confirmed start and duration are known.
@@ -2210,7 +2210,7 @@ pub struct OttArchivePlaying {
 /// Optional linear-channel presentation for a source-owned OTT playback session.
 /// The runtime publishes this only for its matching accepted playback identity;
 /// late metadata cannot replace information belonging to a newer item.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OttNowPlaying {
     /// Present only for live channels. Finite media and archive keep their existing fields.
     pub live: Option<OttLivePlaying>,
@@ -2228,7 +2228,7 @@ pub struct OttNowPlaying {
 /// **leaf**: an episode carries the show title + SxEy + episode name + its still; a movie carries the
 /// movie title + landscape art. Set by the play paths — `sync_now_playing()` after a leaf load, or
 /// explicitly by show-page episode play (where `current()` is still the show).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NowPlaying {
     pub ott: Option<OttNowPlaying>,
     /// Whether the "Go to X" target (`detail_rk`) is a show rather than a movie, and whether the
