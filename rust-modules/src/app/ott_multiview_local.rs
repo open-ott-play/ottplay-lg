@@ -1,6 +1,6 @@
 //! Independent on-device slots. No fullscreen route ticket, compositor client,
 //! global player transport or active-provider mutation is spent here.
-use super::multiview::{BackendIntent, Effect, StopResult, Transition};
+use super::multiview::{BackendIntent, SceneEffect, StopResult, Transition};
 use super::multiview_sources::{LocalResolved, PreparedMetadata};
 use super::*;
 use plx_data::ott::multiview::{AdmissionOutcome, Layout, ResolveTicket, SceneId, SlotId};
@@ -606,7 +606,7 @@ impl Driver {
                     return;
                 }
                 if let Some(origin) = self.wait_for_handoff(&receipt) {
-                    self.handoff.hold(ticket, receipt, origin);
+                    self.handoff.hold(ticket, receipt, origin, runtime.frame_time());
                     return;
                 }
                 match open(receipt.source.clone()) {
@@ -699,8 +699,8 @@ impl Driver {
                 break;
             };
             let start = match &effect {
-                Effect::PrepareMetadata { ticket, .. }
-                | Effect::Backend(BackendIntent::Load { ticket, .. }) => {
+                SceneEffect::PrepareMetadata { ticket, .. }
+                | SceneEffect::Backend(BackendIntent::Load { ticket, .. }) => {
                     Some(ticket.slot().index())
                 }
                 _ => None,
@@ -710,7 +710,7 @@ impl Driver {
                 && !self.closing
                 && matches!(
                     &effect,
-                    Effect::PrepareMetadata { .. } | Effect::Backend(BackendIntent::Load { .. })
+                    SceneEffect::PrepareMetadata { .. } | SceneEffect::Backend(BackendIntent::Load { .. })
                 )
             {
                 if runtime.multiview.effect_current(runtime, &effect) {
@@ -898,7 +898,7 @@ impl Driver {
                             let _ = self.play_source(runtime, app, slot, handle);
                         }
                     } else if self.recovery[index].pending() {
-                        self.recover_drained_slot(runtime, app, index, std::time::Instant::now());
+                        self.recover_drained_slot(runtime, app, index, runtime.frame_time());
                     }
                 }
             }
@@ -911,14 +911,14 @@ impl Driver {
             self.restore_ready = std::mem::take(&mut self.restore_previous) && !self.cleanup_failed;
         }
     }
-    fn apply(&mut self, runtime: &mut Runtime, app: &App, effect: Effect) {
+    fn apply(&mut self, runtime: &mut Runtime, app: &App, effect: SceneEffect) {
         if self.closing || self.cleanup_failed {
             match &effect {
-                Effect::PrepareMetadata { work, .. } => {
+                SceneEffect::PrepareMetadata { work, .. } => {
                     work.cancellation().store(true, Ordering::Release);
                     return;
                 }
-                Effect::Backend(BackendIntent::Load { input, .. }) => {
+                SceneEffect::Backend(BackendIntent::Load { input, .. }) => {
                     input.cancellation().store(true, Ordering::Release);
                     return;
                 }
@@ -929,7 +929,7 @@ impl Driver {
             return;
         }
         match effect {
-            Effect::PrepareMetadata { ticket, work } => {
+            SceneEffect::PrepareMetadata { ticket, work } => {
                 let index = ticket.slot().index();
                 if self.workers[index].is_some() || self.pictures[index].is_some() {
                     return;
@@ -959,7 +959,7 @@ impl Driver {
                     self.queue(runtime, t);
                 }
             }
-            Effect::CancelResolve {
+            SceneEffect::CancelResolve {
                 ticket,
                 cancellation,
             } => {
@@ -971,7 +971,7 @@ impl Driver {
                     work.cancel.store(true, Ordering::Release);
                 }
             }
-            Effect::Backend(BackendIntent::Load { ticket, input }) => {
+            SceneEffect::Backend(BackendIntent::Load { ticket, input }) => {
                 if input.reauthorize(runtime, app).is_err() {
                     let t = runtime
                         .multiview
@@ -1005,7 +1005,7 @@ impl Driver {
                     self.queue(runtime, t);
                 }
             }
-            Effect::Backend(BackendIntent::Stop { ticket }) => {
+            SceneEffect::Backend(BackendIntent::Stop { ticket }) => {
                 let index = ticket.slot().index();
                 self.stopping[index] = Some(ticket);
                 if let Some(w) = self.workers[index].as_ref().filter(|w| w.ticket == ticket) {
@@ -1020,11 +1020,11 @@ impl Driver {
                     self.audio_applied = None;
                 }
             }
-            Effect::Backend(BackendIntent::Layout { layout, .. }) => {
+            SceneEffect::Backend(BackendIntent::Layout { layout, .. }) => {
                 self.layout = Some(layout);
                 self.geometry_revision = self.geometry_revision.saturating_add(1);
             }
-            Effect::Backend(BackendIntent::AudioOwner {
+            SceneEffect::Backend(BackendIntent::AudioOwner {
                 scene,
                 audio_revision,
                 owner,
@@ -1035,7 +1035,7 @@ impl Driver {
                 self.audio_applied = None;
                 self.audio_request = Some((scene, audio_revision, owner));
             }
-            Effect::Backend(BackendIntent::Focus { .. }) => {}
+            SceneEffect::Backend(BackendIntent::Focus { .. }) => {}
         }
     }
 }

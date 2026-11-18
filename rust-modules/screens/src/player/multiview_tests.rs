@@ -39,7 +39,7 @@ fn frame(owned: bool) -> ChromeFrame {
         thumb: String::new(), detail_rk: String::new() });
     frame
 }
-fn key(sym: u32, edge: Edge) -> InputKind<u32> {
+fn sdl_key(sym: u32, edge: Edge) -> InputKind<u32> {
     InputKind::Key { key: Key::Other, sym, wcode: 0, edge, at_edge: false }
 }
 fn deliver(page: &mut PlayerScreen, offer: Option<&ChromeFrame>, kind: InputKind<u32>) -> (Handled, Vec<PlayerReq>) {
@@ -71,9 +71,9 @@ fn admitted_multiview_primary_click_and_keys_emit_revision_bound_events() {
         InputKind::Click { x: inset.cx(), y: inset.cy(), hit: None });
     assert_eq!(handled, Handled::Yes);
     assert_eq!(requests, vec![PlayerReq::Multiview(Event::ActivateSlot { revision: 415, slot: 1 })]);
-    let (_, requests) = deliver(&mut page, Some(&frame), key(consts::SDLK_RETURN, Edge::Down));
+    let (_, requests) = deliver(&mut page, Some(&frame), sdl_key(consts::SDLK_RETURN, Edge::Down));
     assert_eq!(requests, vec![PlayerReq::Multiview(Event::ActivateSlot { revision: 415, slot: 0 })]);
-    let (_, requests) = deliver(&mut page, Some(&frame), key(consts::SDLK_RIGHT, Edge::Down));
+    let (_, requests) = deliver(&mut page, Some(&frame), sdl_key(consts::SDLK_RIGHT, Edge::Down));
     assert_eq!(requests, vec![PlayerReq::Multiview(Event::FocusSlot { revision: 415, slot: 1 })]);
     assert_eq!(frame.state().active, Some(0), "renderer events never commit active media");
 }
@@ -85,7 +85,7 @@ fn local_window_actions_share_keyboard_and_magic_remote_targets() {
     frame.enable_window_actions();
     let mut page = PlayerScreen::new(EntryId(53));
     let key_code = |wcode, edge| InputKind::Key { key: Key::Other, sym: 0, wcode, edge, at_edge: false };
-    assert_eq!(deliver(&mut page, Some(&frame), key(consts::SDLK_RETURN, Edge::Down)).1,
+    assert_eq!(deliver(&mut page, Some(&frame), sdl_key(consts::SDLK_RETURN, Edge::Down)).1,
         vec![PlayerReq::Multiview(Event::OpenWindowChannels { revision: 415, slot: 0 })]);
     let inset = frame.layout().slot(1).unwrap().bounds;
     for (y, expected) in [
@@ -113,8 +113,8 @@ fn absent_or_nonowning_offer_retains_identical_ordinary_fullscreen_input() {
     let _lock = plx_base::testlock::serial();
     let inactive = frame(false);
     for sym in [consts::SDLK_UP, consts::SDLK_RIGHT, consts::SDLK_RETURN, consts::WCODE_PAUSE] {
-        let baseline = deliver(&mut PlayerScreen::new(EntryId(53)), None, key(sym, Edge::Down));
-        let passive = deliver(&mut PlayerScreen::new(EntryId(53)), Some(&inactive), key(sym, Edge::Down));
+        let baseline = deliver(&mut PlayerScreen::new(EntryId(53)), None, sdl_key(sym, Edge::Down));
+        let passive = deliver(&mut PlayerScreen::new(EntryId(53)), Some(&inactive), sdl_key(sym, Edge::Down));
         assert_eq!(baseline, passive);
         assert!(!passive.1.iter().any(|request| matches!(request, PlayerReq::Multiview(_))));
     }
@@ -125,7 +125,7 @@ fn owned_selection_does_not_activate_on_hover_scroll_drag_keyup_or_outside_click
     let frame = frame(true);
     for kind in [InputKind::Pointer { x: 100.0, y: 100.0, hit: None },
         InputKind::Wheel { dy: 1.0 }, InputKind::Drag { x: 100.0, y: 100.0, hit: None },
-        key(consts::SDLK_RETURN, Edge::Up), key(consts::SDLK_RETURN, Edge::Repeat),
+        sdl_key(consts::SDLK_RETURN, Edge::Up), sdl_key(consts::SDLK_RETURN, Edge::Repeat),
         InputKind::Click { x: -1.0, y: -1.0, hit: None }] {
         let (_, requests) = deliver(&mut PlayerScreen::new(EntryId(53)), Some(&frame), kind);
         assert!(requests.is_empty(), "no playback/selection request from non-confirmation: {requests:?}");
@@ -138,7 +138,7 @@ fn local_repair_modal_wins_over_admitted_scene_selection() {
     let mut page = PlayerScreen::new(EntryId(53));
     page.repair_alert.open(c"Existing repair");
     for sym in [consts::SDLK_UP, consts::SDLK_RETURN] {
-        let (_, requests) = deliver(&mut page, Some(&frame), key(sym, Edge::Down));
+        let (_, requests) = deliver(&mut page, Some(&frame), sdl_key(sym, Edge::Down));
         assert!(!requests.iter().any(|request| matches!(request, PlayerReq::Multiview(_))));
     }
 }

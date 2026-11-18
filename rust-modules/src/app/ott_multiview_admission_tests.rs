@@ -291,6 +291,7 @@ fn setup() -> Rig {
         Box::new(ManualLauncher(connection_jobs.clone())),
     );
     runtime.multiview_connection.tick(
+        runtime.frame_time(),
         true,
         true,
         Some(&protected),
@@ -298,6 +299,7 @@ fn setup() -> Rig {
     );
     finish_jobs(&connection_jobs);
     runtime.multiview_connection.tick(
+        runtime.frame_time(),
         true,
         true,
         Some(&protected),
@@ -443,6 +445,7 @@ fn actual_deferred_composite_gate_revokes_changed_installation_without_loading()
     let mut rig = admitted();
     let runtime = rig.app.ott.as_mut().unwrap();
     runtime.multiview_connection.tick(
+        runtime.frame_time(),
         true,
         true,
         runtime.saved.settings.get("nativeMultiviewService"),
@@ -716,6 +719,9 @@ fn owned_output_replacement_keeps_picture_until_inspected_successor_is_admitted(
         .as_mut()
         .unwrap()
         .output_generation = "output_successor".into();
+    // The next foreground frame reaches the status poll deadline.
+    let runtime = rig.app.ott.as_mut().unwrap();
+    runtime.clock_sample = Some(runtime.clock_sample.unwrap().advance_for_test(Duration::from_millis(500)));
     let end = Instant::now() + Duration::from_secs(3);
     while rig.output_jobs.lock().unwrap().is_empty() {
         assert!(
@@ -788,6 +794,9 @@ fn replacement_inspection_cannot_retain_picture_after_playback_policy_revocation
         .as_mut()
         .unwrap()
         .output_generation = "output_successor".into();
+    // The next foreground frame reaches the status poll deadline.
+    let runtime = rig.app.ott.as_mut().unwrap();
+    runtime.clock_sample = Some(runtime.clock_sample.unwrap().advance_for_test(Duration::from_millis(500)));
     let end = Instant::now() + Duration::from_secs(3);
     while rig.output_jobs.lock().unwrap().is_empty() {
         assert!(Instant::now() < end, "actual poll must offer replacement");

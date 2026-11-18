@@ -332,22 +332,24 @@ fn success(
     data["reload_required"] = json!(reload_required);
     ok(data)
 }
-pub(super) fn command(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
-    let now = runtime.now_ms();
-    command_with(
+pub(super) fn command(
+    runtime: &mut Runtime, inv: &Invocation, publication_time: impl FnOnce() -> Option<u64>,
+) -> Option<Value> {
+    command_with_publication(
         runtime,
         inv,
-        now,
+        runtime.now_ms(),
+        publication_time,
         |runtime, saved, inv, reload, response| runtime.save_reply(saved, inv, reload, response),
     )
 }
-fn command_with(
+fn command_with_publication(
     runtime: &mut Runtime,
     inv: &Invocation,
     now: u64,
+    publication_time: impl FnOnce() -> Option<u64>,
     save: impl FnOnce(&mut Runtime, Saved, Invocation, bool, Value) -> Result<(), &'static str>,
 ) -> Option<Value> {
-    let admission_started = std::time::Instant::now();
     let process = || -> Result<(ProviderKind, usize), Reason> {
         let result = parse(inv)?;
         admitted(runtime, inv, now)?;
@@ -370,11 +372,11 @@ fn command_with(
             Ok(v) => v,
             Err(e) => return Some(rejected_reason(inv, e)),
         };
-        // ClockSample is fixed for this frame; include all admission and OS entropy time
-        // before publishing authority, and recheck the invocation generation.
-        let published_at = now.saturating_add(
-            u64::try_from(admission_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        );
+        // Preparing the two opaque handles can block on OS entropy. Recheck
+        // expiry and ownership at publication, on the same steady frame timeline.
+        let Some(published_at) = publication_time() else {
+            return Some(rejected_reason(inv, Reason::Expired));
+        };
         if let Err(reason) = admitted(runtime, inv, published_at) {
             return Some(rejected_reason(inv, reason));
         }

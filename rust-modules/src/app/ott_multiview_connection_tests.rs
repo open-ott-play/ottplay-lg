@@ -98,7 +98,7 @@ fn reply(state: &TestState, epoch: &str) {
         .push_back(Ok(serde_json::to_vec(&body).unwrap()));
 }
 fn tick(state: &mut TestState) {
-    state.tick(true, true, Some(&config()), Some("native_A"));
+    state.tick(Duration::ZERO, true, true, Some(&config()), Some("native_A"));
 }
 fn finish(state: &mut TestState) {
     let (work, done) = state.queue.lock().unwrap().queued.pop_front().unwrap();
@@ -108,10 +108,10 @@ fn finish(state: &mut TestState) {
 #[test]
 fn disabled_background_and_not_ready_do_no_work() {
     let mut s = state();
-    s.tick(true, true, None, Some("native_A"));
+    s.tick(Duration::ZERO, true, true, None, Some("native_A"));
     assert_eq!(s.status, "disabled");
-    s.tick(false, true, Some(&config()), Some("native_A"));
-    s.tick(true, false, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, false, true, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, true, false, Some(&config()), Some("native_A"));
     assert!(s.pending.is_none());
     assert!(s.queue.lock().unwrap().queued.is_empty());
     assert_eq!(*s.transport.calls.lock().unwrap(), 0);
@@ -120,15 +120,16 @@ fn disabled_background_and_not_ready_do_no_work() {
 fn invalid_and_unpaired_are_closed_without_network() {
     let mut s = state();
     s.tick(
+        Duration::ZERO,
         true,
         true,
         Some(&Value::String("private-secret-invalid-json".into())),
         Some("native_A"),
     );
     assert_eq!(s.error, Some("invalid_config"));
-    s.tick(true, true, Some(&config()), Some("another_native"));
+    s.tick(Duration::ZERO, true, true, Some(&config()), Some("another_native"));
     assert_eq!(s.error, Some("unpaired_installation"));
-    s.tick(true, true, Some(&config()), None);
+    s.tick(Duration::ZERO, true, true, Some(&config()), None);
     assert_eq!(s.error, Some("unpaired_installation"));
     assert!(s.pending.is_none());
 }
@@ -158,7 +159,7 @@ fn cancellation_retains_worker_until_retirement_before_replacement() {
     let (work, done) = s.queue.lock().unwrap().queued.pop_front().unwrap();
     // Work has sent its reply but has not retired yet.
     work(&OffFrame::for_test());
-    s.tick(true, false, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, true, false, Some(&config()), Some("native_A"));
     assert!(s.pending.is_some());
     assert!(s.qualified().is_none());
     tick(&mut s);
@@ -174,18 +175,18 @@ fn identity_and_exact_config_changes_cancel_old_generation() {
     tick(&mut s);
     let generation = s.generation();
     let cancel = s.pending.as_ref().unwrap().cancelled.clone();
-    s.tick(true, true, Some(&config()), Some("another_native"));
+    s.tick(Duration::ZERO, true, true, Some(&config()), Some("another_native"));
     assert!(cancel.load(Ordering::Acquire));
     assert!(s.generation() > generation);
     finish(&mut s);
-    s.tick(true, true, Some(&config()), Some("another_native"));
+    s.tick(Duration::ZERO, true, true, Some(&config()), Some("another_native"));
     assert_eq!(s.error, Some("unpaired_installation"));
     tick(&mut s);
     assert!(s.pending.is_some());
     let mut changed = config().as_str().unwrap().to_owned();
     changed.push(' ');
     let generation = s.generation();
-    s.tick(true, true, Some(&Value::String(changed)), Some("native_A"));
+    s.tick(Duration::ZERO, true, true, Some(&Value::String(changed)), Some("native_A"));
     assert!(s.generation() > generation);
     assert!(s
         .pending
@@ -220,7 +221,7 @@ fn generation_overflow_permanently_disables_work() {
     assert_eq!(s.generation(), 0);
     assert!(s.pending.is_none());
     s.refresh();
-    s.tick(true, false, None, None);
+    s.tick(Duration::ZERO, true, false, None, None);
     tick(&mut s);
     assert_eq!(s.generation(), 0);
     assert!(s.pending.is_none());
@@ -253,7 +254,7 @@ fn background_invalidates_authenticated_caps_and_same_config_foreground_rebinds(
     tick(&mut s);
     let generation = s.generation();
     assert!(s.qualified().is_some());
-    s.tick(true, false, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, true, false, Some(&config()), Some("native_A"));
     assert!(s.qualified().is_none());
     assert_eq!(s.status, "idle");
     assert!(s.generation() > generation);
@@ -288,9 +289,9 @@ fn disconnected_reply_is_not_worker_retirement() {
 fn cancelled_before_dispatch_never_calls_transport() {
     let mut s = state();
     tick(&mut s);
-    s.tick(false, false, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, false, false, Some(&config()), Some("native_A"));
     finish(&mut s);
-    s.tick(false, false, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, false, false, Some(&config()), Some("native_A"));
     assert_eq!(*s.transport.calls.lock().unwrap(), 0);
     assert!(s.pending.is_none());
     assert!(s.qualified().is_none());
@@ -320,15 +321,15 @@ fn captured_client_never_regains_currentness_after_refresh_background_or_rebindi
     assert!(s.is_current(second_generation, "epoch_B", &second_client));
     // Generation and epoch alone cannot launder a previously authenticated client.
     assert!(!s.is_current(second_generation, "epoch_B", &old_client));
-    s.tick(true, false, Some(&config()), Some("native_A"));
+    s.tick(Duration::ZERO, true, false, Some(&config()), Some("native_A"));
     assert!(!s.is_current(second_generation, "epoch_B", &second_client));
     let mut replacement: Value = serde_json::from_str(config().as_str().unwrap()).unwrap();
     replacement["origin"] = Value::String("https://replacement.example.test".into());
     let replacement = Value::String(replacement.to_string());
     reply(&s, "epoch_C");
-    s.tick(true, true, Some(&replacement), Some("native_A"));
+    s.tick(Duration::ZERO, true, true, Some(&replacement), Some("native_A"));
     finish(&mut s);
-    s.tick(true, true, Some(&replacement), Some("native_A"));
+    s.tick(Duration::ZERO, true, true, Some(&replacement), Some("native_A"));
     let third = s.qualified().unwrap();
     assert!(s.is_current(third.generation, "epoch_C", &third.client));
     assert!(!s.is_current(third.generation, "epoch_C", &second_client));
@@ -378,23 +379,23 @@ fn unavailable_reprobe_is_explicit_rate_limited_and_preserves_zero_capacity_trut
     let generation = s.generation();
     let client = Arc::clone(&s.qualified().unwrap().client);
     let due = s.reprobe_after.unwrap();
-    assert!(!s.reprobe_unavailable_at(due - Duration::from_millis(1)));
+    assert!(!s.reprobe_unavailable(due - Duration::from_millis(1)));
     for _ in 0..20 {
         tick(&mut s);
     }
     assert_eq!(*s.transport.calls.lock().unwrap(), 1);
-    assert!(s.reprobe_unavailable_at(due));
+    assert!(s.reprobe_unavailable(due));
     assert!(!s.is_current(generation, "epoch_A", &client));
     assert!(s.qualified().is_none());
     assert!(
         s.pending.is_none(),
         "an explicit request queues no inline network work"
     );
-    assert!(!s.reprobe_unavailable_at(due));
+    assert!(!s.reprobe_unavailable(due));
     reply(&s, "epoch_B");
     tick(&mut s);
     assert!(
-        !s.reprobe_unavailable_at(due + REPROBE_INTERVAL),
+        !s.reprobe_unavailable(due + REPROBE_INTERVAL),
         "a worker must retire before a new discovery attempt"
     );
     finish(&mut s);
@@ -414,7 +415,7 @@ fn unavailable_transport_can_recover_only_through_a_fresh_validated_capability_r
     assert!(s.qualified().is_none());
     assert_eq!(s.error, Some("service_unavailable"));
     let due = s.reprobe_after.unwrap();
-    assert!(s.reprobe_unavailable_at(due));
+    assert!(s.reprobe_unavailable(due));
     // A fabricated positive count without an admitted output profile remains invalid.
     let malformed = serde_json::json!({"version":1,"server_id":"server_A","server_epoch":"epoch_B",
         "max_inputs":4,"qualified_input_adapters":[],"output_profiles":[],
@@ -432,7 +433,7 @@ fn unavailable_transport_can_recover_only_through_a_fresh_validated_capability_r
         "retry cannot fabricate positive qualification"
     );
     let due = s.reprobe_after.unwrap();
-    assert!(s.reprobe_unavailable_at(due));
+    assert!(s.reprobe_unavailable(due));
     let qualified = serde_json::json!({"version":1,"server_id":"server_A","server_epoch":"epoch_C",
         "max_inputs":4,"qualified_input_adapters":["http_checked"],
         "output_profiles":[{"profile_id":"grid4","canvas":{"width":960,"height":540,"fps":15},
@@ -449,7 +450,7 @@ fn unavailable_transport_can_recover_only_through_a_fresh_validated_capability_r
     assert_eq!(s.qualified().unwrap().capabilities.max_inputs, 4);
     let due = s.reprobe_after.unwrap() + REPROBE_INTERVAL;
     assert!(
-        !s.reprobe_unavailable_at(due),
+        !s.reprobe_unavailable(due),
         "the unavailable-only door cannot invalidate positive qualification"
     );
 }
@@ -457,22 +458,23 @@ fn unavailable_transport_can_recover_only_through_a_fresh_validated_capability_r
 #[test]
 fn unavailable_reprobe_never_borrows_background_invalid_or_shutdown_authority() {
     let mut s = state();
-    assert!(!s.reprobe_unavailable_at(Instant::now()));
+    assert!(!s.reprobe_unavailable(Duration::ZERO));
     s.tick(
+        Duration::ZERO,
         true,
         true,
         Some(&Value::String("invalid protected configuration".into())),
         Some("native_A"),
     );
-    assert!(!s.reprobe_unavailable_at(Instant::now() + REPROBE_INTERVAL));
-    s.tick(true, true, Some(&config()), Some("other_installation"));
-    assert!(!s.reprobe_unavailable_at(Instant::now() + REPROBE_INTERVAL));
-    s.tick(true, false, Some(&config()), Some("native_A"));
-    assert!(!s.reprobe_unavailable_at(Instant::now() + REPROBE_INTERVAL));
+    assert!(!s.reprobe_unavailable(Duration::ZERO + REPROBE_INTERVAL));
+    s.tick(Duration::ZERO, true, true, Some(&config()), Some("other_installation"));
+    assert!(!s.reprobe_unavailable(Duration::ZERO + REPROBE_INTERVAL));
+    s.tick(Duration::ZERO, true, false, Some(&config()), Some("native_A"));
+    assert!(!s.reprobe_unavailable(Duration::ZERO + REPROBE_INTERVAL));
     tick(&mut s);
     let due = s.reprobe_after.unwrap();
     s.shutdown();
-    assert!(!s.reprobe_unavailable_at(due + REPROBE_INTERVAL));
+    assert!(!s.reprobe_unavailable(due + REPROBE_INTERVAL));
     assert!(s.queue.lock().unwrap().queued.len() <= 1);
     assert_eq!(*s.transport.calls.lock().unwrap(), 0);
 }

@@ -660,9 +660,6 @@ fn profiles(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
     defer(runtime, inv, saved, reload && changed, response)
 }
 fn provider_settings(runtime: &mut Runtime, inv: &Invocation) -> Option<Value> {
-    if provider_config::handles(inv) {
-        return provider_config::command(runtime, inv);
-    }
     let now = runtime.now_ms();
     let p = &inv.params;
     let Some(kind) = p["provider"].as_str().and_then(provider_kind) else {
@@ -1802,6 +1799,13 @@ pub(super) fn command(runtime: &mut Runtime, app: &mut App, inv: &Invocation) ->
         }
         "profiles" | "profile" | "profile_settings" | "profile_save" | "profile_export"
         | "profile_import" => profiles(runtime, inv),
+        "settings_compare" | "provider_settings" if provider_config::handles(inv) => {
+            let anchor = runtime.clock_anchor.or(runtime.clock_sample).expect("sampled command dispatch");
+            provider_config::command(runtime, inv, || {
+                let sample = plx_base::task::time::ClockSample::capture_main(app.adapters.player.mt()).ok()?;
+                Some(sample.steady_from(anchor).unix_ms())
+            })
+        }
         "settings_compare" | "provider_settings" => provider_settings(runtime, inv),
         "player_settings" => settings::command(runtime, app, inv),
         "player_settings_patch" => Some(settings::patch(runtime, inv)),

@@ -6,7 +6,7 @@ use super::{Driver, LocalResolved, Picture};
 use plx_data::ott::multiview::{AdmissionOutcome, ResolveTicket};
 use plx_media::ff::ExternalSource;
 use plx_media::local_multiview::{hls_handoff_barrier, hls_handoff_origin, Limits, Session};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: Duration = Duration::from_millis(100);
@@ -27,8 +27,8 @@ struct Pending {
     ticket: ResolveTicket,
     receipt: LocalResolved,
     origin: String,
-    deadline: Instant,
-    next_check: Instant,
+    deadline: Duration,
+    next_check: Duration,
 }
 
 #[derive(Default)]
@@ -47,8 +47,7 @@ impl Handoff {
         self.pending.iter().any(Option::is_some)
     }
 
-    pub(super) fn hold(&mut self, ticket: ResolveTicket, receipt: LocalResolved, origin: String) {
-        let now = Instant::now();
+    pub(super) fn hold(&mut self, ticket: ResolveTicket, receipt: LocalResolved, origin: String, now: Duration) {
         let slot = ticket.slot().index();
         debug_assert!(!self.waiting(slot));
         self.pending[slot] = Some(Box::new(Pending {
@@ -215,7 +214,7 @@ impl Driver {
         if !self.handoff.has_waiters() {
             return;
         }
-        let now = Instant::now();
+        let now = runtime.frame_time();
         for index in 0..self.handoff.pending.len() {
             let Some(mut wait) = self.handoff.pending[index].take() else {
                 continue;
@@ -356,7 +355,7 @@ mod tests {
             if cancel {
                 signal.store(true, std::sync::atomic::Ordering::Release);
             } else {
-                driver.handoff.pending[i].as_mut().unwrap().deadline = Instant::now();
+                driver.handoff.pending[i].as_mut().unwrap().deadline = runtime.frame_time();
             }
             driver.poll_handoffs(&mut runtime, &app);
             assert!(driver.slot_drained(i) && driver.pictures.iter().all(Option::is_none));

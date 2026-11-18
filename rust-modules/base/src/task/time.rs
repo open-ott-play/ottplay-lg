@@ -232,14 +232,17 @@ impl ClockSample {
         }
     }
 
+    /// Fix a relative IO budget at this frame's sampled monotonic boundary.
+    /// Queueing and work performed later in the frame consume the allowance.
+    pub fn deadline_after(self, allowance: Duration) -> Deadline {
+        Deadline { origin: self.origin, allowance }
+    }
+
     /// Pure conversion: an expiry before the sample is already expired. Queue
     /// latency consumes the allowance, and later wall-clock changes cannot
     /// revive or extend an admitted operation.
     pub fn deadline_at_unix_ms(self, expiry: u64) -> Deadline {
-        Deadline {
-            origin: self.origin,
-            allowance: Duration::from_millis(expiry.saturating_sub(self.unix_ms)),
-        }
+        self.deadline_after(Duration::from_millis(expiry.saturating_sub(self.unix_ms)))
     }
 }
 

@@ -242,20 +242,9 @@ $1|$2
 # and include! files from Rust tokens. Test ownership propagates through descendants; any
 # production reference keeps a shared file in the scan. No filename suffix grants an exemption.
 wholly_test_files() {
-  python3 ci/rust_test_modules.py "$SRC"
-  python3 ci/rust_test_modules.py "$SRC_BASE"
-  python3 ci/rust_test_modules.py "$SRC_MACHINE"
-  python3 ci/rust_test_modules.py "$SRC_PLATFORM"
-  python3 ci/rust_test_modules.py "$SRC_GFX"
-  python3 ci/rust_test_modules.py "$SRC_NET"
-  python3 ci/rust_test_modules.py "$SRC_UI"
-  python3 ci/rust_test_modules.py "$SRC_PLEX"
-  python3 ci/rust_test_modules.py "$SRC_TELEMETRY"
-  python3 ci/rust_test_modules.py "$SRC_DATA"
-  python3 ci/rust_test_modules.py "$SRC_SESSION"
-  python3 ci/rust_test_modules.py "$SRC_MEDIA"
-  python3 ci/rust_test_modules.py "$SRC_APPKIT"
-  python3 ci/rust_test_modules.py "$SRC_SCREENS"
+  python3 ci/rust_test_modules.py "$SRC" "$SRC_BASE" "$SRC_MACHINE" "$SRC_PLATFORM" \
+    "$SRC_GFX" "$SRC_NET" "$SRC_UI" "$SRC_PLEX" "$SRC_TELEMETRY" "$SRC_DATA" \
+    "$SRC_SESSION" "$SRC_MEDIA" "$SRC_APPKIT" "$SRC_SCREENS"
 }
 
 # is_wholly_test <path>: the `wholly_test` list as a builtin lookup. Three gates below asked this
@@ -276,6 +265,31 @@ $1
   return 1
 }
 
+# ledger_scan: candidate files on stdin (a wholly-test file is skipped, like an inline test `mod`); the
+# sites of each, as ci/ledger.awk prints them, on stdout. LG_* in the environment configure the awk
+# (its header lists them, including the spellings that are sites only in a file that imports them).
+ledger_scan() {
+  local files
+  # the wholly-test files go in ONE pass: `is_wholly_test`'s case-match over the whole index costs
+  # ~20 ms a file, which is seconds over the few hundred candidates of a rule that reads every crate
+  files=$(sort -u | comm -23 - <(printf '%s\n' "$wholly_test" | sort))
+  [ -z "$files" ] && return 0
+  # ONE awk for all of them: an awk start costs more than lexing a typical file (paths hold no spaces)
+  # shellcheck disable=SC2086
+  awk -f ci/ledger.awk $files
+}
+
+# Keep the original matching source lines, but require the same pattern in live
+# Rust tokens. Test-only inline modules may occur between two production items.
+production_matches() {
+  local pattern="$1" candidates
+  shift
+  candidates="$(grep_code "$pattern" "$@")"
+  awk -F: 'NR == FNR { live[$1 ":" $2] = 1; next } ($1 ":" $2) in live' \
+    <(printf '%s\n' "$candidates" | awk -F: 'NF > 2 {print $1}' | LG_MODE=lines ledger_scan | grep -E "$pattern") \
+    <(printf '%s\n' "$candidates")
+}
+
 # gate <rule> <pattern> <paths...>: every match must be in an allowlisted file.
 gate() {
   local rule="$1" pat="$2"; shift 2
@@ -283,12 +297,8 @@ gate() {
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     local p="${line%%:*}"
-    # Bounded test-worker waits are not production clock reads. Reuse the token/module
-    # graph proof: a filename or any production reference cannot grant this exemption.
-    # Other generic rules retain their existing scope.
-    if [ "$rule" = wall ] && is_wholly_test "$p"; then continue; fi
     if ! allowed "$rule" "$p"; then echo "    $line"; bad=$((bad+1)); fi
-  done < <(grep_code "$pat" "$@")
+  done < <(if [ "$rule" = wall ]; then production_matches "$pat" "$@"; else grep_code "$pat" "$@"; fi)
   if [ "$bad" -eq 0 ]; then ok "$rule"; else fail "$rule: $bad line(s) outside ci/allow/$rule.txt"; fi
 }
 
@@ -602,13 +612,12 @@ fi
 # table test); `.log(&…`/`.log("…` is a logger, not a logarithm.
 # Wholly-test files (see `wholly_test_files`) are skipped like inline `#[cfg(test)]` blocks: a
 # test's reference colour maths is not logical state.
-libm_lines=$(grep_code '\.(exp|ln|log|powf|powi|cbrt|sin|cos|tan|atan2|hypot|mul_add|sin_cos)\(' "$SRC" "$SRC_BASE" "$SRC_MACHINE" "$SRC_PLATFORM" "$SRC_GFX" "$SRC_NET" "$SRC_UI" "$SRC_PLEX" "$SRC_TELEMETRY" "$SRC_DATA" "$SRC_SESSION" "$SRC_MEDIA" "$SRC_APPKIT" "$SRC_SCREENS" \
+libm_lines=$(production_matches '\.(exp|ln|log|powf|powi|cbrt|sin|cos|tan|atan2|hypot|mul_add|sin_cos)\(' "$SRC" "$SRC_BASE" "$SRC_MACHINE" "$SRC_PLATFORM" "$SRC_GFX" "$SRC_NET" "$SRC_UI" "$SRC_PLEX" "$SRC_TELEMETRY" "$SRC_DATA" "$SRC_SESSION" "$SRC_MEDIA" "$SRC_APPKIT" "$SRC_SCREENS" \
   | grep -vE '\.log\((&|")' | grep -v "^$SRC_MACHINE/motion.rs:")
 libm_bad=0
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   p="${line%%:*}"
-  if is_wholly_test "$p"; then continue; fi
   if ! allowed libm "$p"; then echo "    $line"; libm_bad=$((libm_bad+1)); fi
 done <<< "$libm_lines"
 if [ "$libm_bad" -eq 0 ]; then ok "libm"; else fail "libm: $libm_bad line(s) outside ci/allow/libm.txt"; fi
@@ -1003,11 +1012,9 @@ testmod_n=$(awk '/^#\[cfg\(test\)\]$/{p=1;next} p && /^mod /{c++} {p=0} END{prin
 if [ "$testmod_n" -eq 0 ]; then ok "testmod: app/mod.rs"
 else fail "testmod: $testmod_n \`#[cfg(test)] mod\` block(s) in app/mod.rs — a test lives beside its subject (D8)"; fi
 
-# threads: `thread::spawn(` outside task.rs, PRODUCTION lines only, EVERY spelling — a
-# `#[cfg(test)] mod` block is skipped by brace depth, the same convention the `mutators` gate
-# above uses, because every remaining call site in the tree (43, re-verified 2026-09-11 after
-# widening the match below) is a test's own mock TCP/HTTP server standing in for a peer, never a
-# real worker (see ci/allow/threads.txt's own header). Three spellings, not one:
+# threads: raw thread creation outside task.rs, in production code. The module
+# graph identifies wholly-test files; ledger.awk handles inline cfg predicates,
+# strings and comments in mixed files. Check all three existing spellings:
 #   - `std::thread::spawn(`, the fully-qualified form the old grep matched;
 #   - a bare `thread::spawn(` after `use std::thread;` (or `use std::thread as thread;`) — the
 #     shorter spelling is a SUBSTRING of the longer one, so one `\bthread::spawn\(` pattern
@@ -1022,22 +1029,17 @@ else fail "testmod: $testmod_n \`#[cfg(test)] mod\` block(s) in app/mod.rs — a
 #     `thread::spawn(` spelling used to.
 threads_bad=0
 while IFS= read -r f; do
-  # a wholly-test file is test code exactly like an inline `#[cfg(test)] mod` block, which the
-  # awk below skips — without this, splitting a test module into its own file fails the gate
-  if is_wholly_test "$f"; then continue; fi
+  # Keep cheap candidate discovery ahead of the cfg-aware scan.
+  if is_wholly_test "$f" || allowed threads "$f"; then continue; fi
   pat='\bthread::spawn\('
   if grep -qE '^\s*use\s+std::thread::(spawn\s*;|\{[^}]*\bspawn\b[^}]*\}\s*;)' "$f"; then
     pat='\bthread::spawn\(|\bspawn\('
   fi
+  grep -qE "$pat" "$f" || continue
   while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    if ! allowed threads "$f"; then echo "    $f:$line"; threads_bad=$((threads_bad+1)); fi
-  done < <(awk '
-    skip>0 { n=gsub(/\{/,"{"); m=gsub(/\}/,"}"); depth+=n-m; if (depth<=0) skip=0; prev=$0; next }
-    prev ~ /^[[:space:]]*#\[cfg\((test|any\(test, feature = "test-support"\))\)\][[:space:]]*$/ && /^[[:space:]]*mod / { skip=1; depth=gsub(/\{/,"{")-gsub(/\}/,"}"); if (depth<=0) skip=0; prev=$0; next }
-    { print NR":"$0; prev=$0 }' "$f" | grep -E "$pat" | grep -vE '^[0-9]+:\s*//' || true)
-# ...over the files that spell `spawn(` at all — a superset of both matched spellings, and the `awk`
-# below only drops `#[cfg(test)] mod` blocks, so the count is unchanged.
+    echo "    $line"
+    threads_bad=$((threads_bad+1))
+  done < <(LG_MODE=lines awk -f ci/ledger.awk "$f" | grep -E "$pat" || true)
 done < <(grep -rlE --include='*.rs' '\bspawn\(' "$SRC" "$SRC_BASE" "$SRC_MACHINE" "$SRC_PLATFORM" "$SRC_GFX" "$SRC_NET" "$SRC_UI" "$SRC_PLEX" "$SRC_TELEMETRY" "$SRC_DATA" "$SRC_SESSION" "$SRC_MEDIA" "$SRC_APPKIT" "$SRC_SCREENS" 2>/dev/null | grep -v "^$SRC_BASE/task.rs\$" | sort)
 threads_declared=$(sed -n 's/^# count: *//p' ci/allow/threads.txt | head -1)
 if [ "$threads_bad" -eq "${threads_declared:-0}" ]; then ok "threads"
@@ -1075,19 +1077,6 @@ ledger_area() {
   esac
 }
 
-# ledger_scan: candidate files on stdin (a wholly-test file is skipped, like an inline test `mod`); the
-# sites of each, as ci/ledger.awk prints them, on stdout. LG_* in the environment configure the awk
-# (its header lists them, including the spellings that are sites only in a file that imports them).
-ledger_scan() {
-  local files
-  # the wholly-test files go in ONE pass: `is_wholly_test`'s case-match over the whole index costs
-  # ~20 ms a file, which is seconds over the few hundred candidates of a rule that reads every crate
-  files=$(sort -u | comm -23 - <(printf '%s\n' "$wholly_test" | sort))
-  [ -z "$files" ] && return 0
-  # ONE awk for all of them: an awk start costs more than lexing a typical file (paths hold no spaces)
-  # shellcheck disable=SC2086
-  awk -f ci/ledger.awk $files
-}
 
 # ledger_check <rule> <scan output>: compares it with the ledger files in $LG_LEDGERS and reports.
 # Messages come from LG_MSG_NEW / LG_MSG_REF / LG_MSG_STALE (line prefixes), LG_NOUN and LG_TAIL;
@@ -1169,7 +1158,7 @@ EOF_STALE
 #     (`task::spawn_off_frame`, whose token a PMS half takes) instead of being excused;
 #   - an entry whose site no longer exists fails — so the list can only shrink, and a migration
 #     lands by deleting its line. The declared `# count:` must also equal the entry count.
-# Test code is skipped as `ci/ledger.awk` skips it, which is more than `threads` does: a wholly-test file,
+# Test code is skipped as `ci/ledger.awk` skips it for threads: a wholly-test file,
 # and any item, statement or field under a `#[cfg(..)]` production can never satisfy (a `mod` with other
 # attributes in front of it, a `fn`, `feature = "test-support"`, `all(test, ..)`); strings and block comments
 # are blanked first, so a call after a `"http://"` string is seen. The same sites as before are listed.

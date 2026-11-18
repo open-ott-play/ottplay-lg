@@ -7,6 +7,16 @@ gh pr view PR --repo open-ott-play/ottplay-lg --json headRefOid,mergeStateStatus
 gh run view RUN --repo open-ott-play/ottplay-lg --log-failed
 ```
 
+## Player harness
+
+Run `python3 tests/test_harness.py` to reproduce the **Player harness tests** CI job.
+The suite uses temporary files, synthetic recordings and simulated device responses.
+For a dependency or global-state report, run `bash ci/check-deps.sh` or
+`bash ci/check-statics.sh` to see the offending source locations. For a replay
+fixture, run `tools/plxnative-rec check tests/fixtures/replay/<fixture>` and
+`python3 ci/check-public-source.py`. The second command also checks what is
+actually staged in Git.
+
 ## Native compilation and dependency updates
 
 ICU datetime provider APIs can move between minor versions. The ICU 2.4 update

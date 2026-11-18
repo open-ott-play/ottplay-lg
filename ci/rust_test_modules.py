@@ -193,8 +193,9 @@ def wholly_test_files(root):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('root', type=Path)
+    parser.add_argument('roots', nargs='+', type=Path)
     args = parser.parse_args()
     cwd = Path.cwd()
-    for path in sorted(wholly_test_files(args.root)):
-        print(path.relative_to(cwd) if path.is_relative_to(cwd) else path)
+    for root in args.roots:
+        for path in sorted(wholly_test_files(root)):
+            print(path.relative_to(cwd) if path.is_relative_to(cwd) else path)

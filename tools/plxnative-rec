@@ -18,7 +18,7 @@ A recording is `manifest.json` + `rec-NNNN.jsonl` (ui/src/rec.rs). `diff` prints
 kinds and hashes and never a string payload unless `--unsafe` is given, because a recording taken
 against a real server is private and the printer's output lands in transcripts. `import` refuses
 anything `check` refuses; the committed fixture is what tests/test_harness.py verifies on every
-`make check`, and the outbound guard applies the same alphabet before a push.
+`make check`, and ci/check-public-source.py verifies the tracked replay files in public CI.
 
 **`rerecord` vs `rebaseline`, which is the whole reason there are two verbs.** A rebaseline says
 "the behaviour changed and the new stream is the truth" — a judgement, which is why it costs a
@@ -74,10 +74,23 @@ def load(d):
     return header, [frames[f] for f in order]
 
 
+def parse_alphabet(data):
+    policy = strict_json(data)
+    if not isinstance(policy, dict) or not all(
+        isinstance(policy.get(key), list) and all(isinstance(word, str) for word in policy[key])
+        for key in ("literals", "patterns")
+    ):
+        raise ValueError("Invalid public replay alphabet")
+    try:
+        patterns = [re.compile("^(?:%s)$" % pattern) for pattern in policy["patterns"]]
+    except re.error:
+        raise ValueError("Invalid public replay alphabet pattern") from None
+    return frozenset(policy["literals"]), patterns
+
+
 def alphabet():
     with open(os.path.join(FIXTURES, "ALPHABET.json"), encoding="utf-8") as f:
-        a = json.load(f)
-    return frozenset(a.get("literals", [])), [re.compile("^(?:%s)$" % p) for p in a.get("patterns", [])]
+        return parse_alphabet(f.read())
 
 
 def strings(node, out):
@@ -150,35 +163,38 @@ def metric_strings(doc):
     return False, []
 
 
+def check_file(n, text, allowed):
+    lits, pats = allowed
+    bad = 0
+    try:
+        docs = [strict_json(text)] if n.endswith(".json") else [strict_json(l) for l in text.splitlines() if l.strip()]
+    except (ValueError, json.JSONDecodeError):
+        print("  %s: malformed or duplicate-key JSON" % n)
+        return 1
+    for doc in docs:
+        vals = []
+        strings(doc, vals)
+        metric_ok, metric_vals = metric_strings(doc)
+        vals.extend(metric_vals)
+        if not metric_ok:
+            bad += 1
+            print("  %s: a malformed public metric record" % n)
+        for v in vals:
+            if v in lits or any(pt.fullmatch(v) for pt in pats):
+                continue
+            bad += 1
+            # the value is NOT printed: that is the leak by a shorter route
+            print("  %s: a string of %d chars outside the alphabet" % (n, len(v)))
+    return bad
+
+
 def check(d):
-    lits, pats = alphabet()
+    allowed = alphabet()
     bad = 0
     for n in sorted(os.listdir(d)):
-        p = os.path.join(d, n)
-        if not (n == "manifest.json" or (n.startswith("rec-") and n.endswith(".jsonl"))):
-            continue
-        with open(p, encoding="utf-8") as f:
-            text = f.read()
-        try:
-            docs = [strict_json(text)] if n.endswith(".json") else [strict_json(l) for l in text.splitlines() if l.strip()]
-        except (ValueError, json.JSONDecodeError):
-            bad += 1
-            print("  %s: malformed or duplicate-key JSON" % n)
-            continue
-        for doc in docs:
-            vals = []
-            strings(doc, vals)
-            metric_ok, metric_vals = metric_strings(doc)
-            vals.extend(metric_vals)
-            if not metric_ok:
-                bad += 1
-                print("  %s: a malformed public metric record" % n)
-            for v in vals:
-                if v in lits or any(pt.fullmatch(v) for pt in pats):
-                    continue
-                bad += 1
-                # the value is NOT printed: that is the leak by a shorter route
-                print("  %s: a string of %d chars outside the alphabet" % (n, len(v)))
+        if n == "manifest.json" or (n.startswith("rec-") and n.endswith(".jsonl")):
+            with open(os.path.join(d, n), encoding="utf-8") as f:
+                bad += check_file(n, f.read(), allowed)
     return bad
 
 

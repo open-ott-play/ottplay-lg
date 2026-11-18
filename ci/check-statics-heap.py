@@ -11,10 +11,10 @@ cache, which `ci/check-statics.sh` already names for `ui/` and `screens/`; this 
 refusal to every crate, so the next `static mut ELIDE_CACHE: Option<HashMap<..>>` fails the gate
 instead of a stranger's test run.
 
-What counts as heap. The declared type, with every name it mentions followed into its own
-definition anywhere in the tree (`struct`/`enum`/`union`/`type`, resolved by simple name whatever
-its spelling and whether or not a std type shares it, all same-named definitions unioned, so the
-answer is conservative), mentions one of `HEAP`. That is what makes `Option<KeyMemo>` (a struct
+What counts as heap. Follow each type through its struct, enum, union or alias definition. A type
+owns heap if this walk reaches a name in HEAP. For a directly declared crate-qualified type,
+follow its module path to the defining file. For bare names, re-exports and unresolved paths,
+conservatively consider all same-named definitions. This makes `Option<KeyMemo>` (a struct
 holding nested `HashMap`s) and `GroundProbe<N>` (a struct holding `Option<Vec<u8>>`) visible where
 a regex over the declaration line sees nothing. Only a definition a bare name can reach counts:
 `type Item = String;` inside an `impl` or `trait` block is an ASSOCIATED type (spelled
@@ -49,9 +49,10 @@ Usage: `ci/check-statics-heap.py [REPO_ROOT]` (default: the checkout this file l
 import re
 import sys
 from pathlib import Path
+from functools import lru_cache
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from module_graph import blank  # noqa: E402
+from module_graph import OPENERS, Tokens, blank  # noqa: E402
 
 # Types that own a heap allocation. `Cow` is here because its owned arm does.
 HEAP = frozenset("""
@@ -271,6 +272,72 @@ def macro_label(spans, at):
     return f'{max(inner)[2] if inner else "macro"}!'
 
 
+# Keep unresolved names conservative. Narrow a collision only when a direct,
+# unconditional Rust declaration proves the file, including inline modules.
+CRATE_TYPE = re.compile(r'\bcrate(?:\s*::\s*[a-z_][A-Za-z_0-9]*)*\s*::\s*[A-Z][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*')
+
+
+@lru_cache(maxsize=32)
+def source_tokens(path):
+    return Tokens(path.read_text(encoding='utf-8', errors='replace'))
+
+
+def direct_item(tokens, start, end, name, kinds):
+    """Index of an unconditional declaration at this module level.
+
+    An attributed item, re-export, macro, or an unfamiliar visibility spelling
+    is left to the existing conservative lookup.
+    """
+    words = tokens.text
+    i = start
+    while i < end:
+        word = words[i]
+        if word in kinds and words[i + 1:i + 2] == [name] and words[start:i] in ([], ['pub']):
+            return i
+        if word in OPENERS:
+            i = tokens.ends.get(i, end)
+        if word in (';', '{'):
+            start = i + 1
+        i += 1
+    return None
+
+
+def defined_file(root, origin, parts):
+    source = Path(origin).parts
+    if 'src' not in source:
+        return None
+    idx = source.index('src')
+    # Cargo automatically discovers separate binary crates under src/bin and src/main.rs.
+    if source[idx + 1] in ('bin', 'main.rs'):
+        return None
+    directory = root.joinpath(*source[:idx + 1])
+    path = directory / 'lib.rs'
+    if not path.is_file():
+        return None
+    tok = source_tokens(path)
+    start, end = 0, len(tok.text)
+    for module in parts[:-1]:
+        index = direct_item(tok, start, end, module, ('mod',))
+        if index is None:
+            return None
+        body = index + 2
+        if tok.text[body:body + 1] == ['{']:
+            start, end = body + 1, tok.ends[body]
+        elif tok.text[body:body + 1] == [';']:
+            files = [f for f in (directory / (module + '.rs'), directory / module / 'mod.rs') if f.is_file()]
+            if len(files) != 1:
+                return None
+            path = files[0]
+            tok = source_tokens(path)
+            start, end = 0, len(tok.text)
+        else:
+            return None
+        directory = directory / module
+    if direct_item(tok, start, end, parts[-1], ('struct', 'enum', 'union', 'type')) is not None:
+        return path.relative_to(root).as_posix()
+    return None
+
+
 def scan(root):
     """([(path, name, type_text, line)] for every `static mut`, {type name: [body, ...]}) over the
     tree. A macro-declared static (`$name`) comes back named `macro!` for its `macro_rules!`."""
@@ -286,7 +353,7 @@ def scan(root):
                 name = macro_label(spans, m.start())
             decls.append((rel, name, declared_type(text, m.end()), text.count('\n', 0, m.start()) + 1))
         for name, body in definitions(text):
-            defs.setdefault(name, []).append(body)
+            defs.setdefault(name, []).append((rel, body))
     return decls, defs
 
 
@@ -294,18 +361,27 @@ def is_plain_std(name):
     return name in PLAIN or PLAIN_NONZERO.fullmatch(name) is not None
 
 
-def owner(type_text, defs):
+def owner(type_text, defs, origin, root):
     """(owns_heap, why): follow every name in `type_text` through `defs`."""
-    seen, todo = set(), [type_text]
+    seen, todo = set(), [(origin, type_text)]
     while todo:
-        for name in IDENT.findall(drop_fn_types(todo.pop())):
+        location, fragment = todo.pop()
+        for match in CRATE_TYPE.finditer(drop_fn_types(fragment)):
+            parts = [part.strip() for part in match.group().split('::')]
+            name = parts[-1]
             if name in HEAP:
                 return True, f'owns `{name}`'
-            if name in seen:
+            candidates = defs.get(name, [])
+            target = None
+            if len(parts) > 1 and len(candidates) > 1:
+                target = defined_file(root, location, parts[1:])
+                if not any(file == target for file, _ in candidates):
+                    target = None
+            if (target, name) in seen:
                 continue
-            seen.add(name)
-            if name in defs:
-                todo.extend(defs[name])
+            seen.add((target, name))
+            if candidates:
+                todo.extend(candidate for candidate in candidates if target is None or candidate[0] == target)
             elif not is_plain_std(name) and looks_like_a_type(name):
                 return True, (f'names `{name}`, which is defined nowhere in the tree and is not a std '
                               f'plain-data type PLAIN lists (plain data? add it to PLAIN, do not allowlist)')
@@ -319,7 +395,7 @@ def heap_statics(root):
         if name.endswith('!'):
             heap, why = True, f'is declared through macro `{name}` (line {line}), so its type is not read'
         else:
-            heap, why = owner(type_text, defs)
+            heap, why = owner(type_text, defs, rel, root)
         if heap:
             found.setdefault((rel, name), (' '.join(type_text.split()), why))
     return found
