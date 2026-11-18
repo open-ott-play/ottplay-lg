@@ -88,6 +88,12 @@ keep their usual start behavior.
 
 ## Using local scenes
 
+The grid and perimeter layouts use the entire screen. Neighboring tiles share
+the same edge. PiP places its inset against the screen edge. Each multi-window
+picture fills its tile at its display aspect ratio, cropping equally from
+opposite sides when the tile and source proportions differ. A single window
+shows the full picture. Black bars embedded in the broadcast stay in the video.
+
 Open **Settings → Multiview** and choose a layout. Move the highlight with the
 arrow keys, then press **OK** to activate that window and open its **Channel
 list**. With the Magic Remote pointer, click the window to do the same. Clicking
