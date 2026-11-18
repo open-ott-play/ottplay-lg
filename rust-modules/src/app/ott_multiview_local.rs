@@ -255,23 +255,6 @@ impl Driver {
         height: u32,
     ) -> Option<plx_appkit::multiview_layout::RasterPlan> {
         use plx_appkit::multiview_layout::{Layout as Geometry, Mode};
-        if self.layout == Some(Layout::Single) {
-            return plx_appkit::multiview_layout::RasterPlan::checked(
-                self.geometry_revision,
-                width,
-                height,
-                Mode::Perimeter { satellites: 0 },
-                vec![plx_appkit::multiview_layout::RasterSlot {
-                    id: 0,
-                    layer: 0,
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                }],
-            )
-            .ok();
-        }
         let mode = match self.layout? {
             Layout::Single => Mode::Perimeter { satellites: 0 },
             Layout::PictureInPicture => Mode::Pip,
@@ -285,7 +268,7 @@ impl Driver {
             1.0,
         )
         .ok()?
-        .rasterize_even(self.geometry_revision)
+        .rasterize_pixels(self.geometry_revision)
         .ok()
     }
     pub fn play_source(

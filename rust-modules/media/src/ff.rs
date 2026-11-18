@@ -453,6 +453,7 @@ plx_base::dynlib! {
         options: *mut *mut AVDictionary,
     ) -> c_int;
     fn avformat_find_stream_info(ic: *mut AVFormatContext, options: *mut *mut AVDictionary) -> c_int;
+    fn av_guess_sample_aspect_ratio(ctx: *mut AVFormatContext, stream: *mut AVStream, frame: *mut c_void) -> AVRational;
     fn av_find_best_stream(
         ic: *mut AVFormatContext,
         type_: c_int,

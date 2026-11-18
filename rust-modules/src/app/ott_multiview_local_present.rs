@@ -116,7 +116,7 @@ pub(super) struct State {
     lease_failed: bool,
     textures: [Option<Texture>; 9],
     tickets: [Option<ResolveTicket>; 9],
-    sizes: [(u32, u32); 9],
+    display_aspects: [f32; 9],
     frames: [RenderedFrames; 9],
     plan: Option<RasterPlan>,
     sink: Option<Sink>,
@@ -136,7 +136,7 @@ impl Default for State {
             lease_failed: false,
             textures: std::array::from_fn(|_| None),
             tickets: [None; 9],
-            sizes: [(0, 0); 9],
+            display_aspects: [0.0; 9],
             frames: [RenderedFrames::default(); 9],
             plan: None,
             sink: None,
@@ -379,7 +379,7 @@ impl State {
                 runtime.changed();
                 self.textures[index] = None;
             } else {
-                self.sizes[index] = (frame.width, frame.height);
+                self.display_aspects[index] = frame.display_aspect;
                 self.frames[index].pending_pts_us = Some(frame.pts_us);
             }
         }
@@ -539,19 +539,8 @@ impl State {
             let Some(texture) = self.textures[index].as_ref() else {
                 continue;
             };
-            let (w, h) = self.sizes[index];
-            if w == 0 || h == 0 {
-                continue;
-            }
-            let bounds = slot.bounds();
-            let scale = (bounds.w / w as f32).min(bounds.h / h as f32);
-            let rect = plx_ui::Rect::new(
-                bounds.x + (bounds.w - w as f32 * scale) / 2.0,
-                bounds.y + (bounds.h - h as f32 * scale) / 2.0,
-                w as f32 * scale,
-                h as f32 * scale,
-            );
-            if texture.draw(app.adapters.player.mt(), rect, 1.0) == Ok(true)
+            let (rect, uv) = picture_placement(slot.bounds(), self.display_aspects[index], plan.slots().len());
+            if texture.draw_uv(app.adapters.player.mt(), rect, uv, 1.0) == Ok(true)
                 && !plx_gfx::gfx::blur_source_pass()
             {
                 self.frames[index].submitted();
@@ -564,6 +553,18 @@ pub(super) fn tick(runtime: &mut Runtime, app: &mut App) {
     state.tick(runtime, app);
     runtime.multiview_local_present = state;
 }
+/// A multi-window scene paints right up to the shared pixel edge. Crop the texture at
+/// its centre rather than expanding the quad, which could overwrite a neighbouring slot.
+fn picture_placement(bounds: plx_ui::Rect, aspect: f32, slots: usize) -> (plx_ui::Rect, [f32; 4]) {
+    if slots > 1 {
+        return (bounds, bounds.cover_uv(aspect, 1.0, plx_gfx::gfx::Crop::Centre));
+    }
+    // A perimeter with no satellites is a single picture; show the entire frame.
+    let h = (bounds.w / aspect).min(bounds.h);
+    let w = aspect * h;
+    (plx_ui::Rect::new(bounds.cx() - w * 0.5, bounds.cy() - h * 0.5, w, h), plx_gfx::gfx::UV_FULL)
+}
+
 pub(super) fn draw(app: &mut App) {
     let Some(mut runtime) = app.ott.take() else {
         return;
@@ -624,6 +625,27 @@ pub(super) fn flush_audio(runtime: &mut Runtime, app: &App) {
 #[cfg(all(test, feature = "hostsim"))]
 mod tests {
     use super::*;
+    #[test]
+    fn mismatched_pictures_fill_their_own_tiles_and_preserve_display_aspect() {
+        let tile = plx_ui::Rect::new(961.0, 541.0, 960.0, 540.0);
+        for slots in [2, 4, 9] {
+            for (aspect, expected) in [
+                (4.0 / 3.0, [0.0, 0.125, 1.0, 0.75]),
+                (64.0 / 27.0, [0.125, 0.0, 0.75, 1.0]),
+                (16.0 / 9.0, plx_gfx::gfx::UV_FULL),
+            ] {
+                let (rect, uv) = picture_placement(tile, aspect, slots);
+                assert_eq!(rect, tile);
+                for (actual, wanted) in uv.into_iter().zip(expected) {
+                    assert!((actual - wanted).abs() < 1e-6);
+                }
+                assert!((aspect * uv[2] / uv[3] - rect.w / rect.h).abs() < 1e-6);
+            }
+        }
+        assert_eq!(picture_placement(tile, 4.0 / 3.0, 1),
+            (plx_ui::Rect::new(1081.0, 541.0, 720.0, 540.0), plx_gfx::gfx::UV_FULL));
+    }
+
     #[test]
     fn rendered_frames_count_new_successful_draws_only() {
         let mut frames = RenderedFrames::default();

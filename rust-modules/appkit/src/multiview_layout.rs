@@ -11,7 +11,7 @@ pub enum Mode {
     Pip,
     Grid4,
     Grid9,
-    /// Stable positions clockwise from north; zero leaves the central view alone.
+    /// Clockwise slots from north. Unused sectors expand into the adjacent view.
     Perimeter { satellites: u8 },
 }
 
@@ -91,10 +91,6 @@ impl Layout {
         if !chrome_scale.is_finite() || chrome_scale <= 0.0 {
             return Err(GeometryError::InvalidScale);
         }
-        let gap = (12.0 * f64::from(chrome_scale))
-            .min(f64::from(viewport.w.min(viewport.h)) * 0.02);
-        let gx = gap / f64::from(viewport.w);
-        let gy = gap / f64::from(viewport.h);
         let mut slots = Vec::with_capacity(9);
         let mut push = |bounds: Rect| {
             let id = slots.len() as SlotId;
@@ -103,32 +99,43 @@ impl Layout {
         match mode {
             Mode::Pip => {
                 push(viewport);
-                push(fraction(viewport, 1.0 - gx - 0.28, 1.0 - gy - 0.28,
-                    1.0 - gx, 1.0 - gy));
+                push(fraction(viewport, 0.72, 0.72, 1.0, 1.0));
             }
             Mode::Grid4 | Mode::Grid9 => {
                 let n = if mode == Mode::Grid4 { 2 } else { 3 };
-                let w = (1.0 - gx * f64::from(n - 1)) / f64::from(n);
-                let h = (1.0 - gy * f64::from(n - 1)) / f64::from(n);
+                let edge = |i: u8| f64::from(i) / f64::from(n);
                 for row in 0..n {
                     for col in 0..n {
-                        let left = f64::from(col) * (w + gx);
-                        let top = f64::from(row) * (h + gy);
-                        push(fraction(viewport, left, top,
-                            if col + 1 == n { 1.0 } else { left + w },
-                            if row + 1 == n { 1.0 } else { top + h }));
+                        push(fraction(viewport, edge(col), edge(row), edge(col + 1), edge(row + 1)));
                     }
                 }
             }
             Mode::Perimeter { satellites } => {
                 if satellites > 8 { return Err(GeometryError::TooManySatellites); }
-                push(fraction(viewport, 0.2 + gx, 0.2 + gy, 0.8 - gx, 0.8 - gy));
-                // N, NE, E, SE, S, SW, W, NW. Adding a view never moves earlier slots.
-                for &(x, y) in &[(0.5, 0.1), (0.9, 0.1), (0.9, 0.5), (0.9, 0.9),
-                    (0.5, 0.9), (0.1, 0.9), (0.1, 0.5), (0.1, 0.1)][..usize::from(satellites)]
-                {
-                    push(fraction(viewport, x - 0.1 + gx * 0.5, y - 0.1 + gy * 0.5,
-                        x + 0.1 - gx * 0.5, y + 0.1 - gy * 0.5));
+                // A side rail exists only once it has a window. Each missing
+                // corner belongs to its adjacent rail; the center fills to a
+                // screen edge until that side arrives.
+                let top = if satellites >= 1 { 0.2 } else { 0.0 };
+                let right = if satellites >= 3 { 0.8 } else { 1.0 };
+                let bottom = if satellites >= 5 { 0.8 } else { 1.0 };
+                let left = if satellites >= 7 { 0.2 } else { 0.0 };
+                let north_left = if satellites == 8 { 0.2 } else { 0.0 };
+                let north_right = if satellites >= 2 { 0.8 } else { 1.0 };
+                let east_bottom = if satellites >= 4 { 0.8 } else { 1.0 };
+                let south_left = if satellites >= 6 { 0.2 } else { 0.0 };
+                push(fraction(viewport, left, top, right, bottom));
+                let ring = [
+                    (north_left, 0.0, north_right, top), // N
+                    (0.8, 0.0, 1.0, top),               // NE
+                    (right, top, 1.0, east_bottom),       // E
+                    (right, 0.8, 1.0, 1.0),              // SE
+                    (south_left, bottom, right, 1.0),     // S
+                    (0.0, bottom, 0.2, 1.0),             // SW
+                    (0.0, top, left, bottom),             // W
+                    (0.0, 0.0, north_left, top),          // NW
+                ];
+                for &(x, y, r, b) in &ring[..usize::from(satellites)] {
+                    push(fraction(viewport, x, y, r, b));
                 }
             }
         }
@@ -144,25 +151,34 @@ impl Layout {
     pub fn slots(&self) -> &[Slot] { &self.slots }
     pub fn slot(&self, id: SlotId) -> Option<&Slot> { self.slots.get(usize::from(id)) }
 
-    /// Quantize inward on the compositor's output raster. This is a geometry
-    /// limit, not a statement that a device can decode these views or dimensions.
+    /// The encoded compositor output requires even luma coordinates for chroma.
     pub fn rasterize_even(&self, revision: u64) -> Result<RasterPlan, GeometryError> {
+        self.rasterize(revision, 2)
+    }
+
+    /// Native output draws to individual screen pixels, including odd-sized surfaces.
+    pub fn rasterize_pixels(&self, revision: u64) -> Result<RasterPlan, GeometryError> {
+        self.rasterize(revision, 1)
+    }
+
+    fn rasterize(&self, revision: u64, alignment: u32) -> Result<RasterPlan, GeometryError> {
         let v = self.viewport;
         if v.x != 0.0 || v.y != 0.0 || v.w.fract() != 0.0 || v.h.fract() != 0.0
             || v.w < 2.0 || v.h < 2.0 || v.w > MAX_RASTER_EDGE as f32 || v.h > MAX_RASTER_EDGE as f32
-            || v.w as u32 % 2 != 0 || v.h as u32 % 2 != 0
+            || v.w as u32 % alignment != 0 || v.h as u32 % alignment != 0
         { return Err(GeometryError::InvalidRaster); }
+        // Both neighbors snap the shared edge to the same coordinate. Rounding
+        // each slot inward independently leaves a seam at fractional divisions.
+        let snap = |edge: f32| (f64::from(edge) / f64::from(alignment)).round() as u32 * alignment;
         let slots = self.slots.iter().map(|slot| {
             let r = slot.bounds;
-            let x = (f64::from(r.x) / 2.0).ceil() as u32 * 2;
-            let y = (f64::from(r.y) / 2.0).ceil() as u32 * 2;
-            let right = (f64::from(r.x + r.w) / 2.0).floor() as u32 * 2;
-            let bottom = (f64::from(r.y + r.h) / 2.0).floor() as u32 * 2;
+            let (x, y) = (snap(r.x), snap(r.y));
+            let (right, bottom) = (snap(r.x + r.w), snap(r.y + r.h));
             if right <= x || bottom <= y { return Err(GeometryError::CollapsedRasterSlot); }
             Ok(RasterSlot { id: slot.id, layer: slot.layer, x, y,
                 width: right - x, height: bottom - y })
         }).collect::<Result<Vec<_>, _>>()?;
-        RasterPlan::checked(revision, v.w as u32, v.h as u32, self.mode, slots)
+        RasterPlan::checked_aligned(revision, v.w as u32, v.h as u32, self.mode, slots, alignment)
     }
 
     /// Use checked actual compositor rectangles, without recalculating their
@@ -269,15 +285,20 @@ impl RasterPlan {
     pub fn checked(revision: u64, width: u32, height: u32, mode: Mode, slots: Vec<RasterSlot>)
         -> Result<Self, GeometryError>
     {
+        Self::checked_aligned(revision, width, height, mode, slots, 2)
+    }
+    fn checked_aligned(revision: u64, width: u32, height: u32, mode: Mode, slots: Vec<RasterSlot>, alignment: u32)
+        -> Result<Self, GeometryError>
+    {
         let count = match mode { Mode::Pip => 2, Mode::Grid4 => 4, Mode::Grid9 => 9,
             Mode::Perimeter { satellites } if satellites <= 8 => usize::from(satellites) + 1,
             Mode::Perimeter { .. } => return Err(GeometryError::TooManySatellites) };
         if !(2..=MAX_RASTER_EDGE).contains(&width) || !(2..=MAX_RASTER_EDGE).contains(&height)
-            || width % 2 != 0 || height % 2 != 0 || slots.len() != count
+            || width % alignment != 0 || height % alignment != 0 || slots.len() != count
         { return Err(GeometryError::InvalidRaster); }
         for (index, slot) in slots.iter().enumerate() {
             if usize::from(slot.id) != index || slot.layer != slot.id || slot.width == 0 || slot.height == 0
-                || [slot.x, slot.y, slot.width, slot.height].iter().any(|v| v % 2 != 0)
+                || [slot.x, slot.y, slot.width, slot.height].iter().any(|v| v % alignment != 0)
                 || slot.x.checked_add(slot.width).is_none_or(|right| right > width)
                 || slot.y.checked_add(slot.height).is_none_or(|bottom| bottom > height)
             { return Err(GeometryError::InvalidRaster); }
