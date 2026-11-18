@@ -59,7 +59,7 @@ use plx_machine::machine::Measure;
 use crate::popover::Popover;
 use crate::text_view::TextView;
 use crate::widgets::{Button, ControlStyle, CtlPop, StatusOverlay};
-use crate::{theme, Env, Rect, Spring, View};
+use crate::{theme, Env, Painter, Rect, Spring, View};
 
 const PANEL_W: f32 = 660.0;
 const PAD_TOP: f32 = theme::alert::PAD;
@@ -438,10 +438,14 @@ impl DecisionAlert {
             // The panel's field, from the page as it stands before the dim below touches it —
             // idempotent once latched; until the read lands, and on a refusal (the video plane),
             // the flat sheet.
-            let _ = self.field.latch_from_frame(
-                crate::underlay::Grade::Dim,
-                crate::popover::host::page_tex(),
-            );
+            // The video lives on a separate hardware plane. A text-recording
+            // walk also has no rendered page to sample.
+            if !plx_gfx::gfx::video_plane_frame() && !Painter::root().is_recording() {
+                let _ = self.field.latch_from_frame(
+                    crate::underlay::Grade::Dim,
+                    crate::popover::host::page_tex(),
+                );
+            }
             // The DECISION role's weight, as the flat ink (`Popover::scrim`): this alert is a
             // `Popover` drawn from inside its page (consent, and the player's repair alert over the
             // video plane), not a `ModalStack` surface, so its DIM has no container field to inherit.
@@ -461,7 +465,8 @@ impl DecisionAlert {
         let _live = crate::popover::host::live();
         let l = self.measured(measure);
         let p = self.pop.content_painter(Popover::RISE);
-        crate::profile::phase("da.panel", || self.pop.panel(p, l.panel, theme::ALERT_PANEL_RAD, Some(&self.field), crate::widgets::Ground::Sheet));
+        let field = (!plx_gfx::gfx::video_plane_frame()).then_some(&self.field);
+        crate::profile::phase("da.panel", || self.pop.panel(p, l.panel, theme::ALERT_PANEL_RAD, field, crate::widgets::Ground::Sheet));
         crate::profile::phase("da.text", || {
             let scroll = self.scroll.pos.clamp(0.0, l.scroll_max);
             if l.scroll_max > 0.0 { p.clip(l.text_viewport); }

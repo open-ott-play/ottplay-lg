@@ -424,7 +424,8 @@ fn all_typed_osd_picker_back_actions_preserve_source_pending_play_and_admitted_w
         for page in ["settings", "unknown-picker"] {
             app.ott.as_mut().unwrap().page = page;
             act(&mut app, OttAction::Back).unwrap();
-            assert_eq!(app.ott.as_ref().unwrap().page, "providers", "ordinary {page} Back is unchanged");
+            let parent = if mode == UiMode::Classic && page == "settings" { "channels" } else { "providers" };
+            assert_eq!(app.ott.as_ref().unwrap().page, parent, "{mode:?} {page}");
         }
     }
 }

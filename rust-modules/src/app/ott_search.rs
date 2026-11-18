@@ -61,6 +61,16 @@ impl Search {
 }
 
 impl Runtime {
+    pub(super) fn catalog_page(&self) -> &'static str {
+        if self.view_selection().1 { "favorites" } else { "channels" }
+    }
+
+    pub(super) fn show_catalog(&mut self) {
+        self.cancel_setup();
+        self.page = self.catalog_page();
+        self.resume_returned_catalog();
+    }
+
     fn search_context(&self) -> Option<Context> {
         if !self.loaded { return None; }
         let (category, favorites) = self.view_selection();
@@ -93,6 +103,10 @@ impl Runtime {
     pub(super) fn search_filter(&self) -> impl Fn(&str) -> bool + '_ {
         let context = self.search_list_context();
         move |title| context.as_ref().is_none_or(|context| self.search.matches(context, title))
+    }
+    pub(super) fn search_active(&self) -> bool {
+        !self.search.query.is_empty() && self.search_list_context().is_some_and(|context|
+            self.search.context.as_ref() == Some(&context))
     }
     pub(super) fn search_view(&self) -> Option<OttSearch> {
         let context = self.search_list_context()?;
@@ -188,9 +202,7 @@ pub(super) fn action(runtime: &mut Runtime, app: &mut App, action: &OttAction)
 {
     Some(match action {
         OttAction::ShowCatalog => {
-            runtime.cancel_setup();
-            runtime.page = if runtime.view_selection().1 { "favorites" } else { "channels" };
-            runtime.resume_returned_catalog();
+            runtime.show_catalog();
             Ok(())
         }
         OttAction::BeginSearch => runtime.begin_search(app),

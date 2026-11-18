@@ -3,14 +3,14 @@
 fn terminal_catalog_return_app() -> App {
     let mut app = m3u_navigation_fixture();
     let runtime = app.ott.as_mut().unwrap();
-    let saved = runtime.interface_mode_candidate(plx_machine::machine::UiMode::Classic);
+    let saved = runtime.interface_mode_candidate(plx_machine::machine::UiMode::Modern);
     runtime.last_checkpoint_ms = runtime.now_ms();
     runtime.saving = true;
     runtime.save_navigation = SaveNavigation::Preserve;
     runtime.save_playback_epoch = runtime.playback_epoch;
     runtime.tx.send(Job::Saved(Ok(saved), None, false, json!({"status":"ok"}))).unwrap();
     runtime_tick(&mut app);
-    assert_eq!(app.bridge.ui_mode(), plx_machine::machine::UiMode::Classic);
+    assert_eq!(app.bridge.ui_mode(), plx_machine::machine::UiMode::Modern);
     assert!(!app.ott.as_ref().unwrap().saving);
     app
 }

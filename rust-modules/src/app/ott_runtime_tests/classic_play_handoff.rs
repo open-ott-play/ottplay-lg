@@ -97,7 +97,7 @@ fn classic_play_handoff_failure_preserves_selection_and_does_not_navigate() {
 }
 
 #[test]
-fn classic_play_handoff_modern_and_failed_back_without_video_keep_existing_hierarchy() {
+fn classic_play_handoff_modern_has_no_loading_cover_and_failed_classic_stays_in_catalog() {
     let _serial = plx_base::testlock::serial();
     let (mut app, mut r) = fixture();
     r.saved.settings.insert("interfaceMode".into(), json!(1));
@@ -107,7 +107,8 @@ fn classic_play_handoff_modern_and_failed_back_without_video_keep_existing_hiera
     assert!(r.view().pending_play.is_none());
     r.cancel_play_request();
     r.saved.settings.insert("interfaceMode".into(), json!(0));
-    assert!(!classic_play_handoff::close_catalog(&mut r, &mut app));
+    apply_ui_action(&mut r, &mut app, OttAction::Back, true, false, false);
+    assert_eq!(r.page, "channels");
     assert!(!app.pages.has_pending_navigation(), "a catalogue is not proof of installed video");
 }
 

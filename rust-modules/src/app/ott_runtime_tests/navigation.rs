@@ -1,7 +1,7 @@
 //! Back crosses the actual screen, dispatcher and OTT runner. No platform Home
 //! operation is performed: its ordinary loop request is observed at the boundary.
 use super::*;
-use plx_machine::machine::Key;
+use plx_machine::machine::{Key, UiMode};
 use plx_screens::registry::LoopReq;
 
 fn mount_ott(app: &mut App, page: &'static str, pushed: bool) {
@@ -30,6 +30,12 @@ fn mount_ott(app: &mut App, page: &'static str, pushed: bool) {
     assert!(!app.pages.has_pending_navigation());
 }
 
+fn mount_modern_ott(app: &mut App, page: &'static str, pushed: bool) {
+    app.ott.as_mut().unwrap().saved.settings.insert("interfaceMode".into(), json!(UiMode::Modern.index()));
+    mount_ott(app, page, pushed);
+    assert_eq!(app.bridge.ui_mode(), UiMode::Modern);
+}
+
 fn press_back(app: &mut App) {
     let tick = next_tick(app);
     bridge::frame(
@@ -43,7 +49,7 @@ fn press_back(app: &mut App) {
 }
 
 #[test]
-fn back_from_internal_ott_pages_returns_to_its_parent_without_leaving_ott() {
+fn modern_back_from_internal_ott_pages_returns_to_its_parent_without_leaving_ott() {
     let _serial = plx_base::testlock::serial();
     for (page, parent) in [
         ("profiles", "providers"),
@@ -53,7 +59,7 @@ fn back_from_internal_ott_pages_returns_to_its_parent_without_leaving_ott() {
         ("settings", "providers"),
     ] {
         let mut app = app_fixture();
-        mount_ott(&mut app, page, false);
+        mount_modern_ott(&mut app, page, false);
         let ott = app.pages.top_page();
 
         press_back(&mut app);
@@ -70,14 +76,14 @@ fn back_from_internal_ott_pages_returns_to_its_parent_without_leaving_ott() {
 }
 
 #[test]
-fn back_from_pushed_ott_providers_restores_the_existing_host_page() {
+fn modern_back_from_pushed_ott_providers_restores_the_existing_host_page() {
     let _serial = plx_base::testlock::serial();
     let mut app = app_fixture();
     bridge::show_page(&mut app.pages, AppArg::Home);
     settle_pages(&mut app);
     let home = app.pages.top_page();
     assert!(home.is_some());
-    mount_ott(&mut app, "providers", true);
+    mount_modern_ott(&mut app, "providers", true);
     assert_eq!(app.pages.nav.tabs.stack.depth(), 2);
     assert_ne!(app.pages.top_page(), home);
 
@@ -98,11 +104,11 @@ fn back_from_pushed_ott_providers_restores_the_existing_host_page() {
 }
 
 #[test]
-fn back_from_root_ott_providers_requests_standard_root_back_once() {
+fn modern_back_from_root_ott_providers_requests_standard_root_back_once() {
     let _serial = plx_base::testlock::serial();
     let mut app = app_fixture();
     app.running = true;
-    mount_ott(&mut app, "providers", false);
+    mount_modern_ott(&mut app, "providers", false);
     let ott = app.pages.top_page();
     assert_eq!(app.pages.nav.tabs.stack.depth(), 1);
 
@@ -165,7 +171,7 @@ fn back_to_profiles_fences_an_earlier_save_reload_and_its_first_batch() {
         saved.category = "Fixture folder".into();
         saved
     };
-    mount_ott(&mut app, "channels", false);
+    mount_modern_ott(&mut app, "channels", false);
 
     press_back(&mut app);
     assert_eq!(app.ott.as_ref().unwrap().page, "profiles");
@@ -333,7 +339,7 @@ fn category_back_preserves_an_accepted_transient_local_source() {
 fn channel_back_keeps_m3u_profiles_and_then_returns_to_the_same_provider() {
     let _serial = plx_base::testlock::serial();
     let mut app = m3u_navigation_fixture();
-    mount_ott(&mut app, "channels", false);
+    mount_modern_ott(&mut app, "channels", false);
     let playback_epoch = app.ott.as_ref().unwrap().playback_epoch;
     let cancel = app.ott.as_ref().unwrap().cancel.clone();
 
@@ -366,7 +372,7 @@ fn channel_list_return_after_back_restarts_an_unfinished_m3u_catalog_without_pla
         if !had_first_batch {
             app.ott.as_mut().unwrap().catalog.entries.clear();
         }
-        mount_ott(&mut app, "channels", false);
+        mount_modern_ott(&mut app, "channels", false);
         let retired_generation = app.ott.as_ref().unwrap().generation;
         let old_cancel = app.ott.as_ref().unwrap().cancel.clone();
         let before = serde_json::to_value(&app.ott.as_ref().unwrap().saved).unwrap();
@@ -444,7 +450,7 @@ fn channel_list_return_keeps_live_and_completed_m3u_catalogs() {
         let mut app = m3u_navigation_fixture();
         app.ott.as_mut().unwrap().catalog_loading = !complete;
         app.ott.as_mut().unwrap().catalog_complete = complete;
-        mount_ott(&mut app, "channels", false);
+        mount_modern_ott(&mut app, "channels", false);
         if complete { press_back(&mut app); }
         let generation = app.ott.as_ref().unwrap().generation;
         let cancel = app.ott.as_ref().unwrap().cancel.clone();
@@ -473,7 +479,7 @@ fn interrupted_m3u_return_survives_profile_back_but_not_profile_or_source_replac
     let _serial = plx_base::testlock::serial();
     for replacement in ["none", "source", "profile"] {
         let mut app = m3u_navigation_fixture();
-        mount_ott(&mut app, "channels", false);
+        mount_modern_ott(&mut app, "channels", false);
         press_back(&mut app);
         press_back(&mut app);
         assert_eq!(app.ott.as_ref().unwrap().page, "providers");
@@ -506,7 +512,7 @@ fn interrupted_m3u_return_survives_profile_back_but_not_profile_or_source_replac
 fn root_back_confirmation_open_preserves_navigation_and_source_work() {
     let _serial = plx_base::testlock::serial();
     let mut app = m3u_navigation_fixture();
-    mount_ott(&mut app, "providers", false);
+    mount_ott(&mut app, "channels", false);
     let mut runtime = app.ott.take().unwrap();
     runtime.reply = app.pages.top_page();
     runtime.catalog_next = runtime.active().cloned();
@@ -546,7 +552,7 @@ fn root_exit_action(app: &mut App, action: OttAction) {
 fn root_exit_cancel_and_wrong_token_preserve_the_current_question() {
     let _serial = plx_base::testlock::serial();
     let mut app = m3u_navigation_fixture();
-    mount_ott(&mut app, "providers", false);
+    mount_ott(&mut app, "channels", false);
     let before = {
         let r = app.ott.as_ref().unwrap();
         (r.navigation_epoch, r.playback_epoch, r.generation, r.catalog.clone(), r.catalog_next.clone(),
@@ -576,7 +582,7 @@ fn root_exit_answer_rejects_changed_owner_mode_source_root_and_policy() {
     let _serial = plx_base::testlock::serial();
     for changed in 0..7 {
         let mut app = m3u_navigation_fixture();
-        mount_ott(&mut app, "providers", false);
+        mount_ott(&mut app, "channels", false);
         root_exit_action(&mut app, OttAction::Back);
         match changed {
             0 => {
@@ -612,7 +618,7 @@ fn root_exit_answer_rejects_changed_owner_mode_source_root_and_policy() {
 fn root_exit_pending_surface_does_not_open_or_accept_navigation() {
     let _serial = plx_base::testlock::serial();
     let mut app = m3u_navigation_fixture();
-    mount_ott(&mut app, "providers", false);
+    mount_ott(&mut app, "channels", false);
     let mut runtime = app.ott.take().unwrap();
     runtime.reply = app.pages.top_page();
     let before = (runtime.navigation_epoch, runtime.generation, runtime.catalog.clone());

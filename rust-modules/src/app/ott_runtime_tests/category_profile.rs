@@ -1,6 +1,7 @@
 //! Real category selection projection and writer/settlement boundaries.
 //! Synthetic Saved completions do not claim persistence durability.
 use super::*;
+use plx_machine::machine::UiMode;
 
 fn profile(id: &str) -> ProviderProfile {
     ProviderProfile { id: id.into(), name: id.into(), kind: ProviderKind::M3u,
@@ -381,11 +382,12 @@ fn old_m3u_category_action_cannot_write_new_vportal_profile() {
 }
 
 
-fn load_without_active_profile(favorites: bool, navigation: u64) -> (App, Saved) {
+fn load_without_active_profile(favorites: bool, navigation: u64, mode: UiMode) -> (App, Saved) {
     let mut app = ready();
     let r = app.ott.as_mut().unwrap();
     let mut incoming = r.saved.clone();
     incoming.profiles.active_profile = None;
+    incoming.settings.insert("interfaceMode".into(), json!(mode.index()));
     incoming.favorites_selected = favorites;
     incoming.favorites.toggle(selection::capture(&profile("A"), &entry("news", "News")).unwrap()).unwrap();
     incoming.validate().unwrap();
@@ -403,7 +405,7 @@ fn load_without_active_profile(favorites: bool, navigation: u64) -> (App, Saved)
 #[test]
 fn initial_global_favorites_without_active_profile_reopens_list_without_playing() {
     let _serial = plx_base::testlock::serial();
-    let (app, incoming) = load_without_active_profile(true, 0);
+    let (app, incoming) = load_without_active_profile(true, 0, UiMode::Classic);
     let r = app.ott.as_ref().unwrap();
     assert!(r.loaded && r.saved.profiles.active_profile.is_none());
     assert_eq!(r.page, "favorites");
@@ -417,19 +419,21 @@ fn initial_global_favorites_without_active_profile_reopens_list_without_playing(
 }
 
 #[test]
-fn initial_no_active_profile_without_favorites_keeps_provider_selection() {
+fn initial_no_active_profile_without_favorites_opens_the_root_for_its_mode() {
     let _serial = plx_base::testlock::serial();
-    let (app, _) = load_without_active_profile(false, 0);
-    let r = app.ott.as_ref().unwrap();
-    assert_eq!(r.page, "providers");
-    assert!(!r.saved.favorites_selected);
-    assert!(r.play_target.is_none() && r.playing.is_none());
+    for (mode, root) in [(UiMode::Classic, "channels"), (UiMode::Modern, "providers")] {
+        let (app, _) = load_without_active_profile(false, 0, mode);
+        let r = app.ott.as_ref().unwrap();
+        assert_eq!(r.page, root);
+        assert!(!r.saved.favorites_selected);
+        assert!(r.play_target.is_none() && r.playing.is_none());
+    }
 }
 
 #[test]
 fn late_global_favorites_load_without_active_profile_cannot_replace_newer_navigation() {
     let _serial = plx_base::testlock::serial();
-    let (app, _) = load_without_active_profile(true, 1);
+    let (app, _) = load_without_active_profile(true, 1, UiMode::Classic);
     let r = app.ott.as_ref().unwrap();
     assert!(r.saved.favorites_selected);
     assert_eq!(r.page, "settings");

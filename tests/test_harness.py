@@ -9388,7 +9388,7 @@ class FpsMock(unittest.TestCase):
 
 
 class ClassicUiNavigation(unittest.TestCase):
-    """Driver-only regression using the observed old Remote route, not a renderer proof."""
+    """Check the capture driver against the shipped Settings row order and focus changes."""
 
     def settings_rows(self):
         # Derive this fixture's row allocation from the shipped declarations,
@@ -9447,22 +9447,21 @@ class ClassicUiNavigation(unittest.TestCase):
     def test_settings_allocation_includes_appended_adapter_rows(self):
         rows = self.settings_rows()
         self.assertEqual(rows, ["settings.open:" + name for name in (
-            "interface", "colors", "lists", "channels", "infobar", "buttons", "menu",
+            "interface", "colors", "lists", "channels", "infobar", "buttons", "menu", "subtitles",
             "profiles", "parental", "remote")] + [
             "interfaceMode", "native.audio", "native.subtitles", "native.settings",
             "torrent.settings", "stremio.settings"])
-        self.assertEqual(43 + rows.index("interfaceMode"), 53)
-        self.assertEqual(43 + len(rows), 59)
+        self.assertEqual(rows.index("interfaceMode"), 11)
+        self.assertEqual(len(rows), 17)
 
     def drive(self, fault=None, complete=False):
         import ott_classic_ui
         classic = 43 + len(self.settings_rows())
-        modern, back = classic + 1, classic + 2
-        tail = iter(("back", "back", "ok", "down", "ok", "ck:811,1023", "ck:1066,865",
+        tail = iter(("back", "back", "back", "ck:811,1023", "ck:1066,865",
                      "k:0,489", "k:57,38", "k:0,489", "k:49,30", "k:0,489", "k:50,31",
                      "k:0,489", "k:57,38", "k:0,489", "k:49,30", "ck:811,1023",
                      "ck:1100,505", "ok", "txt:Fixture+Channel+08", "down", "down", "ok",
-                     "back", "back", "back", "back", "back"))
+                     "back", "back", "back"))
 
         class CapturedClassic(Exception):
             pass
@@ -9474,7 +9473,6 @@ class ClassicUiNavigation(unittest.TestCase):
                 self.server.counts.return_value = {"/fixture.m3u": 1, "/fixture.xml": 1}
                 self.sim = mock.Mock(dir=ott_classic_ui.Path("unused-fixture-root"))
                 self.started = False
-                self.opening = iter(("back", "back", "ck:158,177", "ck:1120,606"))
                 self.elem = None
                 self.page = "catalog"
                 self.persisted = False
@@ -9508,7 +9506,7 @@ class ClassicUiNavigation(unittest.TestCase):
 
             def capture(self, name):
                 self.captures.append(name)
-                if name == "modern-channel-list":
+                if name == "channel-list-classic":
                     self.started = True
                 if name == "classic-selected":
                     if not complete:
@@ -9529,6 +9527,14 @@ class ClassicUiNavigation(unittest.TestCase):
                     expected = next(tail, None)
                     if token != expected:
                         raise AssertionError((token, expected))
+                    if self.captures[-1] == "settings-classic":
+                        self.elem = 7
+                    elif self.captures[-1] == "search-cancel":
+                        self.elem = 17 if fault == "providers-root" else ott_classic_ui.EXIT_NO
+                    elif self.captures[-1] == "exit-prompt":
+                        self.elem = 22 if fault == "lost-list-focus" else 23
+                    elif self.captures[-1] == "search-results":
+                        self.elem = 23
                     if token == "ck:1066,865":
                         self.record["value"]["favorites"]["entries"] = [
                             {"locator": {"kind": "channel", "channelId": "m3u-epg:visual-01"}}]
@@ -9540,31 +9546,21 @@ class ClassicUiNavigation(unittest.TestCase):
                     if fault == "favorite-lost" and self.captures[-1] == "exit-prompt":
                         self.record["value"]["favorites"]["entries"] = []
                     return
-                opening = next(self.opening, None)
-                if opening is not None:
-                    if token != opening:
-                        raise AssertionError((token, opening))
-                    if token == "ck:1120,606":
-                        self.page, self.elem = "settings", 44 if fault == "root" else 43
-                    return
-                if token == "ck:1192,940":
-                    # Captured ffd trace: Settings Remote key 52 opens its Back key 59.
-                    self.page, self.elem = "remote", 59
+                if self.page == "catalog" and token == "ck:811,1023":
+                    self.page, self.elem = "menu", 4
+                elif self.page == "menu" and token == "down":
+                    self.elem = {4: 8, 8: 16, 16: 5, 5: 6, 6: 7}[self.elem]
+                elif self.page == "menu" and token == "ok" and self.elem == 7:
+                    self.page, self.elem = "settings", 7 if fault == "root" else 43
                 elif self.page == "settings" and token == "down":
                     if not (fault == "missed-down" and self.elem == 45):
                         self.elem += 1
-                    if fault == "remote-row" and self.elem == 53:
-                        self.elem = 52
-                elif self.page == "settings" and token == "ok" and self.elem == 53:
-                    self.page, self.elem = "picker", back if fault == "wrong-picker" else modern
-                elif self.page == "picker" and token == "up":
-                    self.elem -= 1
+                    if fault == "remote-row" and self.elem == 54:
+                        self.elem = 53
+                elif self.page == "settings" and token == "ok" and self.elem == 54:
+                    self.page, self.elem = "picker", classic + 2 if fault == "wrong-picker" else classic
                 elif self.page == "picker" and token == "ok" and self.elem == classic:
                     self.persisted = fault != "write-refused"
-                elif self.page == "remote" and token == "up":
-                    self.elem = 1
-                elif self.page == "remote" and token == "ok":
-                    self.page, self.elem = "browse", 7
                 else:
                     raise AssertionError((self.page, self.elem, token))
 
@@ -9586,8 +9582,11 @@ class ClassicUiNavigation(unittest.TestCase):
         self.assertTrue(driver.persisted)
         self.assertEqual(driver.receipt["classic_preference"], {"revision": 2})
         self.assertEqual([row["focus"] for row in driver.receipt["navigation"]],
-                         [f"focus route=ott elem={n} press=0" for n in (*range(43, 54), 60, 59)])
-        self.assertNotIn("ck:1192,940", driver.receipt["inputs"])
+                         [f"focus route=ott elem={n} press=0" for n in (4, 7, *range(43, 55), 60)])
+        self.assertEqual(driver.captures[:4],
+                         ["boot", "providers-classic", "profiles-classic", "channel-list-classic"])
+        self.assertEqual(driver.receipt["inputs"][:9],
+                         ["ok", "ok", "ok", "ok", "txt:" + driver.server.url, "down", "down", "ok", "ok"])
 
     def test_added_adapter_row_rejects_stale_picker_before_activation(self):
         from pathlib import Path
@@ -9601,7 +9600,7 @@ class ClassicUiNavigation(unittest.TestCase):
             return value
         with mock.patch.object(Path, "read_text", changed):
             driver, error = self.drive()
-        self.assertIn("Modern mode picker: expected focus route=ott elem=60 press=0", error)
+        self.assertIn("Classic mode picker: expected focus route=ott elem=60 press=0", error)
         self.assertEqual(driver.elem, 61)
         self.assertEqual(driver.receipt["inputs"][-1], "ok")
         self.assertFalse(driver.persisted)
@@ -9623,10 +9622,18 @@ class ClassicUiNavigation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Favorites changed while navigating"):
             self.drive("favorite-lost", complete=True)
 
+    def test_exit_must_open_from_the_list_and_return_to_its_focused_row(self):
+        for fault, message in [("providers-root", "exit question defaults to No"),
+                               ("lost-list-focus", "exit cancellation restores Channel list focus")]:
+            with self.subTest(fault=fault):
+                driver, error = self.drive(fault, complete=True)
+                self.assertIn(message, error)
+                self.assertNotIn("exit-cancel", driver.captures)
+
     def test_changed_root_stops_before_walking(self):
         driver, error = self.drive("root")
-        self.assertIn("Settings row: expected focus route=ott elem=43 press=0", error)
-        self.assertEqual(driver.receipt["inputs"][-1], "ck:1120,606")
+        self.assertIn("first Settings row after opening Menu item", error)
+        self.assertEqual(driver.receipt["inputs"][-1], "ok")
 
     def test_missed_down_stops_before_another_row_is_activated(self):
         driver, error = self.drive("missed-down")
@@ -9636,15 +9643,15 @@ class ClassicUiNavigation(unittest.TestCase):
 
     def test_remote_row_cannot_pass_mode_checkpoint(self):
         driver, error = self.drive("remote-row")
-        self.assertIn("Settings row: expected focus route=ott elem=53 press=0", error)
+        self.assertIn("Settings row: expected focus route=ott elem=54 press=0", error)
         self.assertEqual(driver.page, "settings")
         self.assertEqual(driver.receipt["inputs"][-1], "down")
         self.assertFalse(driver.persisted)
 
     def test_wrong_picker_cannot_receive_classic_activation(self):
         driver, error = self.drive("wrong-picker")
-        self.assertIn("Modern mode picker: expected focus route=ott elem=60 press=0", error)
-        self.assertEqual(driver.elem, 61)
+        self.assertIn("Classic mode picker: expected focus route=ott elem=60 press=0", error)
+        self.assertEqual(driver.elem, 62)
         self.assertFalse(driver.persisted)
 
     def test_focus_does_not_substitute_for_durable_mode_write(self):

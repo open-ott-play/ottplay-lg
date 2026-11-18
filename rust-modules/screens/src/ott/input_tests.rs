@@ -31,9 +31,13 @@ impl Mounter<TestHost> for Mount {
 mod exit_confirmation_tests {
     use super::*;
     fn exit_prompt(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, token: u64, ms: u32) {
+        let page_id = rig.snapshot.page_id.clone();
+        addressed_prompt(d, rig, token, page_id, ms);
+    }
+    fn addressed_prompt(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, token: u64, page_id: String, ms: u32) {
         let instance = d.nav.top_page().unwrap().inst.as_ref().unwrap().id;
         d.emit(MachineId::Nav, Fx::Deliver(MachineId::Instance(instance),
-            Delivery::Screen(ScreenEvent::App(AppMsg::OttExitPrompt { token }))));
+            Delivery::Screen(ScreenEvent::App(AppMsg::OttExitPrompt { token, page_id }))));
         for at in (ms..=ms + 800).step_by(16) { frame(d, rig, at, vec![]); }
     }
     fn answer_ok(d: &mut Dispatcher<TestHost>, rig: &mut TestRig, ms: u32, expected: OttAction) -> u32 {
@@ -55,8 +59,9 @@ mod exit_confirmation_tests {
     fn exit_confirmation_defaults_to_cancel_in_both_modes() {
         let _guard = plx_base::testlock::serial();
         for mode in [UiMode::Classic, UiMode::Modern] {
-            let snapshot = navigation_view("providers", 1,
-                vec![navigation_row("profiles", OttAction::ShowProfiles)], Some("profiles"));
+            let snapshot = if mode == UiMode::Classic { classic_list("channels:category", false) }
+                else { navigation_view("providers", 1,
+                    vec![navigation_row("profiles", OttAction::ShowProfiles)], Some("profiles")) };
             let (mut d, mut rig) = mount_snapshot_in_mode(snapshot, mode);
             exit_prompt(&mut d, &mut rig, 41, 300);
             let answered = answer_ok(&mut d, &mut rig, 1200, OttAction::ExitAnswer { token: 41, accept: false });
@@ -95,6 +100,122 @@ mod exit_confirmation_tests {
         frame(&mut d, &mut rig, 2216, vec![key(Key::Back, tick(2216))]);
         frame(&mut d, &mut rig, 2232, vec![key_up(Key::Back, tick(2232))]);
         assert_eq!(rig.actions, vec![OttAction::ExitAnswer { token: 42, accept: false }]);
+    }
+    fn classic_list(page: &str, empty: bool) -> Arc<OttView> {
+        let rows = if empty { Vec::new() } else {
+            ["first", "selected"].into_iter().map(|id| navigation_row(id, OttAction::Play(id.into()))).collect()
+        };
+        let mut view = navigation_view(page, 1, rows, (!empty).then_some("selected"));
+        Arc::make_mut(&mut view).preview_context = None;
+        view
+    }
+
+    #[test]
+    fn classic_list_exit_uses_drawn_no_and_yes_and_restores_the_exact_focus() {
+        let _guard = plx_base::testlock::serial();
+        for (page, empty) in [("channels:any-category", false), ("favorites:pinned", false),
+            ("favorites", true), ("channels", true)] {
+            let (mut d, mut rig) = mount_snapshot_in_mode(classic_list(page, empty), UiMode::Classic);
+            if !empty { assert_focus(&d, "item:selected"); }
+            let origin = d.focus().expect("the list has a row or navigation control");
+            for (offset, accept) in [false, true].into_iter().enumerate() {
+                let token = offset as u64 + 31;
+                let start = 320 + offset as u32 * 2400;
+                let back = tick(start);
+                frame(&mut d, &mut rig, start, vec![key(Key::Back, back), key_up(Key::Back, back)]);
+                assert_eq!(std::mem::take(&mut rig.actions), vec![OttAction::Back]);
+                exit_prompt(&mut d, &mut rig, token, start + 32);
+                assert_eq!(d.focus().unwrap().elem, crate::registry::ALERT);
+                assert!(!native_navigation_screen(&d).accepts_channel_number());
+                // Walk the ordinary page and the Player's hardware-plane panel.
+                let previous_plane = plx_gfx::gfx::set_video_plane_frame(accept);
+                let mut answers = Vec::new();
+                let labels = plx_ui::draw_census::capture_runs(|| plx_ui::record_walk(|| {
+                    answers = draw_pointer_keys(&mut d, &rig, &[crate::registry::ALERT, crate::registry::ALERT + 1],
+                        plx_ui::screen::Activate::Press);
+                }));
+                plx_gfx::gfx::set_video_plane_frame(previous_plane);
+                for label in [msg::ott_exit_question(), msg::ott_settings_no(), msg::ott_settings_yes()] {
+                    assert!(labels.iter().any(|run| run.text == label), "missing exit label {label}");
+                }
+                let outside = d.input.hit.resolve(Some(origin.entry), plx_ui::hit::PointerKind::Click,
+                    1.0, 1.0, d.focus());
+                assert!(!outside.miss && outside.focus.is_none(), "an outside click stays on the panel");
+                click_header(&mut d, &mut rig, Rect::new(0.0, 0.0, 2.0, 2.0), start + 864);
+                assert!(rig.actions.is_empty() && native_navigation_screen(&d).exit.prompt.is_open());
+                assert_eq!(d.focus().unwrap().elem, crate::registry::ALERT);
+                click_header(&mut d, &mut rig, answers[usize::from(accept)], start + 1328);
+                for at in (start + 1744..start + 2224).step_by(16) { frame(&mut d, &mut rig, at, vec![]); }
+                assert_eq!(std::mem::take(&mut rig.actions), vec![OttAction::ExitAnswer { token, accept }]);
+                assert_eq!(d.focus(), Some(origin));
+            }
+        }
+    }
+
+    #[test]
+    fn classic_exit_is_bound_to_the_exact_current_list_and_retires_late_delivery() {
+        let _guard = plx_base::testlock::serial();
+        let (mut d, mut rig) = mount_snapshot_in_mode(classic_list("channels:first", false), UiMode::Classic);
+        exit_prompt(&mut d, &mut rig, 11, 320);
+        let mut same = (*rig.snapshot).clone();
+        same.revision += 1;
+        same.status = "Catalogue updated".into();
+        publish_snapshot(&mut d, &mut rig, Arc::new(same), 1200);
+        assert!(native_navigation_screen(&d).exit.prompt.is_open());
+        let next = OttView { revision: 3, page_id: "channels:second".into(), ..(*rig.snapshot).clone() };
+        publish_snapshot(&mut d, &mut rig, Arc::new(next), 1232);
+        assert!(!native_navigation_screen(&d).exit.prompt.visible());
+        addressed_prompt(&mut d, &mut rig, 12, "channels:first".into(), 1264);
+        assert!(!native_navigation_screen(&d).exit.prompt.is_open());
+        let old = OttView { revision: 4, page_id: "channels:first".into(), ..(*rig.snapshot).clone() };
+        publish_snapshot(&mut d, &mut rig, Arc::new(old), 2144);
+        exit_prompt(&mut d, &mut rig, 11, 2176);
+        assert!(!native_navigation_screen(&d).exit.prompt.is_open());
+        assert_eq!(rig.actions, vec![OttAction::ExitAnswer { token: 12, accept: false }]);
+    }
+
+    #[test]
+    fn delayed_exit_while_browse_is_open_releases_the_grant_for_the_next_back() {
+        let _guard = plx_base::testlock::serial();
+        let (mut d, mut rig) = mount_snapshot_in_mode(classic_list("channels:owner", false), UiMode::Classic);
+        let menu = draw_pointer_map(&mut d, &rig, &["nav:browse"])[0];
+        click_header(&mut d, &mut rig, menu, 256);
+        assert!(native_navigation_screen(&d).browse);
+        exit_prompt(&mut d, &mut rig, 17, 720);
+        assert!(!native_navigation_screen(&d).exit.prompt.is_open());
+        assert_eq!(std::mem::take(&mut rig.actions), vec![OttAction::ExitAnswer { token: 17, accept: false }]);
+        frame(&mut d, &mut rig, 1600, vec![key(Key::Back, tick(1600)), key_up(Key::Back, tick(1600))]);
+        assert!(!native_navigation_screen(&d).browse && rig.actions.is_empty());
+        assert_focus(&d, "item:selected");
+        frame(&mut d, &mut rig, 1632, vec![key(Key::Back, tick(1632)), key_up(Key::Back, tick(1632))]);
+        assert_eq!(std::mem::take(&mut rig.actions), vec![OttAction::Back]);
+        exit_prompt(&mut d, &mut rig, 18, 1664);
+        addressed_prompt(&mut d, &mut rig, 17, "channels:owner".into(), 2528);
+        frame(&mut d, &mut rig, 3408, vec![key(Key::Back, tick(3408))]);
+        assert_eq!(rig.actions, vec![OttAction::ExitAnswer { token: 18, accept: false }]);
+    }
+
+    #[test]
+    fn addressed_exit_preserves_modern_list_and_classic_nested_back() {
+        let _guard = plx_base::testlock::serial();
+        for (mode, page, query, loading) in [
+            (UiMode::Modern, "channels:owner", "", false),
+            (UiMode::Classic, "categories", "", false),
+            (UiMode::Classic, "providers", "", false),
+            (UiMode::Classic, "channels:owner", "filtered", false),
+            (UiMode::Classic, "channels:owner", "", true),
+        ] {
+            let mut view = classic_list(page, false);
+            let view_mut = Arc::make_mut(&mut view);
+            view_mut.search = Some(OttSearch { query: query.into(), scope: String::new() });
+            view_mut.startup_pending = loading;
+            let (mut d, mut rig) = mount_snapshot_in_mode(view, mode);
+            exit_prompt(&mut d, &mut rig, 41, 320);
+            assert!(!native_navigation_screen(&d).exit.prompt.is_open());
+            frame(&mut d, &mut rig, 1200, vec![key(Key::Back, tick(1200))]);
+            let expected = if query.is_empty() { OttAction::Back } else { OttAction::ClearSearch };
+            assert_eq!(rig.actions, vec![OttAction::ExitAnswer { token: 41, accept: false }, expected]);
+        }
     }
 }
 
@@ -874,14 +995,20 @@ fn draw_pointer_map(d: &mut Dispatcher<TestHost>, rig: &TestRig, controls: &[&st
 
 fn draw_pointer_map_with_activation(d: &mut Dispatcher<TestHost>, rig: &TestRig,
     controls: &[&str], activation: plx_ui::screen::Activate) -> Vec<Rect> {
+    let screen = native_navigation_screen(d);
+    let keys: Vec<_> = controls.iter().map(|id| screen.keys[*id]).collect();
+    draw_pointer_keys(d, rig, &keys, activation)
+}
+
+fn draw_pointer_keys(d: &mut Dispatcher<TestHost>, rig: &TestRig,
+    keys: &[u32], activation: plx_ui::screen::Activate) -> Vec<Rect> {
     let current = d.focus();
     let page = d.nav.tabs.stack.top_mut().unwrap();
     let screen = page.inst.as_mut().unwrap().screen.as_any_mut().unwrap().downcast_mut::<OttScreen>().unwrap();
     let cx = Cx { views: rig.mode, tick: tick(240), measure: &rig.measure,
         press: Default::default(), focus: plx_machine::machine::FocusRead { current, ..Default::default() },
         owner: InputOwner::Entry(page.id) };
-    let placed: Vec<_> = controls.iter().map(|id| {
-        let elem = screen.keys[*id];
+    let placed: Vec<_> = keys.iter().map(|&elem| {
         let placed = Focusable::<TestHost>::place(screen, &elem, &cx, At::Drawn).expect("visible header control");
         (FocusKey { entry: page.id, elem }, placed.rect.intersect(placed.clip))
     }).collect();

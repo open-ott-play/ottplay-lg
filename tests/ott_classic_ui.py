@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ("category-all", "category-favorites", "category-nine")
 SUPPLEMENTARY = ("providers-classic", "profiles-classic", "channel-list-classic",
                  "channel-browse", "category-picker", "search-editor", "search-results",
-                 "search-cancel", "profiles-return", "providers-return", "exit-prompt", "exit-cancel")
+                 "search-cancel", "exit-prompt", "exit-cancel")
 ASSETS = ("appfont.ttf", "appfont-bold.ttf", "appfont-cjk.ttf", "appfont-emoji.ttf",
           "appfont-arabic.ttf", "appfont-arabic-bold.ttf", "appfont-hebrew.ttf",
           "appfont-hebrew-bold.ttf", "icon.png", "largeIcon.png", "splash.png",
@@ -41,6 +41,8 @@ FIRST_GROUP = "<News> / {category} & Music"
 # The flat M3U category identity from ott_catalog_organization::provider_id.
 # Display labels are deliberately not persisted as category IDs.
 NINTH_CATEGORY = "organization:provider:" + hashlib.sha256(b"Group 07").hexdigest()
+# Shared decision prompt's negative button (screens::registry::ALERT).
+EXIT_NO = 0x4000_0100
 
 
 def sha(path):
@@ -269,50 +271,70 @@ class Scenario:
                         f"category {digit} Saved acknowledgement", revision)
         self.capture(name)
 
+    def check_exit_from_list(self):
+        list_focus = self.wait(self.focus, "settled Channel list focus")
+        self.key("back")
+        self.expect_focus(EXIT_NO, "exit question defaults to No")
+        self.capture("exit-prompt")
+        self.key("back")
+        self.wait(lambda: self.focus() == list_focus, "exit cancellation restores Channel list focus")
+        self.capture("exit-cancel")
+
     def run(self):
         fifo = self.sim.dir / "plxnative-remote"
         self.wait(lambda: fifo.exists() and stat.S_ISFIFO(fifo.lstat().st_mode), "remote FIFO ready")
         self.capture("boot")
-        for token in ("ok", "ok", "ok", "txt:" + self.server.url, "down", "down", "ok"):
+        self.key("ok")  # Providers row in the first-run Classic Channel list
+        self.capture("providers-classic")
+        self.key("ok")  # M3U
+        self.capture("profiles-classic")
+        for token in ("ok", "ok", "txt:" + self.server.url, "down", "down", "ok"):
             self.key(token)
         def profile_matches(v):
             profiles = v.get("profiles", {})
-            return profiles.get("active_profile") == "m3u-1" and any(
+            return any(
                 p.get("id") == "m3u-1" and p.get("source") == self.server.url and p.get("kind") == "m3u"
                 for p in profiles.get("profiles", []))
-        self.saved_when(profile_matches, "ordinary M3U profile Saved acknowledgement")
+        self.saved_when(profile_matches, "M3U slot Saved acknowledgement")
+        self.key("ok")  # First activation of this newly saved slot
+        self.saved_when(lambda v: profile_matches(v) and v["profiles"].get("active_profile") == "m3u-1",
+                        "ordinary M3U profile activation")
         self.wait(lambda: self.server.counts().get("/fixture.m3u", 0) and self.server.counts().get("/fixture.xml", 0), "playlist and EPG requests")
-        self.capture("modern-channel-list")
-        # These two opening clicks are unchanged in the captured Modern fixture.
-        for token in ("back", "back", "ck:158,177", "ck:1120,606"):
-            self.key(token)
-        # In this fresh eight-channel fixture, Settings allocates keys 43..58:
-        # seven groups (including Interface colors), Profiles/Parental/Remote,
-        # then Interface mode at 53; the final two rows are Torrent and Stremio.
-        # The old row-coordinate now opens Remote.
-        # Walk real Down input and fail at the first changed/missed focus instead
-        # of continuing blind clicks into another page. Keys 59/60 are the
-        # Classic/Modern picker rows; Modern is the initially selected value.
-        for elem in range(43, 54):
-            if elem != 43:
+        self.capture("channel-list-classic")
+        self.key("ck:811,1023")  # Menu
+        self.expect_focus(4, "Channel list Menu")
+        # Menu keys are allocated before the rows of the active catalogue.
+        # The actions below Channel list depend on the current item.
+        for _ in range(8):
+            if self.wait(self.focus, "settled Menu item") == "focus route=ott elem=7 press=0":
+                break
+            self.key("down")
+        self.expect_focus(7, "Settings Menu item")
+        self.key("ok")
+        # The first Settings visit allocates its rows after the startup and
+        # profile rows. Their absolute numbers depend on that earlier route.
+        def first_settings_row():
+            focus = self.focus()
+            if focus:
+                elem = int(focus.split(" elem=")[1].split()[0])
+                if 17 < elem < EXIT_NO:
+                    return elem
+            return None
+        first = self.wait(first_settings_row, "first Settings row after opening Menu item")
+        for elem in range(first, first + 12):
+            if elem != first:
                 self.key("down")
             self.expect_focus(elem, "Settings row")
         self.key("ok")
-        self.expect_focus(60, "Modern mode picker")
-        self.key("up")
-        self.expect_focus(59, "Classic mode picker")
+        self.expect_focus(first + 17, "Classic mode picker")
         self.key("ok")
         self.receipt["classic_preference"] = self.wait(self.mode, "ordinary Classic mode write")
         self.capture("classic-selected")
         self.key("back")
         self.capture("settings-classic")
         self.key("back")
-        self.capture("providers-classic")
-        self.key("ok")
-        self.capture("profiles-classic")
-        self.key("down")  # Classic's separate Load playlist row
-        self.key("ok")
-        self.capture("channel-list-classic")
+        self.expect_focus(7, "Settings returns to Menu")
+        self.key("back")
         self.key("ck:811,1023")
         self.capture("channel-browse")
         revision = self.saved()["record_revision"]
@@ -344,14 +366,7 @@ class Scenario:
         self.capture("search-results")
         self.key("back")
         self.capture("search-cancel")
-        self.key("back")
-        self.capture("profiles-return")
-        self.key("back")
-        self.capture("providers-return")
-        self.key("back")
-        self.capture("exit-prompt")
-        self.key("back")
-        self.capture("exit-cancel")
+        self.check_exit_from_list()
         final = self.saved()
         if not has_first(final["value"]):
             raise ValueError("Favorites changed while navigating")

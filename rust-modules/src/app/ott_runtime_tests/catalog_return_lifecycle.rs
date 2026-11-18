@@ -35,7 +35,7 @@ fn lifecycle_return_app() -> Box<App> {
     assert!(!runtime.catalog_done.load(Ordering::Acquire));
     assert!(runtime.catalog_next.is_none() && runtime.catalog_return.is_none());
     assert!(!runtime.saving);
-    assert_eq!(app.bridge.ui_mode(), plx_machine::machine::UiMode::Classic);
+    assert_eq!(app.bridge.ui_mode(), plx_machine::machine::UiMode::Modern);
     lifecycle_return_no_play(&app);
     app
 }

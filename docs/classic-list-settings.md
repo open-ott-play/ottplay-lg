@@ -8,24 +8,26 @@ The native default when no mode is saved is **Classic**; an update retains
 the installation's saved choice. The list settings below are separate from
 this mode selection.
 
-Physical **Blue** opens Categories where that action is available, including
-from Providers. It does not replace input handling in an editor, Description
-or Browse. **Back** first closes those nested views. In a Classic Channel list
-or Favorites list with a nonempty search, Back clears the filter before leaving
-the list. Otherwise it returns through the existing category, channel and profile
-hierarchy. At the settled **Providers** root, Back opens an exit confirmation. Only confirming
-exits; **Cancel**, or Back within that confirmation, keeps the application open.
-Reaching a horizontal focus boundary with Left does not itself mean Back.
-The explicit contextual-arrow choice described below retains its own actions.
+The **Channel list** is the main Classic screen. On first use, choose
+**Providers** in the empty list to configure a source. To change providers
+later, choose **Menu → Providers**. From fullscreen playback, press **OK**
+to open the list. **Back** on the list asks “Exit OTTPlay?” with **No**
+selected. Choose **No** or press **Back** again to keep the same list and
+focused row. Choose **Yes** to return to the television’s Home screen.
+
+**Back** first closes an open editor, Description or Browse. On a Channel list
+or Favorites list with an active search, it clears the filter first. Press
+**Blue** from the list to open Categories, then **Back** to return to the list.
+**Blue** also opens Categories from Providers. At a horizontal focus boundary,
+Left follows the arrow setting described below.
 
 Opening Settings from the list's Menu remembers that caller. Back from the
-Settings root reopens the same Menu with Settings focused; the next Back closes
-Menu to the retained list. A list covering fullscreen video then returns to
-that video through its ordinary Back. Inner setting pickers return to Settings
-first, including all list-display pickers when Settings was opened over video;
-they do not close that caller or cancel the active catalogue. A replaced source, authentication session, interface mode or screen
-owner retires the caller receipt. Direct Settings entry keeps its existing root
-return, and the fullscreen player's own Menu keeps its separate return path.
+Settings root reopens the same Menu with Settings focused. The next Back closes
+Menu to the retained list. Inner setting pickers return to Settings first.
+This return to Menu applies while the same source, session, interface mode and
+screen remain active. Direct Settings entry uses its own return path.
+Opening Menu or Categories directly from fullscreen playback gives that
+screen its own return path to the player.
 
 Mixed Favorites show provider, profile, subprofile and source alias in the
 selected-item details, omitting empty or repeated labels. The origin remains
@@ -144,8 +146,8 @@ captions, not the selected sidebar title. **Show description** hides both the
 synopsis and selected-item poster; the explicit Description action remains
 available. File metadata does not acquire a synthetic current/next schedule.
 
-After ordinary Back from an M3U, VPortal or Plex catalogue, reopening that
-retained source preserves its last completed or failed scan outcome. A completed empty list remains empty and complete. A failed
+Reopening a retained M3U, VPortal or Plex catalogue preserves its last
+completed or failed scan outcome. A completed empty list remains empty and complete. A failed
 scan retains its error and any rows already received; returning does not silently
 retry it. A scan cancelled while still loading resumes when that source's list
 is reopened. Replacing the source invalidates its old return state. Returning to

@@ -5,7 +5,7 @@ fn terminal_catalog_return_rejects_a_replaced_profile_or_source() {
     for completed in [false, true] {
         for replacement in ["profile", "source", "generation"] {
             let mut app = m3u_navigation_fixture();
-            mount_ott(&mut app, "channels", false);
+            mount_modern_ott(&mut app, "channels", false);
             let runtime = app.ott.as_ref().unwrap();
             runtime.catalog_tx.send(CatalogEvent::Finished(runtime.generation,
                 if completed { Ok(()) } else { Err("Original source failed") })).unwrap();

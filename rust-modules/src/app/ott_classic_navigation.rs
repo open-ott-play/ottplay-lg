@@ -17,6 +17,10 @@ struct Origin {
     server: plx_plex::plex::ServerId,
 }
 
+pub(super) fn active(runtime: &Runtime, app: &App) -> bool {
+    runtime.interface_mode() == UiMode::Classic && app.bridge.ui_mode() == UiMode::Classic
+}
+
 fn catalogue_page(route: &AppArg) -> bool {
     matches!(route, AppArg::Home | AppArg::Library | AppArg::LibraryCollections { .. }
         | AppArg::LibraryRecommended { .. } | AppArg::Search | AppArg::Watchlist
@@ -155,7 +159,8 @@ pub(super) fn reconcile(runtime: &mut Runtime, app: &mut App) -> bool {
                 // playback and queued reads; it grants no new source authority.
                 runtime.provider = provider;
                 if runtime.active().is_none() {
-                    runtime.page = if runtime.saved.favorites_selected { "favorites" } else { "profiles" };
+                    runtime.page = if mode == UiMode::Classic { runtime.catalog_page() }
+                        else if runtime.saved.favorites_selected { "favorites" } else { "profiles" };
                 }
                 runtime.reply = None;
                 runtime.changed();
@@ -189,12 +194,16 @@ pub(super) fn reconcile(runtime: &mut Runtime, app: &mut App) -> bool {
             if let Err(error) = runtime.require_parental(parental::Target::Providers) {
                 return hold(runtime, error);
             }
+            // An unavailable projected Plex page cannot lend its view to an unrelated catalogue.
+            if runtime.effective_profile().is_some() || !runtime.catalog.entries.is_empty() {
+                return hold(runtime, "Plex source is no longer available");
+            }
             Some("Plex source is no longer available")
         },
         Err(error) => return hold(runtime, error),
     };
     if let Some(error) = unavailable {
-        runtime.page = "providers";
+        runtime.page = runtime.catalog_page();
         runtime.status = error.into();
     }
     runtime.reply = None;
