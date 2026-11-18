@@ -15,6 +15,9 @@ pub struct Memory {
     pub(super) next_key: u32,
 }
 impl Memory {
+    #[cfg(feature = "test-support")]
+    pub fn element_for_test(&self, id: &str) -> Option<u32> { self.keys.get(id).copied() }
+
     pub(super) fn capture(screen: &OttScreen, focus: Option<FocusKey<u32>>) -> Self {
         let focus = focus.filter(|key| key.entry == screen.entry).and_then(|key|
             screen.keys.iter().find(|(_, elem)| **elem == key.elem).map(|(id, _)| id.clone()));

@@ -105,6 +105,9 @@ struct NativeAdmission {
     configuration: (Configuration, u64),
     session: Option<(String, Option<usize>)>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TorrentSettingsParent { Settings, Providers, StremioStreams }
+
 pub(super) struct Adapter {
     pending: Vec<Pending>,
     sources: Vec<IndexerSource>,
@@ -139,6 +142,7 @@ pub(super) struct Adapter {
     snapshot: Value,
     draft: Draft,
     stremio: stremio::State,
+    torrent_settings_parent: TorrentSettingsParent,
     media_provider: &'static str,
     direct_source: Option<plx_media::ff::ExternalSource>,
 }
@@ -179,6 +183,7 @@ impl Default for Adapter {
             snapshot: Value::Null,
             draft: Draft::default(),
             stremio: stremio::State::default(),
+            torrent_settings_parent: TorrentSettingsParent::Settings,
             media_provider: "torrent",
             direct_source: None,
         }
@@ -1895,6 +1900,7 @@ impl Adapter {
                     "torrent-results" => "torrent-categories",
                     "torrent-categories" if self.children.is_some() => "torrent-children",
                     "torrent-categories" | "torrent-children" | "torrent-files" | "torrent-configure" => "torrent-sources",
+                    "torrent-settings" if self.torrent_settings_parent == TorrentSettingsParent::Providers => "providers",
                     "torrent-settings" => "settings",
                     _ => "providers",
                 };
@@ -1942,6 +1948,7 @@ impl Adapter {
                         runtime.page = "torrent-sources";
                         self.ui_request(runtime, Request::Indexer(IndexerRequest::List), Target::Sources)?;
                     } else {
+                        self.torrent_settings_parent = TorrentSettingsParent::Providers;
                         runtime.page = "torrent-settings";
                         runtime.status = if snapshot.ready {
                             "The local service does not offer torrent indexers"
@@ -1950,7 +1957,11 @@ impl Adapter {
                         }.into();
                     }
                 }
-                "torrent.settings" => { self.navigate(runtime, app); runtime.page = "torrent-settings"; },
+                "torrent.settings" => {
+                    self.navigate(runtime, app);
+                    self.torrent_settings_parent = TorrentSettingsParent::Settings;
+                    runtime.page = "torrent-settings";
+                }
                 "torrent.back" => self.action(runtime, app, &OttAction::Back)?,
                 "torrent.retry" => self.action(runtime, app, &OttAction::Refresh)?,
                 "torrent.language" => self.editor(runtime, app, key, "Preferred result language (blank: any)",

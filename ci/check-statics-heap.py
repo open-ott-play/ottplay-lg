@@ -13,7 +13,7 @@ instead of a stranger's test run.
 
 What counts as heap. Follow each type through its struct, enum, union or alias definition. A type
 owns heap if this walk reaches a name in HEAP. For a directly declared crate-qualified type,
-follow its module path to the defining file. For bare names, re-exports and unresolved paths,
+follow its module path to the defining item. For bare names, re-exports and unresolved paths,
 conservatively consider all same-named definitions. This makes `Option<KeyMemo>` (a struct
 holding nested `HashMap`s) and `GroundProbe<N>` (a struct holding `Option<Vec<u8>>`) visible where
 a regex over the declaration line sees nothing. Only a definition a bare name can reach counts:
@@ -52,7 +52,7 @@ from pathlib import Path
 from functools import lru_cache
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from module_graph import OPENERS, Tokens, blank  # noqa: E402
+from module_graph import OPENERS, TOKEN, Tokens, blank  # noqa: E402
 
 # Types that own a heap allocation. `Cow` is here because its owned arm does.
 HEAP = frozenset("""
@@ -221,7 +221,7 @@ def without_variant_names(body):
 
 
 def definitions(text):
-    """[(name, body)] for every `struct`/`enum`/`union`/`type` item in `text` that a bare name can
+    """[(name, offset, body)] for every `struct`/`enum`/`union`/`type` item in `text` that a bare name can
     reach. A `type` directly inside an `impl` or `trait` body is an associated type and is skipped;
     one in a `fn` body inside an `impl` is a local alias and stays."""
     found, stack, pos, head, nest = [], [], 0, 0, 0
@@ -244,7 +244,7 @@ def definitions(text):
         pos = m.start()
         if not (stack and stack[-1]):
             body = definition_body(text, m.end())
-            found.append((m.group(2), without_variant_names(body) if m.group(1) == 'enum' else body))
+            found.append((m.group(2), m.start(), without_variant_names(body) if m.group(1) == 'enum' else body))
     return found
 
 
@@ -273,13 +273,17 @@ def macro_label(spans, at):
 
 
 # Keep unresolved names conservative. Narrow a collision only when a direct,
-# unconditional Rust declaration proves the file, including inline modules.
+# unconditional Rust declaration proves the defining item, including inline modules.
 CRATE_TYPE = re.compile(r'\bcrate(?:\s*::\s*[a-z_][A-Za-z_0-9]*)*\s*::\s*[A-Z][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*')
 
 
 @lru_cache(maxsize=32)
 def source_tokens(path):
-    return Tokens(path.read_text(encoding='utf-8', errors='replace'))
+    source = path.read_text(encoding='utf-8', errors='replace')
+    cleaned, _ = blank(source)
+    # Use the same token positions as Tokens, and the same cleaned source as definitions().
+    offsets = [match.start(1) for match in TOKEN.finditer(cleaned) if match.group(1)]
+    return Tokens(source), offsets
 
 
 def direct_item(tokens, start, end, name, kinds):
@@ -302,7 +306,7 @@ def direct_item(tokens, start, end, name, kinds):
     return None
 
 
-def defined_file(root, origin, parts):
+def defined_item(root, origin, parts):
     source = Path(origin).parts
     if 'src' not in source:
         return None
@@ -314,7 +318,7 @@ def defined_file(root, origin, parts):
     path = directory / 'lib.rs'
     if not path.is_file():
         return None
-    tok = source_tokens(path)
+    tok, offsets = source_tokens(path)
     start, end = 0, len(tok.text)
     for module in parts[:-1]:
         index = direct_item(tok, start, end, module, ('mod',))
@@ -328,18 +332,19 @@ def defined_file(root, origin, parts):
             if len(files) != 1:
                 return None
             path = files[0]
-            tok = source_tokens(path)
+            tok, offsets = source_tokens(path)
             start, end = 0, len(tok.text)
         else:
             return None
         directory = directory / module
-    if direct_item(tok, start, end, parts[-1], ('struct', 'enum', 'union', 'type')) is not None:
-        return path.relative_to(root).as_posix()
+    index = direct_item(tok, start, end, parts[-1], ('struct', 'enum', 'union', 'type'))
+    if index is not None:
+        return path.relative_to(root).as_posix(), offsets[index]
     return None
 
 
 def scan(root):
-    """([(path, name, type_text, line)] for every `static mut`, {type name: [body, ...]}) over the
+    """([(path, name, type_text, line)] for every `static mut`, {type name: {(path, offset): body}}) over the
     tree. A macro-declared static (`$name`) comes back named `macro!` for its `macro_rules!`."""
     decls, defs = [], {}
     for path in rust_files(root):
@@ -352,8 +357,8 @@ def scan(root):
                 spans = macro_spans(text) if spans is None else spans
                 name = macro_label(spans, m.start())
             decls.append((rel, name, declared_type(text, m.end()), text.count('\n', 0, m.start()) + 1))
-        for name, body in definitions(text):
-            defs.setdefault(name, []).append((rel, body))
+        for name, offset, body in definitions(text):
+            defs.setdefault(name, {})[(rel, offset)] = body
     return decls, defs
 
 
@@ -371,17 +376,19 @@ def owner(type_text, defs, origin, root):
             name = parts[-1]
             if name in HEAP:
                 return True, f'owns `{name}`'
-            candidates = defs.get(name, [])
+            candidates = defs.get(name, {})
             target = None
             if len(parts) > 1 and len(candidates) > 1:
-                target = defined_file(root, location, parts[1:])
-                if not any(file == target for file, _ in candidates):
+                target = defined_item(root, location, parts[1:])
+                if target not in candidates:
                     target = None
             if (target, name) in seen:
                 continue
             seen.add((target, name))
-            if candidates:
-                todo.extend(candidate for candidate in candidates if target is None or candidate[0] == target)
+            if target is not None:
+                todo.append((target[0], candidates[target]))
+            elif candidates:
+                todo.extend((path, body) for (path, _), body in candidates.items())
             elif not is_plain_std(name) and looks_like_a_type(name):
                 return True, (f'names `{name}`, which is defined nowhere in the tree and is not a std '
                               f'plain-data type PLAIN lists (plain data? add it to PLAIN, do not allowlist)')

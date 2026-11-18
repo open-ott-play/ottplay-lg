@@ -9,6 +9,7 @@ const GROUP: GroupId = GroupId(0x45584954);
 const CANCEL: u32 = crate::registry::ALERT;
 const AFFIRM: u32 = CANCEL + 1;
 const SCRIM: u32 = AFFIRM + 1;
+const SCRIM_PLACEMENT: Placed = Placed { rect: Rect::FULL, rest_rect: Rect::FULL, clip: Rect::FULL, index: None };
 
 pub(super) struct State {
     pub(super) prompt: DecisionPrompt,
@@ -27,9 +28,14 @@ impl State {
         // The Player catalogue is a panel that dismisses on a pointer miss.
         // Its modal scrim covers every list hit until the exit fade finishes.
         frame.stop(plx_ui::Painter::root(), Stop { key: FocusKey { entry, elem: SCRIM },
-            rect: Rect::FULL, rest_rect: Rect::FULL, clip: Rect::FULL,
+            rect: SCRIM_PLACEMENT.rect, rest_rect: SCRIM_PLACEMENT.rest_rect, clip: SCRIM_PLACEMENT.clip,
             hover: Hover::Ignore, activate: Activate::Direct });
         self.prompt.draw(frame, entry);
+    }
+    pub(super) fn place(&self, elem: u32, measure: &dyn plx_machine::machine::Measure) -> Option<Option<Placed>> {
+        // Pointer hits are validated against placement even when the stop takes no focus.
+        if elem == SCRIM { return Some(self.prompt.visible().then_some(SCRIM_PLACEMENT)); }
+        self.prompt.place(elem, measure)
     }
     pub(super) fn write(&self, out: &mut Canon) {
         out.option(self.last_token, |out, token| { out.u64(token); });

@@ -153,6 +153,73 @@ mod exit_confirmation_tests {
     }
 
     #[test]
+    fn exit_scrim_pointer_hits_record_and_replay_through_dismissal() {
+        use plx_ui::dispatch::{FocusAnswer, Tap};
+        use plx_ui::hit::{PointerKind, Resolution};
+        use std::collections::VecDeque;
+
+        #[derive(Default)]
+        struct Trace {
+            replay: bool,
+            hits: VecDeque<Resolution<u32>>,
+            focus: VecDeque<FocusAnswer<u32>>,
+        }
+        impl Tap<TestHost> for Trace {
+            fn resolution_active(&self) -> bool { true }
+            fn resolution_mode(&self) -> Option<bool> { self.replay.then_some(false) }
+            fn resolution_error(&mut self, reason: &'static str) { panic!("{reason}"); }
+            fn resolve_hit(&mut self, _: u64, _: PointerKind, _: Option<EntryId>,
+                actual: Option<Resolution<u32>>) -> Option<Resolution<u32>>
+            {
+                if self.replay { return self.hits.pop_front(); }
+                self.hits.extend(actual);
+                actual
+            }
+            fn resolve_focus(&mut self, _: u64, _: u8, _: EntryId,
+                actual: Option<FocusAnswer<u32>>) -> Option<FocusAnswer<u32>>
+            {
+                if self.replay { return self.focus.pop_front(); }
+                self.focus.extend(actual);
+                actual
+            }
+        }
+
+        let _guard = plx_base::testlock::serial();
+        let mut trace = Trace::default();
+        for replay in [false, true] {
+            trace.replay = replay;
+            let (mut d, mut rig) = mount_snapshot_in_mode(classic_list("channels", false), UiMode::Classic);
+            let list_focus = d.focus();
+            exit_prompt(&mut d, &mut rig, 41, 320);
+            for (ms, closing) in [(1200, false), (1248, true)] {
+                if closing {
+                    frame(&mut d, &mut rig, ms - 16, vec![key(Key::Back, tick(ms - 16))]);
+                }
+                let prompt = &native_navigation_screen(&d).exit.prompt;
+                assert!(prompt.visible());
+                assert_eq!(prompt.is_open(), !closing);
+                plx_ui::record_walk(|| { draw_pointer_keys(&mut d, &rig, &[], Activate::Press); });
+                let inputs = [InputKind::Pointer { x: 1.0, y: 1.0, hit: None },
+                    InputKind::Click { x: 1.0, y: 1.0, hit: None }].into_iter()
+                    .map(|kind| InputEvent { at: tick(ms), source: plx_machine::machine::Source::Sdl, kind }).collect();
+                d.frame_with(&mut rig, tick(ms), inputs, vec![], &mut trace, false);
+                if closing {
+                    assert_eq!(d.focus(), list_focus);
+                    assert_eq!(rig.actions, vec![OttAction::ExitAnswer { token: 41, accept: false }]);
+                } else {
+                    assert_eq!(d.focus().unwrap().elem, crate::registry::ALERT);
+                    assert!(rig.actions.is_empty() && native_navigation_screen(&d).exit.prompt.is_open());
+                }
+            }
+            if !replay {
+                assert_eq!(trace.hits.len(), 4);
+                assert!(trace.hits.iter().all(|hit| hit.hit.is_some() && hit.focus.is_none() && !hit.miss));
+            }
+        }
+        assert!(trace.hits.is_empty() && trace.focus.is_empty());
+    }
+
+    #[test]
     fn classic_exit_is_bound_to_the_exact_current_list_and_retires_late_delivery() {
         let _guard = plx_base::testlock::serial();
         let (mut d, mut rig) = mount_snapshot_in_mode(classic_list("channels:first", false), UiMode::Classic);

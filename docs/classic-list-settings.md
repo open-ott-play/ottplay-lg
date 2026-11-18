@@ -27,7 +27,15 @@ Menu to the retained list. Inner setting pickers return to Settings first.
 This return to Menu applies while the same source, session, interface mode and
 screen remain active. Direct Settings entry uses its own return path.
 Opening Menu or Categories directly from fullscreen playback gives that
-screen its own return path to the player.
+screen its own return path to the player. For example, press **Blue** during
+playback, open **Menu → Settings**, then press **Back** three times. The first
+press returns to Menu, the second to Categories and the third to fullscreen
+video. If you opened Categories from Channel list, the third press returns to
+that list.
+
+When you open **Local torrent service** or **Stremio sources** from Settings,
+**Back** returns there first. If you open the local torrent setup from
+Providers, **Back** returns to Providers.
 
 Mixed Favorites show provider, profile, subprofile and source alias in the
 selected-item details, omitting empty or repeated labels. The origin remains
