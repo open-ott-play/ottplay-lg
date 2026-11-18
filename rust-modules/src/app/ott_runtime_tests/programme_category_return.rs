@@ -69,7 +69,7 @@ fn classic_direct_categories_one_back_returns_to_the_same_player() {
 }
 
 #[test]
-fn classic_catalog_categories_one_back_returns_to_the_same_player() {
+fn classic_catalog_categories_back_returns_to_list_over_the_same_player() {
     let _serial = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     let mut app = continuity_catalog_app(UiMode::Classic);
@@ -82,9 +82,10 @@ fn classic_catalog_categories_one_back_returns_to_the_same_player() {
 
     key(&mut app, Key::Back);
 
-    assert!(ott_surface(&app).is_none(), "Classic Categories also closes when entered through the catalog");
-    assert!(!app.pages.surface_up());
-    assert_eq!(input_owner(&app), owner);
+    let surface = ott_surface(&app).expect("Categories returns to the retained Classic channel list");
+    assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+    assert_eq!(input_owner(&app), surface);
+    assert_eq!(app.pages.top_page(), Some(owner));
     assert_eq!(retained_player(&app), before);
     assert_no_player_replacement(&app);
 }

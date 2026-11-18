@@ -1,5 +1,6 @@
 //! Physical step input while a resolver is held: newest selection, not a queue.
 use super::*;
+use plx_machine::machine::UiMode;
 use plx_screens::registry::{OttPlayerAction as Action, OttPlayerRequest};
 
 fn rocker(app: &mut App, code: u32) {
@@ -8,17 +9,17 @@ fn rocker(app: &mut App, code: u32) {
 }
 
 fn admitted_category_queue() -> App {
-    admitted_category_queue_with_finite_media(false)
+    admitted_category_queue_for(UiMode::Classic, false)
 }
-fn admitted_category_queue_with_finite_media(finite: bool) -> App {
-    let mut app = category_queue_before_admission(finite);
+fn admitted_category_queue_for(mode: UiMode, finite: bool) -> App {
+    let mut app = category_queue_before_admission(mode, finite);
     rocker(&mut app, 480);
     assert_eq!(queued(&app), Some("a"));
     super::player_remote::admit_latest_channel(&mut app, "a");
     app
 }
-fn category_queue_before_admission(finite: bool) -> App {
-    let mut app = live_m3u_remote_app(plx_machine::machine::UiMode::Classic, false);
+fn category_queue_before_admission(mode: UiMode, finite: bool) -> App {
+    let mut app = live_m3u_remote_app(mode, false);
     let runtime = app.ott.as_mut().unwrap();
     for entry in &mut runtime.catalog.entries {
         entry.category = "Playing".into();
@@ -49,11 +50,26 @@ fn accept_category(app: &mut App, category: &str) {
     idle(app);
 }
 
+// Browse contains only "other". Modern allows returning to fullscreen from
+// that list while preserving both its category and the separately admitted queue.
+fn browse_other_category_then_return(finite: bool) -> App {
+    let mut app = admitted_category_queue_for(UiMode::Modern, finite);
+    super::player_remote::open_fullscreen_catalog(&mut app);
+    accept_category(&mut app, "Browse");
+    assert_eq!(commands::selected_ids(app.ott.as_ref().unwrap()), ["other"]);
+    let identity = route::playback_identity(&app.player.session);
+    key(&mut app, Key::Back);
+    assert!(ott_surface(&app).is_none());
+    assert_eq!(route::playback_identity(&app.player.session), identity);
+    assert_eq!(app.ott.as_ref().unwrap().playing.as_ref().unwrap().selection_id, "a");
+    app
+}
+
 #[test]
 fn accepted_organization_growth_refreshes_only_the_admitted_category_without_a_raw_catalog_change() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
-    let mut app = category_queue_before_admission(false);
+    let mut app = category_queue_before_admission(UiMode::Classic, false);
     let mut runtime = app.ott.take().unwrap();
     runtime.resolver_hold_for_test = true;
     let profile_id = runtime.effective_profile().unwrap().id.clone();
@@ -113,12 +129,7 @@ fn browsed_category_cannot_replace_the_admitted_fullscreen_channel_queue() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for (code, expected) in [(480, "b"), (481, "c")] {
-        let mut app = admitted_category_queue();
-        super::player_remote::open_fullscreen_catalog(&mut app);
-        accept_category(&mut app, "Browse");
-        assert_eq!(commands::selected_ids(app.ott.as_ref().unwrap()), vec!["other"]);
-        key(&mut app, Key::Back);
-        assert!(ott_surface(&app).is_none());
+        let mut app = browse_other_category_then_return(false);
         let identity = route::playback_identity(&app.player.session);
         rocker(&mut app, code);
         assert_eq!(queued(&app), Some(expected));
@@ -131,10 +142,7 @@ fn browsed_category_cannot_replace_the_admitted_fullscreen_channel_queue() {
 fn admitted_queue_survives_progressive_append_and_rapid_steps_keep_the_latest_destination() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
-    let mut app = admitted_category_queue();
-    super::player_remote::open_fullscreen_catalog(&mut app);
-    accept_category(&mut app, "Browse");
-    key(&mut app, Key::Back);
+    let mut app = browse_other_category_then_return(false);
     let runtime = app.ott.as_mut().unwrap();
     let mut appended = runtime.catalog.entries[0].clone();
     appended.id = "discovered-later".into();
@@ -157,10 +165,7 @@ fn admitted_queue_rejects_replaced_removed_or_revoked_source_without_browse_fall
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for mutation in ["profile", "generation", "removed", "media", "uncertain", "kiosk"] {
-        let mut app = admitted_category_queue();
-        super::player_remote::open_fullscreen_catalog(&mut app);
-        accept_category(&mut app, "Browse");
-        key(&mut app, Key::Back);
+        let mut app = browse_other_category_then_return(false);
         let mut runtime = app.ott.take().unwrap();
         match mutation {
             "profile" => {
@@ -239,10 +244,7 @@ fn finite_eof_uses_the_admitted_category_after_browsing_elsewhere_and_denies_rev
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for revoked in [false, true] {
-        let mut app = admitted_category_queue_with_finite_media(true);
-        super::player_remote::open_fullscreen_catalog(&mut app);
-        accept_category(&mut app, "Browse");
-        key(&mut app, Key::Back);
+        let mut app = browse_other_category_then_return(true);
         if revoked {
             let runtime = app.ott.as_mut().unwrap();
             runtime.saved.profiles.profiles[0].enabled = false;
@@ -333,10 +335,7 @@ fn finite_error_continuation_keeps_exact_queue_and_denied_scope_cannot_later_fal
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for revoked in [false, true] {
-        let mut app = admitted_category_queue_with_finite_media(true);
-        super::player_remote::open_fullscreen_catalog(&mut app);
-        accept_category(&mut app, "Browse");
-        key(&mut app, Key::Back);
+        let mut app = browse_other_category_then_return(true);
         let runtime = app.ott.as_mut().unwrap();
         // Model the ordinary VOD policy; explicit channel stepping itself
         // deliberately refuses advance-on-error and remains unchanged.
@@ -375,8 +374,8 @@ fn resolver_failure_and_discovery_keep_the_original_queue_even_before_first_admi
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     for initial in [false, true] {
         for revoked in [false, true] {
-            let mut app = if initial { category_queue_before_admission(true) }
-                else { admitted_category_queue_with_finite_media(true) };
+            let mut app = if initial { category_queue_before_admission(UiMode::Classic, true) }
+                else { admitted_category_queue_for(UiMode::Classic, true) };
             app.ott.as_mut().unwrap().resolver_hold_for_test = true;
             assert_eq!(app.ott.as_ref().unwrap().resolver_launches_for_test, 0);
             if !initial { super::player_remote::open_fullscreen_catalog(&mut app); }

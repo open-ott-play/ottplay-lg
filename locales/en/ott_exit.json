@@ -1,10 +1,10 @@
 {
   "ott.exit_question": {
     "value": "Exit OTTPlay?",
-    "description": "Owned OTT providers-root confirmation. Exit invokes existing platform Home behavior; it does not delete data or terminate the process."
+    "description": "Question shown when Back reaches the main OTTPlay screen."
   },
   "ott.exit_confirm": {
     "value": "Exit",
-    "description": "Owned OTT providers-root confirmation. Exit invokes existing platform Home behavior; it does not delete data or terminate the process."
+    "description": "Button that confirms exit and returns to the television’s Home screen."
   }
 }

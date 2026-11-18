@@ -296,23 +296,30 @@ fn native_m3u_number_one_uses_live_channel_owner_across_hud_and_failure() {
 fn native_blue_opens_categories_and_back_keeps_the_same_paused_decoder() {
     let _lock = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
-    let mut app = remote_app();
-    let identity = route::playback_identity(&app.player.session);
-    let owner = app.pages.top_page();
-    let paused = lifecycle::viewer_paused();
-    native_edge(&mut app, 0, 489, Edge::Down);
-    idle(&mut app);
-    assert!(ott_surface(&app).is_some());
-    assert_eq!(app.ott.as_ref().unwrap().page, "categories");
-    key(&mut app, Key::Back);
-    assert_eq!(app.ott.as_ref().unwrap().page, "channels");
-    assert!(ott_surface(&app).is_some());
-    key(&mut app, Key::Back);
-    assert!(!app.pages.surface_up());
-    assert_eq!(app.pages.top_page(), owner);
-    assert_eq!(route::playback_identity(&app.player.session), identity);
-    assert_eq!(lifecycle::viewer_paused(), paused);
-    assert!(app.adapters.player.is_live());
+    use plx_machine::machine::UiMode;
+    for mode in [UiMode::Classic, UiMode::Modern] {
+        let mut app = continuity_catalog_app(mode);
+        bridge::player_mut(&mut app.pages).unwrap().hud.hide(false);
+        let identity = route::playback_identity(&app.player.session);
+        let owner = app.pages.top_page();
+        let paused = lifecycle::viewer_paused();
+        native_edge(&mut app, 0, 489, Edge::Down);
+        native_edge(&mut app, 0, 489, Edge::Up);
+        idle(&mut app);
+        let panel = ott_surface(&app).unwrap();
+        assert_eq!(app.ott.as_ref().unwrap().page, "categories");
+        key(&mut app, Key::Back);
+        if mode == UiMode::Modern {
+            assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+            assert_eq!(ott_surface(&app), Some(panel));
+            key(&mut app, Key::Back);
+        }
+        assert!(!app.pages.surface_up());
+        assert_eq!(app.pages.top_page(), owner);
+        assert_eq!(route::playback_identity(&app.player.session), identity);
+        assert_eq!(lifecycle::viewer_paused(), paused);
+        assert!(app.adapters.player.is_live());
+    }
 }
 
 #[test]

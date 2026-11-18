@@ -199,17 +199,17 @@ fn delayed_public_classic_preference_projects_an_already_mounted_home() {
 }
 
 #[test]
-fn classic_unavailable_or_refused_source_shows_providers_without_changing_retained_state() {
+fn classic_unavailable_or_refused_source_preserves_the_catalogue_without_replacing_playback() {
     let _serial = plx_base::testlock::serial();
     let _registry = Registry::new();
-    for refused in [false, true] {
+    for case in ["missing-empty", "missing-retained", "refused"] {
         let mut app = ready();
         mount(&mut app, AppArg::Home);
         // Exercise an explicit native source request, not saved-provider boot.
         bridge::nav_push(&mut app.pages, AppArg::Library);
         settle_pages(&mut app);
         let runtime = app.ott.as_mut().unwrap();
-        if refused {
+        if case == "refused" {
             let profile = synthetic_profile();
             runtime.saved.profiles.active_profile = Some(profile.id.clone());
             runtime.saved.profiles.profiles = vec![profile];
@@ -222,17 +222,22 @@ fn classic_unavailable_or_refused_source_shows_providers_without_changing_retain
             assert!(crate::app::ott_runtime::input_policy::replace_source(runtime).is_err());
         } else {
             plx_plex::plex::reset_servers_for_test();
+            if case == "missing-empty" {
+                runtime.saved.profiles.active_profile = None;
+                runtime.saved.profiles.profiles.clear();
+                runtime.catalog = Catalog::default();
+            }
         }
         let saved = serde_json::to_value(&runtime.saved).unwrap();
         let catalog = runtime.catalog.clone();
         let generation = runtime.generation;
         let selected = runtime.selected.clone();
         let playback = plx_media::route::playback_identity(&app.player.session);
-        assert_eq!(reconcile_classic_navigation(&mut app), !refused);
+        assert_eq!(reconcile_classic_navigation(&mut app), case == "missing-empty");
         settle_pages(&mut app);
-        assert!(app.route() == if refused { AppArg::Library } else { AppArg::Ott });
+        assert!(app.route() == if case == "missing-empty" { AppArg::Ott } else { AppArg::Library });
         let runtime = app.ott.as_ref().unwrap();
-        assert_eq!(runtime.page, if refused { "channels" } else { "providers" });
+        assert_eq!(runtime.page, "channels");
         assert!(!runtime.status.is_empty());
         assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
         assert_eq!(runtime.catalog, catalog);
@@ -352,7 +357,7 @@ fn modern_mode_restores_the_exact_retained_native_entry_and_focus() {
 }
 
 #[test]
-fn projected_providers_back_uses_root_exit_without_popping_native_origin() {
+fn projected_channel_list_back_uses_root_exit_without_popping_native_origin() {
     let _serial = plx_base::testlock::serial();
     let _registry = Registry::new();
     let mut app = ready();
@@ -363,7 +368,7 @@ fn projected_providers_back_uses_root_exit_without_popping_native_origin() {
     let owner = app.pages.top_page();
     let depth = app.pages.nav.tabs.stack.depth();
     let mut runtime = app.ott.take().unwrap();
-    runtime.page = "providers";
+    runtime.page = "channels";
     runtime.reply = owner;
     let epoch = runtime.playback_epoch;
     handle_action(&mut runtime, &mut app, OttAction::Back).unwrap();
@@ -474,7 +479,7 @@ fn queued_surface_work_prevents_classic_projection_and_modern_restoration() {
 
 
 #[test]
-fn projected_providers_back_defers_to_queued_settings_or_consent() {
+fn projected_channel_list_back_defers_to_queued_settings_or_consent() {
     let _serial = plx_base::testlock::serial();
     let _registry = Registry::new();
     for queued in [false, true] {
@@ -488,7 +493,7 @@ fn projected_providers_back_defers_to_queued_settings_or_consent() {
             let depth = app.pages.nav.tabs.stack.depth();
             let playback = plx_media::route::playback_identity(&app.player.session);
             let mut runtime = app.ott.take().unwrap();
-            runtime.page = "providers";
+            runtime.page = "channels";
             runtime.reply = owner;
             let mut row = synthetic_entry();
             row.media = MediaLocator::Plex { server_id: "classic-fixture-machine".into(),
@@ -584,7 +589,9 @@ fn classic_cold_home_preserves_explicit_m3u_without_a_profile() {
     settle_pages(&mut app);
     assert!(app.route() == AppArg::Ott);
     assert_eq!(app.pages.nav.tabs.stack.depth(), 1);
-    assert_eq!(app.ott.as_ref().unwrap().page, "profiles");
+    let runtime = app.ott.as_ref().unwrap();
+    assert_eq!(runtime.page, "channels");
+    assert!(runtime.raw_view().rows.iter().any(|row| row.action == OttAction::ShowProviders));
 }
 
 #[test]
@@ -756,7 +763,7 @@ fn saved_startup_waits_for_private_public_and_session_readiness() {
 
 
 #[test]
-fn saved_startup_provider_root_back_never_reveals_native_plex_home() {
+fn saved_startup_root_back_never_reveals_native_plex_home() {
     let _serial = plx_base::testlock::serial();
     let _registry = Registry::new();
     for use_modern in [false, true] {
@@ -768,7 +775,7 @@ fn saved_startup_provider_root_back_never_reveals_native_plex_home() {
         assert_eq!(app.pages.nav.tabs.stack.depth(), 1);
         let owner = app.pages.top_page();
         let mut runtime = app.ott.take().unwrap();
-        runtime.page = "providers";
+        runtime.page = if use_modern { "providers" } else { "channels" };
         runtime.reply = owner;
         handle_action(&mut runtime, &mut app, OttAction::Back).unwrap();
         handle_action(&mut runtime, &mut app, OttAction::ExitAnswer { token: 1, accept: true }).unwrap();
@@ -794,7 +801,7 @@ fn projected_root_back_confirmation_open_is_not_accepted_navigation() {
     let owner = app.pages.top_page();
     let depth = app.pages.nav.tabs.stack.depth();
     let mut runtime = app.ott.take().unwrap();
-    runtime.page = "providers";
+    runtime.page = "channels";
     runtime.reply = owner;
     let before = (runtime.navigation_epoch, runtime.playback_epoch, runtime.generation,
         runtime.catalog.clone(), runtime.catalog_next.clone(), serde_json::to_value(&runtime.saved).unwrap());

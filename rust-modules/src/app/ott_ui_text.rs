@@ -266,6 +266,8 @@ fn view_in(mut view: OttView, cx: &LocaleContext) -> OttView {
                     row.title = msg::ott_profile_edit_in(cx, name);
                 }
             }
+            OttAction::ShowProviders if row.id == "action/providers" =>
+                row.title = msg::ott_providers_in(cx).into(),
             OttAction::ShowM3uMediaLinks => row.title = msg::ott_m3u_media_links_in(cx).into(),
             OttAction::ShowProfiles if view.page_id == "m3u-media-links" && row.id == "m3u-media.back" =>
                 row.title = msg::settings_back_in(cx).into(),

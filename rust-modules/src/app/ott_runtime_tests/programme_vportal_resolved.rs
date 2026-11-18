@@ -197,8 +197,20 @@ fn parsed_vportal_row_resolves_admits_and_reopens_its_structural_category() {
     assert_eq!(route::playback_identity(&app.player.session), Some(identity.clone()));
     assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), before);
     assert_eq!(resources.starts, 1);
+    let panel = ott_surface(&app).unwrap();
+    let play_generation = runtime.play_generation;
+    let selected_focus = app.pages.focus();
+    // A focused catalogue already owns this Back while its opening animation settles.
     key(&mut app, Key::Back);
-    assert!(ott_surface(&app).is_none(), "Back closes the catalogue, not Player");
+    assert_eq!(app.pages.focus().unwrap().elem, plx_screens::registry::ALERT);
+    key(&mut app, Key::Back);
+    assert_eq!(ott_surface(&app), Some(panel));
+    assert_eq!(app.pages.focus(), selected_focus);
+    idle(&mut app); // The fading question keeps its pointer and press ownership until it closes.
+    assert_catalog_card_focus(&mut app);
+    key(&mut app, Key::Ok);
+    assert!(ott_surface(&app).is_none(), "activating the current row returns to its retained Player");
+    assert_eq!(app.ott.as_ref().unwrap().play_generation, play_generation);
     assert_eq!(app.pages.top_page(), player_page);
     assert_eq!(bridge::player(&app.pages).unwrap().origin, player_origin);
     assert_eq!(route::playback_identity(&app.player.session), Some(identity));

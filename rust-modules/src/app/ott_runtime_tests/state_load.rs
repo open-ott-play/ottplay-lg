@@ -106,6 +106,7 @@ fn failed_state_load_denies_profile_edit_and_submit_without_a_write() {
 fn state_load_retry_is_single_flight_and_success_restores_the_mounted_page() {
     let _serial = plx_base::testlock::serial();
     let mut app = failed_app();
+    let owner = app.pages.top_page();
     let epoch = app.ott.as_ref().unwrap().navigation_epoch;
     action(&mut app, OttAction::ShowProfiles);
     assert_eq!(app.ott.as_ref().unwrap().page, "providers");
@@ -135,7 +136,9 @@ fn state_load_retry_is_single_flight_and_success_restores_the_mounted_page() {
     let runtime = app.ott.as_ref().unwrap();
     assert!(runtime.loaded);
     assert_eq!(runtime.state_load, StateLoad::Idle);
-    assert_eq!(runtime.page, "providers");
+    assert_eq!(app.pages.top_page(), owner);
+    assert_eq!(runtime.page, "channels");
+    assert!(runtime.view().rows.iter().any(|row| row.enabled && row.action == OttAction::ShowProviders));
     assert_eq!(runtime.navigation_epoch, epoch);
     assert!(runtime.view().status.is_empty());
     assert!(runtime.saved.profiles.profiles.is_empty());

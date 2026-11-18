@@ -755,6 +755,8 @@ pub(super) struct Runtime {
     classic_navigation: classic_navigation::State,
     auth_return: auth_return::State,
     native_catalog: Option<player_browse::NativeCatalog>,
+    // A Categories shortcut opened directly from video returns to that Player.
+    direct_categories: Option<(InstanceId, u64)>,
     menu_settings: menu_settings::State,
     browse_settings: Option<player_browse::SettingsOrigin>,
     desktop_input: desktop_input::State,
@@ -1269,6 +1271,7 @@ impl Runtime {
             classic_navigation: classic_navigation::State::default(),
             auth_return: auth_return::State::default(),
             native_catalog: None,
+            direct_categories: None,
             menu_settings: menu_settings::State::default(),
             browse_settings: None,
             desktop_input: desktop_input::State::default(),
@@ -1819,11 +1822,9 @@ impl Runtime {
             // Keep retirement above this guard: a cleared active slot must not
             // publish a late batch from its previous source or start a new one.
             if profile.source.is_empty() {
-                self.page = if self.saved.favorites_selected {
-                    "favorites"
-                } else {
-                    "profiles"
-                };
+                self.page = if self.interface_mode() == plx_machine::machine::UiMode::Classic {
+                    self.catalog_page()
+                } else if self.saved.favorites_selected { "favorites" } else { "profiles" };
                 self.continuity.suppress_unrequested_start();
                 self.catalog_complete = true;
                 self.status.clear();
@@ -3870,6 +3871,13 @@ impl Runtime {
             rows.extend(organization_ui::entry(self));
         }
         rows.extend(companion_adapter::rows(self));
+        if self.page == "channels" && self.interface_mode() == plx_machine::machine::UiMode::Classic
+            && self.loaded && rows.is_empty()
+            && self.effective_profile().is_none_or(|profile| profile.source.is_empty())
+        {
+            rows.push(row("action/providers".into(), "Providers".into(), String::new(),
+                OttAction::ShowProviders, false));
+        }
         // Keep first-run setup discoverable without requiring the Browse menu.
         if matches!(self.page, "providers" | "profiles")
             && !self
@@ -5837,12 +5845,13 @@ fn tick_with_start(
                                     runtime.refresh_catalog_preserving_playback();
                                 }
                             } else if runtime.navigation_epoch == 0
-                                && runtime.saved.favorites_selected
+                                && (runtime.saved.favorites_selected
+                                    || runtime.interface_mode() == plx_machine::machine::UiMode::Classic)
                             {
                                 // Global Favorites is a browse preference even when no
                                 // persistent profile is active. Targets still require
                                 // their normal source binding when explicitly played.
-                                runtime.page = "favorites";
+                                runtime.page = runtime.catalog_page();
                             }
                             // A denied startup must not regain playback authority
                             // through ordinary first-row catalogue continuity.
@@ -7543,6 +7552,18 @@ fn handle_action(
             return result;
         }
     }
+    if matches!(selected, OttAction::Back) && classic_navigation::active(runtime, app)
+        && runtime.setup.is_none() && runtime.edit_session.is_none() && !runtime.usb_browsing()
+        && matches!(runtime.page, "categories" | "providers" | "profiles" | "settings")
+    {
+        input_policy::navigation(runtime)?;
+        if runtime.page == "profiles" {
+            runtime.page = "providers";
+        } else {
+            runtime.show_catalog();
+        }
+        return Ok(());
+    }
     if let Some(result) = input_policy::browse_back(runtime, app, &selected) {
         return result;
     }
@@ -7888,9 +7909,6 @@ fn handle_action(
             }
             if runtime.usb_browsing() {
                 return runtime.usb_browser_back(app);
-            }
-            if classic_play_handoff::close_catalog(runtime, app) {
-                return Ok(());
             }
             // Categories is another view of the same catalogue. Closing it must
             // retain progressive loading, the selected source and its playback.

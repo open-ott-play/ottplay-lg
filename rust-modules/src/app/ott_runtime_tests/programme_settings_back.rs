@@ -112,7 +112,14 @@ fn browse_settings_return_preserves_player_and_has_a_finite_back_chain() {
         assert_eq!(app.ott.as_ref().unwrap().page, "channels", "Menu Back restores its list");
         assert_eq!(ott_surface(&app), Some(surface));
         key(&mut app, Key::Back);
-        assert!(ott_surface(&app).is_none(), "list Back returns to Player, never Settings");
+        if mode == UiMode::Classic {
+            assert_eq!(ott_surface(&app), Some(surface));
+            assert_eq!(app.pages.focus().unwrap().elem, plx_screens::registry::ALERT, "No owns the exit question");
+            key(&mut app, Key::Back);
+            assert_eq!(ott_surface(&app), Some(surface));
+        } else {
+            assert!(ott_surface(&app).is_none(), "Modern list returns to Player");
+        }
         let runtime = app.ott.as_ref().unwrap();
         assert_eq!((runtime.generation, runtime.play_generation, runtime.playback_epoch), epochs);
         assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
@@ -198,11 +205,13 @@ fn browse_settings_origin_retires_on_foreign_owner_or_source_changes() {
 }
 
 #[test]
-fn ordinary_root_settings_without_browse_origin_keeps_provider_return() {
+fn ordinary_classic_settings_without_browse_origin_returns_to_channels() {
     let _serial = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
     let mut app = ready_app_fixture();
     app.running = true;
+    app.ott.as_mut().unwrap().saved.settings.insert("interfaceMode".into(), json!(UiMode::Classic.index()));
+    app.bridge.apply_ui_mode(UiMode::Classic);
     bridge::show_page(&mut app.pages, AppArg::Ott);
     idle(&mut app);
     let reply = super::super::super::current_ui_owner(&app).unwrap();
@@ -214,7 +223,7 @@ fn ordinary_root_settings_without_browse_origin_keeps_provider_return() {
     assert_eq!(app.ott.as_ref().unwrap().page, "settings");
     assert!(app.ott.as_ref().unwrap().browse_settings.is_none());
     key(&mut app, Key::Back);
-    assert_eq!(app.ott.as_ref().unwrap().page, "providers");
+    assert_eq!(app.ott.as_ref().unwrap().page, "channels");
     assert!(matches!(app.route(), AppArg::Ott));
 }
 

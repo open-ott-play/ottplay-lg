@@ -180,8 +180,13 @@ fn fullscreen_channel_steps_reopen_a_fresh_catalogue_at_thirty_three() {
         for (code, presses) in [(480, 32), (481, 8)] {
             let mut app = forty_channels(mode);
             let first_panel = open_fullscreen_catalog(&mut app);
-            key(&mut app, Key::Back);
+            let identity = route::playback_identity(&app.player.session);
+            let generation = app.ott.as_ref().unwrap().play_generation;
+            key(&mut app, if mode == UiMode::Classic { Key::Ok } else { Key::Back });
             assert!(!app.pages.surface_up());
+            assert!(queued(&app).is_none());
+            assert_eq!(app.ott.as_ref().unwrap().play_generation, generation);
+            assert_eq!(route::playback_identity(&app.player.session), identity);
             step_to_thirty_three(&mut app, code, presses);
             let identity = route::playback_identity(&app.player.session);
             let generation = app.ott.as_ref().unwrap().play_generation;

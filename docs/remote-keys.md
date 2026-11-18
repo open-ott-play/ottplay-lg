@@ -105,7 +105,7 @@ before `SDL_Init` (§5).
 | `452` | either | `Left { alt: true }` | rewind, likewise | evdev 168 `KEY_REWIND` |
 | `120` | `wcode` only | `Stop` | player only: stop and leave | evdev 128 `KEY_STOP` |
 | `260` | `wcode` only | `Stop` | player only: stop and leave | evdev 166 `KEY_STOPCD` |
-| `505` | either | `Exit` | **terminates the app** (checklist #38); no confirmation, unlike OTT Providers-root BACK | evdev 174 `KEY_EXIT` |
+| `505` | either | `Exit` | **terminates the app immediately** (checklist #38) | evdev 174 `KEY_EXIT` |
 | `19` | either | `Play` | legacy alternate — **this is `SDL_SCANCODE_P`, see §4.2** | evdev 25 `KEY_P` |
 | `402` | either | `Play` | legacy alternate | evdev 472, unnamed in `linux/input.h` |
 | `415` | either | `Pause` | legacy alternate | evdev 541, unnamed |
@@ -387,11 +387,11 @@ SAM's `closeByAppId` exactly as
 kept: it existed only to let a caller quit by pressing BACK, and BACK is no longer a quit for
 anybody.
 
-**The OTT Providers root has a separate confirmation.** In both Classic and Modern, BACK
-there opens a confirmation with **Cancel** selected. Cancel or BACK keeps the app open; only
-confirming returns to the television's Home screen. Nested OTT pages retain their parent-page or
-overlay BACK behavior. This does not restore the retired script bypass or make BACK terminate
-the process (`app/ott_exit_confirmation.rs`, `screens/ott/exit_prompt.rs`).
+**OTTPlay asks before returning to Home.** In Classic, BACK on the main Channel list
+opens “Exit OTTPlay?” with **No** selected. **No** or BACK dismisses the question and
+restores focus to the same row. **Yes** returns to the television’s Home screen.
+In Modern, BACK on the Providers screen opens the confirmation with **Cancel**
+selected. Nested pages handle BACK before the main screen does.
 
 **For the native Plex roots, what replaced the confirmation is the platform's own behaviour.** The alert was
 added deliberately on 2026-08-21 and the warning that stood here — do not delete it on the strength

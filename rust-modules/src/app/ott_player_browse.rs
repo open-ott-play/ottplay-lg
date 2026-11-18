@@ -340,6 +340,9 @@ pub(super) fn present(runtime: &mut Runtime, app: &mut App,
     runtime.reply = None;
     runtime.page = page;
     runtime.accepted_navigation(false);
+    runtime.direct_categories = app.pages.top_page()
+        .filter(|_| page == "categories" && classic_navigation::active(runtime, app))
+        .map(|player| (player, runtime.navigation_epoch));
     runtime.changed();
     app.bridge.publish_ott_catalog_offer(None);
     app.bridge.publish_ott_player_offer(None);
@@ -414,13 +417,16 @@ pub(super) fn back(runtime: &mut Runtime, app: &mut App, action: &OttAction)
         runtime.page = "profiles";
     } else if runtime.page == "actions" {
         return organization_runtime::list_order::action(runtime, app, action);
-    } else if runtime.page == "categories"
-        && (runtime.interface_mode() != plx_machine::machine::UiMode::Classic
-            || app.bridge.ui_mode() != plx_machine::machine::UiMode::Classic) {
-        runtime.page = if runtime.view_selection().1 { "favorites" } else { "channels" };
+    } else if (runtime.page == "categories"
+        && !(classic_navigation::active(runtime, app)
+            && runtime.direct_categories.is_some_and(|(player, epoch)|
+                Some(player) == app.pages.top_page() && epoch == runtime.navigation_epoch)))
+        || (classic_navigation::active(runtime, app) && matches!(runtime.page, "providers" | "settings"))
+    {
+        runtime.show_catalog();
     } else if matches!(runtime.page, "categories" | "channels" | "favorites" | "providers") {
-        // Classic Categories closes to its retained Player, just like Channels.
-        // Dismiss only this owned surface; never replace or restart playback.
+        // Direct Categories and the Modern outer list close to their retained Player.
+        // A settled primary Classic list already passed through exit confirmation.
         runtime.cancel_setup();
         runtime.native_catalog = None;
         runtime.cancel_editor();

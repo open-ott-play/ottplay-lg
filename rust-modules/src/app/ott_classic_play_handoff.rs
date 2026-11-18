@@ -85,28 +85,3 @@ pub(super) fn back(runtime: &mut Runtime, app: &App, action: &OttAction)
     runtime.status.clear();
     Some(Ok(()))
 }
-
-/// Classic RETURN closes a catalogue to its actual installed video. Changing
-/// presentation never resolves or restarts a source and cannot adopt an old,
-/// untagged decoder or a pending replacement.
-pub(super) fn close_catalog(runtime: &mut Runtime, app: &mut App) -> bool {
-    if !classic(runtime) || app.bridge.ui_mode() != plx_machine::machine::UiMode::Classic
-        || !matches!(runtime.page, "channels" | "favorites" | "categories")
-        || runtime.setup.is_some() || runtime.edit_session.is_some()
-        || runtime.play_target.is_some() || runtime.pending_play.is_some()
-        || runtime.reply != current_ui_owner(app) || !matches!(app.route(), AppArg::Ott)
-        || app.pages.surface_up() || app.pages.has_pending_navigation()
-        || app.pages.nav.tabs.stack.is_pending() || app.pages.nav.suspended
-        || !playback_allowed(app) || !app.adapters.player.is_live()
-        || app.decoder_parked || app.player.lifecycle.awaiting_load()
-        || !plx_media::route::has_url(&app.player.session)
-        || plx_media::route::play_pending() || retained_request_replaces_installed(app)
-        || plx_appkit::player_hud::transport_hidden(&app.player.session)
-        || runtime.playing.as_ref().is_none_or(|playing|
-            playing.identity.is_none() || !playing_matches(playing, app))
-    { return false; }
-    playback::enter_player(&mut app.pages, &mut app.bridge, playback::Origin::Here, None);
-    runtime.reply = None;
-    runtime.native_catalog = None;
-    true
-}

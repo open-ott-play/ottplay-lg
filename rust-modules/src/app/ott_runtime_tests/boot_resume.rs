@@ -43,9 +43,11 @@ fn configured_boot_covers_real_catalogue_navigation_without_fake_player() {
 fn unconfigured_and_failed_state_expose_honest_setup_or_recovery() {
     let _lock = plx_base::testlock::serial();
     let mut app = initial_app(Saved::default());
-    assert!(!app.ott.as_ref().unwrap().view().startup_pending);
-    assert_eq!(app.ott.as_ref().unwrap().page, "providers");
     let runtime = app.ott.as_mut().unwrap();
+    let view = runtime.view();
+    assert!(!view.startup_pending);
+    assert_eq!(runtime.page, "channels");
+    assert!(view.rows.iter().any(|row| row.enabled && row.action == OttAction::ShowProviders));
     super::super::boot_resume::arm(runtime);
     runtime.tx.send(Job::Loaded(Err("State unavailable"))).unwrap();
     runtime_tick(&mut app);

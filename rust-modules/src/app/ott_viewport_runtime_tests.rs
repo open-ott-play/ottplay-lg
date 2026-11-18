@@ -468,13 +468,13 @@ fn root_exit_prompt_keeps_viewport_source_and_ack_live_through_cancel_fade() {
     let owner = crate::app::ott_runtime::current_ui_owner(&app).expect("mounted OTT page");
     let to = MachineId::Instance(owner);
     let mut view = plx_screens::ott::OttView {
-        page_id: "providers".into(), revision: 1_000_000, ..Default::default()
+        page_id: "channels:viewport".into(), revision: 1_000_000, ..Default::default()
     };
     app.pages.emit(MachineId::Ott, Fx::Deliver(to, Delivery::Screen(ScreenEvent::App(
         AppMsg::OttSnapshot(std::sync::Arc::new(view.clone()))))));
     frame(&mut app);
     app.pages.emit(MachineId::Ott, Fx::Deliver(to, Delivery::Screen(ScreenEvent::App(
-        AppMsg::OttExitPrompt { token: 71 }))));
+        AppMsg::OttExitPrompt { token: 71, page_id: view.page_id.clone() }))));
     for _ in 0..60 { frame(&mut app); }
     let source = native(&mut app);
     let first = emitted(&mut app);
@@ -502,7 +502,7 @@ fn root_exit_prompt_keeps_viewport_source_and_ack_live_through_cancel_fade() {
     frame(&mut app);
     assert!(player_viewport::composite(&mut app), "Cancel fade must not strand an actual placement ACK");
 
-    view.page_id = "channels".into();
+    view.page_id = "favorites:viewport".into();
     view.revision += 1;
     app.pages.emit(MachineId::Ott, Fx::Deliver(to, Delivery::Screen(ScreenEvent::App(
         AppMsg::OttSnapshot(std::sync::Arc::new(view))))));

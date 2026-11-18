@@ -196,10 +196,10 @@ fn surface_action(app: &mut App, action: OttAction) {
 }
 
 #[test]
-fn catalog_menu_and_back_keep_the_same_player_and_decoder() {
+fn modern_catalog_menu_and_back_keep_the_same_player_and_decoder() {
     let _serial = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
-    let mut app = catalog_app();
+    let mut app = continuity_catalog_app(plx_machine::machine::UiMode::Modern);
     let identity = route::playback_identity(&app.player.session);
     let source = route::external_source(&app.player.session);
     let page = app.pages.top_page();
@@ -240,10 +240,10 @@ fn catalog_menu_and_back_keep_the_same_player_and_decoder() {
 }
 
 #[test]
-fn catalog_categories_and_providers_do_not_cancel_the_admitted_stream() {
+fn modern_catalog_categories_and_providers_do_not_cancel_the_admitted_stream() {
     let _serial = plx_base::testlock::serial();
     let _globals = Globals(player::swap_state_for_test(player::PlaybackState::Idle));
-    let mut app = catalog_app();
+    let mut app = continuity_catalog_app(plx_machine::machine::UiMode::Modern);
     let identity = route::playback_identity(&app.player.session);
     let page = app.pages.top_page();
     let epoch = app.ott.as_ref().unwrap().playback_epoch;
@@ -472,7 +472,15 @@ fn real_catalog_surface_ack_places_and_restores_the_same_native_source() {
     assert_eq!(player::ffi_host::place_calls_for_test()[0].1, 1);
     assert_eq!(route::playback_identity(&app.player.session), identity);
     player::ffi_host::reset_place_probe_for_test(false);
+    let surface = ott_surface(&app).expect("mounted catalogue");
     key(&mut app, Key::Back);
+    assert_eq!(app.pages.focus().unwrap().elem, plx_screens::registry::ALERT);
+    assert_eq!(ott_surface(&app), Some(surface));
+    assert!(crate::app::player_viewport::composite(&mut app));
+    key(&mut app, Key::Back);
+    assert_eq!(ott_surface(&app), Some(surface));
+    surface_action(&mut app, OttAction::Play("c".into()));
+    retire_closing_surfaces(&mut app);
     crate::app::player_viewport::sync(&mut app);
     assert_eq!(player::ffi_host::place_calls_for_test(), vec![([1280, 720, 0, 0, 1920, 1080], 1)]);
     assert!(!crate::app::player_viewport::composite(&mut app));
@@ -684,8 +692,14 @@ fn classic_back_from_a_different_highlight_does_not_play_it() {
     key(&mut app, Key::Down);
     assert_catalog_card_focus(&mut app);
     assert_ne!(app.pages.focus(), initial_focus, "a different media row is highlighted");
+    let highlighted = app.pages.focus();
+    let surface = ott_surface(&app);
     key(&mut app, Key::Back);
-    assert!(ott_surface(&app).is_none());
+    assert_eq!(app.pages.focus().unwrap().elem, plx_screens::registry::ALERT);
+    assert_eq!(ott_surface(&app), surface);
+    key(&mut app, Key::Back);
+    assert_eq!(app.pages.focus(), highlighted);
+    assert_eq!(ott_surface(&app), surface);
     let runtime = app.ott.as_ref().unwrap();
     assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
     assert_eq!(runtime.playing.as_ref().unwrap().selection_id, "c");
@@ -897,6 +911,9 @@ fn classic_native_plex_catalogue_is_explicit_and_never_adopts_playback() {
     choose_catalog(&mut app);
     assert!(app.ott.as_ref().unwrap().catalog_next.is_some());
     let _ = native_catalog_rows(&mut app);
+    let surface = ott_surface(&app).expect("actual native Plex catalogue");
+    key(&mut app, Key::Back);
+    assert_eq!(app.pages.focus().unwrap().elem, plx_screens::registry::ALERT);
     key(&mut app, Key::Back);
     let runtime = app.ott.as_ref().unwrap();
     assert!(runtime.playing.is_none() && runtime.play_target.is_none() && runtime.resolver_next.is_none());
@@ -904,7 +921,8 @@ fn classic_native_plex_catalogue_is_explicit_and_never_adopts_playback() {
     assert_eq!(route::playback_identity(&app.player.session), identity);
     assert_eq!(app.pages.top_page(), page);
     assert_eq!(serde_json::to_value(&runtime.saved).unwrap(), saved);
-    assert!(ott_surface(&app).is_none() && app.adapters.player.is_live());
+    assert_eq!(ott_surface(&app), Some(surface));
+    assert!(app.adapters.player.is_live());
 }
 
 #[test]

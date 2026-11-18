@@ -546,23 +546,53 @@ mod exit_ingress {
     }
 
     #[test]
-    fn fifo_back_keeps_catalog_parent_navigation() {
+    fn fifo_back_on_classic_channels_opens_exit_and_default_no_keeps_the_list() {
         let _serial = plx_base::testlock::serial();
         let _events = Events::new();
         let mut app = catalog();
-        let page = app.pages.top_page();
-        fifo(&mut app, "back");
-        assert!(app.running, "Back must not become process Exit");
-        let inputs = std::mem::take(&mut app.inputs);
-        assert!(!inputs.is_empty(), "Back must still reach the owned dispatcher");
-        let tick = next_tick(&mut app);
-        bridge::frame(&mut app.pages, &mut app.bridge, tick, inputs);
-        runtime_tick(&mut app);
+        let mode = plx_machine::machine::UiMode::Classic;
+        let mut runtime = app.ott.take().unwrap();
+        runtime.saved.settings.insert("interfaceMode".into(), json!(mode.index()));
+        let profile = synthetic_profile();
+        runtime.provider = profile.kind;
+        runtime.saved.profiles.active_profile = Some(profile.id.clone());
+        runtime.saved.profiles.profiles = vec![profile];
+        runtime.catalog_complete = true;
+        runtime.changed();
+        app.bridge.apply_ui_mode(mode);
+        let scoped = runtime.search_page_id().expect("configured channel list");
+        runtime.publish(&mut app);
+        app.ott = Some(runtime);
         settle_pages(&mut app);
-        assert!(app.running);
-        assert_eq!(app.ott.as_ref().unwrap().page, "profiles");
-        assert_eq!(app.pages.top_page(), page);
+
+        let page = app.pages.top_page();
+        let focus = app.pages.focus().expect("mounted channel list has a cursor");
+        let navigation = app.ott.as_ref().unwrap().navigation_epoch;
+        for key in ["back", "ok"] {
+            fifo(&mut app, key);
+            let inputs = std::mem::take(&mut app.inputs);
+            assert!(!inputs.is_empty(), "{key} must reach the owned dispatcher");
+            let tick = next_tick(&mut app);
+            bridge::frame(&mut app.pages, &mut app.bridge, tick, inputs);
+            settle_pages(&mut app);
+            runtime_tick(&mut app);
+            settle_pages(&mut app);
+            assert!(app.running);
+            let runtime = app.ott.as_ref().unwrap();
+            assert_eq!(runtime.search_page_id().as_ref(), Some(&scoped));
+            assert_eq!(runtime.navigation_epoch, navigation);
+            assert_eq!(app.pages.top_page(), page);
+            assert!(!app.bridge.take_reqs().iter().any(|req| matches!(req,
+                plx_screens::registry::LoopReq::BackAtRoot)));
+            if key == "back" {
+                assert_eq!(app.pages.focus().unwrap().elem, plx_screens::registry::ALERT,
+                    "the exit question opens with No focused");
+            } else {
+                assert_eq!(app.pages.focus(), Some(focus), "No restores the channel-list cursor");
+            }
+        }
     }
+
 }
 
 // Exercises the actual dispatcher effect and content drain. The observer replaces

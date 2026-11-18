@@ -165,8 +165,10 @@ fn late_loaded_cannot_reclaim_browse_after_navigation_aba() {
     // to navigate while the initial protected-state result is unavailable.
     let mut app = mounted_ready();
     let initial = browse(&app);
+    assert_eq!(initial, ("channels", ProviderKind::M3u));
     ui(&mut app, OttAction::SelectProvider("m3u".into()));
-    ui(&mut app, OttAction::ShowProviders);
+    assert_eq!(browse(&app), ("profiles", ProviderKind::M3u));
+    ui(&mut app, OttAction::ShowCatalog);
     assert_eq!(
         browse(&app),
         initial,
@@ -590,7 +592,17 @@ fn passive_saved_refresh_retains_newer_queued_selection() {
     let generation = app.ott.as_ref().unwrap().play_generation;
     let mut saved = fixture_saved();
     saved.profiles.active_profile = Some("m3u".into());
-    modeled_saved(&mut app, saved, pending);
+    let (invocation, reload, response) = pending;
+    deliver(&mut app, Job::Saved(Ok(saved), invocation, reload, response));
+    // Activating the row also records browse focus. Its write was queued while
+    // the profile save owned the writer, and now fails at the revoked permit.
+    let runtime = app.ott.as_ref().unwrap();
+    assert!(runtime.saving);
+    let focus_result = runtime.rx.recv_timeout(Duration::from_secs(5)).expect("browse focus write");
+    assert!(matches!(&focus_result,
+        Job::Saved(Err("Could not prepare protected OTT settings for saving"), None, false, _)));
+    deliver(&mut app, focus_result);
+    assert!(!app.ott.as_ref().unwrap().saving);
     first_batch(&mut app, "first");
     let runtime = app.ott.as_ref().unwrap();
     assert_eq!(runtime.play_generation, generation);

@@ -450,7 +450,7 @@ impl OttScreen {
 
     /// Numbering applies to the canonical catalogue, never an editor or reader.
     pub fn accepts_channel_number(&self) -> bool {
-        self.classic_visible && !self.loading_cover() && self.editor.is_none() && !self.reading && !self.browse
+        self.classic_visible && !self.exit.prompt.visible() && !self.loading_cover() && self.editor.is_none() && !self.reading && !self.browse
             && (matches!(self.snapshot.page_id.split(':').next(), Some("channels" | "favorites"))
                 || (self.classic_mode && self.form.table.is_classic_catalogue()
                     && matches!(self.snapshot.page_id.as_str(), "torrent-results" | "torrent-files")))
@@ -1962,7 +1962,7 @@ impl LogicalState for OttScreen {
 
 impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
     fn locale_changed(&mut self, _epoch: u64) {
-        self.exit.prompt.relabel(msg::ott_exit_question_c(), "", msg::settings_cancel_c(), msg::ott_exit_confirm_c());
+        self.exit.relabel(self.classic_mode);
         if let Some(editor) = &mut self.editor {
             editor.title = Editor::display_title(&editor.spec, &editor.return_page);
             self.editor_form(false);
@@ -2083,7 +2083,7 @@ impl<H: AppLike<Memory = PageMemory>> Screen<H> for OttScreen {
         if self.number_notice.visible() && self.accepts_channel_number() {
             self.number_notice.draw(msg::settings_cancel_c(), msg::settings_cancel_c(), frame.measure);
         }
-        self.exit.prompt.draw(frame, self.entry);
+        self.exit.draw(frame, self.entry);
     }
     fn links(&self, out: &mut Vec<Link>) {
         if self.loading_cover() { return; }

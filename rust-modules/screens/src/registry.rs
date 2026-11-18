@@ -1547,7 +1547,7 @@ pub enum AppMsg {
     OttEditor(std::sync::Arc<crate::ott::OttEditor>),
     OttEditorResult { session: u64, error: Option<String> },
     /// One owned OTT-root question; its reply remains an addressed OttAction.
-    OttExitPrompt { token: u64 },
+    OttExitPrompt { token: u64, page_id: String },
     OttExitDismiss { token: u64 },
     /// An applied source activation retired this exact draft, without submitting it.
     OttEditorRetired { session: u64 },

@@ -225,6 +225,7 @@ fn profile_page_and_editing_use_chosen_provider_instead_of_playing_provider() {
 fn saved_source_catalog_play_back_and_restart_keep_the_profile() {
     let _serial = plx_base::testlock::serial();
     let mut app = app_fixture();
+    app.ott.as_mut().unwrap().write_permit.revoke();
     mount_setup(&mut app);
     setup_action(&mut app, OttAction::SelectProvider("m3u".into()));
     setup_key(&mut app, Key::Ok);
@@ -312,10 +313,15 @@ fn saved_source_catalog_play_back_and_restart_keep_the_profile() {
     assert_eq!(app.ott.as_ref().unwrap().page, "channels");
     assert!(app.ott.as_ref().unwrap().play_target.is_none(),
         "Classic Back cancels the unresolved play request before leaving its channel list");
+    let owner = app.pages.top_page();
+    let epoch = app.ott.as_ref().unwrap().navigation_epoch;
     setup_key(&mut app, Key::Back);
-    assert_eq!(app.ott.as_ref().unwrap().page, "profiles");
-    setup_key(&mut app, Key::Back);
-    assert_eq!(app.ott.as_ref().unwrap().page, "providers");
+    assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+    setup_key(&mut app, Key::Ok); // The exit question defaults to No.
+    assert_eq!(app.pages.top_page(), owner);
+    assert_eq!(app.ott.as_ref().unwrap().page, "channels");
+    assert_eq!(app.ott.as_ref().unwrap().navigation_epoch, epoch);
+    assert!(app.ott.as_ref().unwrap().play_target.is_none());
     assert_eq!(
         app.ott.as_ref().unwrap().saved.profiles.profiles,
         vec![profile.clone()]

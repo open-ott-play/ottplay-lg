@@ -175,9 +175,13 @@ fn list_app(order: &[u32], current: u32) -> App {
     runtime.catalog_tx.send(CatalogEvent::Finished(runtime.generation, Ok(()))).unwrap();
     frame(&mut app, vec![]);
     idle(&mut app);
-    key(&mut app, Key::Back);
+    let identity = route::playback_identity(&app.player.session);
+    surface_action(&mut app, OttAction::Play(format!("{}:{current}", profile.id)));
+    retire_closing_surfaces(&mut app);
     assert!(ott_surface(&app).is_none());
+    assert_eq!(route::playback_identity(&app.player.session), identity);
     let runtime = app.ott.as_mut().unwrap();
+    assert!(runtime.play_target.is_none() && runtime.resolver_next.is_none());
     classic_source::set_view(runtime, "Selected");
     runtime.selected = Some("unrelated-highlight".into());
     assert!(runtime.playing.is_none());
