@@ -16,6 +16,7 @@ pub enum Error {
     SourceDenied,
     LostProviderLease,
     SourceInterrupted,
+    SourceTemporarilyUnavailable,
     Playlist,
     Decode,
     Budget,

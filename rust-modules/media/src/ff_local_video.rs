@@ -28,6 +28,7 @@ const INTERRUPTED_RESPONSE: &[u8] = b"The request is interrupted by main process
 const DENIED_RESPONSE: &[u8] = b"Forbidden (No client found)";
 const MISSING_STREAM_HTML: &[u8] = b"<h1>No stream id found</h1>";
 const TRANSITIONAL_HTML: &[u8] = b"<h1>Forbidden</h1>";
+const UPSTREAM_TIMEOUT: &[u8] = b"ESOCKETTIMEDOUT";
 
 /// Only exact known control replies are meaningful. Arbitrary HTML or media
 /// bytes never authorize a retry or appear in a diagnostic.
@@ -51,6 +52,18 @@ fn open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
     else { Error::Source }
 }
 
+// A restore coordinator can schedule a later ordinary request only from these explicit facts.
+// Certificate, permission, rate-limit, DNS, parse and unspecified transport failures stay final.
+fn temporarily_unavailable(error: crate::curlio::OpenErr) -> bool {
+    use crate::curlio::OpenErr;
+    matches!(error, OpenErr::Status(502 | 503 | 504) | OpenErr::Deadline | OpenErr::Transport(28))
+}
+
+fn startup_open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
+    if !c.stopped() && temporarily_unavailable(error) { Error::SourceTemporarilyUnavailable }
+    else { open_error(error, c) }
+}
+
 struct Remote {
     source: Box<crate::curlio::CurlSource>,
     deadline: Option<Instant>,
@@ -71,9 +84,9 @@ impl Remote {
             // cookie on its first response, before we know the source is HLS.
             crate::curlio::CurlSource::open_hls_private_checked(url, deadline, &mut check)
         }
-        .map_err(|e| open_error(e, c))?;
+        .map_err(|e| startup_open_error(e, c))?;
         if !(200..300).contains(&source.status()) {
-            return Err(open_error(crate::curlio::OpenErr::Status(source.status()), c));
+            return Err(startup_open_error(crate::curlio::OpenErr::Status(source.status()), c));
         }
         Ok(Self {
             source,
@@ -104,6 +117,9 @@ impl Remote {
     /// HTML bodies after the provider stopped that stream. An authentication/limit status, a
     /// denial opening the source itself, and an arbitrary HTML body retain their ordinary errors.
     fn provider_error(&self, bytes: &[u8], existing: Option<&str>, c: &Control) -> Option<Error> {
+        if existing.is_none() && self.source.status() == 200 && bytes == UPSTREAM_TIMEOUT {
+            return Some(Error::SourceTemporarilyUnavailable);
+        }
         let error = provider_reply(bytes)?;
         let lost = matches!(bytes.trim_ascii(), MISSING_STREAM_HTML
             | b"<h1>Forbidden (No client found)</h1>" | b"<h1>Forbidden (No client session found)</h1>");
@@ -155,6 +171,9 @@ impl Remote {
             open = true;
         };
         self.deadline = previous_deadline;
+        if matches!(&result, Err(Error::Source)) && !c.stopped() && self.failure.is_some_and(temporarily_unavailable) {
+            return Err(Error::SourceTemporarilyUnavailable);
+        }
         result
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
@@ -172,12 +191,12 @@ impl Remote {
         // potential control body to EOF before recognizing its exact meaning.
         let head = bytes.trim_ascii_start();
         if !head.is_empty() && !hls && (INTERRUPTED_RESPONSE.starts_with(head)
-            || DENIED_RESPONSE.starts_with(head) || head.starts_with(b"<h1>")) {
+            || DENIED_RESPONSE.starts_with(head) || UPSTREAM_TIMEOUT.starts_with(head) || head.starts_with(b"<h1>")) {
             while bytes.len() < 128 {
                 let mut rest = [0; 128];
                 let n = self.read_raw(&mut rest[..128 - bytes.len()], c)?;
                 if n == 0 {
-                    if let Some(error) = provider_reply(&bytes) { return Err(error); }
+                    if let Some(error) = self.provider_error(&bytes, None, c) { return Err(error); }
                     break;
                 }
                 bytes.extend_from_slice(&rest[..n]);
@@ -197,13 +216,15 @@ impl Remote {
         self.read_raw(b, c)
     }
     fn read_raw(&mut self, b: &mut [u8], c: &Control) -> Result<usize, Error> {
+        let deadline = self.deadline();
         let n = self.source.read_until(
             b,
-            Some(self.deadline()),
+            Some(deadline),
             &mut Check(c),
         );
         if n < 0 {
-            self.failure = self.source.body_failure().map(|f| crate::curlio::OpenErr::Transport(f.rc));
+            self.failure = self.source.body_failure().map(|f| crate::curlio::OpenErr::Transport(f.rc))
+                .or_else(|| (Instant::now() >= deadline).then_some(crate::curlio::OpenErr::Deadline));
             Err(if c.stopped() {
                 Error::Cancelled
             } else {
@@ -1291,6 +1312,46 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_startup_outages_are_typed_without_retrying_a_cold_source() {
+        use crate::curlio::{cookie_tests::{curl, Reply, SessionServer}, OpenErr};
+        let _serial = curl();
+        let c = Control::default();
+        for (status, expected) in [(502, Error::SourceTemporarilyUnavailable), (503, Error::SourceTemporarilyUnavailable),
+            (504, Error::SourceTemporarilyUnavailable), (401, Error::SourceDenied), (403, Error::SourceDenied),
+            (429, Error::SourceDenied), (404, Error::Source), (500, Error::Source)]
+        {
+            let server = SessionServer::new(vec![Reply { status, ..Reply::ok("", b"") }]);
+            assert!(matches!(Hls::open(format!("{}/source.m3u8", server.base), 1024, &c), Err(e) if e == expected));
+            assert_eq!(server.heads().len(), 1);
+        }
+        let server = SessionServer::new(vec![
+            Reply::ok("", UPSTREAM_TIMEOUT), Reply::ok("", UPSTREAM_TIMEOUT),
+            Reply::ok("", b"ESOCKETTIMEDOUT\n"), Reply::ok("", b"<h1>ESOCKETTIMEDOUT</h1>"),
+        ]);
+        let url = format!("{}/source.m3u8", server.base);
+        assert!(matches!(Hls::open(url.clone(), 1024, &c), Err(Error::SourceTemporarilyUnavailable)));
+        let mut sniff = Remote::open(&url, false, &c).unwrap();
+        assert_eq!(sniff.sniff_hls(&c), Err(Error::SourceTemporarilyUnavailable));
+        for _ in 0..2 {
+            assert!(matches!(Hls::open(url.clone(), 1024, &c), Err(Error::Playlist)));
+        }
+        assert_eq!(server.heads().len(), 4);
+        for error in [OpenErr::Deadline, OpenErr::Transport(28)] {
+            assert_eq!(startup_open_error(error, &c), Error::SourceTemporarilyUnavailable);
+        }
+        for error in [OpenErr::Transport(6), OpenErr::Transport(7), OpenErr::Transport(60)] {
+            assert_eq!(startup_open_error(error, &c), Error::Source);
+        }
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let outage = || Reply { status: 503, ..Reply::ok("", b"") };
+        let server = SessionServer::new(vec![Reply::ok("", master), outage(), outage(), outage()]);
+        assert!(matches!(Hls::open(format!("{}/source.m3u8", server.base), 1024, &c), Err(Error::SourceTemporarilyUnavailable)));
+        let heads = server.heads();
+        assert_eq!(heads.len(), 4);
+        assert!(heads[1..].iter().all(|r| r.starts_with("GET /leaf.m3u8 ")));
+    }
 
     #[test]
     fn transitional_gateway_body_rechecks_only_the_existing_recently_playing_leaf_once() {
