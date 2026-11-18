@@ -1,5 +1,12 @@
 use super::*;
 use plx_base::task::{time::ClockSample, OffFrame};
+fn command_with(
+    runtime: &mut Runtime, inv: &Invocation, now: u64,
+    save: impl FnOnce(&mut Runtime, Saved, Invocation, bool, Value) -> Result<(), &'static str>,
+) -> Option<Value> {
+    command_with_publication(runtime, inv, now, || Some(now), save)
+}
+
 fn fixture() -> Runtime {
     let mut runtime = Runtime::unloaded(crate::app::ott_companion::Supervisor::inert_for_test());
     runtime.remote = Remote::disabled_for_test("dev_fixture", "native-fixture");
@@ -300,4 +307,17 @@ fn provider_config_v1_capability_and_reply_shapes_match_shared_fixture() {
     assert_ne!(response["data"]["revision"], receipt.binding.source);
     let response = rejected_reason(&inv, Reason::StorageFailed);
     assert_eq!(response["data"].as_object().unwrap().len(), 5);
+}
+
+
+#[test]
+fn compare_expiring_during_entropy_does_not_publish_a_receipt() {
+    let _lock = plx_base::testlock::serial();
+    let mut runtime = fixture();
+    let (inv, _) = compare(&mut runtime, "edem", 1, json!({"key":"fixture"}));
+    let before = runtime.command_receipts.native_provider.rows.len();
+    let reply = command_with_publication(&mut runtime, &inv, inv.deadline_ms - 1,
+        || Some(inv.deadline_ms), refuse_save).unwrap();
+    assert_eq!(reply["data"]["reason"], "expired");
+    assert_eq!(runtime.command_receipts.native_provider.rows.len(), before);
 }

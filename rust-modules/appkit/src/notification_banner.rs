@@ -91,8 +91,10 @@ fn phase(b: &Banner, now: u64, reduced_motion: bool) -> Option<Phase> {
     }
     let age = now - b.started_ms;
     let lifetime = b.expires_ms - b.started_ms;
-    let enter = 1.0 - (1.0 - progress(age, ENTER_MS)).powi(3);
-    let out = progress(EXIT_MS.saturating_sub(b.expires_ms - now), EXIT_MS).powi(2);
+    let entering = 1.0 - progress(age, ENTER_MS);
+    let enter = 1.0 - entering * entering * entering;
+    let exiting = progress(EXIT_MS.saturating_sub(b.expires_ms - now), EXIT_MS);
+    let out = exiting * exiting;
     let dim = progress(age.saturating_sub(DIM_AT_MS), lifetime.saturating_sub(EXIT_MS + DIM_AT_MS));
     Some(Phase {
         slide: (1.0 - enter).max(out),
@@ -271,8 +273,9 @@ fn draw_activity_ring(p: Painter, icon: Rect, color: [f32; 4], phase: f32, alpha
     let first = ((phase.rem_euclid(1.0) * SEGMENTS as f32).floor() as usize) % SEGMENTS;
     for i in 0..SEGMENTS {
         let angle = (i as f32 / SEGMENTS as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-        let x = center_x + angle.cos() * RADIUS - DOT * 0.5;
-        let y = center_y + angle.sin() * RADIUS - DOT * 0.5;
+        let (sin, cos) = plx_machine::motion::sin_cos(angle);
+        let x = center_x + cos * RADIUS - DOT * 0.5;
+        let y = center_y + sin * RADIUS - DOT * 0.5;
         let trail = (i + SEGMENTS - first) % SEGMENTS;
         let strength = (1.0 - trail as f32 / SEGMENTS as f32) * 0.75 + 0.25;
         let mut ink = color;

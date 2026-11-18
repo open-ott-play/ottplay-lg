@@ -382,10 +382,7 @@ exit 0
 
 
 class ReplayFixtures(unittest.TestCase):
-    """Restructure spec §5.6 rule 2: every string value in a committed replay fixture belongs to
-    the closed synthetic alphabet (tests/fixtures/replay/ALPHABET.json). The guard applies the same
-    rule before a push; this is the copy that runs on every `make check`, so a fixture that slipped
-    in by any other route is still caught."""
+    """Exercise the synthetic recording validator and the public source CI check."""
 
     FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "replay")
 
@@ -394,26 +391,28 @@ class ReplayFixtures(unittest.TestCase):
             a = json.load(f)
         return frozenset(a["literals"]), [re.compile("^(?:%s)$" % p) for p in a["patterns"]]
 
-    def test_actual_cli_and_outbound_fixture_exception(self):
-        """Invoke both public boundaries; never execute the described outbound command."""
+    def _public_source_tree(self, root):
+        subprocess.run(["git", "init", "-q", root], check=True)
+        for name in ("ci/check-public-source.py", "tools/plxnative-rec",
+                     "tests/fixtures/replay/ALPHABET.json", "SOURCE-PROVENANCE.json",
+                     "LICENSE", "LICENSING.md", "THIRD-PARTY-NOTICES.md",
+                     "licenses/PlxNative-historical-MIT.txt", "pkg/appinfo.json"):
+            target = os.path.join(root, name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy(os.path.join(REPO_ROOT, name), target)
+        return os.path.join(root, "tests", "fixtures", "replay")
+
+    @staticmethod
+    def _source_check(root):
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        return subprocess.run([sys.executable, "ci/check-public-source.py"],
+                              cwd=root, capture_output=True, text=True)
+
+    def test_recorder_and_public_source_check_enforce_the_fixture_exception(self):
         with tempfile.TemporaryDirectory() as root:
-            subprocess.run(["git", "init", "-q", root], check=True)
-            fixtures = os.path.join(root, "tests", "fixtures", "replay")
-            os.makedirs(fixtures)
-            os.makedirs(os.path.join(root, "tools"))
+            fixtures = self._public_source_tree(root)
             tool = os.path.join(root, "tools", "plxnative-rec")
-            shutil.copy(os.path.join(REPO_ROOT, "tools", "plxnative-rec"), tool)
-            shutil.copy(os.path.join(self.FIXTURES, "ALPHABET.json"), fixtures)
-            hook = os.path.join(REPO_ROOT, ".claude", "hooks", "outbound-guard.py")
-
-            def guard(path):
-                return subprocess.run([sys.executable, hook], input=json.dumps({
-                    "tool_name": "Bash", "cwd": root, "tool_input": {
-                        "command": "gh pr create --body-file " + path}}),
-                    capture_output=True, text=True, cwd=root)
-
             d = self._synthetic_recording(fixtures)
-            relative = "tests/fixtures/replay/rec/rec-0000.jsonl"
             negatives = ["UnlistedHouseholdName", "UNLISTEDHOUSEHOLDNAME",
                          "UnlistedHouseholdName(Instance(4))",
                          "Landing(UnlistedHouseholdName(4))",
@@ -436,14 +435,14 @@ class ReplayFixtures(unittest.TestCase):
                         f.write(json.dumps({"t": "st", "f": 0, "probe": value}) + "\n")
                     cli = subprocess.run([sys.executable, tool, "check", d],
                                          capture_output=True, text=True, cwd=root)
-                    outbound = guard(relative)
+                    source = self._source_check(root)
                     with self.subTest(boundary="cli"):
                         self.assertEqual(cli.returncode, 0 if accepted else 1)
-                    with self.subTest(boundary="guard"):
-                        self.assertEqual(outbound.returncode, 0 if accepted else 2)
+                    with self.subTest(boundary="public-source"):
+                        self.assertEqual(source.returncode, 0 if accepted else 1)
                     if not accepted:
                         self.assertNotIn(value, cli.stdout + cli.stderr)
-                        self.assertNotIn(value, outbound.stdout + outbound.stderr)
+                        self.assertNotIn(value, source.stdout + source.stderr)
             # The original counterexample changed only manifest.build, not a frame payload.
             with open(os.path.join(d, "rec-0000.jsonl"), "w", encoding="utf-8") as f:
                 f.write(json.dumps({"t": "st", "f": 0, "hash": 1}) + "\n")
@@ -455,15 +454,19 @@ class ReplayFixtures(unittest.TestCase):
                 json.dump(manifest, f)
             cli = subprocess.run([sys.executable, tool, "check", d],
                                  capture_output=True, text=True, cwd=root)
-            outbound = guard("tests/fixtures/replay/rec/manifest.json")
+            source = self._source_check(root)
             with self.subTest(boundary="manifest-cli"):
                 self.assertEqual(cli.returncode, 1)
-            with self.subTest(boundary="manifest-guard"):
-                self.assertEqual(outbound.returncode, 2)
-            self.assertNotIn(negatives[0], cli.stdout + cli.stderr + outbound.stdout + outbound.stderr)
+            with self.subTest(boundary="manifest-public-source"):
+                self.assertEqual(source.returncode, 1)
+            self.assertNotIn(negatives[0], cli.stdout + cli.stderr + source.stdout + source.stderr)
             # Identical synthetic bytes outside the exception remain private recording grammar.
             shutil.copy(os.path.join(d, "rec-0000.jsonl"), os.path.join(root, "outside.jsonl"))
-            self.assertEqual(guard("outside.jsonl").returncode, 2)
+            shutil.rmtree(d)  # The misplaced segment is the only recording left.
+            source = self._source_check(root)
+            self.assertEqual(source.returncode, 1)
+            self.assertIn("Recording data must be in a public replay fixture", source.stderr)
+            os.remove(os.path.join(root, "outside.jsonl"))
             for name in sorted(os.listdir(self.FIXTURES)):
                 source = os.path.join(self.FIXTURES, name)
                 if not os.path.isfile(os.path.join(source, "manifest.json")):
@@ -473,10 +476,59 @@ class ReplayFixtures(unittest.TestCase):
                 result = subprocess.run([sys.executable, tool, "check", target],
                                         capture_output=True, text=True, cwd=root)
                 self.assertEqual(result.returncode, 0, name)
-                for fn in os.listdir(target):
-                    if fn == "manifest.json" or fn.endswith(".jsonl"):
-                        self.assertEqual(guard("tests/fixtures/replay/" + name + "/" + fn).returncode, 0,
-                                         name + "/" + fn)
+            source = self._source_check(root)
+            self.assertEqual(source.returncode, 0, source.stdout + source.stderr)
+
+    def test_public_source_checks_staged_replay_bytes_and_refuses_segment_symlinks(self):
+        with tempfile.TemporaryDirectory() as root:
+            fixtures = self._public_source_tree(root)
+            recording = self._synthetic_recording(fixtures)
+            segment = os.path.join(recording, "rec-0000.jsonl")
+            sentinel = "UnlistedHouseholdName"
+            with open(segment, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"f": 0, "t": "st", "probe": sentinel}) + "\n")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            with open(segment, "w", encoding="utf-8") as f:
+                f.write('{"f":0,"t":"st"}\n')
+            source = subprocess.run([sys.executable, "ci/check-public-source.py"],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertEqual(source.returncode, 1)
+            self.assertIn("failed synthetic validation", source.stderr)
+            self.assertNotIn(sentinel, source.stdout + source.stderr)
+            os.remove(segment)
+            os.symlink("manifest.json", segment)
+            source = self._source_check(root)
+            self.assertEqual(source.returncode, 1)
+            self.assertIn("regular files", source.stderr)
+
+    def test_public_source_uses_the_staged_regular_alphabet(self):
+        with tempfile.TemporaryDirectory() as root:
+            fixtures = self._public_source_tree(root)
+            recording = self._synthetic_recording(fixtures)
+            sentinel = "UnlistedHouseholdName"
+            with open(os.path.join(recording, "rec-0000.jsonl"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"f": 0, "t": "st", "probe": sentinel}) + "\n")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            alphabet = os.path.join(fixtures, "ALPHABET.json")
+            with open(alphabet, encoding="utf-8") as f:
+                policy = json.load(f)
+            policy["literals"].append(sentinel)
+            with open(alphabet, "w", encoding="utf-8") as f:
+                json.dump(policy, f)
+            cli = subprocess.run([sys.executable, "tools/plxnative-rec", "check", recording],
+                                 cwd=root, capture_output=True, text=True)
+            self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+            source = subprocess.run([sys.executable, "ci/check-public-source.py"],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertEqual(source.returncode, 1)
+            self.assertIn("failed synthetic validation", source.stderr)
+            self.assertNotIn(sentinel, source.stdout + source.stderr)
+
+            os.rename(alphabet, os.path.join(fixtures, "alternate.json"))
+            os.symlink("alternate.json", alphabet)
+            source = self._source_check(root)
+            self.assertEqual(source.returncode, 1)
+            self.assertIn("alphabet must be a tracked regular file", source.stderr)
 
     def test_metric_text_bytes_are_checked_at_both_public_fixture_boundaries(self):
         """MetricKey::Width is byte-valued on disk, but public fixtures are UTF-8 synthetic text.
@@ -486,31 +538,21 @@ class ReplayFixtures(unittest.TestCase):
         not become publishable merely because ``Width`` itself is later admitted.
         """
         with tempfile.TemporaryDirectory() as root:
-            subprocess.run(["git", "init", "-q", root], check=True)
-            fixtures = os.path.join(root, "tests", "fixtures", "replay")
-            os.makedirs(fixtures)
-            os.makedirs(os.path.join(root, "tools"))
+            fixtures = self._public_source_tree(root)
             tool = os.path.join(root, "tools", "plxnative-rec")
-            shutil.copy(os.path.join(REPO_ROOT, "tools", "plxnative-rec"), tool)
-            alphabet_path = os.path.join(fixtures, "ALPHABET.json")
-            shutil.copy(os.path.join(self.FIXTURES, "ALPHABET.json"), alphabet_path)
-
             recording = self._synthetic_recording(fixtures)
             segment = os.path.join(recording, "rec-0000.jsonl")
-            relative = "tests/fixtures/replay/rec/rec-0000.jsonl"
-            hook = os.path.join(REPO_ROOT, ".claude", "hooks", "outbound-guard.py")
+
+            def check():
+                cli = subprocess.run([sys.executable, tool, "check", recording],
+                                     capture_output=True, text=True, cwd=root)
+                return zip(("cli", "public-source"), (cli, self._source_check(root)))
 
             def outcomes(rows):
                 with open(segment, "w", encoding="utf-8") as f:
                     for row in rows:
                         f.write(json.dumps(row, separators=(",", ":")) + "\n")
-                cli = subprocess.run([sys.executable, tool, "check", recording],
-                                     capture_output=True, text=True, cwd=root)
-                guard = subprocess.run([sys.executable, hook], input=json.dumps({
-                    "tool_name": "Bash", "cwd": root, "tool_input": {
-                        "command": "gh pr create --body-file " + relative}}),
-                    capture_output=True, text=True, cwd=root)
-                return cli, guard
+                return check()
 
             natural = [
                 {"f": 0, "t": "metrics", "q": {"kind": "Width",
@@ -518,7 +560,7 @@ class ReplayFixtures(unittest.TestCase):
                 {"f": 0, "t": "metrics", "q": {"kind": "Cap", "sz": 28}, "bits": 2},
                 {"f": 0, "t": "metrics", "q": {"kind": "Line", "sz": 28}, "bits": 3},
             ]
-            for boundary, result in zip(("cli", "guard"), outcomes(natural)):
+            for boundary, result in outcomes(natural):
                 with self.subTest(case="natural", boundary=boundary):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -535,18 +577,18 @@ class ReplayFixtures(unittest.TestCase):
             for index, text_bytes in enumerate(bad_texts):
                 row = {"f": 0, "t": "metrics", "q": {"kind": "Width",
                        "text": text_bytes, "sz": 28, "bold": False}, "bits": 1}
-                for boundary, result in zip(("cli", "guard"), outcomes([row])):
+                for boundary, result in outcomes([row]):
                     with self.subTest(case=index, boundary=boundary):
-                        self.assertEqual(result.returncode, 1 if boundary == "cli" else 2,
+                        self.assertEqual(result.returncode, 1,
                                          result.stdout + result.stderr)
                         self.assertNotIn(private, result.stdout + result.stderr)
 
             malformed = {"f": 0, "t": "metrics", "q": {"kind": "Unknown",
                          "text": list(b"UnlistedHouseholdName"), "sz": 28, "bold": False},
                          "bits": 1}
-            for boundary, result in zip(("cli", "guard"), outcomes([malformed])):
+            for boundary, result in outcomes([malformed]):
                 with self.subTest(case="unknown-byte-context", boundary=boundary):
-                    self.assertEqual(result.returncode, 1 if boundary == "cli" else 2,
+                    self.assertEqual(result.returncode, 1,
                                      result.stdout + result.stderr)
                     self.assertNotIn(private, result.stdout + result.stderr)
 
@@ -558,15 +600,9 @@ class ReplayFixtures(unittest.TestCase):
                          '"sz":28,"bold":false},"bits":1}\n')
             with open(segment, "w", encoding="utf-8") as f:
                 f.write(duplicate)
-            cli = subprocess.run([sys.executable, tool, "check", recording],
-                                 capture_output=True, text=True, cwd=root)
-            guard = subprocess.run([sys.executable, hook], input=json.dumps({
-                "tool_name": "Bash", "cwd": root, "tool_input": {
-                    "command": "gh pr create --body-file " + relative}}),
-                capture_output=True, text=True, cwd=root)
-            for boundary, result in zip(("cli", "guard"), (cli, guard)):
+            for boundary, result in check():
                 with self.subTest(case="duplicate-metric-key", boundary=boundary):
-                    self.assertEqual(result.returncode, 1 if boundary == "cli" else 2,
+                    self.assertEqual(result.returncode, 1,
                                      result.stdout + result.stderr)
                     self.assertNotIn(private, result.stdout + result.stderr)
 
@@ -6518,6 +6554,17 @@ impl ViewStateOwnerGateFixture {
         for line in (2, 3, 4):
             self.assertIn(f"{target}:{line}:", result.stdout)
 
+    def test_wall_and_libm_check_live_siblings_of_inline_host_tests(self):
+        body = ('#[cfg(all(test, feature = "hostsim"))]\n'
+                'mod fixture { fn wait() { Instant::now(); let _ = 0.5f32.sin(); } }\n'
+                'fn live() { Instant::now(); let _ = 0.5f32.sin(); }\n')
+        result, target = self._wall_module_fixture("orphan", body)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("libm:", result.stdout)
+        self.assertIn("wall:", result.stdout)
+        self.assertNotIn(f"{target}:2:", result.stdout)
+        self.assertEqual(result.stdout.count(f"{target}:3:"), 2, result.stdout)
+
     def test_wall_test_exemption_does_not_change_other_gate_rules(self):
         result, target = self._wall_module_fixture(body="fn raw_ticks() { SDL_GetTicks(); }\n")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -6560,19 +6607,23 @@ impl PersonOwnerGateFixture {
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("ok — person-owner", r.stdout)
 
-    def test_threads_gate_catches_a_bare_thread_spawn_after_use_std_thread(self):
-        """The gate used to match only the fully-qualified `std::thread::spawn(` spelling, so a
-        file that does `use std::thread;` and then calls the bare `thread::spawn(` — exactly the
-        shape the phase-12 gates package's own brief named as invisible — passed silently. RED:
-        planting that shape in a file ci/allow/threads.txt does not name must fail `threads`."""
-        r = self._plant(
-            "_check_deps_selftest_threads.rs",
-            "use std::thread;\n\npub fn spawn_worker() {\n    thread::spawn(|| {});\n}\n",
+    def test_threads_gate_counts_live_spawns_but_excludes_host_test_workers(self):
+        name = "_check_deps_selftest_threads.rs"
+        source = (
+            'use std::thread;\n'
+            '#[cfg(all(test, feature = "hostsim"))]\n'
+            'mod host_fixture {\n'
+            '    fn worker() { std::thread::spawn(|| {}); }\n'
+            '}\n'
+            '#[cfg(any(test, feature = "hostsim"))]\n'
+            'pub fn live_worker() { thread::spawn(|| {}); }\n'
         )
+        r = self._plant(name, source)
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("threads:", out)
-        self.assertIn("_check_deps_selftest_threads.rs", out)
+        self.assertIn("threads: 1 line(s)", out)
+        self.assertIn(name + ":7:", out)
+        self.assertNotIn(name + ":4:", out)
 
     def test_blocking_gate_catches_a_new_allow_blocking_site(self):
         """A frame-thread blocking exception is a ledger entry in ci/allow/blocking.txt. RED: a new
@@ -7521,6 +7572,23 @@ impl PersonOwnerGateFixture {
                 "pub enum TtfFont {}\n"),
         })
         self.assertEqual(found, set())
+
+    def test_heap_static_gate_resolves_direct_crate_paths_and_preserves_ambiguous_names(self):
+        found = self._heap_statics({
+            "gfx/src/lib.rs": "pub mod egl; mod other; mod consumer;",
+            "gfx/src/egl.rs": "pub mod fence { pub struct Fence { sync: usize } }",
+            "gfx/src/other/mod.rs": "pub struct Fence(String);",
+            "gfx/src/consumer.rs": (
+                "type Sync = crate::egl::fence::Fence;\n"
+                "static mut CAPTURE: Option<Sync> = None;\n"
+                "static mut OWNED: Option<crate::other::Fence> = None;\n"
+                "static mut UNQUALIFIED: Option<Fence> = None;\n"
+                "static mut VIA_EXPORT: Option<crate::external::Fence> = None;\n"
+                "static mut TWO: Option<(crate::egl::fence::Fence, crate::other::Fence)> = None;\n"
+            ),
+        })
+        self.assertEqual(found, {("rust-modules/gfx/src/consumer.rs", n)
+                                 for n in ("OWNED", "UNQUALIFIED", "VIA_EXPORT", "TWO")})
 
     def test_heap_static_gate_does_not_resolve_a_name_to_an_associated_type(self):
         """`type Item = String;` inside an `impl`/`trait` block is an ASSOCIATED type, reachable only

@@ -417,8 +417,8 @@ is the verb: it verifies the shape actually moved and replaces the fixture, anch
 
 **Nothing here may carry a household byte.** The mock server's names are `s[0-9a-f]{8}`; every
 other string a recording holds is a protocol constant named in `ALPHABET.json`. A recording taken
-against a REAL server lives in `plxnative-recordings/` (gitignored, refused by the outbound guard) and
-never comes here. A fixture whose `manifest.json` carries `"anchor": true` refuses `--rebaseline`
+against a real server stays in the gitignored `plxnative-recordings/` directory. Public CI runs
+`ci/check-public-source.py` on tracked replay manifests and segments. A fixture whose `manifest.json` carries `"anchor": true` refuses `--rebaseline`
 (a behaviour-change replacement, evidenced by a divergence record); `rerecord`, above, is the
 shape-bump escape an anchor does not refuse.
 

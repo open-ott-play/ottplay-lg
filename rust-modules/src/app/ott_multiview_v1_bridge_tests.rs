@@ -453,6 +453,7 @@ fn bridge_setup() -> BridgeRig {
     while runtime.multiview_connection.qualified().is_none() {
         assert!(Instant::now() < until, "Owned capabilities worker deadline");
         runtime.multiview_connection.tick(
+            runtime.frame_time(),
             true,
             true,
             Some(&protected),
@@ -654,6 +655,7 @@ fn actual_native_pipeline_against_owned_foss_v1_reaches_and_revokes_deferred_adm
     {
         let runtime = rig.app.ott.as_mut().unwrap();
         runtime.multiview_connection.tick(
+            runtime.frame_time(),
             true,
             true,
             runtime.saved.settings.get("nativeMultiviewService"),

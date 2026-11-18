@@ -119,7 +119,7 @@ pub(super) enum BackendIntent {
     },
 }
 
-pub(super) enum Effect {
+pub(super) enum SceneEffect {
     PrepareMetadata {
         ticket: ResolveTicket,
         work: SourceWork,
@@ -133,7 +133,7 @@ pub(super) enum Effect {
 
 pub(super) struct Transition {
     pub revision: plx_data::ott::multiview::Revisions,
-    pub effects: Vec<Effect>,
+    pub effects: Vec<SceneEffect>,
     pub issues: Vec<SlotIssue>,
 }
 
@@ -321,7 +321,7 @@ impl Coordinator {
         self.lifecycle = Lifecycle::Active;
         let scene = self.scene.as_ref().ok_or(Error::SceneInactive)?;
         let mut result = Transition::new(scene);
-        result.effects.push(Effect::Backend(BackendIntent::Layout {
+        result.effects.push(SceneEffect::Backend(BackendIntent::Layout {
             scene: scene_id,
             layout,
         }));
@@ -613,9 +613,9 @@ impl Coordinator {
     /// Verify that a queued effect still belongs to the exact live scene/slot operation.
     /// Cancellation is the exception: its own already-raised token may retire an old worker
     /// after the coordinator has cleared that ticket, but it can never authorize another worker.
-    pub fn effect_current(&self, runtime: &Runtime, effect: &Effect) -> bool {
+    pub fn effect_current(&self, runtime: &Runtime, effect: &SceneEffect) -> bool {
         match effect {
-            Effect::PrepareMetadata { ticket, work } => {
+            SceneEffect::PrepareMetadata { ticket, work } => {
                 self.require_current_ticket(*ticket).is_ok()
                     && self
                         .snapshot
@@ -625,14 +625,14 @@ impl Coordinator {
                         .cancellation()
                         .load(std::sync::atomic::Ordering::Acquire)
             }
-            Effect::CancelResolve {
+            SceneEffect::CancelResolve {
                 ticket,
                 cancellation,
             } => {
                 cancellation.load(std::sync::atomic::Ordering::Acquire)
                     && self.tickets[ticket.slot().index()] != Some(*ticket)
             }
-            Effect::Backend(intent) => match intent {
+            SceneEffect::Backend(intent) => match intent {
                 BackendIntent::Layout { scene, layout } => {
                     self.lifecycle == Lifecycle::Active
                         && self.scene_id == Some(*scene)
@@ -793,7 +793,7 @@ impl Coordinator {
                     Transition::new(self.scene.as_ref().ok_or(Error::SceneInactive)?);
                 transition
                     .effects
-                    .push(Effect::PrepareMetadata { ticket, work });
+                    .push(SceneEffect::PrepareMetadata { ticket, work });
                 Ok(transition)
             }
             Err(error) => {
@@ -891,7 +891,7 @@ impl Coordinator {
         let mut transition = Transition::new(self.scene.as_ref().ok_or(Error::SceneInactive)?);
         transition
             .effects
-            .push(Effect::Backend(BackendIntent::Load {
+            .push(SceneEffect::Backend(BackendIntent::Load {
                 ticket,
                 input: authorized,
             }));
@@ -917,7 +917,7 @@ impl Coordinator {
                     self.stopping[slot.index()] = Some(ticket);
                     transition
                         .effects
-                        .push(Effect::Backend(BackendIntent::Stop { ticket }));
+                        .push(SceneEffect::Backend(BackendIntent::Stop { ticket }));
                 }
                 AdmissionOutcome::Unsupported | AdmissionOutcome::Rejected => {
                     self.scene
@@ -974,14 +974,14 @@ impl Coordinator {
         let mut transition = Transition::new(scene);
         transition
             .effects
-            .push(Effect::Backend(BackendIntent::Layout {
+            .push(SceneEffect::Backend(BackendIntent::Layout {
                 scene: scene_id,
                 layout,
             }));
         if scene.active_slot() != prior_focus {
             transition
                 .effects
-                .push(Effect::Backend(BackendIntent::Focus {
+                .push(SceneEffect::Backend(BackendIntent::Focus {
                     scene: scene_id,
                     slot: scene.active_slot(),
                 }));
@@ -1001,7 +1001,7 @@ impl Coordinator {
         let mut transition = Transition::new(scene);
         transition
             .effects
-            .push(Effect::Backend(BackendIntent::Focus {
+            .push(SceneEffect::Backend(BackendIntent::Focus {
                 scene: scene_id,
                 slot,
             }));
@@ -1057,7 +1057,7 @@ impl Coordinator {
             (SlotStatus::Resolving { .. }, Some(ticket)) => {
                 if let Some(cancellation) = self.cancellations[slot.index()].take() {
                     cancellation.store(true, Ordering::Release);
-                    transition.effects.push(Effect::CancelResolve {
+                    transition.effects.push(SceneEffect::CancelResolve {
                         ticket,
                         cancellation,
                     });
@@ -1078,7 +1078,7 @@ impl Coordinator {
                 self.stopping[slot.index()] = Some(ticket);
                 transition
                     .effects
-                    .push(Effect::Backend(BackendIntent::Stop { ticket }));
+                    .push(SceneEffect::Backend(BackendIntent::Stop { ticket }));
             }
             (SlotStatus::Failed { .. } | SlotStatus::Unsupported { .. }, Some(ticket)) => {
                 self.scene
@@ -1121,7 +1121,7 @@ impl Coordinator {
                 SlotStatus::Resolving { .. } => {
                     if let Some(cancellation) = self.cancellations[index].take() {
                         cancellation.store(true, Ordering::Release);
-                        transition.effects.push(Effect::CancelResolve {
+                        transition.effects.push(SceneEffect::CancelResolve {
                             ticket,
                             cancellation,
                         });
@@ -1140,7 +1140,7 @@ impl Coordinator {
                         self.closing_slots[index] = true;
                         transition
                             .effects
-                            .push(Effect::Backend(BackendIntent::Stop { ticket }));
+                            .push(SceneEffect::Backend(BackendIntent::Stop { ticket }));
                     }
                 }
                 SlotStatus::Failed { .. } | SlotStatus::Unsupported { .. } => {
@@ -1241,7 +1241,7 @@ impl Coordinator {
         self.audio_pending = Some((scene_id, revision, owner));
         transition
             .effects
-            .push(Effect::Backend(BackendIntent::AudioOwner {
+            .push(SceneEffect::Backend(BackendIntent::AudioOwner {
                 scene: scene_id,
                 audio_revision: revision,
                 owner,

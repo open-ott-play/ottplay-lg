@@ -4,7 +4,7 @@ use super::super::{multiview, multiview_sources::SourceHandle, App, Runtime};
 use super::{handoff::direct_hls, Driver, Picture};
 use plx_data::ott::multiview::{ResolveTicket, SlotId};
 use plx_media::local_multiview::{Error as MediaError, Event};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const WINDOW: Duration = Duration::from_secs(5 * 60);
 const FOLLOWUP_DELAY: Duration = Duration::from_secs(25);
@@ -14,14 +14,14 @@ struct Proof {
     original: ResolveTicket,
     handle: SourceHandle,
     url_hash: String,
-    lost: Instant,
+    lost: Duration,
 }
 
 #[derive(Default)]
 pub(super) struct Budget {
-    attempts: [Option<Instant>; 2],
+    attempts: [Option<Duration>; 2],
     proof: Option<Box<Proof>>,
-    next: Option<(ResolveTicket, SourceHandle, Instant, Instant)>,
+    next: Option<(ResolveTicket, SourceHandle, Duration, Duration)>,
 }
 
 impl Budget {
@@ -29,7 +29,7 @@ impl Budget {
         &mut self,
         ticket: ResolveTicket,
         handle: SourceHandle,
-        now: Instant,
+        now: Duration,
     ) -> bool {
         self.enqueue(ticket, handle, now, now, now + FOLLOWUP_LIMIT)
     }
@@ -38,9 +38,9 @@ impl Budget {
         &mut self,
         ticket: ResolveTicket,
         handle: SourceHandle,
-        now: Instant,
-        earliest: Instant,
-        expires: Instant,
+        now: Duration,
+        earliest: Duration,
+        expires: Duration,
     ) -> bool {
         if self.next.is_some() {
             return false;
@@ -49,7 +49,7 @@ impl Budget {
             .attempts
             .iter()
             .flatten()
-            .filter(|t| now.duration_since(**t) < WINDOW)
+            .filter(|t| now.saturating_sub(**t) < WINDOW)
             .count();
         if recent >= self.attempts.len() {
             return false;
@@ -74,7 +74,7 @@ impl Budget {
         ticket: ResolveTicket,
         handle: SourceHandle,
         url: &str,
-        now: Instant,
+        now: Duration,
     ) -> bool {
         if !self.schedule(ticket, handle, now) {
             return false;
@@ -94,7 +94,7 @@ impl Budget {
         ticket: ResolveTicket,
         handle: SourceHandle,
         url: &str,
-        now: Instant,
+        now: Duration,
     ) -> bool {
         let Some(proof) = self.proof.take() else {
             return false;
@@ -131,7 +131,7 @@ impl Budget {
             self.resumed();
             return false;
         };
-        let now = Instant::now();
+        let now = runtime.frame_time();
         match event {
             Event::Failure(MediaError::LostProviderLease)
                 if picture.admitted && picture.decoder.hls_handoff().is_some() =>
@@ -152,7 +152,7 @@ impl Budget {
         self.next.is_some()
     }
 
-    pub(super) fn take_due(&mut self, now: Instant) -> Option<(ResolveTicket, SourceHandle)> {
+    pub(super) fn take_due(&mut self, now: Duration) -> Option<(ResolveTicket, SourceHandle)> {
         let (ticket, handle, after, expires) = self.next?;
         if now >= expires {
             self.next = None;
@@ -173,7 +173,7 @@ impl Driver {
         runtime: &mut Runtime,
         app: &App,
         slot: usize,
-        now: Instant,
+        now: Duration,
     ) {
         let Some((ticket, handle)) = self.recovery[slot].take_due(now) else {
             return;
@@ -245,7 +245,7 @@ mod tests {
         let _serial = plx_base::testlock::serial();
         let (_, _, _, handle, original) = super::super::lease_tests::receipt();
         let (first, fresh) = test_tickets(handle, original.input.ticket);
-        let start = Instant::now();
+        let start = Duration::ZERO;
         let lost = start + Duration::from_secs(28);
         let url = "https://fixture.invalid:443/channel.m3u8";
         let mut budget = Budget::default();
@@ -281,7 +281,7 @@ mod tests {
         let (_, _, _, handle, original) = super::super::lease_tests::receipt();
         let (first, fresh) = test_tickets(handle, original.input.ticket);
         let url = "https://fixture.invalid:443/channel.m3u8";
-        let now = Instant::now();
+        let now = Duration::ZERO;
         for (error, target, identity, elapsed) in [
             (MediaError::SourceDenied, fresh, url, 2),
             (MediaError::Source, fresh, url, 2),

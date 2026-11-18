@@ -246,7 +246,7 @@ impl Layout {
                 source.y < target.y + target.h && target.y < source.y + source.h
             } else { source.x < target.x + target.w && target.x < source.x + source.w };
             let rank = (u8::from(!beam), if beam { forward } else { cross / forward },
-                dx.hypot(dy), slot.id);
+                dx * dx + dy * dy, slot.id);
             let precedes = best.as_ref().is_none_or(|(old, _)| rank.0.cmp(&old.0)
                 .then(rank.1.total_cmp(&old.1)).then(rank.2.total_cmp(&old.2))
                 .then(rank.3.cmp(&old.3)).is_lt());

@@ -12,7 +12,7 @@ use std::{
     collections::VecDeque,
     sync::mpsc,
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 type Client = super::multiview_connection::NativeClient;
@@ -290,7 +290,7 @@ struct Pending {
 enum Kind {
     Create {
         capacity: u8,
-        initial_audio: Option<scene::Effect>,
+        initial_audio: Option<scene::SceneEffect>,
     },
     Sources {
         slot: wire::SlotBinding,
@@ -357,15 +357,15 @@ enum RecoveryEffect {
     Audio(SceneId, u64, Option<SlotId>),
 }
 impl RecoveryEffect {
-    fn capture(effect: &scene::Effect) -> Option<Self> {
+    fn capture(effect: &scene::SceneEffect) -> Option<Self> {
         match effect {
-            scene::Effect::Backend(scene::BackendIntent::Stop { ticket }) => {
+            scene::SceneEffect::Backend(scene::BackendIntent::Stop { ticket }) => {
                 Some(Self::Stop(*ticket))
             }
-            scene::Effect::Backend(scene::BackendIntent::Focus { scene, slot }) => {
+            scene::SceneEffect::Backend(scene::BackendIntent::Focus { scene, slot }) => {
                 Some(Self::Focus(*scene, *slot))
             }
-            scene::Effect::Backend(scene::BackendIntent::AudioOwner {
+            scene::SceneEffect::Backend(scene::BackendIntent::AudioOwner {
                 scene,
                 audio_revision,
                 owner,
@@ -390,16 +390,16 @@ struct AcceptedOutputBudget {
     deadline: Deadline,
 }
 impl AcceptedOutputBudget {
-    fn matches(&self, effect: &scene::Effect, current: &wire::Context) -> bool {
+    fn matches(&self, effect: &scene::SceneEffect, current: &wire::Context) -> bool {
         self.expected == *current
             && match (&self.effect, effect) {
                 (
                     AcceptedBudgetEffect::Stop(expected),
-                    scene::Effect::Backend(scene::BackendIntent::Stop { ticket }),
+                    scene::SceneEffect::Backend(scene::BackendIntent::Stop { ticket }),
                 ) => expected == ticket,
                 (
                     AcceptedBudgetEffect::Layout,
-                    scene::Effect::Backend(scene::BackendIntent::Layout { .. }),
+                    scene::SceneEffect::Backend(scene::BackendIntent::Layout { .. }),
                 ) => true,
                 _ => false,
             }
@@ -421,8 +421,8 @@ pub(super) struct Driver {
         Option<fn(sources::SourceWork) -> Result<sources::PreparedMetadata, sources::Error>>,
     clock_now_ms: u64,
     clock_sample: Option<task::time::ClockSample>,
-    last_poll: Instant,
-    last_renew: Instant,
+    last_poll: Duration,
+    last_renew: Duration,
     audio_mode: service::AudioPolicy,
     selected: [Option<Box<Joined>>; 9],
     serial: u64,
@@ -449,8 +449,8 @@ impl Default for Driver {
             metadata_fixture: None,
             clock_now_ms: 0,
             clock_sample: None,
-            last_poll: Instant::now(),
-            last_renew: Instant::now(),
+            last_poll: Duration::ZERO,
+            last_renew: Duration::ZERO,
             audio_mode: service::AudioPolicy::FollowsFocus,
             selected: std::array::from_fn(|_| None),
             serial: 1,
@@ -712,11 +712,8 @@ impl Driver {
                 });
                 let id = service::RequestId::parse(&self.nonce(runtime)?)
                     .map_err(|_| wire::Reason::Unavailable)?;
-                let end = Instant::now()
-                    + Duration::from_millis(
-                        invocation.deadline_ms.saturating_sub(runtime.now_ms()),
-                    )
-                    .min(BUDGET);
+                let budget = Duration::from_millis(invocation.deadline_ms.saturating_sub(runtime.now_ms()));
+                let deadline = runtime.clock_sample.ok_or(wire::Reason::Expired)?.deadline_after(budget.min(BUDGET));
                 self.spawn(
                     Some(invocation),
                     Some(request),
@@ -730,7 +727,7 @@ impl Driver {
                             service::ControlOp::Off {},
                             None,
                             id,
-                            deadline(off, end),
+                            deadline,
                             cancel,
                         )
                         .map(Reply::Status)
@@ -782,6 +779,15 @@ impl Driver {
         self.serial = next;
         Ok(plx_data::ott::favorites_wire::hash(&bytes)[..32].into())
     }
+    fn observe_frame(&mut self, runtime: &Runtime) {
+        if self.clock_sample.is_none() {
+            self.last_poll = runtime.frame_time();
+            self.last_renew = self.last_poll;
+        }
+        self.clock_sample = runtime.clock_sample;
+        self.clock_now_ms = runtime.now_ms();
+    }
+
     pub fn command(
         &mut self,
         runtime: &mut Runtime,
@@ -791,8 +797,7 @@ impl Driver {
         if invocation.action != "multiview" {
             return None;
         }
-        self.clock_sample = runtime.clock_sample;
-        self.clock_now_ms = runtime.now_ms();
+        self.observe_frame(runtime);
         let request = wire::Request::decode(invocation.multiview_projection()?).ok()?;
         let reply_runtime = runtime.remote.runtime().to_owned();
         let reject = |reason| request.rejected(&reply_runtime, reason).ok();
@@ -838,7 +843,7 @@ impl Driver {
                     Ok(crate::app::ott_kiosk_policy::State::Off)
                 )
             {
-                runtime.multiview_connection.reprobe_unavailable();
+                runtime.multiview_connection.reprobe_unavailable(runtime.frame_time());
             }
             return request
                 .status_response(runtime.remote.runtime(), snapshot(runtime, self.audio_mode))
@@ -889,10 +894,10 @@ impl Driver {
         admission: Option<Deadline>,
     ) -> Result<(), wire::Reason> {
         let effect = transition.effects.iter().find_map(|effect| match effect {
-            scene::Effect::Backend(scene::BackendIntent::Stop { ticket }) => {
+            scene::SceneEffect::Backend(scene::BackendIntent::Stop { ticket }) => {
                 Some(AcceptedBudgetEffect::Stop(*ticket))
             }
-            scene::Effect::Backend(scene::BackendIntent::Layout { .. }) => {
+            scene::SceneEffect::Backend(scene::BackendIntent::Layout { .. }) => {
                 Some(AcceptedBudgetEffect::Layout)
             }
             _ => None,
@@ -931,16 +936,9 @@ impl Driver {
         let remaining =
             Duration::from_millis(invocation.deadline_ms.saturating_sub(runtime.now_ms()))
                 .min(BUDGET);
-        let end = Instant::now() + remaining;
-        // Capture this explicit authenticated invocation now. The exact same
-        // deadline travels to its effect ACK; completion never remints a budget.
-        let output_admission = self.clock_sample.map(|sample| {
-            sample.deadline_at_unix_ms(
-                sample
-                    .unix_ms()
-                    .saturating_add(remaining.as_millis().min(u128::from(u64::MAX)) as u64),
-            )
-        });
+        // The same admission budget bounds the worker and any resulting output.
+        let deadline = runtime.clock_sample.ok_or(wire::Reason::Expired)?.deadline_after(remaining);
+        let output_admission = Some(deadline);
 
         match request.operation().clone() {
             wire::Operation::Layout(layout) => {
@@ -993,8 +991,8 @@ impl Driver {
                 runtime.multiview = coordinator;
                 let activation = activation?;
                 let activation_layout = activation.effects.iter().find_map(|effect| match effect {
-                    scene::Effect::Backend(scene::BackendIntent::Layout { scene, layout }) => {
-                        Some(scene::Effect::Backend(scene::BackendIntent::Layout {
+                    scene::SceneEffect::Backend(scene::BackendIntent::Layout { scene, layout }) => {
+                        Some(scene::SceneEffect::Backend(scene::BackendIntent::Layout {
                             scene: *scene,
                             layout: *layout,
                         }))
@@ -1004,7 +1002,7 @@ impl Driver {
                 let initial_audio = activation.effects.into_iter().find(|effect| {
                     matches!(
                         effect,
-                        scene::Effect::Backend(scene::BackendIntent::AudioOwner { .. })
+                        scene::SceneEffect::Backend(scene::BackendIntent::AudioOwner { .. })
                     )
                 });
                 let result = (|| {
@@ -1026,7 +1024,7 @@ impl Driver {
                                 &profile.profile_id,
                                 geometry,
                                 id,
-                                deadline(off, end),
+                                deadline,
                                 cancel,
                             )
                             .map(Reply::Status)
@@ -1064,7 +1062,7 @@ impl Driver {
                     Kind::Sources { slot, filters },
                     false,
                     move |off, cancel| {
-                        io.sources(off, binding, cursor, deadline(off, end), cancel)
+                        io.sources(off, binding, cursor, deadline, cancel)
                             .map(Reply::Sources)
                             .map_err(|_| wire::Reason::Unavailable)
                     },
@@ -1127,7 +1125,7 @@ impl Driver {
                 runtime.multiview = coordinator;
                 let mut transition = transition?;
                 let effect = transition.effects.pop().ok_or(wire::Reason::Unavailable)?;
-                let scene::Effect::PrepareMetadata { ticket, work } = effect else {
+                let scene::SceneEffect::PrepareMetadata { ticket, work } = effect else {
                     return Err(wire::Reason::Unavailable);
                 };
                 let work_cancel = work.cancellation();
@@ -1234,7 +1232,7 @@ impl Driver {
                             service::ControlOp::Off {},
                             None,
                             id,
-                            deadline(off, end),
+                            deadline,
                             cancel,
                         )
                         .map(Reply::Status)
@@ -1336,12 +1334,11 @@ impl Driver {
             self.tick_shutdown(runtime, app);
             return;
         }
-        self.clock_sample = runtime.clock_sample;
-        self.clock_now_ms = runtime.now_ms();
+        self.observe_frame(runtime);
         // Cancellation has priority over slow metadata/network completion. Only the exact
         // captured ticket and this driver's worker token may be affected.
         runtime.multiview_effects.retain(|effect| match effect {
-            scene::Effect::CancelResolve {
+            scene::SceneEffect::CancelResolve {
                 ticket,
                 cancellation,
             } => {
@@ -1767,7 +1764,7 @@ impl Driver {
                                 self.selected[ticket.slot().index()] = None;
                             }
                             EffectAck::Renew => {
-                                self.last_renew = Instant::now();
+                                self.last_renew = runtime.frame_time();
                                 self.output_offered = None;
                             }
                             EffectAck::Layout => {
@@ -1827,7 +1824,7 @@ impl Driver {
                             return None;
                         }
                         match e {
-                            scene::Effect::Backend(scene::BackendIntent::Load {
+                            scene::SceneEffect::Backend(scene::BackendIntent::Load {
                                 ticket: effect_ticket,
                                 input,
                             }) if effect_ticket == ticket && input.ticket == effect_ticket => {
@@ -1893,12 +1890,12 @@ impl Driver {
             );
             return;
         };
-        let effect = scene::Effect::Backend(scene::BackendIntent::Load {
+        let effect = scene::SceneEffect::Backend(scene::BackendIntent::Load {
             ticket,
             input: *input,
         });
         let ticket_current = runtime.multiview.effect_current(runtime, &effect);
-        let scene::Effect::Backend(scene::BackendIntent::Load { input, .. }) = effect else {
+        let scene::SceneEffect::Backend(scene::BackendIntent::Load { input, .. }) = effect else {
             unreachable!()
         };
         let input = Box::new(input);
@@ -2000,15 +1997,9 @@ impl Driver {
         let io = session.io.clone();
         let item = joined.item.clone();
         let catalog = joined.catalog.clone();
-        let end = Instant::now()
-            + Duration::from_millis(
-                invocation
-                    .as_ref()
-                    .ok_or(wire::Reason::Expired)?
-                    .deadline_ms
-                    .saturating_sub(runtime.now_ms()),
-            )
-            .min(BUDGET);
+        let expiry = invocation.as_ref().ok_or(wire::Reason::Expired)?.deadline_ms;
+        let budget = Duration::from_millis(expiry.saturating_sub(runtime.now_ms())).min(BUDGET);
+        let deadline = runtime.clock_sample.ok_or(wire::Reason::Expired)?.deadline_after(budget);
         let grant_id = service::RequestId::parse(&self.nonce(runtime)?)
             .map_err(|_| wire::Reason::Unavailable)?;
         let play_id = service::RequestId::parse(&self.nonce(runtime)?)
@@ -2024,8 +2015,7 @@ impl Driver {
             },
             true,
             move |off, cancel| {
-                let remaining = end
-                    .saturating_duration_since(Instant::now())
+                let remaining = deadline.remaining(off)
                     .as_millis()
                     .min(30_000) as u32;
                 if remaining == 0 {
@@ -2040,7 +2030,7 @@ impl Driver {
                     remaining,
                     grant_id,
                     play_id,
-                    deadline(off, end),
+                    deadline,
                     cancel,
                 )
                 .map(Reply::Played)
@@ -2150,7 +2140,7 @@ impl Driver {
             return Ok(());
         }
         let effect = runtime.multiview_effects.pop_front();
-        if let Some(scene::Effect::CancelResolve {
+        if let Some(scene::SceneEffect::CancelResolve {
             ticket,
             cancellation,
         }) = &effect
@@ -2194,10 +2184,10 @@ impl Driver {
             false
         };
         let (slot, op, ack) = match effect {
-            Some(scene::Effect::Backend(scene::BackendIntent::Focus { slot, .. })) => {
+            Some(scene::SceneEffect::Backend(scene::BackendIntent::Focus { slot, .. })) => {
                 (slot, service::ControlOp::Focus {}, EffectAck::Focus)
             }
-            Some(scene::Effect::Backend(scene::BackendIntent::AudioOwner {
+            Some(scene::SceneEffect::Backend(scene::BackendIntent::AudioOwner {
                 scene,
                 audio_revision,
                 owner,
@@ -2214,12 +2204,12 @@ impl Driver {
                     owner,
                 },
             ),
-            Some(scene::Effect::Backend(scene::BackendIntent::Stop { ticket })) => (
+            Some(scene::SceneEffect::Backend(scene::BackendIntent::Stop { ticket })) => (
                 ticket.slot(),
                 service::ControlOp::Stop {},
                 EffectAck::Stop(ticket),
             ),
-            Some(scene::Effect::Backend(scene::BackendIntent::Layout { layout, .. })) => {
+            Some(scene::SceneEffect::Backend(scene::BackendIntent::Layout { layout, .. })) => {
                 let wire_layout = model_wire_layout(layout);
                 let mut geometry = geometry(wire_layout, &session.status.geometry.canvas)?;
                 geometry.revision = session
@@ -2235,7 +2225,7 @@ impl Driver {
                 )
             }
             Some(_) => return Err(wire::Reason::Unsupported),
-            None if self.last_renew.elapsed() >= Duration::from_secs(20) => (
+            None if runtime.frame_time().saturating_sub(self.last_renew) >= Duration::from_secs(20) => (
                 runtime.multiview.active_slot().unwrap_or(SlotId::SLOT_0),
                 service::ControlOp::Renew {},
                 EffectAck::Renew,
@@ -2303,7 +2293,7 @@ impl Driver {
         }
         let id = service::RequestId::parse(&self.nonce(runtime)?)
             .map_err(|_| wire::Reason::Unavailable)?;
-        let end = Instant::now() + budget;
+        let deadline = runtime.clock_sample.ok_or(wire::Reason::Expired)?.deadline_after(budget);
         self.spawn(
             None,
             None,
@@ -2317,7 +2307,7 @@ impl Driver {
                     op,
                     next_native,
                     id,
-                    deadline(off, end),
+                    deadline,
                     cancel,
                 )
                 .map(Reply::Status)
@@ -2344,7 +2334,7 @@ impl Driver {
         if self.recovery_only {
             return;
         }
-        if self.last_poll.elapsed() < Duration::from_millis(500) {
+        if runtime.frame_time().saturating_sub(self.last_poll) < Duration::from_millis(500) {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -2369,10 +2359,11 @@ impl Driver {
             protected: session.protected.clone(),
             installation: session.installation.clone(),
         });
-        self.last_poll = Instant::now();
-        let end = Instant::now() + Duration::from_secs(5);
+        let Some(sample) = runtime.clock_sample else { return; };
+        self.last_poll = runtime.frame_time();
+        let deadline = sample.deadline_after(Duration::from_secs(5));
         let _ = self.spawn(None, None, fence, Kind::Poll, false, move |off, cancel| {
-            io.status(off, &epoch, &id, native, deadline(off, end), cancel)
+            io.status(off, &epoch, &id, native, deadline, cancel)
                 .map(Reply::Status)
                 .map_err(|_| wire::Reason::Unavailable)
         });
@@ -2934,9 +2925,6 @@ fn coordinator_audio_policy(runtime: &Runtime) -> Result<service::AudioPolicy, w
         None => Err(wire::Reason::Unavailable),
     }
 }
-fn deadline(off: &OffFrame, end: Instant) -> Deadline {
-    Deadline::after(off, end.saturating_duration_since(Instant::now()))
-}
 fn data_layout(layout: wire::Layout) -> Layout {
     match layout {
         wire::Layout::Single => Layout::Single,
@@ -3357,7 +3345,7 @@ fn settle_closed_scene(runtime: &mut Runtime, status: &service::StatusResponse) 
     };
     for effect in transition.effects {
         match effect {
-            scene::Effect::Backend(scene::BackendIntent::Stop { ticket }) => {
+            scene::SceneEffect::Backend(scene::BackendIntent::Stop { ticket }) => {
                 // A Closed session confirms every input in THAT owned backend session is stopped.
                 let _ = runtime
                     .multiview

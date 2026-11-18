@@ -27,10 +27,18 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertNotIn("--verify-graph", source)
         self.assertNotIn("continue-on-error:", source)
         self.assertNotRegex(source, r"(?m)^    if:")
-        self.assertIn("needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output, harness]", body)
         native = body.split("  native:", 1)[1].split("\n  arm:", 1)[0]
         self.assertLess(native.index("uses: ./.github/actions/rust-toolchain"),
                         native.index("python3 scripts/lg-build.py check"))
+
+    def test_complete_player_harness_is_required_by_the_gate(self):
+        body = workflow("ci.yml")
+        harness, gate = body.split("  harness:\n", 1)[1].split("\n  gate:", 1)
+        self.assertIn("- run: python3 tests/test_harness.py", harness)
+        self.assertNotIn("continue-on-error", harness)
+        self.assertIn("HARNESS: ${{ needs.harness.result }}", gate)
+        self.assertIn('test "$HARNESS" = success', gate)
 
     def test_isolated_host_cache_resolves_to_the_actual_build_target(self):
         native = workflow("ci.yml").split("  native:\n", 1)[1].split("\n  renderer-replay:", 1)[0]
@@ -166,7 +174,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertRegex(body, r"(?m)^  workflow_call:")
         self.assertIn("name: Release contracts", body)
         self.assertIn("ci.test_native_release_workflows", body)
-        self.assertIn("needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output]", body)
+        self.assertIn("needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output, harness]", body)
         self.assertIn('test "$RELEASE" = success', body)
 
     def test_renderer_replay_is_network_denied_complete_and_required(self):

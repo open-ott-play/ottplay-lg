@@ -10,7 +10,7 @@
 # (an alias the call-site grep cannot count). Everything is configured through the environment,
 # because awk's -v would process the backslashes of a regex:
 #
-#   LG_MODE      call (default) | fork | arm
+#   LG_MODE      call (default) | fork | arm | lines
 #   -- call: every occurrence of LG_SITE on a code line is a site --
 #   LG_SITE      ERE of one call site, `(^|[^A-Za-z0-9_])name\(` style (awk has no \b)
 #   LG_DEF       ERE of a definition header (`fn name(`): blanked before matching, so it is neither a
@@ -27,6 +27,8 @@
 #   LG_FILE_SITE `PATH@@SITE;;..`: SITE joins LG_SITE in the file PATH alone (the module that defines a
 #                getter calls it bare, and no `use` says so)
 #   LG_REEXPORT_FILE / LG_REEXPORT_RE   the one bare mention tolerated, by file and exact line
+#   -- lines: emit each nonempty production code line as <path>:<line>:<code>, with literals
+#      and comments blanked and test-only items skipped. No site expression is required.
 #   -- fork: an attribute `#[cfg(..)]` or an inline `cfg!(..)` whose predicate reads `test` /
 #      `feature = "test-support"`. An attribute counts only when production can satisfy it (an item no
 #      production build compiles is skipped whole); an inline `cfg!(..)` counts whatever it evaluates
@@ -345,6 +347,7 @@ function scan_file(    i, code, scan, uline, name, k, hit, rest, p, txt, v, n, o
       continue
     }
     if (code !~ /[^[:space:]]/) continue
+    if (MODE == "lines") { print file ":" i ":" code; continue }
 
     if (pendfork > 0) {
       name = itemname(code); if (name == "") name = enclosing()

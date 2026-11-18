@@ -311,10 +311,23 @@ jobs:
           ci.test_native_release_workflows ci.test_native_hbc_manifest ci.test_native_candidate_receipt
           ci.test_package_product_config -v
 
+  harness:
+    name: Player harness tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - run: python3 tests/test_harness.py
+
   gate:
     name: CI gate
     if: always()
-    needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output]
+    needs: [source, native, arm, release-contracts, renderer-replay, local-decoder-build, local-decoder-sessions, local-virtual-output, harness]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -328,9 +341,10 @@ jobs:
           DECODER_BUILD: ${{ needs.local-decoder-build.result }}
           DECODER_SESSIONS: ${{ needs.local-decoder-sessions.result }}
           VIRTUAL_OUTPUT: ${{ needs.local-virtual-output.result }}
+          HARNESS: ${{ needs.harness.result }}
         run: >-
           test "$SOURCE" = success && test "$NATIVE" = success &&
           test "$RENDERER_REPLAY" = success &&
           test "$ARM" = success && test "$RELEASE" = success &&
           test "$DECODER_BUILD" = success && test "$DECODER_SESSIONS" = success &&
-          test "$VIRTUAL_OUTPUT" = success
+          test "$VIRTUAL_OUTPUT" = success && test "$HARNESS" = success

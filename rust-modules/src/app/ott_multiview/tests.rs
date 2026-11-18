@@ -84,7 +84,7 @@ fn authorize_fixture(
         .effects
         .into_iter()
         .find_map(|effect| match effect {
-            Effect::PrepareMetadata { ticket, work } => Some((ticket, work)),
+            SceneEffect::PrepareMetadata { ticket, work } => Some((ticket, work)),
             _ => None,
         })
         .unwrap();
@@ -95,7 +95,7 @@ fn authorize_fixture(
         .metadata_succeeded(prepared, runtime, app)
         .unwrap();
     assert!(loaded.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Load { ticket: loaded, input })
+        SceneEffect::Backend(BackendIntent::Load { ticket: loaded, input })
         if *loaded == ticket && input.identity_scheme() == 1
             && input.identity_digest().len() == 64)));
     ticket
@@ -121,7 +121,7 @@ fn actual_coordinator_publishes_snapshot_sources_and_ui_focus_is_not_playback_ac
     let activated = coordinator.activate(&runtime, &app, Layout::Grid4).unwrap();
     assert!(activated.effects.iter().any(|effect| matches!(
         effect,
-        Effect::Backend(BackendIntent::Layout {
+        SceneEffect::Backend(BackendIntent::Layout {
             layout: Layout::Grid4,
             ..
         })
@@ -166,7 +166,7 @@ fn actual_coordinator_publishes_snapshot_sources_and_ui_focus_is_not_playback_ac
     assert_eq!(coordinator.active_slot(), Some(slot(1)));
     assert_eq!(coordinator.audio_route_state().desired, Some(slot(1)));
     assert!(activate.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::AudioOwner { owner: Some(id), .. }) if *id == slot(1))));
+        SceneEffect::Backend(BackendIntent::AudioOwner { owner: Some(id), .. }) if *id == slot(1))));
     let audio_revision = coordinator.audio_route_state().pending_revision.unwrap();
     coordinator
         .audio_route_completed(
@@ -187,12 +187,12 @@ fn layout_focus_and_audio_policy_emit_exact_revisioned_backend_intents() {
     let created = coordinator.activate(&runtime, &app, Layout::Grid4).unwrap();
     let scene = coordinator.scene_id.unwrap();
     assert!(created.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Layout {scene:got,layout:Layout::Grid4}) if *got==scene)));
+        SceneEffect::Backend(BackendIntent::Layout {scene:got,layout:Layout::Grid4}) if *got==scene)));
     let (initial_audio_revision, initial_owner) = created
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Backend(BackendIntent::AudioOwner {
+            SceneEffect::Backend(BackendIntent::AudioOwner {
                 scene: got,
                 audio_revision,
                 owner,
@@ -208,17 +208,17 @@ fn layout_focus_and_audio_policy_emit_exact_revisioned_backend_intents() {
 
     let layout = coordinator.set_layout(Layout::PictureInPicture).unwrap();
     assert!(layout.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Layout {scene:got,layout:Layout::PictureInPicture}) if *got==scene)));
+        SceneEffect::Backend(BackendIntent::Layout {scene:got,layout:Layout::PictureInPicture}) if *got==scene)));
     assert_eq!(coordinator.layout(), Some(Layout::PictureInPicture));
 
     let focused = coordinator.focus(slot(1)).unwrap();
     assert!(focused.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Focus {scene:got,slot:focused}) if *got==scene && *focused==slot(1))));
+        SceneEffect::Backend(BackendIntent::Focus {scene:got,slot:focused}) if *got==scene && *focused==slot(1))));
     let (focus_audio_revision, focus_owner) = focused
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Backend(BackendIntent::AudioOwner {
+            SceneEffect::Backend(BackendIntent::AudioOwner {
                 scene: got,
                 audio_revision,
                 owner,
@@ -245,7 +245,7 @@ fn layout_focus_and_audio_policy_emit_exact_revisioned_backend_intents() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::Backend(BackendIntent::AudioOwner {
+            SceneEffect::Backend(BackendIntent::AudioOwner {
                 scene: got,
                 audio_revision,
                 owner,
@@ -260,12 +260,12 @@ fn layout_focus_and_audio_policy_emit_exact_revisioned_backend_intents() {
         .unwrap();
     let focus_under_explicit = coordinator.focus(slot(0)).unwrap();
     assert!(focus_under_explicit.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Focus {scene:got,slot:focused}) if *got==scene && *focused==slot(0))));
+        SceneEffect::Backend(BackendIntent::Focus {scene:got,slot:focused}) if *got==scene && *focused==slot(0))));
     assert!(
         !focus_under_explicit
             .effects
             .iter()
-            .any(|effect| matches!(effect, Effect::Backend(BackendIntent::AudioOwner { .. }))),
+            .any(|effect| matches!(effect, SceneEffect::Backend(BackendIntent::AudioOwner { .. }))),
         "focus does not change the owner under an explicit audio policy"
     );
 }
@@ -283,13 +283,13 @@ fn close_scene_cancels_resolvers_and_waits_for_each_pipeline_stop_ack() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
+            SceneEffect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
             _ => None,
         })
         .unwrap();
     let closed = coordinator.close_scene().unwrap();
     assert!(closed.effects.iter().any(|effect| matches!(effect,
-        Effect::CancelResolve {ticket,cancellation} if *ticket==resolver_ticket && Arc::ptr_eq(cancellation,&cancel))));
+        SceneEffect::CancelResolve {ticket,cancellation} if *ticket==resolver_ticket && Arc::ptr_eq(cancellation,&cancel))));
     assert!(cancel.load(Ordering::Acquire));
     assert_eq!(
         coordinator
@@ -315,7 +315,7 @@ fn close_scene_cancels_resolvers_and_waits_for_each_pipeline_stop_ack() {
         .unwrap();
     let stopping = coordinator.close_scene().unwrap();
     assert!(stopping.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Stop {ticket:got}) if *got==ticket)));
+        SceneEffect::Backend(BackendIntent::Stop {ticket:got}) if *got==ticket)));
     assert_eq!(
         coordinator.active_playback(),
         None,
@@ -345,7 +345,7 @@ fn resolver_cancellation_is_slot_local_and_late_completion_is_rejected() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
+            SceneEffect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
             _ => None,
         })
         .unwrap();
@@ -353,14 +353,14 @@ fn resolver_cancellation_is_slot_local_and_late_completion_is_rejected() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
+            SceneEffect::PrepareMetadata { ticket, work } => Some((*ticket, work.cancellation())),
             _ => None,
         })
         .unwrap();
     assert!(!Arc::ptr_eq(&first_cancel, &second_cancel));
     let closed = coordinator.close_slot(slot(0)).unwrap();
     assert!(closed.effects.iter().any(
-        |effect| matches!(effect, Effect::CancelResolve { ticket, .. } if *ticket == first_ticket)
+        |effect| matches!(effect, SceneEffect::CancelResolve { ticket, .. } if *ticket == first_ticket)
     ));
     assert!(first_cancel.load(Ordering::Acquire));
     assert!(!second_cancel.load(Ordering::Acquire));
@@ -389,7 +389,7 @@ fn a_new_same_source_attempt_rotates_slot_receipt_but_not_source_revision() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PrepareMetadata { ticket, .. } => Some(*ticket),
+            SceneEffect::PrepareMetadata { ticket, .. } => Some(*ticket),
             _ => None,
         })
         .unwrap();
@@ -408,7 +408,7 @@ fn a_new_same_source_attempt_rotates_slot_receipt_but_not_source_revision() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::PrepareMetadata { ticket, .. } => Some(*ticket),
+            SceneEffect::PrepareMetadata { ticket, .. } => Some(*ticket),
             _ => None,
         })
         .unwrap();
@@ -453,11 +453,11 @@ fn backend_admission_is_observed_and_close_waits_for_stop_acknowledgement() {
         .unwrap();
     assert_eq!(coordinator.admitted_pipeline_slots(), 1);
     assert!(admitted.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::AudioOwner { owner: Some(id), .. }) if *id == slot(0))));
+        SceneEffect::Backend(BackendIntent::AudioOwner { owner: Some(id), .. }) if *id == slot(0))));
 
     let stopping = coordinator.close_slot(slot(0)).unwrap();
     assert!(stopping.effects.iter().any(|effect| matches!(effect,
-        Effect::Backend(BackendIntent::Stop { ticket: stopped }) if *stopped == ticket)));
+        SceneEffect::Backend(BackendIntent::Stop { ticket: stopped }) if *stopped == ticket)));
     assert_eq!(
         coordinator.admitted_pipeline_slots(),
         1,

@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 use plx_data::ott::favorites::{Favorite, Locator, Origin as FavoriteOrigin};
 use std::sync::{Mutex, OnceLock};
 
@@ -454,6 +455,7 @@ fn setup_with_capabilities(advertised_capabilities: service::Capabilities) -> Dr
             "real capabilities qualification must settle"
         );
         runtime.multiview_connection.tick(
+            runtime.frame_time(),
             true,
             true,
             Some(&protected),
@@ -987,7 +989,7 @@ fn late_metadata_failure_cannot_clear_a_successor_ticket() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            scene::Effect::PrepareMetadata { ticket, .. } => Some(*ticket),
+            scene::SceneEffect::PrepareMetadata { ticket, .. } => Some(*ticket),
             _ => None,
         })
         .expect("successor play creates a fresh resolver ticket");
@@ -1626,7 +1628,7 @@ fn preparing_play_fixture(id: u64) -> DriverFixture {
 }
 fn begin_poll(driver: &mut Driver, runtime: &mut Runtime, app: &mut App) {
     assert!(runtime.multiview_effects.is_empty());
-    driver.last_poll = Instant::now() - Duration::from_secs(1);
+    driver.last_poll = runtime.frame_time().saturating_sub(Duration::from_secs(1));
     driver.tick(runtime, app);
     assert!(matches!(
         driver.pending.as_ref().map(|p| &p.kind),
@@ -2288,9 +2290,9 @@ fn accepted_budget_status_poll_and_renew_never_admit_a_reported_new_generation()
             'd',
         );
         if renew {
-            driver.last_renew = Instant::now() - Duration::from_secs(21);
+            driver.last_renew = runtime.frame_time().saturating_sub(Duration::from_secs(21));
         } else {
-            driver.last_poll = Instant::now() - Duration::from_secs(1);
+            driver.last_poll = runtime.frame_time().saturating_sub(Duration::from_secs(1));
         }
         driver.tick(&mut runtime, &mut app);
         drive(&mut driver, &mut runtime, &mut app);
@@ -2684,7 +2686,7 @@ fn recovery_uncaptured_focus_cannot_borrow_stop_custody() {
         .scene();
     runtime
         .multiview_effects
-        .push_back(scene::Effect::Backend(scene::BackendIntent::Focus {
+        .push_back(scene::SceneEffect::Backend(scene::BackendIntent::Focus {
             scene,
             slot: SlotId::SLOT_0,
         }));
@@ -2947,6 +2949,7 @@ fn review_qualify(runtime: &mut Runtime) {
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         runtime.multiview_connection.tick(
+            runtime.frame_time(),
             true,
             true,
             Some(&protected),
@@ -3254,20 +3257,12 @@ fn review_confirmed_recovery_off_retires_only_owned_picture_and_allows_explicit_
         );
         let before = rig.runtime.multiview_connection.generation();
         rig.state.lock().unwrap().capabilities = Some(capabilities());
-        let until = Instant::now() + Duration::from_secs(35);
-        let mut id = 6300;
-        while rig.runtime.multiview_connection.generation() == before {
-            assert!(
-                Instant::now() < until,
-                "eligible Status must trigger the real bounded rediscovery after cooldown"
-            );
+        let start = rig.runtime.clock_sample.unwrap();
+        for (id, elapsed, due) in [(6300, 29_999, false), (6301, 30_000, true)] {
+            rig.runtime.clock_sample = Some(start.advance_for_test(Duration::from_millis(elapsed)));
             let status = invocation(&mut rig.runtime, id, json!({"version":1,"op":"status"}));
-            id += 1;
-            assert!(rig
-                .driver
-                .command(&mut rig.runtime, &rig.app, &status)
-                .is_some());
-            std::thread::sleep(Duration::from_millis(20));
+            assert!(rig.driver.command(&mut rig.runtime, &rig.app, &status).is_some());
+            assert_eq!(rig.runtime.multiview_connection.generation() != before, due);
         }
         review_qualify(&mut rig.runtime);
         let request = layout(

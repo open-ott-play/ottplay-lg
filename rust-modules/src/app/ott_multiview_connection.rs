@@ -12,7 +12,7 @@ use std::{
         Arc,
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const BUDGET: Duration = Duration::from_secs(30);
@@ -118,7 +118,7 @@ pub(super) struct State {
     pending: Option<Pending>,
     qualified: Option<Qualified>,
     attempted: bool,
-    reprobe_after: Option<Instant>,
+    reprobe_after: Option<Duration>,
     shutdown: bool,
     transport: Arc<dyn Transport + Send + Sync>,
     launcher: Box<dyn Launcher>,
@@ -189,6 +189,7 @@ impl State {
     /// a cancelled worker is still retiring. No replacement can overlap it.
     pub fn tick(
         &mut self,
+        now: Duration,
         ready: bool,
         foreground: bool,
         protected: Option<&Value>,
@@ -241,7 +242,7 @@ impl State {
             return;
         }
         self.attempted = true;
-        self.reprobe_after = Some(Instant::now() + REPROBE_INTERVAL);
+        self.reprobe_after = Some(now + REPROBE_INTERVAL);
         let client = (|| {
             let binding =
                 ServiceBinding::from_protected_json(raw)?.ok_or(ServiceError::InvalidConfig)?;
@@ -297,10 +298,7 @@ impl State {
     /// An admitted foreground status request may retry unavailable discovery.
     /// No timer or background tick retries automatically, and positive metadata
     /// or a still-retiring worker is never replaced by this read-side door.
-    pub fn reprobe_unavailable(&mut self) -> bool {
-        self.reprobe_unavailable_at(Instant::now())
-    }
-    fn reprobe_unavailable_at(&mut self, now: Instant) -> bool {
+    pub fn reprobe_unavailable(&mut self, now: Duration) -> bool {
         if self.shutdown
             || self.generation == 0
             || !self.attempted

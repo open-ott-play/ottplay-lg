@@ -741,7 +741,7 @@ pub(super) struct Runtime {
     multiview_ui: multiview_ui::State,
     multiview_menu: multiview_local_menu::State,
     multiview: Box<multiview::Coordinator>,
-    multiview_effects: std::collections::VecDeque<multiview::Effect>,
+    multiview_effects: std::collections::VecDeque<multiview::SceneEffect>,
     multiview_picture: Option<plx_media::route::PlaybackIdentity>,
     // A content hash cannot fence remove/re-add. This stamp observes accepted
     // source-policy images without invalidating them for ordinary UI changes.
@@ -1443,6 +1443,10 @@ impl Runtime {
         self.clock_sample
             .expect("OTT runtime receives a clock sample before dispatch")
             .unix_ms()
+    }
+
+    fn frame_time(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.now_ms())
     }
     fn active(&self) -> Option<&ProviderProfile> {
         self.saved
@@ -7244,6 +7248,7 @@ fn tick_with_start(
     // Discover only the explicitly paired service. A saved provider, a discovered
     // URL or a previous foreground session cannot confer service authority.
     runtime.multiview_connection.tick(
+        runtime.frame_time(),
         !local_multiview_enabled(&runtime) && runtime.loaded
             && runtime.state_load == StateLoad::Idle && !runtime.persistence_uncertain,
         app.running && playback_allowed(app),
