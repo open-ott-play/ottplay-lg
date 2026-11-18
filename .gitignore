@@ -226,3 +226,7 @@ __pycache__/
 /pkg/ottplay-control.json
 /pkg/ott-state
 /pkg/ott-state.json
+
+# Local, non-shared repository instructions.
+/AGENTS.md
+/CLAUDE.md
