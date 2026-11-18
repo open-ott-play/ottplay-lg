@@ -138,7 +138,7 @@ impl Handle {
     /// 4.4.2, and naming either at link time would make the binary demand a symbol that older
     /// televisions do not have.
     pub fn self_handle() -> Handle {
-        Handle(std::ptr::null_mut()) // RTLD_DEFAULT
+        Handle(libc::RTLD_DEFAULT)
     }
 
     pub fn sym(&self, name: &str) -> Option<*mut c_void> {
@@ -419,6 +419,11 @@ mod tests {
     static HOST_LIBC: &[&str] = &["libSystem.B.dylib"];
     #[cfg(not(target_os = "macos"))]
     static HOST_LIBC: &[&str] = &["libc.so.6"];
+
+    #[test]
+    fn default_scope_resolves_a_linked_system_symbol() {
+        assert!(Handle::self_handle().sym("getpid").is_some_and(|p| !p.is_null()));
+    }
 
     /// A SONAME that exists on no platform must report `NoLibrary` rather than opening something.
     /// Cheap, but it is the branch every non-TV host takes, including this test runner.
