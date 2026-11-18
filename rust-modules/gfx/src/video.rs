@@ -136,7 +136,7 @@ impl Drop for State {
 }
 fn video_program(fragment: *const c_char) -> Option<u32> {
     unsafe {
-        let vertex = try_compile(GL_VERTEX_SHADER, VS_SRC.as_ptr())?;
+        let vertex = try_compile(GL_VERTEX_SHADER, VS_IMG.as_ptr())?;
         let Some(fragment) = try_compile(GL_FRAGMENT_SHADER, fragment) else {
             glDeleteShader(vertex);
             return None;
@@ -177,7 +177,7 @@ pub struct Texture {
     format: u32,
     range: Range,
     matrix: Matrix,
-    locations: [i32; 9],
+    locations: [i32; 10],
     _main: PhantomData<Rc<()>>,
 }
 impl Texture {
@@ -206,11 +206,11 @@ impl Texture {
             return Err("No current graphics context");
         }
         let program=video_program(c"precision mediump float;
-            varying vec2 v_uv; uniform sampler2D u_y; uniform sampler2D u_u; uniform sampler2D u_v;
+            varying highp vec2 v_cuv; uniform sampler2D u_y; uniform sampler2D u_u; uniform sampler2D u_v;
             uniform vec3 u_scale; uniform vec3 u_coeff; uniform float u_blue; uniform float u_opacity;
-            void main(){float y=(texture2D(u_y,v_uv).r-u_scale.z)*u_scale.x;
-            float u=(texture2D(u_u,v_uv).r-128.0/255.0)*u_scale.y;
-            float v=(texture2D(u_v,v_uv).r-128.0/255.0)*u_scale.y;
+            void main(){float y=(texture2D(u_y,v_cuv).r-u_scale.z)*u_scale.x;
+            float u=(texture2D(u_u,v_cuv).r-128.0/255.0)*u_scale.y;
+            float v=(texture2D(u_v,v_cuv).r-128.0/255.0)*u_scale.y;
             vec3 rgb=vec3(y+u_coeff.x*v,y+u_coeff.y*u+u_coeff.z*v,y+u_blue*u);
             gl_FragColor=vec4(clamp(rgb,0.0,1.0),u_opacity);}".as_ptr())
             .ok_or("Planar video shader unavailable")?;
@@ -226,8 +226,8 @@ impl Texture {
             return Err("Video texture allocation failed");
         }
         let locations = [
-            c"u_screen",
-            c"u_rect",
+            c"u_tscreen",
+            c"u_trect",
             c"u_scale",
             c"u_coeff",
             c"u_blue",
@@ -235,6 +235,7 @@ impl Texture {
             c"u_y",
             c"u_u",
             c"u_v",
+            c"u_uvrect",
         ]
         .map(|name| unsafe { glGetUniformLocation(program, name.as_ptr()) });
         Ok(Self {
@@ -334,7 +335,18 @@ impl Texture {
         Ok(())
     }
     /// Returns true when a video draw was submitted. Culled or transparent draws are skipped.
-    pub fn draw(&self, _main: &MainThread, rect: Rect, opacity: f32) -> Result<bool, &'static str> {
+    pub fn draw(&self, main: &MainThread, rect: Rect, opacity: f32) -> Result<bool, &'static str> {
+        self.draw_uv(main, rect, UV_FULL, opacity)
+    }
+
+    /// Map a source UV window onto the exact destination rectangle for all three planes.
+    pub fn draw_uv(
+        &self,
+        _main: &MainThread,
+        rect: Rect,
+        uv: [f32; 4],
+        opacity: f32,
+    ) -> Result<bool, &'static str> {
         self.current()?;
         if self.sizes.is_none() {
             return Err("Video texture has no frame");
@@ -358,6 +370,7 @@ impl Texture {
             use_prog(self.program);
             glUniform2f(self.locations[0], SCR_W, SCR_H);
             glUniform4f(self.locations[1], rect.x, rect.y, rect.w, rect.h);
+            glUniform4f(self.locations[9], uv[0], uv[1], uv[2], uv[3]);
             let (scale, coeff) = coefficients(self.range, self.matrix);
             glUniform3f(self.locations[2], scale[0], scale[1], scale[2]);
             glUniform3f(self.locations[3], coeff[0], coeff[1], coeff[2]);

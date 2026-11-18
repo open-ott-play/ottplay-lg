@@ -851,6 +851,15 @@ unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize) -> Result<Ve
     }
     Ok(out)
 }
+fn display_aspect(w: usize, h: usize, sar: AVRational) -> f32 {
+    let raster = w as f64 / h as f64;
+    if sar.num > 0 && sar.den > 0 {
+        (raster * f64::from(sar.num) / f64::from(sar.den)) as f32
+    } else {
+        raster as f32
+    }
+}
+
 fn dimensions(w: i32, h: i32, limits: Limits) -> Result<(usize, usize, usize, usize), Error> {
     if w <= 0 || h <= 0 || (w as u64) * (h as u64) > u64::from(limits.max_source_pixels) {
         return Err(Error::Budget);
@@ -1276,6 +1285,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                     let frame = FrameYuv {
                         width: w as u32,
                         height: h as u32,
+                        display_aspect: display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame)),
                         chroma_width: cw as u32,
                         chroma_height: ch as u32,
                         y: plane(f, 0, w, h)?,
@@ -1312,6 +1322,19 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_aspect_respects_anamorphic_broadcast_frames() {
+        for (w, h, num, den, expected) in [
+            (720, 576, 64, 45, 16.0 / 9.0),
+            (720, 576, 16, 15, 4.0 / 3.0),
+            (640, 480, 1, 1, 4.0 / 3.0),
+            (640, 480, 0, 1, 4.0 / 3.0),
+            (640, 480, 1, 0, 4.0 / 3.0),
+        ] {
+            assert_eq!(display_aspect(w, h, AVRational { num, den }), expected);
+        }
+    }
 
     #[test]
     fn explicit_startup_outages_are_typed_without_retrying_a_cold_source() {

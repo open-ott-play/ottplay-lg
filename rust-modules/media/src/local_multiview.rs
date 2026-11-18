@@ -43,6 +43,8 @@ pub enum ColorMatrix {
 pub struct FrameYuv {
     pub width: u32,
     pub height: u32,
+    /// Display width / height, including non-square pixels from the stream or decoded frame.
+    pub display_aspect: f32,
     pub chroma_width: u32,
     pub chroma_height: u32,
     pub y: Vec<u8>,
