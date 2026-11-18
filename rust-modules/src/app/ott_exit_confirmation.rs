@@ -64,10 +64,11 @@ fn settled(runtime: &Runtime, app: &App, host: Host) -> bool {
     { return false; }
     match host {
         Host::Page | Host::Projected => !app.pages.surface_up(),
-        // A closing More, Settings or consent surface still owns its own transition.
+        // The mounted PlayerPanel owns input during its opening animation.
+        // A closing More, Settings or consent surface still owns its transition.
         Host::Panel { entry, .. } => app.pages.nav.modals.surfaces.iter()
-            .all(|surface| surface.phase == Phase::Hidden
-                || (surface.entry.id == entry && surface.phase == Phase::Open)),
+            .all(|surface| surface.phase == Phase::Hidden || (surface.entry.id == entry
+                && matches!(surface.phase, Phase::Opening | Phase::Open))),
     }
 }
 
