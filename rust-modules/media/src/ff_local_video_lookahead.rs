@@ -90,20 +90,23 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
         // read() validates sequence, URI, object size, content and lease as usual. A media
         // request can only use a segment declared by a parsed playlist. At the live edge
         // its existing poll cadence, timeout and retry budget remain in force.
-        let mut result = if ahead {
-            hls.read_available(&mut [], control, super::LIVE_READ_BUDGET, true)
-        } else {
-            hls.read(&mut [], control)
-        };
-        if ahead && result.is_ok() && hls.bytes.is_empty() && !hls.playlist.ended {
-            // The playlist still ends at our current segment. Release the early
-            // lookup and start a fresh timeout when FFmpeg actually needs bytes.
-            if requests.recv().is_err() {
-                return;
+        let result = loop {
+            if !ahead {
+                break hls.read(&mut [], control);
             }
-            ahead = false;
-            result = hls.read(&mut [], control);
-        }
+            let result = hls.read_available(&mut [], control, super::LIVE_READ_BUDGET, true);
+            if result.is_err() || !hls.bytes.is_empty() || hls.playlist.ended {
+                break result;
+            }
+            // A fresh manifest still ends at the current segment. Poll at the
+            // normal cadence while decoding continues. Its actual demand owns a
+            // fresh timeout, so a long current segment cannot exhaust it early.
+            match requests.try_recv() {
+                Ok(()) => ahead = false,
+                Err(TryRecvError::Empty) => (),
+                Err(TryRecvError::Disconnected) => return,
+            }
+        };
         let object = result.map(|_| {
             hls.pos = 0;
             std::mem::take(&mut hls.bytes)

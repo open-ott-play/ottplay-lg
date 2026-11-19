@@ -53,8 +53,8 @@ reader supports same-origin TS/fMP4 playlists; encrypted, byte-range,
 discontinuous and external-audio renditions are rejected. HLS seek is unavailable.
 A clear live MPEG-TS source opened in the four-window grid can read one segment
 ahead while its current segment plays. The same private HTTP session handles
-both segments. If the next segment is still unpublished after a playlist
-refresh, reading waits for decoder demand. Both compressed buffers share the
+both segments. While the next segment is unpublished, the reader checks the
+playlist at its usual cadence. Decoder demand has its own timeout. Both compressed buffers share the
 slot’s segment budget. A full buffer defers the read until the decoder releases space.
 Moving an existing source from another layout keeps its original reader.
 Plex uses direct media; this path does not silently start a transcoder.
