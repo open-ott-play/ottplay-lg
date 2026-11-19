@@ -61,8 +61,24 @@ mod tests {
     use super::BoxFilter;
 
     #[test]
+    fn rounds_every_possible_sum_including_black_and_white() {
+        let mut top = Vec::new();
+        let mut bottom = Vec::new();
+        for sum in 0u16..=1020 {
+            let samples = [0, 255, 510, 765].map(|base| sum.saturating_sub(base).min(255) as u8);
+            top.extend_from_slice(&samples[..2]);
+            bottom.extend_from_slice(&samples[2..]);
+        }
+        let mut out = vec![0; top.len() / 2];
+        BoxFilter::detect().row(&top, &bottom, &mut out);
+        for (sum, pixel) in out.into_iter().enumerate() {
+            assert_eq!(pixel, ((sum + 2) / 4) as u8);
+        }
+    }
+
+    #[test]
     fn unaligned_rows_and_partial_vector_match_integer_reference() {
-        let bytes: Vec<u8> = (0..240).map(|i| (i * 53 + i * i) as u8).collect();
+        let bytes: Vec<u8> = (0..240).map(|i| (i * 53 + i / 3) as u8).collect();
         let filter = BoxFilter::detect();
         for offset in 0..4 {
             for width in 1..=39 {
