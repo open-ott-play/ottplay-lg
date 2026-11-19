@@ -602,6 +602,14 @@ fn check_four_window_audio(readers: &mut Readers) {
     }
 }
 
+fn boot_real_decoders() {
+    // Start the same queued writer as the app before timed workers emit their first records.
+    plx_base::eventlog::start();
+    assert!(plx_net::net::global_init());
+    crate::ff::boot();
+    assert!(available(), "bundled H264 decoder unavailable");
+}
+
 #[test]
 #[ignore = "Explicit real bundled-decoder qualification; requires generated fixtures and PLXNATIVE_APP_DIR"]
 fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
@@ -613,9 +621,7 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         std::env::var_os("PLXNATIVE_APP_DIR").is_some(),
         "new decoder prefix required"
     );
-    assert!(plx_net::net::global_init());
-    crate::ff::boot();
-    assert!(available(), "bundled H264 decoder unavailable");
+    boot_real_decoders();
     let mut server = FixtureServer::open(root.clone());
     let (mut readers, latches) = open_mixed_readers(&root, &server);
     let off = plx_base::task::OffFrame::for_test();
@@ -756,9 +762,7 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
 fn four_live_hls_windows_advance_after_gateway_timeouts() {
     let _serial = plx_base::testlock::serial();
     let root = PathBuf::from(std::env::var_os("PLXNATIVE_LOCAL_VIDEO_FIXTURES").unwrap());
-    assert!(plx_net::net::global_init());
-    crate::ff::boot();
-    assert!(available(), "bundled H264 decoder unavailable");
+    boot_real_decoders();
     let mut server = FixtureServer::open(root);
     let mut readers = Readers(Vec::new());
     for index in [2, 6, 7, 8] {
