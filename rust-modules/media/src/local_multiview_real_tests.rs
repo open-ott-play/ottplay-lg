@@ -104,6 +104,9 @@ impl FixtureServer {
         live_grid: &LiveGridFixture,
     ) -> std::io::Result<()> {
         use std::io::Read;
+        // Darwin may inherit O_NONBLOCK from the listener. Blocking I/O on a
+        // single accepted connection is bounded by the two socket timeouts.
+        socket.set_nonblocking(false)?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
         socket.set_write_timeout(Some(Duration::from_millis(500)))?;
         let mut header = Vec::new();
@@ -280,6 +283,36 @@ impl FixtureServer {
         self.worker.is_none()
     }
 }
+#[test]
+fn fixture_waits_for_the_rest_of_a_split_request() {
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    // Exercise Darwin's inherited mode on every host.
+    socket.set_nonblocking(true).unwrap();
+    client.write_all(b"GET /unknown HTTP/1.1\r\n").unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        client.write_all(b"\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    });
+    let served = FixtureServer::serve(
+        socket,
+        std::path::Path::new("."),
+        &AtomicUsize::default(),
+        &LiveGridFixture::default(),
+    );
+    let response = writer.join().unwrap();
+    served.unwrap();
+    assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+}
+
 impl Drop for FixtureServer {
     fn drop(&mut self) {
         let _ = self.stop();
