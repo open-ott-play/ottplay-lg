@@ -233,7 +233,10 @@ The Native checks workflow runs these checks:
   focus, per-window buffer bounds and worker retirement. The job log records
   per-window peaks, sampled aggregate compressed memory and the longest
   observed gap between delivered frames. Each 25 fps source publishes into
-  a 640 × 360 tile.
+  a 640 × 360 tile. All nine must advance by 8.2 seconds of media time
+  during the same observation. CI requires 85% of the configured frame
+  rate in media time and 50% in wall time. It rejects any delivery gap of
+  1.5 seconds, including a pane that stops before the observation finishes.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 

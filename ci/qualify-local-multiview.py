@@ -495,7 +495,7 @@ def qualify(runner, ident, artifact, virtual=False):
     records, hls = manifest["videos"], manifest["hls_objects"]
     if manifest.get("schema") != 1 or manifest.get("video_count") != 9 or len(records) != 9 or {r["name"] for r in records} != {f"slot{i}.mp4" for i in range(9)}:
         raise RuntimeError("Fixture video inventory is incomplete")
-    if not 8 <= len(hls) <= 160:
+    if not 8 <= len(hls) <= 216:
         raise RuntimeError("HLS fixture inventory is incomplete or unbounded")
     groups = {f"slot{slot}-hls" for slot in (2, 6, 7, 8)}
     if not virtual:
@@ -524,7 +524,10 @@ def qualify(runner, ident, artifact, virtual=False):
                PLXNATIVE_LOCAL_VIDEO_FIXTURES=str(fixtures), PLXNATIVE_RUNTIME_DIR=str(runner.out / "runtime"))
     env.pop("RUST_MIN_STACK", None)
     (runner.out / "runtime").mkdir()
+    # Exercise the shipped per-pixel hot loops under nine live feeds.
+    # Keep test assertions enabled and optimize only the media crate.
     compiled = runner.run("media-compile", ["cargo", "test", "--locked", "--lib", "-p", "plx_media", "--features", "hostsim",
+                                           "--config", "profile.test.package.plx_media.opt-level=2",
                                            "--no-run", "--message-format=json"], 1200, env, ROOT / "rust-modules")
     binaries = set()
     for line in compiled.splitlines():

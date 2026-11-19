@@ -26,7 +26,7 @@ pub(super) struct Origin {
 impl Origin {
     pub(super) fn serve(&self, socket: &mut TcpStream, root: &Path, path: &str) -> io::Result<()> {
         if path == "/media.m3u8" {
-            let last = (1 + self.last.load(Ordering::Acquire)).min(7);
+            let last = (1 + self.last.load(Ordering::Acquire)).min(14);
             let first = last.saturating_sub(3);
             let mut list =
                 format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
@@ -96,6 +96,7 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
     let mut servers = Vec::new();
     let mut readers = Readers(Vec::new());
     let limits = Limits::grid9();
+    let started = Instant::now();
     for slot in 0..SLOTS {
         let origin = Origin {
             slot,
@@ -117,8 +118,10 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
     }
     let mut seen: [Seen; SLOTS] = std::array::from_fn(|_| Seen::default());
     let mut first = [None; SLOTS];
+    let mut common_start = None;
     readers.0[0].set_audio(true);
     let mut focus_moved = false;
+    let mut first_draw = [None; SLOTS];
     let mut last_draw = [None; SLOTS];
     let mut max_gap = [Duration::ZERO; SLOTS];
     let mut peak_observed_sum = 0;
@@ -129,6 +132,7 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
         for (i, slot) in seen.iter().enumerate() {
             if slot.frames > previous[i] {
                 let now = Instant::now();
+                first_draw[i].get_or_insert(now);
                 if let Some(then) = last_draw[i].replace(now) {
                     max_gap[i] = max_gap[i].max(now.duration_since(then));
                 }
@@ -156,10 +160,15 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
                 *start = slot.last;
             }
         }
-        if seen.iter().zip(first).all(|(slot, start)| {
-            slot.last
-                .zip(start)
-                .is_some_and(|(now, start)| now - start >= 8_200_000)
+        if common_start.is_none() && first.iter().all(Option::is_some) {
+            common_start = Some(std::array::from_fn::<_, SLOTS, _>(|i| {
+                seen[i].last.unwrap()
+            }));
+        }
+        if common_start.is_some_and(|starts| {
+            seen.iter()
+                .zip(starts)
+                .all(|(slot, start)| slot.last.is_some_and(|now| now - start >= 8_200_000))
         }) && servers.iter().all(|server| {
             server
                 .live_grid
@@ -197,7 +206,7 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
         // Count delivered frames as well as PTS. An occasional frame with far-apart
         // timestamps must not qualify an otherwise stalled pane on a busy CI host.
         assert!(
-            fps >= f64::from(limits.max_fps) * 0.5,
+            fps >= f64::from(limits.max_fps) * 0.85,
             "lane {index} delivered only {fps:.1} fps"
         );
         let (_, peak) = reader.hls_compressed_bytes().unwrap();
@@ -209,7 +218,21 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
         assert!(ready > 0, "lane {index} never used lookahead");
         let origin = servers[index].live_grid.load.as_ref().unwrap();
         assert!(origin.delayed.load(Ordering::Acquire) && origin.last.load(Ordering::Acquire) >= 5);
-        eprintln!("nine-HLS slot {}: {} frames ({fps:.1} per media second), peak {peak} bytes, {ready} lookahead hits, {deferrals} budget waits, longest observed frame gap {} ms", index + 1, seen[index].frames, max_gap[index].as_millis());
+        let first_at = first_draw[index].unwrap();
+        let last_at = last_draw[index].unwrap();
+        let wall_secs = last_at.duration_since(first_at).as_secs_f64();
+        let wall_fps = (lane.frames - 1) as f64 / wall_secs;
+        let tail = last_at.elapsed();
+        eprintln!("nine-HLS slot {}: {} frames, {fps:.1} fps/media, {wall_fps:.1} fps/wall, first at {} ms, measured {wall_secs:.2}s, tail {} ms, peak {peak} bytes, {ready} lookahead hits, {deferrals} budget waits, max observed frame gap {} ms", index + 1, lane.frames, first_at.duration_since(started).as_millis(), tail.as_millis(), max_gap[index].as_millis());
+        // Hosted CPUs vary, but repeated second-scale stalls must never pass a PTS-only check.
+        assert!(
+            wall_fps >= f64::from(limits.max_fps) * 0.5,
+            "lane {index} sustained only {wall_fps:.1} fps/wall"
+        );
+        assert!(
+            max_gap[index].max(tail) < Duration::from_millis(1_500),
+            "lane {index} stopped delivering during shared playback"
+        );
     }
     let overlap = shared.peak.load(Ordering::Relaxed);
     eprintln!("nine-HLS combined sampled compressed high water: {peak_observed_sum} bytes; peak concurrent delayed GETs: {overlap}");

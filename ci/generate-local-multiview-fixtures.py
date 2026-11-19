@@ -56,7 +56,7 @@ def main():
             remux = [args.ffmpeg, "-nostdin", "-v", "error", "-threads", "1", "-i", str(path), "-c", "copy"]
             hls_objects.extend(hls(args.destination / f"slot{index}-hls", remux, args.destination))
         if args.grid9_resolution:
-            hd = encoder(args.ffmpeg, index, args.grid9_resolution, "25", 50, 16)
+            hd = encoder(args.ffmpeg, index, args.grid9_resolution, "25", 50, 30)
             hls_objects.extend(hls(args.destination / f"grid9-{index}-hls", hd, args.destination))
     manifest = {"schema": 1, "video_count": 9, "videos": records, "hls_objects": hls_objects}
     (args.destination / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
