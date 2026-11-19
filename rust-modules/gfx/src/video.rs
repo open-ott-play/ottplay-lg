@@ -2,7 +2,7 @@
 //! media clocks or native decoder resources. Drop before destroying its GL context.
 use super::*;
 use plx_base::task::MainThread;
-use std::{marker::PhantomData, rc::Rc};
+use std::rc::Rc;
 
 const LUMA: u32 = 0x1909;
 const RED: u32 = 0x1903;
@@ -95,24 +95,44 @@ fn coefficients(range: Range, matrix: Matrix) -> ([f32; 3], [f32; 3]) {
     };
     (scale, coeff)
 }
-/// Restores touched texture units (including the renderer's resident dither
-/// binding), unpack alignment and cached program. Never changes blend/scissor/VBO.
-struct State {
+/// All three plane uploads can use the active texture unit sequentially.
+struct UploadState {
+    binding: i32,
+    unpack: i32,
+}
+impl UploadState {
+    unsafe fn save() -> Self {
+        let mut state = Self {
+            binding: 0,
+            unpack: 0,
+        };
+        glGetIntegerv(TEXTURE_BINDING, &mut state.binding);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &mut state.unpack);
+        state
+    }
+}
+impl Drop for UploadState {
+    fn drop(&mut self) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.binding as u32);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, self.unpack);
+        }
+    }
+}
+/// Restore all sampler units, including the UI's resident dither binding.
+struct DrawState {
     active: i32,
     bindings: [i32; 3],
-    unpack: i32,
     program: i32,
 }
-impl State {
+impl DrawState {
     unsafe fn save() -> Self {
         let mut s = Self {
             active: 0,
             bindings: [0; 3],
-            unpack: 0,
             program: 0,
         };
         glGetIntegerv(ACTIVE_TEXTURE, &mut s.active);
-        glGetIntegerv(GL_UNPACK_ALIGNMENT, &mut s.unpack);
         glGetIntegerv(CURRENT_PROGRAM, &mut s.program);
         for i in 0..3 {
             glActiveTexture(GL_TEXTURE0 + i as u32);
@@ -121,7 +141,7 @@ impl State {
         s
     }
 }
-impl Drop for State {
+impl Drop for DrawState {
     fn drop(&mut self) {
         unsafe {
             for i in 0..3 {
@@ -129,7 +149,6 @@ impl Drop for State {
                 glBindTexture(GL_TEXTURE_2D, self.bindings[i] as u32);
             }
             glActiveTexture(self.active as u32);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, self.unpack);
             use_prog(self.program as u32);
         }
     }
@@ -166,19 +185,42 @@ fn current_context() -> Option<Context> {
     }
     Some(unsafe { std::mem::transmute::<*mut c_void, Context>(raw) })
 }
-/// !Send/!Sync keeps uploads, draws and destruction on the creating UI thread.
-pub struct Texture {
-    ids: [u32; 3],
-    program: u32,
+/// A shader is immutable after linking and belongs to one GL context. Each
+/// draw sets the tile's own uniforms before binding its private textures.
+struct Program {
+    id: u32,
     context: *mut c_void,
     context_fn: Context,
-    sizes: Option<(u32, u32, u32, u32)>,
+    locations: [i32; 10],
     limits: Limits,
     format: u32,
+}
+
+impl Program {
+    fn current(&self) -> bool {
+        unsafe { (self.context_fn)() == self.context }
+    }
+}
+impl Drop for Program {
+    fn drop(&mut self) {
+        if self.current() {
+            unsafe {
+                if CUR_PROG == self.id {
+                    use_prog(0);
+                }
+                glDeleteProgram(self.id);
+            }
+        }
+    }
+}
+
+/// Rc keeps the texture and its linked program on the creating UI thread.
+pub struct Texture {
+    ids: [u32; 3],
+    program: Rc<Program>,
+    sizes: Option<(u32, u32, u32, u32)>,
     range: Range,
     matrix: Matrix,
-    locations: [i32; 10],
-    _main: PhantomData<Rc<()>>,
 }
 impl Texture {
     pub fn probe(_main: &MainThread) -> Result<Limits, &'static str> {
@@ -199,6 +241,34 @@ impl Texture {
         }
     }
     pub fn new(main: &MainThread) -> Result<Self, &'static str> {
+        Self::new_shared(main, None)
+    }
+    /// Reuse a live sibling's shader and uniform locations on the same context.
+    pub fn new_shared(main: &MainThread, sibling: Option<&Self>) -> Result<Self, &'static str> {
+        let program = match sibling {
+            Some(texture) if texture.program.current() => Rc::clone(&texture.program),
+            _ => Rc::new(Self::compile_program(main)?),
+        };
+        let mut ids = [0; 3];
+        unsafe {
+            glGenTextures(3, ids.as_mut_ptr());
+        }
+        if ids.contains(&0) {
+            unsafe {
+                glDeleteTextures(3, ids.as_ptr());
+            }
+            return Err("Video texture allocation failed");
+        }
+        Ok(Self {
+            ids,
+            program,
+            sizes: None,
+            range: Range::Limited,
+            matrix: Matrix::Bt709,
+        })
+    }
+
+    fn compile_program(main: &MainThread) -> Result<Program, &'static str> {
         let limits = Self::probe(main)?;
         let context_fn = current_context().ok_or("Graphics context identity unavailable")?;
         let context = unsafe { context_fn() };
@@ -214,17 +284,6 @@ impl Texture {
             vec3 rgb=vec3(y+u_coeff.x*v,y+u_coeff.y*u+u_coeff.z*v,y+u_blue*u);
             gl_FragColor=vec4(clamp(rgb,0.0,1.0),u_opacity);}".as_ptr())
             .ok_or("Planar video shader unavailable")?;
-        let mut ids = [0; 3];
-        unsafe {
-            glGenTextures(3, ids.as_mut_ptr());
-        }
-        if ids.contains(&0) {
-            unsafe {
-                glDeleteTextures(3, ids.as_ptr());
-                glDeleteProgram(program);
-            }
-            return Err("Video texture allocation failed");
-        }
         let locations = [
             c"u_tscreen",
             c"u_trect",
@@ -238,26 +297,19 @@ impl Texture {
             c"u_uvrect",
         ]
         .map(|name| unsafe { glGetUniformLocation(program, name.as_ptr()) });
-        Ok(Self {
-            ids,
-            program,
+        Ok(Program {
+            id: program,
             context,
             context_fn,
-            sizes: None,
+            locations,
             limits,
             format: if gl_is_es() { LUMA } else { RED },
-            range: Range::Limited,
-            matrix: Matrix::Bt709,
-            locations,
-            _main: PhantomData,
         })
     }
-    fn current(&self) -> Result<(), &'static str> {
-        if unsafe { (self.context_fn)() } != self.context {
-            Err("Video graphics context changed")
-        } else {
-            Ok(())
-        }
+
+    /// Luma-plane dimensions of the currently uploaded picture.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        self.sizes.map(|(w, h, _, _)| (w, h))
     }
     #[allow(clippy::too_many_arguments)]
     pub fn upload(
@@ -273,7 +325,9 @@ impl Texture {
         range: Range,
         matrix: Matrix,
     ) -> Result<(), &'static str> {
-        self.current()?;
+        if !self.program.current() {
+            return Err("Video graphics context changed");
+        }
         validate_planes(
             y.len(),
             u.len(),
@@ -282,47 +336,47 @@ impl Texture {
             h,
             cw,
             ch,
-            self.limits.max_dimension,
+            self.program.limits.max_dimension,
         )?;
         let resize = self.sizes != Some((w, h, cw, ch));
         unsafe {
-            let _state = State::save();
+            let _state = UploadState::save();
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
             for (i, (bytes, pw, ph)) in [(y, w, h), (u, cw, ch), (v, cw, ch)]
                 .into_iter()
                 .enumerate()
             {
-                glActiveTexture(GL_TEXTURE0 + i as u32);
                 glBindTexture(GL_TEXTURE_2D, self.ids[i]);
                 if resize {
                     tex_ledger::specified_bytes(self.ids[i], u64::from(pw) * u64::from(ph));
                     glTexImage2D(
                         GL_TEXTURE_2D,
                         0,
-                        self.format as i32,
+                        self.program.format as i32,
                         pw as i32,
                         ph as i32,
                         0,
-                        self.format,
+                        self.program.format,
                         GL_UNSIGNED_BYTE,
-                        std::ptr::null(),
+                        bytes.as_ptr().cast(),
                     );
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                } else {
+                    glTexSubImage2D(
+                        GL_TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        pw as i32,
+                        ph as i32,
+                        self.program.format,
+                        GL_UNSIGNED_BYTE,
+                        bytes.as_ptr().cast(),
+                    );
                 }
-                glTexSubImage2D(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    pw as i32,
-                    ph as i32,
-                    self.format,
-                    GL_UNSIGNED_BYTE,
-                    bytes.as_ptr().cast(),
-                );
             }
             if glGetError() != GL_NO_ERROR {
                 self.sizes = None;
@@ -347,7 +401,9 @@ impl Texture {
         uv: [f32; 4],
         opacity: f32,
     ) -> Result<bool, &'static str> {
-        self.current()?;
+        if !self.program.current() {
+            return Err("Video graphics context changed");
+        }
         if self.sizes.is_none() {
             return Err("Video texture has no frame");
         }
@@ -366,27 +422,27 @@ impl Texture {
             return Ok(false);
         }
         unsafe {
-            let _state = State::save();
-            use_prog(self.program);
-            glUniform2f(self.locations[0], SCR_W, SCR_H);
-            glUniform4f(self.locations[1], rect.x, rect.y, rect.w, rect.h);
-            glUniform4f(self.locations[9], uv[0], uv[1], uv[2], uv[3]);
+            let _state = DrawState::save();
+            use_prog(self.program.id);
+            glUniform2f(self.program.locations[0], SCR_W, SCR_H);
+            glUniform4f(self.program.locations[1], rect.x, rect.y, rect.w, rect.h);
+            glUniform4f(self.program.locations[9], uv[0], uv[1], uv[2], uv[3]);
             let (scale, coeff) = coefficients(self.range, self.matrix);
-            glUniform3f(self.locations[2], scale[0], scale[1], scale[2]);
-            glUniform3f(self.locations[3], coeff[0], coeff[1], coeff[2]);
+            glUniform3f(self.program.locations[2], scale[0], scale[1], scale[2]);
+            glUniform3f(self.program.locations[3], coeff[0], coeff[1], coeff[2]);
             glUniform1f(
-                self.locations[4],
+                self.program.locations[4],
                 if self.matrix == Matrix::Bt601 {
                     1.772
                 } else {
                     1.8556
                 },
             );
-            glUniform1f(self.locations[5], opacity.clamp(0.0, 1.0));
+            glUniform1f(self.program.locations[5], opacity.clamp(0.0, 1.0));
             for i in 0..3 {
                 glActiveTexture(GL_TEXTURE0 + i as u32);
                 glBindTexture(GL_TEXTURE_2D, self.ids[i]);
-                glUniform1i(self.locations[6 + i], i as i32);
+                glUniform1i(self.program.locations[6 + i], i as i32);
             }
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             if glGetError() != GL_NO_ERROR {
@@ -404,13 +460,9 @@ impl Drop for Texture {
         for id in self.ids {
             tex_ledger::deleted(id);
         }
-        if self.current().is_ok() {
+        if self.program.current() {
             unsafe {
                 glDeleteTextures(3, self.ids.as_ptr());
-                glDeleteProgram(self.program);
-                if CUR_PROG == self.program {
-                    use_prog(0);
-                }
             }
         }
     }

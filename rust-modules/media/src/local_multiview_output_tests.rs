@@ -529,8 +529,9 @@ fn nine_real_yuv_textures_and_virtual_sdl_audio() {
     let before_textures = gfx::tex_ledger::totals();
     let mut textures = Vec::new();
     for frame in &frames {
-        let mut texture = Texture::new(&main).unwrap();
+        let mut texture = Texture::new_shared(&main, textures.first()).unwrap();
         upload(&mut texture, &main, frame);
+        assert_eq!(texture.dimensions(), Some((96, 64)));
         textures.push(texture);
     }
     let allocated = gfx::tex_ledger::totals();
@@ -712,6 +713,11 @@ fn nine_real_yuv_textures_and_virtual_sdl_audio() {
     }
     assert!(readers.0.iter().all(Session::is_retired));
     assert!(server.stop());
+    // Replacing the window that first linked the program must leave its
+    // siblings' shader, uniforms and texture names valid.
+    drop(textures.remove(0));
+    assert!(textures[7].draw(&main, rect(8), 1.0).unwrap());
+    assert_eq!(tile_hash(&readback(), 8), hashes[8]);
     drop(textures);
     assert_eq!(gfx::tex_ledger::totals(), before_textures);
     clean_gl();
