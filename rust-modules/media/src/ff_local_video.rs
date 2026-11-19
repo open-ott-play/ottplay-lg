@@ -1001,6 +1001,38 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     }
 }
 
+/// Advance on the source timeline, retaining the fractional frame carried across samples.
+/// An overdue interval produces at most one picture, including after a timestamp gap.
+#[derive(Default)]
+struct VideoCadence {
+    previous_pts: Option<i64>,
+    fraction: u64,
+}
+impl VideoCadence {
+    fn accepts(&mut self, pts: i64, fps: u32) -> bool {
+        let Some(previous) = self.previous_pts else {
+            self.previous_pts = Some(pts);
+            // Round to the nearest input frame, including rounded 90 kHz broadcast timestamps.
+            self.fraction = 499_999;
+            return true;
+        };
+        if pts <= previous { return false; }
+        let elapsed = pts.saturating_sub(previous) as u64;
+        if fps <= Limits::default().max_fps {
+            // Keep the existing minimum inter-frame interval for dense layouts. Raising
+            // their average from 12.5 to 15 on PAL would add uploads to all nine windows.
+            if elapsed < 1_000_000 / u64::from(fps.max(1)) { return false; }
+            self.previous_pts = Some(pts);
+            self.fraction = 499_999;
+            return true;
+        }
+        self.previous_pts = Some(pts);
+        let credit = self.fraction.saturating_add(elapsed.saturating_mul(u64::from(fps)));
+        self.fraction = credit % 1_000_000;
+        credit >= 1_000_000
+    }
+}
+
 unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result<(), Error> {
     let seekable = match &input {
         Input::Local(_) => true,
@@ -1143,8 +1175,15 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
     c.seekable.store(seekable, Ordering::Release);
     c.mailbox.lock().unwrap_or_else(|e| e.into_inner()).ready = true;
     let mut clock: Option<(i64, Instant)> = None;
-    let mut last_sent = None;
+    let mut cadence = VideoCadence::default();
     let mut flushing = false;
+    // Missing timestamps still advance at the source rate when focus changes.
+    let rate = (*cp).framerate;
+    let fallback_step = if rate.num > 0 && rate.den > 0 {
+        (1_000_000 * i64::from(rate.den) / i64::from(rate.num)).max(1)
+    } else {
+        1_000_000 / i64::from(Limits::default().max_fps)
+    };
     let mut fallback = 0i64;
     let mut landing: Option<(u64, i64)> = None;
     let mut seek_audio_floor: Option<(u64, i64)> = None;
@@ -1183,7 +1222,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
             audio = None;
             audio_generation = 0;
             clock = None;
-            last_sent = None;
+            cadence = VideoCadence::default();
             flushing = false;
             fallback = position;
             landing = Some((epoch, position));
@@ -1306,7 +1345,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                         },
                     )
                 };
-                fallback = pts.saturating_add(1_000_000 / i64::from(limits.max_fps));
+                fallback = pts.saturating_add(fallback_step);
                 // Backward keyframe seeking may decode preroll. Only the first
                 // frame at the requested position is a paused seek's landing.
                 if landing.is_some_and(|(_, target)| pts < target) {
@@ -1322,9 +1361,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                 if !c.wait(due.saturating_duration_since(Instant::now())) {
                     return Err(Error::Cancelled);
                 }
-                if last_sent.is_none_or(|last: i64| {
-                    pts.saturating_sub(last) >= 1_000_000 / i64::from(limits.max_fps)
-                }) {
+                if cadence.accepts(pts, c.max_fps.load(Ordering::Relaxed)) {
                     let aspect = display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame));
                     let halve = can_halve_frame(w, h, aspect, c.output_tile());
                     let divisor = if halve { 2 } else { 1 };
@@ -1357,7 +1394,6 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                             }
                         }
                     }
-                    last_sent = Some(pts);
                 }
                 av_frame_unref(d.frame);
             }
@@ -1368,6 +1404,33 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_cadence_preserves_source_rates_and_fractional_broadcast_timing() {
+        for (numerator, denominator, cap, expected) in [
+            (25, 1, 15, 125), (24, 1, 15, 120), (25, 1, 25, 250), (24, 1, 25, 240),
+            (30_000, 1_001, 30, 300), (30_000, 1_001, 25, 250), (50, 1, 25, 250),
+        ] {
+            let mut cadence = VideoCadence::default();
+            let shown = (0..).map(|i: i64| i * 1_000_000 * denominator / numerator)
+                .take_while(|&pts| pts < 10_000_000)
+                .filter(|&pts| cadence.accepts(pts, cap)).count();
+            assert_eq!(shown, expected, "{numerator}/{denominator} fps capped at {cap}");
+        }
+    }
+
+    #[test]
+    fn cadence_changes_without_replaying_pts_or_catching_up_after_a_gap() {
+        let mut cadence = VideoCadence::default();
+        assert!(cadence.accepts(0, 25));
+        assert!(cadence.accepts(40_000, 25));
+        assert!(!cadence.accepts(40_000, 30));
+        assert!(!cadence.accepts(30_000, 30));
+        assert!(cadence.accepts(73_333, 30));
+        assert!(cadence.accepts(10_073_333, 15));
+        assert!(!cadence.accepts(10_073_334, 15));
+        assert!(VideoCadence::default().accepts(10, 25), "fresh seek landing");
+    }
 
     #[test]
     fn display_aspect_respects_anamorphic_broadcast_frames() {

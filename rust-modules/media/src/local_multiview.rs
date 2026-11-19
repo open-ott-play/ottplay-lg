@@ -2,7 +2,7 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
@@ -85,6 +85,11 @@ impl Default for Limits {
     }
 }
 impl Limits {
+    /// Four equally sized pictures retain film/PAL cadence, including background slots.
+    pub fn grid4(focused: bool) -> Self {
+        Self { max_fps: if focused { 30 } else { 25 }, ..Self::default() }
+    }
+
     pub(crate) fn valid(self) -> bool {
         self.max_source_pixels > 0
             && self.max_source_pixels <= 3840 * 2160
@@ -132,6 +137,7 @@ pub(crate) struct Control {
     pub timeline: AtomicU64,
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
+    pub max_fps: AtomicU32,
     pub seekable: AtomicBool,
     pub hls_origin: OnceLock<String>,
     pub hls_gateway_lease: AtomicBool,
@@ -243,6 +249,7 @@ impl Session {
             audio_generation: AtomicU64::new(1),
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
+            max_fps: AtomicU32::new(limits.max_fps),
             seekable: AtomicBool::new(false),
             hls_origin: OnceLock::new(),
             hls_gateway_lease: AtomicBool::new(false),
@@ -330,6 +337,12 @@ impl Session {
         (duration > 0).then_some(duration)
     }
 
+    /// Update presentation cadence without disturbing decoding, the media clock or PCM.
+    pub fn set_max_fps(&self, fps: u32) {
+        if (1..=60).contains(&fps) && self.control.max_fps.load(Ordering::Relaxed) != fps {
+            self.control.max_fps.store(fps, Ordering::Relaxed);
+        }
+    }
     pub fn set_audio(&mut self, on: bool) {
         if self.control.audio.swap(on, Ordering::AcqRel) == on {
             return;
@@ -472,6 +485,22 @@ mod tests {
             Err(Error::Unsupported)
         ));
     }
+    #[test]
+    fn grid_focus_changes_only_the_video_publication_budget() {
+        let session = manual_session();
+        let c = &session.control;
+        let source_timeline = c.timeline.load(Ordering::Acquire);
+        let audio_generation = c.audio_generation.load(Ordering::Acquire);
+        for (focused, expected_fps) in [(true, 30), (false, 25), (true, 30)] {
+            session.set_max_fps(Limits::grid4(focused).max_fps);
+            assert_eq!(c.max_fps.load(Ordering::Relaxed), expected_fps);
+        }
+        session.set_max_fps(0);
+        assert_eq!(c.max_fps.load(Ordering::Relaxed), 30);
+        assert_eq!(c.timeline.load(Ordering::Acquire), source_timeline);
+        assert_eq!(c.audio_generation.load(Ordering::Acquire), audio_generation);
+    }
+
     fn manual_session() -> Session {
         Session {
             control: Arc::new(Control {
@@ -483,6 +512,7 @@ mod tests {
                 audio_generation: AtomicU64::new(1),
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
+                max_fps: AtomicU32::new(Limits::default().max_fps),
                 seekable: AtomicBool::new(true),
                 hls_origin: OnceLock::new(),
                 hls_gateway_lease: AtomicBool::new(false),

@@ -7,6 +7,14 @@ use plx_data::ott::multiview::{AdmissionOutcome, Layout, ResolveTicket, SceneId,
 use plx_media::local_multiview::{Event, FrameYuv, Limits, PcmChunk, Session};
 use std::sync::mpsc::{self, Receiver, Sender};
 
+fn picture_limits(runtime: &Runtime, slot: SlotId) -> Limits {
+    if runtime.multiview.layout() == Some(Layout::Grid4) {
+        Limits::grid4(runtime.multiview.active_slot() == Some(slot))
+    } else {
+        Limits::default()
+    }
+}
+
 #[path = "ott_multiview_local_commands.rs"]
 mod commands;
 #[path = "ott_multiview_local_handoff.rs"]
@@ -543,8 +551,9 @@ impl Driver {
                 self.queue(runtime, transition);
             }
             Job::Media(_, result) => {
+                let limits = picture_limits(runtime, ticket.slot());
                 self.media_ready_with(runtime, app, ticket, result, |source| {
-                    Session::open(source, Limits::default())
+                    Session::open(source, limits)
                 })
             }
         }
@@ -761,6 +770,7 @@ impl Driver {
             let audible = (routing_mix || self.audio_applied == Some(picture.ticket.slot()))
                 && self.stopping[index].is_none() && !picture.terminal && !picture.paused
                 && !picture.receipt.input.is_cancelled();
+            picture.decoder.set_max_fps(picture_limits(runtime, picture.ticket.slot()).max_fps);
             picture.decoder.set_audio(audible);
             for _ in 0..8 {
                 let Some(event) = picture.decoder.poll() else {
