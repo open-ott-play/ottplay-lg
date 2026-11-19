@@ -2,7 +2,7 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
@@ -85,6 +85,11 @@ impl Default for Limits {
     }
 }
 impl Limits {
+    /// Four equally sized pictures retain film/PAL cadence, including background slots.
+    pub fn grid4(focused: bool) -> Self {
+        Self { max_fps: if focused { 30 } else { 25 }, ..Self::default() }
+    }
+
     pub(crate) fn valid(self) -> bool {
         self.max_source_pixels > 0
             && self.max_source_pixels <= 3840 * 2160
@@ -132,6 +137,7 @@ pub(crate) struct Control {
     pub timeline: AtomicU64,
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
+    pub max_fps: AtomicU32,
     pub seekable: AtomicBool,
     pub hls_origin: OnceLock<String>,
     pub hls_gateway_lease: AtomicBool,
@@ -139,6 +145,8 @@ pub(crate) struct Control {
     hls_media_live: OnceLock<AtomicBool>,
     pub video_decoded: AtomicBool,
     pub hls_request: AtomicU64,
+    /// Physical output tile, or zero for full-resolution publication.
+    output_tile: AtomicU64,
     pub duration_us: AtomicI64,
     pub seek: Mutex<Option<(u64, i64)>>,
     pub mailbox: Mutex<Mailbox>,
@@ -152,6 +160,12 @@ pub(crate) struct Iteration {
     pub seek_generation: u64,
 }
 impl Control {
+    pub(crate) fn output_tile(&self) -> (u32, u32) {
+        let size = self.output_tile.load(Ordering::Relaxed);
+        ((size >> 32) as u32, size as u32)
+    }
+
+
     pub(crate) fn record_hls_media_leaf(&self, live: bool) {
         self.hls_media_live.get_or_init(|| AtomicBool::new(live)).store(live, Ordering::Release);
     }
@@ -235,12 +249,14 @@ impl Session {
             audio_generation: AtomicU64::new(1),
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
+            max_fps: AtomicU32::new(limits.max_fps),
             seekable: AtomicBool::new(false),
             hls_origin: OnceLock::new(),
             hls_gateway_lease: AtomicBool::new(false),
             hls_media_live: OnceLock::new(),
             video_decoded: AtomicBool::new(false),
             hls_request: AtomicU64::new(0),
+            output_tile: AtomicU64::new(0),
             duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
@@ -321,6 +337,12 @@ impl Session {
         (duration > 0).then_some(duration)
     }
 
+    /// Update presentation cadence without disturbing decoding, the media clock or PCM.
+    pub fn set_max_fps(&self, fps: u32) {
+        if (1..=60).contains(&fps) && self.control.max_fps.load(Ordering::Relaxed) != fps {
+            self.control.max_fps.store(fps, Ordering::Relaxed);
+        }
+    }
     pub fn set_audio(&mut self, on: bool) {
         if self.control.audio.swap(on, Ordering::AcqRel) == on {
             return;
@@ -381,6 +403,14 @@ impl Session {
         m.video = None;
         m.audio.clear();
     }
+    /// This hint affects copies sent to GLES. Input admission retains the source limits.
+    pub fn set_output_tile(&self, width: u32, height: u32) {
+        let size = (u64::from(width) << 32) | u64::from(height);
+        if self.control.output_tile.load(Ordering::Relaxed) != size {
+            self.control.output_tile.store(size, Ordering::Relaxed);
+        }
+    }
+
     /// Available only after this reader opened a seekable transport. HLS,
     /// unopened, withdrawn and retired readers never advertise seeking.
     pub fn is_seekable(&self) -> bool {
@@ -455,6 +485,22 @@ mod tests {
             Err(Error::Unsupported)
         ));
     }
+    #[test]
+    fn grid_focus_changes_only_the_video_publication_budget() {
+        let session = manual_session();
+        let c = &session.control;
+        let source_timeline = c.timeline.load(Ordering::Acquire);
+        let audio_generation = c.audio_generation.load(Ordering::Acquire);
+        for (focused, expected_fps) in [(true, 30), (false, 25), (true, 30)] {
+            session.set_max_fps(Limits::grid4(focused).max_fps);
+            assert_eq!(c.max_fps.load(Ordering::Relaxed), expected_fps);
+        }
+        session.set_max_fps(0);
+        assert_eq!(c.max_fps.load(Ordering::Relaxed), 30);
+        assert_eq!(c.timeline.load(Ordering::Acquire), source_timeline);
+        assert_eq!(c.audio_generation.load(Ordering::Acquire), audio_generation);
+    }
+
     fn manual_session() -> Session {
         Session {
             control: Arc::new(Control {
@@ -466,12 +512,14 @@ mod tests {
                 audio_generation: AtomicU64::new(1),
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
+                max_fps: AtomicU32::new(Limits::default().max_fps),
                 seekable: AtomicBool::new(true),
                 hls_origin: OnceLock::new(),
                 hls_gateway_lease: AtomicBool::new(false),
                 hls_media_live: OnceLock::new(),
                 video_decoded: AtomicBool::new(false),
                 hls_request: AtomicU64::new(0),
+                output_tile: AtomicU64::new(0),
                 duration_us: AtomicI64::new(0),
                 seek: Mutex::new(None),
                 mailbox: Mutex::new(Mailbox::default()),

@@ -38,7 +38,11 @@ see more captured catalog rows; discovery is bounded to 1152 entries.
 
 Software limits are admission limits, not a promise of nine simultaneous HD
 streams. Each slot has one decoder thread, a 1080p input-pixel ceiling, a bounded
-mailbox and a 15 fps presentation ceiling. Unsupported codecs, pixel formats or
+mailbox and a layout-specific presentation limit. The four-window grid targets
+up to 30 fps in the focused window and 25 fps in the other three. Moving focus
+keeps the existing playback session and audio. Other layouts use a 15 fps ceiling.
+A 1080p frame can use half-size YUV planes on a 960×540 tile when both dimensions
+retain enough detail after cropping. Unsupported codecs, pixel formats or
 sources fail that slot independently. Supported output is 8-bit planar YUV420.
 Authorized local files and progressive HTTP media whose final response advertises
 byte ranges support seek. The decoder reports its opened transport capability to
@@ -76,7 +80,15 @@ supply the requested bytes. To investigate a repeatable failure, record the
 window, channel and time and compare that interval with the gateway log.
 A selected window waiting to retry reports `starting`. If recovery ends, it
 reports `failed` and keeps the last frame count and PTS for that selection.
-Stopping or replacing the window clears those measurements.
+Stopping or replacing the window clears those measurements. To measure how
+smoothly an individual window is playing, take two samples from an unchanged
+scene and slot generation. Divide the increase in `drawn_frames` by the wall
+time between samples. For example, 250 new frames in ten seconds gives 25 fps.
+A growing media timestamp alone can also occur when the picture is jerky.
+`draw_interval_p95_ms` and `draw_interval_max_ms` summarize the most recent
+32 intervals between new pictures submitted to the renderer. A held picture
+adds no samples; its elapsed time becomes visible when a new picture arrives.
+Compare the values during continuous playback in the same window generation.
 Once playback has started, the player reopens a window automatically only
 when its selected HLS playlist confirms a live broadcast. A movie with an
 unknown catalogue duration keeps its failure visible without rewinding.
@@ -179,7 +191,9 @@ The Native checks workflow runs these checks:
 - Run four independent live HLS readers against rolling playlists on loopback.
   Two feeds encounter a temporary fault on a media segment (HTTP 503 on one,
   an HTTP 200 response containing the gateway timeout message on another).
-  Verify both segments are requested again and all four timelines continue.
+  Verify both segments are requested again. For 23.976, 29.97, 25 and 50 fps
+  inputs, count the frames each reader actually delivers over its media timeline
+  both before and after moving focus from the first window to the second.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 

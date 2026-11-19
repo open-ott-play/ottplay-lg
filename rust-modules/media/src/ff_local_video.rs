@@ -849,7 +849,19 @@ impl Drop for Decode {
         }
     }
 }
-unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize) -> Result<Vec<u8>, Error> {
+// Downsample only if the cropped area still covers every physical tile pixel.
+fn can_halve_frame(w: usize, h: usize, aspect: f32, tile: (u32, u32)) -> bool {
+    let (tw, th) = tile;
+    if tw == 0 || th == 0 || w % 4 != 0 || h % 4 != 0 || !aspect.is_finite() || aspect <= 0.0 {
+        return false;
+    }
+    let tile_aspect = tw as f32 / th as f32;
+    let visible_w = w as f32 * (tile_aspect / aspect).min(1.0);
+    let visible_h = h as f32 * (aspect / tile_aspect).min(1.0);
+    visible_w >= tw as f32 * 2.0 && visible_h >= th as f32 * 2.0
+}
+
+unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool) -> Result<Vec<u8>, Error> {
     let ptr = std::ptr::read_unaligned(
         frame.add(OFF_FRAME_DATA + index * std::mem::size_of::<*const u8>()) as *const *const u8,
     );
@@ -857,12 +869,28 @@ unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize) -> Result<Ve
     if ptr.is_null() || (stride.unsigned_abs() as usize) < w || stride.unsigned_abs() > 32768 {
         return Err(Error::Decode);
     }
-    let mut out = vec![0; w.checked_mul(h).ok_or(Error::Budget)?];
-    for row in 0..h {
-        out[row * w..(row + 1) * w].copy_from_slice(std::slice::from_raw_parts(
-            ptr.offset(row as isize * stride as isize),
-            w,
-        ));
+    let input_row = |row: usize| std::slice::from_raw_parts(ptr.offset(row as isize * stride as isize), w);
+    let size = w.checked_mul(h).ok_or(Error::Budget)?;
+    if !halve && stride as usize == w {
+        return Ok(std::slice::from_raw_parts(ptr, size).to_vec());
+    }
+    if halve {
+        // The luma dimensions are divisible by four; its two 4:2:0 chroma
+        // planes therefore have complete 2x2 blocks as well.
+        let mut out = vec![0; size / 4];
+        for (row, dst) in out.chunks_exact_mut(w / 2).enumerate() {
+            let top = input_row(2 * row).chunks_exact(2);
+            let bottom = input_row(2 * row + 1).chunks_exact(2);
+            for ((pixel, a), b) in dst.iter_mut().zip(top).zip(bottom) {
+                let sum = u16::from(a[0]) + u16::from(a[1]) + u16::from(b[0]) + u16::from(b[1]);
+                *pixel = ((sum + 2) / 4) as u8;
+            }
+        }
+        return Ok(out);
+    }
+    let mut out = vec![0; size];
+    for (row, dst) in out.chunks_exact_mut(w).enumerate() {
+        dst.copy_from_slice(input_row(row));
     }
     Ok(out)
 }
@@ -970,6 +998,38 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
         mailbox.video = None;
         mailbox.audio.clear();
+    }
+}
+
+/// Advance on the source timeline, retaining the fractional frame carried across samples.
+/// An overdue interval produces at most one picture, including after a timestamp gap.
+#[derive(Default)]
+struct VideoCadence {
+    previous_pts: Option<i64>,
+    fraction: u64,
+}
+impl VideoCadence {
+    fn accepts(&mut self, pts: i64, fps: u32) -> bool {
+        let Some(previous) = self.previous_pts else {
+            self.previous_pts = Some(pts);
+            // Round to the nearest input frame, including rounded 90 kHz broadcast timestamps.
+            self.fraction = 499_999;
+            return true;
+        };
+        if pts <= previous { return false; }
+        let elapsed = pts.saturating_sub(previous) as u64;
+        if fps <= Limits::default().max_fps {
+            // Keep the existing minimum inter-frame interval for dense layouts. Raising
+            // their average from 12.5 to 15 on PAL would add uploads to all nine windows.
+            if elapsed < 1_000_000 / u64::from(fps.max(1)) { return false; }
+            self.previous_pts = Some(pts);
+            self.fraction = 499_999;
+            return true;
+        }
+        self.previous_pts = Some(pts);
+        let credit = self.fraction.saturating_add(elapsed.saturating_mul(u64::from(fps)));
+        self.fraction = credit % 1_000_000;
+        credit >= 1_000_000
     }
 }
 
@@ -1115,8 +1175,15 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
     c.seekable.store(seekable, Ordering::Release);
     c.mailbox.lock().unwrap_or_else(|e| e.into_inner()).ready = true;
     let mut clock: Option<(i64, Instant)> = None;
-    let mut last_sent = None;
+    let mut cadence = VideoCadence::default();
     let mut flushing = false;
+    // Missing timestamps still advance at the source rate when focus changes.
+    let rate = (*cp).framerate;
+    let fallback_step = if rate.num > 0 && rate.den > 0 {
+        (1_000_000 * i64::from(rate.den) / i64::from(rate.num)).max(1)
+    } else {
+        1_000_000 / i64::from(Limits::default().max_fps)
+    };
     let mut fallback = 0i64;
     let mut landing: Option<(u64, i64)> = None;
     let mut seek_audio_floor: Option<(u64, i64)> = None;
@@ -1155,7 +1222,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
             audio = None;
             audio_generation = 0;
             clock = None;
-            last_sent = None;
+            cadence = VideoCadence::default();
             flushing = false;
             fallback = position;
             landing = Some((epoch, position));
@@ -1278,7 +1345,7 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                         },
                     )
                 };
-                fallback = pts.saturating_add(1_000_000 / i64::from(limits.max_fps));
+                fallback = pts.saturating_add(fallback_step);
                 // Backward keyframe seeking may decode preroll. Only the first
                 // frame at the requested position is a paused seek's landing.
                 if landing.is_some_and(|(_, target)| pts < target) {
@@ -1294,18 +1361,19 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                 if !c.wait(due.saturating_duration_since(Instant::now())) {
                     return Err(Error::Cancelled);
                 }
-                if last_sent.is_none_or(|last: i64| {
-                    pts.saturating_sub(last) >= 1_000_000 / i64::from(limits.max_fps)
-                }) {
+                if cadence.accepts(pts, c.max_fps.load(Ordering::Relaxed)) {
+                    let aspect = display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame));
+                    let halve = can_halve_frame(w, h, aspect, c.output_tile());
+                    let divisor = if halve { 2 } else { 1 };
                     let frame = FrameYuv {
-                        width: w as u32,
-                        height: h as u32,
-                        display_aspect: display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame)),
-                        chroma_width: cw as u32,
-                        chroma_height: ch as u32,
-                        y: plane(f, 0, w, h)?,
-                        u: plane(f, 1, cw, ch)?,
-                        v: plane(f, 2, cw, ch)?,
+                        width: (w / divisor) as u32,
+                        height: (h / divisor) as u32,
+                        display_aspect: aspect,
+                        chroma_width: (cw / divisor) as u32,
+                        chroma_height: (ch / divisor) as u32,
+                        y: plane(f, 0, w, h, halve)?,
+                        u: plane(f, 1, cw, ch, halve)?,
+                        v: plane(f, 2, cw, ch, halve)?,
                         pts_us: pts,
                         range: if format == 12 {
                             ColorRange::Full
@@ -1326,7 +1394,6 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                             }
                         }
                     }
-                    last_sent = Some(pts);
                 }
                 av_frame_unref(d.frame);
             }
@@ -1337,6 +1404,33 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_cadence_preserves_source_rates_and_fractional_broadcast_timing() {
+        for (numerator, denominator, cap, expected) in [
+            (25, 1, 15, 125), (24, 1, 15, 120), (25, 1, 25, 250), (24, 1, 25, 240),
+            (30_000, 1_001, 30, 300), (30_000, 1_001, 25, 250), (50, 1, 25, 250),
+        ] {
+            let mut cadence = VideoCadence::default();
+            let shown = (0..).map(|i: i64| i * 1_000_000 * denominator / numerator)
+                .take_while(|&pts| pts < 10_000_000)
+                .filter(|&pts| cadence.accepts(pts, cap)).count();
+            assert_eq!(shown, expected, "{numerator}/{denominator} fps capped at {cap}");
+        }
+    }
+
+    #[test]
+    fn cadence_changes_without_replaying_pts_or_catching_up_after_a_gap() {
+        let mut cadence = VideoCadence::default();
+        assert!(cadence.accepts(0, 25));
+        assert!(cadence.accepts(40_000, 25));
+        assert!(!cadence.accepts(40_000, 30));
+        assert!(!cadence.accepts(30_000, 30));
+        assert!(cadence.accepts(73_333, 30));
+        assert!(cadence.accepts(10_073_333, 15));
+        assert!(!cadence.accepts(10_073_334, 15));
+        assert!(VideoCadence::default().accepts(10, 25), "fresh seek landing");
+    }
 
     #[test]
     fn display_aspect_respects_anamorphic_broadcast_frames() {
@@ -1825,6 +1919,40 @@ mod tests {
         .is_err());
     }
     #[test]
+    fn grid_frame_scaling_respects_physical_tiles_crop_and_source_admission() {
+        let aspect = 16.0 / 9.0;
+        assert!(can_halve_frame(1920, 1080, aspect, (960, 540)));
+        assert!(!can_halve_frame(1920, 1080, aspect, (1920, 1080)), "4K grid");
+        assert!(!can_halve_frame(1280, 720, aspect, (960, 540)));
+        assert!(!can_halve_frame(1920, 1080, aspect, (0, 0)), "full-size playback");
+        assert!(!can_halve_frame(1920, 1080, 2.4, (960, 540)), "visible width after cover crop");
+        assert!(!can_halve_frame(1920, 1080, 4.0 / 3.0, (960, 540)), "visible height after cover crop");
+        assert!(!can_halve_frame(1920, 1078, aspect, (640, 360)), "odd chroma rows");
+        assert_eq!(dimensions(3840, 2160, Limits::default()), Err(Error::Budget));
+    }
+
+    #[test]
+    fn halved_yuv_planes_average_every_2x2_block_and_ignore_padding() {
+        let rows = [[0u8, 3, 8, 12, 255, 255], [4, 7, 12, 16, 255, 255],
+                    [10, 10, 100, 100, 255, 255], [10, 10, 100, 100, 255, 255]];
+        let mut frame = vec![0u8; OFF_FRAME_LINESIZE + 32];
+        unsafe {
+            for index in 0..3 {
+                let address = frame.as_mut_ptr().add(OFF_FRAME_DATA + index * std::mem::size_of::<*const u8>()).cast::<*const u8>();
+                let stride = frame.as_mut_ptr().add(OFF_FRAME_LINESIZE + index * 4).cast::<i32>();
+                std::ptr::write_unaligned(address, rows[0].as_ptr());
+                std::ptr::write_unaligned(stride, 6);
+                assert_eq!(plane(frame.as_ptr(), index, 4, 4, true).unwrap(), [4, 12, 10, 100]);
+                std::ptr::write_unaligned(address, rows[3].as_ptr());
+                std::ptr::write_unaligned(stride, -6);
+                assert_eq!(plane(frame.as_ptr(), index, 4, 4, true).unwrap(), [10, 100, 4, 12]);
+                std::ptr::write_unaligned(stride, 2);
+                assert_eq!(plane(frame.as_ptr(), index, 4, 4, true), Err(Error::Decode));
+            }
+        }
+    }
+
+    #[test]
     fn plane_copy_respects_negative_stride_and_rejects_short_stride() {
         let pixels = [1u8, 2, 0, 0, 3, 4, 0, 0];
         let mut frame = vec![0u8; OFF_FRAME_LINESIZE + 32];
@@ -1834,9 +1962,9 @@ mod tests {
                 pixels.as_ptr().add(4),
             );
             std::ptr::write_unaligned(frame.as_mut_ptr().add(OFF_FRAME_LINESIZE).cast::<i32>(), -4);
-            assert_eq!(plane(frame.as_ptr(), 0, 2, 2).unwrap(), vec![3, 4, 1, 2]);
+            assert_eq!(plane(frame.as_ptr(), 0, 2, 2, false).unwrap(), vec![3, 4, 1, 2]);
             std::ptr::write_unaligned(frame.as_mut_ptr().add(OFF_FRAME_LINESIZE).cast::<i32>(), 1);
-            assert_eq!(plane(frame.as_ptr(), 0, 2, 2), Err(Error::Decode));
+            assert_eq!(plane(frame.as_ptr(), 0, 2, 2, false), Err(Error::Decode));
         }
     }
     #[test]
