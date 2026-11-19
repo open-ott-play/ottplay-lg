@@ -121,19 +121,25 @@ impl Drop for UploadState {
 }
 /// Restore all sampler units, including the UI's resident dither binding.
 struct DrawState {
+    context: *mut c_void,
+    context_fn: Context,
     active: i32,
     bindings: [i32; 3],
     program: i32,
 }
 impl DrawState {
-    unsafe fn save() -> Self {
+    unsafe fn save(program: &Program) -> Self {
         let mut s = Self {
+            context: program.context,
+            context_fn: program.context_fn,
             active: 0,
             bindings: [0; 3],
             program: 0,
         };
         glGetIntegerv(ACTIVE_TEXTURE, &mut s.active);
         glGetIntegerv(CURRENT_PROGRAM, &mut s.program);
+        // Synchronize the UI cache if the preceding client used GL directly.
+        CUR_PROG = s.program as u32;
         for i in 0..3 {
             glActiveTexture(GL_TEXTURE0 + i as u32);
             glGetIntegerv(TEXTURE_BINDING, &mut s.bindings[i]);
@@ -144,6 +150,9 @@ impl DrawState {
 impl Drop for DrawState {
     fn drop(&mut self) {
         unsafe {
+            if (self.context_fn)() != self.context {
+                return;
+            }
             for i in 0..3 {
                 glActiveTexture(GL_TEXTURE0 + i as u32);
                 glBindTexture(GL_TEXTURE_2D, self.bindings[i] as u32);
@@ -153,6 +162,18 @@ impl Drop for DrawState {
         }
     }
 }
+/// Scoped sequence of video draws, with no intervening UI or external GL commands.
+/// Does not query GL until the first drawable picture submits. Drop before resuming UI rendering.
+pub struct DrawBatch<'a> {
+    _main: &'a MainThread,
+    saved: Option<DrawState>,
+}
+impl<'a> DrawBatch<'a> {
+    pub fn new(main: &'a MainThread) -> Self {
+        Self { _main: main, saved: None }
+    }
+}
+
 fn video_program(fragment: *const c_char) -> Option<u32> {
     unsafe {
         let vertex = try_compile(GL_VERTEX_SHADER, VS_IMG.as_ptr())?;
@@ -396,12 +417,24 @@ impl Texture {
     /// Map a source UV window onto the exact destination rectangle for all three planes.
     pub fn draw_uv(
         &self,
-        _main: &MainThread,
+        main: &MainThread,
         rect: Rect,
         uv: [f32; 4],
         opacity: f32,
     ) -> Result<bool, &'static str> {
-        if !self.program.current() {
+        self.draw_uv_batched(&mut DrawBatch::new(main), rect, uv, opacity)
+    }
+
+    pub fn draw_uv_batched(
+        &self,
+        batch: &mut DrawBatch<'_>,
+        rect: Rect,
+        uv: [f32; 4],
+        opacity: f32,
+    ) -> Result<bool, &'static str> {
+        if !self.program.current()
+            || batch.saved.as_ref().is_some_and(|saved| saved.context != self.program.context)
+        {
             return Err("Video graphics context changed");
         }
         if self.sizes.is_none() {
@@ -422,7 +455,7 @@ impl Texture {
             return Ok(false);
         }
         unsafe {
-            let _state = DrawState::save();
+            batch.saved.get_or_insert_with(|| DrawState::save(&self.program));
             use_prog(self.program.id);
             glUniform2f(self.program.locations[0], SCR_W, SCR_H);
             glUniform4f(self.program.locations[1], rect.x, rect.y, rect.w, rect.h);

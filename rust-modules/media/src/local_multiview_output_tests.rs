@@ -4,7 +4,7 @@ use super::*;
 use plx_base::task::MainThread;
 use plx_gfx::gfx::{
     self,
-    video::{Matrix, Range, Texture},
+    video::{DrawBatch, Matrix, Range, Texture},
     Rect,
 };
 use plx_platform::local_audio::{OwnerToken, Sink};
@@ -33,6 +33,11 @@ extern "C" {
     fn SDL_GetCurrentAudioDriver() -> *const c_char;
     fn glViewport(x: c_int, y: c_int, width: c_int, height: c_int);
     fn glFinish();
+    fn glGetIntegerv(name: c_uint, value: *mut c_int);
+    fn glActiveTexture(unit: c_uint);
+    fn glBindTexture(target: c_uint, id: c_uint);
+    fn glGenTextures(count: c_int, ids: *mut c_uint);
+    fn glDeleteTextures(count: c_int, ids: *const c_uint);
     fn glGetString(name: c_uint) -> *const u8;
     fn glGetError() -> c_uint;
     fn glReadPixels(
@@ -179,12 +184,99 @@ fn upload(texture: &mut Texture, main: &MainThread, frame: &FrameYuv) {
 }
 fn render(textures: &[Texture], main: &MainThread) -> Vec<u8> {
     gfx::frame_clear(0.0, 0.0, 0.0);
-    for (index, texture) in textures.iter().enumerate() {
-        assert!(!texture.draw(main, rect(index), 0.0).unwrap());
-        assert!(texture.draw(main, rect(index), 1.0).unwrap());
+    {
+        let mut batch = DrawBatch::new(main);
+        for (index, texture) in textures.iter().enumerate() {
+            assert!(!texture.draw_uv_batched(&mut batch, rect(index), gfx::UV_FULL, 0.0).unwrap());
+            assert!(texture.draw_uv_batched(&mut batch, rect(index), gfx::UV_FULL, 1.0).unwrap());
+        }
     }
     clean_gl();
     readback()
+}
+const UNIT0: u32 = 0x84C0;
+const TEX2D: u32 = 0x0DE1;
+
+#[derive(Debug, PartialEq)]
+struct Bindings {
+    program: i32,
+    active: i32,
+    units: [i32; 4],
+}
+impl Bindings {
+    fn current() -> Self {
+        let mut s = Self { program: 0, active: 0, units: [0; 4] };
+        unsafe {
+            glGetIntegerv(0x8B8D, &mut s.program);
+            glGetIntegerv(0x84E0, &mut s.active);
+            for (i, id) in s.units.iter_mut().enumerate() {
+                glActiveTexture(UNIT0 + i as u32);
+                glGetIntegerv(0x8069, id);
+            }
+            glActiveTexture(s.active as u32);
+        }
+        s
+    }
+    fn restore(&self) {
+        unsafe {
+            for (i, &id) in self.units.iter().enumerate() {
+                glActiveTexture(UNIT0 + i as u32);
+                glBindTexture(TEX2D, id as u32);
+            }
+            glActiveTexture(self.active as u32);
+        }
+        gfx::use_prog(self.program as u32);
+    }
+}
+
+fn check_scoped_bindings(textures: &[Texture], main: &MainThread, gl: &Context) {
+    let original = Bindings::current();
+    let mut markers = [0; 4];
+    unsafe {
+        glGenTextures(4, markers.as_mut_ptr());
+        for (i, &id) in markers.iter().enumerate() {
+            glActiveTexture(UNIT0 + i as u32);
+            glBindTexture(TEX2D, id);
+        }
+    }
+    let marked = Bindings::current();
+    assert_eq!(marked.active as u32, UNIT0 + 3);
+    assert_eq!(marked.units.map(|id| id as u32), markers);
+    assert_ne!(marked.program, 0, "fixture must start with a real UI shader");
+    {
+        let mut batch = DrawBatch::new(main);
+        for (index, texture) in textures.iter().enumerate() {
+            assert!(texture.draw_uv_batched(&mut batch, rect(index), gfx::UV_FULL, 1.0).unwrap());
+        }
+    }
+    assert_eq!(Bindings::current(), marked);
+    // Early exit while the video shader and all three of its samplers are bound.
+    let result = (|| {
+        let mut batch = DrawBatch::new(main);
+        textures[0].draw_uv_batched(&mut batch, rect(0), gfx::UV_FULL, 1.0)?;
+        textures[1].draw_uv_batched(&mut batch, rect(1), gfx::UV_FULL, f32::NAN)
+    })();
+    assert!(result.is_err());
+    assert_eq!(Bindings::current(), marked);
+    // A temporarily switched or lost context must never receive the owner's bindings.
+    let mut batch = DrawBatch::new(main);
+    assert!(textures[0].draw_uv_batched(&mut batch, rect(0), gfx::UV_FULL, 1.0).unwrap());
+    unsafe {
+        let foreign = SDL_GL_CreateContext(gl.window);
+        assert!(!foreign.is_null());
+        let custody = ForeignContext { owner: gl, foreign };
+        let other = Bindings::current();
+        assert!(textures[0].draw_uv_batched(&mut batch, rect(0), gfx::UV_FULL, 1.0).is_err());
+        drop(batch);
+        assert_eq!(Bindings::current(), other);
+        clean_gl();
+        drop(custody);
+        assert_eq!(SDL_GL_GetCurrentContext(), gl.context);
+        original.restore();
+        glDeleteTextures(4, markers.as_ptr());
+    }
+    assert_eq!(Bindings::current(), original);
+    clean_gl();
 }
 fn hash(bytes: impl Iterator<Item = u8>) -> u64 {
     bytes.fold(1469598103934665603u64, |h, b| {
@@ -605,20 +697,9 @@ fn nine_real_yuv_textures_and_virtual_sdl_audio() {
         changed,
         "rejected plane changed an admitted picture"
     );
-    unsafe {
-        let foreign = SDL_GL_CreateContext(gl.window);
-        assert!(!foreign.is_null());
-        let custody = ForeignContext {
-            owner: &gl,
-            foreign,
-        };
-        assert!(
-            textures[0].draw(&main, rect(0), 1.0).is_err(),
-            "old texture accepted a foreign actual GL context"
-        );
-        drop(custody);
-        assert_eq!(SDL_GL_GetCurrentContext(), gl.context);
-    }
+    let black = [0.0, 0.0, 0.0, 1.0];
+    gfx::draw_rect(0.0, 0.0, 10.0, 10.0, 0.0, 0.0, black.as_ptr(), black.as_ptr(), 0.0, 1.0);
+    check_scoped_bindings(&textures, &main, &gl);
     assert_eq!(
         render(&textures, &main),
         changed,
@@ -716,8 +797,16 @@ fn nine_real_yuv_textures_and_virtual_sdl_audio() {
     // Replacing the window that first linked the program must leave its
     // siblings' shader, uniforms and texture names valid.
     drop(textures.remove(0));
-    assert!(textures[7].draw(&main, rect(8), 1.0).unwrap());
-    assert_eq!(tile_hash(&readback(), 8), hashes[8]);
+    {
+        let mut batch = DrawBatch::new(&main);
+        for (index, texture) in textures.iter().enumerate() {
+            assert!(texture.draw_uv_batched(&mut batch, rect(index + 1), gfx::UV_FULL, 1.0).unwrap());
+        }
+    }
+    let remaining = readback();
+    for (index, expected) in hashes.iter().enumerate().skip(1) {
+        assert_eq!(tile_hash(&remaining, index), *expected);
+    }
     drop(textures);
     assert_eq!(gfx::tex_ledger::totals(), before_textures);
     clean_gl();

@@ -2,7 +2,7 @@
 use super::*;
 use plx_appkit::multiview_layout::RasterPlan;
 use plx_data::ott::multiview::{ResolveTicket, SlotId};
-use plx_gfx::gfx::video::{Matrix, Range, Texture};
+use plx_gfx::gfx::video::{DrawBatch, Matrix, Range, Texture};
 use plx_media::local_multiview::{ColorMatrix, ColorRange};
 use plx_platform::local_audio::{OwnerToken, Sink};
 
@@ -573,13 +573,14 @@ impl State {
             0.0,
             1.0,
         );
+        let mut batch = DrawBatch::new(app.adapters.player.mt());
         for slot in plan.slots() {
             let index = usize::from(slot.id);
             let Some(texture) = self.textures[index].as_ref() else {
                 continue;
             };
             let (rect, uv) = picture_placement(slot.bounds(), self.display_aspects[index], plan.slots().len());
-            if texture.draw_uv(app.adapters.player.mt(), rect, uv, 1.0) == Ok(true)
+            if texture.draw_uv_batched(&mut batch, rect, uv, 1.0) == Ok(true)
                 && !plx_gfx::gfx::blur_source_pass()
             {
                 self.frames[index].submitted(draw_ms);
