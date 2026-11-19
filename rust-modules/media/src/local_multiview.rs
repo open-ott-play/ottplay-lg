@@ -134,7 +134,9 @@ pub(crate) struct Control {
     pub seek_generation: AtomicU64,
     pub seekable: AtomicBool,
     pub hls_origin: OnceLock<String>,
-    pub hls_live: AtomicBool,
+    pub hls_gateway_lease: AtomicBool,
+    /// Set only after parsing a media leaf. ENDLIST can change a live leaf to finite.
+    hls_media_live: OnceLock<AtomicBool>,
     pub video_decoded: AtomicBool,
     pub hls_request: AtomicU64,
     pub duration_us: AtomicI64,
@@ -150,6 +152,14 @@ pub(crate) struct Iteration {
     pub seek_generation: u64,
 }
 impl Control {
+    pub(crate) fn record_hls_media_leaf(&self, live: bool) {
+        self.hls_media_live.get_or_init(|| AtomicBool::new(live)).store(live, Ordering::Release);
+    }
+
+    pub(crate) fn opened_hls_live(&self) -> Option<bool> {
+        self.hls_media_live.get().map(|live| live.load(Ordering::Acquire))
+    }
+
     pub(crate) fn take_iteration(&self) -> Iteration {
         let mut request = self.seek.lock().unwrap_or_else(|e| e.into_inner());
         Iteration {
@@ -227,7 +237,8 @@ impl Session {
             seek_generation: AtomicU64::new(1),
             seekable: AtomicBool::new(false),
             hls_origin: OnceLock::new(),
-            hls_live: AtomicBool::new(false),
+            hls_gateway_lease: AtomicBool::new(false),
+            hls_media_live: OnceLock::new(),
             video_decoded: AtomicBool::new(false),
             hls_request: AtomicU64::new(0),
             duration_us: AtomicI64::new(0),
@@ -377,6 +388,12 @@ impl Session {
             && !self.control.retired.load(Ordering::Acquire)
             && self.control.seekable.load(Ordering::Acquire)
     }
+    /// Returns the latest parsed media leaf’s live status. A master response alone
+    /// cannot establish this, even when the gateway has already registered a lease.
+    pub fn opened_hls_live(&self) -> Option<bool> {
+        self.control.opened_hls_live()
+    }
+
     /// An opted-in live HLS gateway and the latest completed leaf/segment GET's start order.
     /// Origin discovery alone has a zero receipt. No path, query or playback ID escapes the worker.
     pub fn hls_handoff(&self) -> Option<(String, u64)> {
@@ -387,7 +404,7 @@ impl Session {
     /// The gateway can register a confirmed master before its leaf or first picture arrives.
     /// Keep that fact available for retirement while the decoder is still starting.
     pub fn hls_handoff_lease(&self) -> Option<(String, u64)> {
-        if !self.control.hls_live.load(Ordering::Acquire) { return None; }
+        if !self.control.hls_gateway_lease.load(Ordering::Acquire) { return None; }
         let origin = self.control.hls_origin.get()?;
         Some((origin.clone(), self.control.hls_request.load(Ordering::Acquire)))
     }
@@ -410,12 +427,12 @@ mod tests {
         let session = manual_session();
         assert!(session.hls_handoff_lease().is_none());
         session.control.hls_origin.set("http://gateway.invalid:8080".into()).unwrap();
-        session.control.hls_live.store(true, Ordering::Release);
+        session.control.hls_gateway_lease.store(true, Ordering::Release);
         assert_eq!(session.hls_handoff_lease(), Some(("http://gateway.invalid:8080".into(), 0)));
         assert!(session.hls_handoff().is_none());
         session.control.video_decoded.store(true, Ordering::Release);
         assert_eq!(session.hls_handoff(), session.hls_handoff_lease());
-        session.control.hls_live.store(false, Ordering::Release);
+        session.control.hls_gateway_lease.store(false, Ordering::Release);
         assert!(session.hls_handoff_lease().is_none());
         assert!(session.hls_handoff().is_none());
     }
@@ -451,7 +468,8 @@ mod tests {
                 seek_generation: AtomicU64::new(1),
                 seekable: AtomicBool::new(true),
                 hls_origin: OnceLock::new(),
-                hls_live: AtomicBool::new(false),
+                hls_gateway_lease: AtomicBool::new(false),
+                hls_media_live: OnceLock::new(),
                 video_decoded: AtomicBool::new(false),
                 hls_request: AtomicU64::new(0),
                 duration_us: AtomicI64::new(0),

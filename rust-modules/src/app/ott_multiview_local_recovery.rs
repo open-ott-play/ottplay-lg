@@ -11,6 +11,13 @@ const COLD_DELAY: Duration = Duration::from_secs(8);
 const FOLLOWUP_DELAY: Duration = Duration::from_secs(25);
 const FOLLOWUP_LIMIT: Duration = Duration::from_secs(90);
 
+// A cold request can be retried before the first picture even if the leaf has
+// not arrived. Once playback starts, reopening a finite or unverified leaf can
+// rewind the viewer to the beginning. The M3U catalogue duration cannot tell.
+fn restartable_hls(admitted: bool, opened_hls_live: Option<bool>) -> bool {
+    opened_hls_live.unwrap_or(!admitted)
+}
+
 struct Proof {
     original: ResolveTicket,
     handle: SourceHandle,
@@ -137,6 +144,10 @@ impl Budget {
             self.resumed();
             return false;
         };
+        if !restartable_hls(picture.admitted, picture.decoder.opened_hls_live()) {
+            self.resumed();
+            return false;
+        }
         let now = runtime.frame_time();
         match event {
             Event::Failure(MediaError::LostProviderLease)
@@ -286,6 +297,16 @@ mod tests {
             url,
             start + Duration::from_secs(55)
         ));
+    }
+
+    #[test]
+    fn restarting_an_admitted_window_requires_a_positive_live_leaf() {
+        for admitted in [false, true] {
+            assert!(restartable_hls(admitted, Some(true)));
+            assert!(!restartable_hls(admitted, Some(false)), "finite leaf");
+        }
+        assert!(restartable_hls(false, None), "no frames to rewind on a cold request");
+        assert!(!restartable_hls(true, None), "unknown duration is not evidence of live media");
     }
 
     #[test]

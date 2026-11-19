@@ -77,6 +77,9 @@ window, channel and time and compare that interval with the gateway log.
 A selected window waiting to retry reports `starting`. If recovery ends, it
 reports `failed` and keeps the last frame count and PTS for that selection.
 Stopping or replacing the window clears those measurements.
+Once playback has started, the player reopens a window automatically only
+when its selected HLS playlist confirms a live broadcast. A movie with an
+unknown catalogue duration keeps its failure visible without rewinding.
 
 Run this command twice several seconds apart to see each CLI window number
 and compare the same generation:

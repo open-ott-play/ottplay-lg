@@ -133,7 +133,7 @@ impl Remote {
     fn played_gateway_resource(&self, url: &str, c: &Control) -> bool {
         let Some(origin) = c.hls_origin.get() else { return false; };
         self.source.status() == 200 && c.video_decoded.load(Ordering::Acquire)
-            && c.hls_live.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
+            && c.hls_gateway_lease.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
             && crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(origin)
             && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
     }
@@ -411,7 +411,7 @@ fn parse_playlist(base: &str, text: &str) -> Result<Playlist, Error> {
                 return Err(Error::Unsupported);
             }
             out.init = Some(url);
-        } else if line == "#EXT-X-ENDLIST" {
+        } else if matches!(line, "#EXT-X-ENDLIST" | "#EXT-X-PLAYLIST-TYPE:VOD") {
             out.ended = true;
         } else if let Some(value) = line.strip_prefix("#EXTINF:") {
             if duration {
@@ -485,7 +485,7 @@ fn poll_wait(checked: Instant, target: Duration, now: Instant) -> Duration {
 }
 
 fn admission_read_started(url: &str, c: &Control) -> Option<u64> {
-    if !c.hls_live.load(Ordering::Acquire) { return None; }
+    if !c.hls_gateway_lease.load(Ordering::Acquire) { return None; }
     let admitted = c.hls_origin.get()?;
     (crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(admitted))
         .then(crate::local_multiview::hls_request_started)
@@ -543,7 +543,7 @@ impl Hls {
             if advertised {
                 if let Some(origin) = &source_origin {
                     c.hls_origin.get_or_init(|| origin.clone());
-                    c.hls_live.store(true, Ordering::Release);
+                    c.hls_gateway_lease.store(true, Ordering::Release);
                 }
             }
             remote.startup(&child, true, c, Manifest::from_remote)?
@@ -552,13 +552,14 @@ impl Hls {
         };
         url = manifest.effective_url.clone();
         let playlist = manifest.media()?;
+        c.record_hls_media_leaf(!playlist.ended);
         let admitted_origin = source_origin.filter(|origin| {
             !playlist.ended && (advertised || remote.source.multiview_refresh_peers())
                 && crate::local_multiview::hls_handoff_origin(&url).as_ref() == Some(origin)
         });
         let admitted = admitted_origin.is_some();
         if let Some(origin) = admitted_origin { let _ = c.hls_origin.set(origin); }
-        c.hls_live.store(admitted, Ordering::Release);
+        c.hls_gateway_lease.store(admitted, Ordering::Release);
         let start = if playlist.ended {
             0
         } else {
@@ -610,7 +611,10 @@ impl Hls {
         if fresh.init != self.playlist.init {
             return Err(Error::Unsupported);
         }
-        if fresh.ended { c.hls_live.store(false, Ordering::Release); }
+        if fresh.ended {
+            c.record_hls_media_leaf(false);
+            c.hls_gateway_lease.store(false, Ordering::Release);
+        }
         else { finish_admission_read(order, &manifest.effective_url, c); }
         self.checked = Instant::now();
         self.url = manifest.effective_url;
@@ -1414,6 +1418,44 @@ mod tests {
     }
 
     #[test]
+    fn finite_leaf_outage_after_delivered_media_preserves_finite_evidence() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let tracks = b"#EXTM3U\n#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n";
+        for end_tag in [&b"#EXT-X-ENDLIST\n"[..], b"#EXT-X-PLAYLIST-TYPE:VOD\n"] {
+            let finite = [tracks.as_slice(), end_tag].concat();
+            let server = SessionServer::new(vec![
+                Reply::ok("", &finite), Reply::ok("", b"A"),
+                Reply { status: 503, ..Reply::ok("", b"") },
+            ]);
+            let c = Control::default();
+            assert_eq!(c.opened_hls_live(), None);
+            let mut hls = Hls::open(format!("{}/movie.m3u8", server.base), 1024, &c).unwrap();
+            let mut out = [0];
+            assert_eq!(hls.read(&mut out, &c), Ok(1));
+            assert_eq!(out, [b'A']);
+            assert_eq!(hls.read(&mut out, &c), Err(Error::SourceTemporarilyUnavailable));
+            assert_eq!(c.opened_hls_live(), Some(false));
+            assert_eq!(server.heads().len(), 3);
+        }
+    }
+
+    #[test]
+    fn ending_an_unmarked_live_leaf_revokes_live_recovery_without_a_gateway_lease() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXTINF:1,\na.ts\n";
+        let ended = [live.as_slice(), b"#EXT-X-ENDLIST\n"].concat();
+        let server = SessionServer::new(vec![Reply::ok("", live), Reply::ok("", &ended)]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &c).unwrap();
+        assert!(c.hls_origin.get().is_none());
+        assert_eq!(c.opened_hls_live(), Some(true));
+        hls.refresh(&c).unwrap();
+        assert_eq!(c.opened_hls_live(), Some(false));
+    }
+
+    #[test]
     fn live_leaf_outage_keeps_its_evidence_after_bounded_same_session_retries() {
         use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
         let _serial = curl();
@@ -1570,7 +1612,8 @@ mod tests {
         assert_eq!(hls.refresh(&c), Err(Error::SourceDenied));
         assert_eq!(c.hls_request.load(Ordering::Acquire), refreshed);
         hls.refresh(&c).unwrap();
-        assert!(!c.hls_live.load(Ordering::Acquire));
+        assert!(!c.hls_gateway_lease.load(Ordering::Acquire));
+        assert_eq!(c.opened_hls_live(), Some(false));
         assert_eq!(c.hls_request.load(Ordering::Acquire), refreshed);
     }
 
@@ -1604,7 +1647,7 @@ mod tests {
         ]);
         let c = Control::default();
         Hls::open(format!("{}/master.m3u8", server.base), 1024, &c).unwrap();
-        assert!(!c.hls_live.load(Ordering::Acquire), "a finite leaf withdraws provisional master admission");
+        assert!(!c.hls_gateway_lease.load(Ordering::Acquire), "a finite leaf withdraws provisional master admission");
         use crate::local_multiview::hls_handoff_origin as origin;
         assert_eq!(origin("https://Example.org:443/private/abc?token=value"), Some("https://example.org:443".to_owned()));
         for url in ["https://user:password@example.org/path", "ftp://host/file", "https://example.org/a#x"] {
