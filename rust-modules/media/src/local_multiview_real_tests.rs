@@ -135,7 +135,7 @@ impl FixtureServer {
         }
         let path = request.next().unwrap_or("");
         if let Some(origin) = &live_grid.load {
-            return origin.serve(&mut socket, root, path);
+            return origin.serve(&mut socket, path);
         }
         let mut file = None;
         for index in [1, 3, 5] {

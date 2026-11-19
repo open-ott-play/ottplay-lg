@@ -7,6 +7,8 @@ use std::{
 };
 
 const SLOTS: usize = 9;
+const SEGMENTS_PER_ORIGIN: usize = 15;
+const MAX_FIXTURE_SEGMENT: usize = 4 * 1024 * 1024;
 const PACKET: usize = 188;
 const SEGMENT_PACKETS: usize = (10 * 1024 * 1024) / PACKET;
 
@@ -18,15 +20,35 @@ struct Concurrency {
 
 pub(super) struct Origin {
     slot: usize,
+    segments: Vec<Vec<u8>>,
     last: AtomicUsize,
     delayed: AtomicBool,
     shared: Arc<Concurrency>,
 }
 
 impl Origin {
-    pub(super) fn serve(&self, socket: &mut TcpStream, root: &Path, path: &str) -> io::Result<()> {
+    fn load(root: &Path, slot: usize, shared: Arc<Concurrency>) -> Self {
+        // Keep filesystem delays out of the timed origin. These are the encoded
+        // fixtures only; the large transport padding is generated directly on the wire.
+        let dir = root.join(format!("grid9-{slot}-hls"));
+        let segments = (0..SEGMENTS_PER_ORIGIN)
+            .map(|n| {
+                let path = dir.join(format!("segment{n:03}.ts"));
+                assert!((1..=MAX_FIXTURE_SEGMENT as u64).contains(&path.metadata().unwrap().len()));
+                std::fs::read(path).unwrap()
+            })
+            .collect();
+        Self {
+            slot,
+            segments,
+            last: AtomicUsize::default(),
+            delayed: AtomicBool::default(),
+            shared,
+        }
+    }
+    pub(super) fn serve(&self, socket: &mut TcpStream, path: &str) -> io::Result<()> {
         if path == "/media.m3u8" {
-            let last = (1 + self.last.load(Ordering::Acquire)).min(14);
+            let last = (1 + self.last.load(Ordering::Acquire)).min(self.segments.len() - 1);
             let first = last.saturating_sub(3);
             let mut list =
                 format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
@@ -44,7 +66,9 @@ impl Origin {
             return FixtureServer::response(socket, "404 Not Found", "", b"");
         };
         let sequence = name[7..10].parse::<usize>().unwrap();
-        let input = std::fs::read(root.join(format!("grid9-{}-hls", self.slot)).join(name))?;
+        let Some(input) = self.segments.get(sequence) else {
+            return FixtureServer::response(socket, "404 Not Found", "", b"");
+        };
         if sequence == 3 && !self.delayed.swap(true, Ordering::AcqRel) {
             let waiting = self.shared.waiting.fetch_add(1, Ordering::AcqRel) + 1;
             self.shared.peak.fetch_max(waiting, Ordering::Relaxed);
@@ -52,11 +76,11 @@ impl Origin {
             self.shared.waiting.fetch_sub(1, Ordering::AcqRel);
         }
         if !(2..=5).contains(&sequence) {
-            FixtureServer::response(socket, "200 OK", "Content-Type: video/mp2t\r\n", &input)?;
+            FixtureServer::response(socket, "200 OK", "Content-Type: video/mp2t\r\n", input)?;
         } else {
             // A bounded reader may pause a transfer until the preceding segment drains.
             socket.set_write_timeout(Some(Duration::from_secs(5)))?;
-            send_large_segment(socket, &input)?;
+            send_large_segment(socket, input)?;
         }
         self.last.fetch_max(sequence, Ordering::Release);
         Ok(())
@@ -93,28 +117,35 @@ fn nine_live_hls_streams_advance_under_buffer_pressure() {
     let root = PathBuf::from(std::env::var_os("PLXNATIVE_LOCAL_VIDEO_FIXTURES").unwrap());
     boot_real_decoders();
     let shared = Arc::new(Concurrency::default());
-    let mut servers = Vec::new();
-    let mut readers = Readers(Vec::new());
+    let origins: Vec<_> = (0..SLOTS)
+        .map(|slot| Origin::load(&root, slot, Arc::clone(&shared)))
+        .collect();
+    let origin_bytes: usize = origins
+        .iter()
+        .flat_map(|origin| &origin.segments)
+        .map(Vec::len)
+        .sum();
+    eprintln!("nine-HLS fixture origin cache: {origin_bytes} encoded bytes; process RSS includes this cache");
+    let mut servers: Vec<_> = origins
+        .into_iter()
+        .map(|origin| {
+            FixtureServer::with_state(
+                root.clone(),
+                LiveGridFixture {
+                    load: Some(origin),
+                    ..LiveGridFixture::default()
+                },
+            )
+        })
+        .collect();
     let limits = Limits::grid9();
+    let mut readers = Readers(Vec::new());
     let started = Instant::now();
-    for slot in 0..SLOTS {
-        let origin = Origin {
-            slot,
-            last: AtomicUsize::default(),
-            delayed: AtomicBool::default(),
-            shared: Arc::clone(&shared),
-        };
-        let server = FixtureServer::with_state(
-            root.clone(),
-            LiveGridFixture {
-                load: Some(origin),
-                ..LiveGridFixture::default()
-            },
-        );
+    for server in &servers {
         let source = ExternalSource::Hls(server.url("/media.m3u8"));
-        let session = Session::open_with_output_tile(source, limits, (640, 360)).unwrap();
-        readers.0.push(session);
-        servers.push(server);
+        readers
+            .0
+            .push(Session::open_with_output_tile(source, limits, (640, 360)).unwrap());
     }
     let mut seen: [Seen; SLOTS] = std::array::from_fn(|_| Seen::default());
     let mut first = [None; SLOTS];
