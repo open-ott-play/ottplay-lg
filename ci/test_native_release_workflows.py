@@ -100,6 +100,10 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         for tokens in commands:
             self.assertIn("OTT_PRODUCT_CONFIG=" + config, tokens,
                           "candidate packaging must not fall back to upstream release documents")
+        candidate = workflow("native-candidate.yml")
+        self.assertIn("CARGO_PROFILE_RELEASE_OPT_LEVEL: 'z'", candidate)
+        self.assertLess(candidate.index(" ipk-stage\n"), candidate.index("ci/check-build-budgets.py --binary "))
+        self.assertLess(candidate.index("ci/check-build-budgets.py --binary "), candidate.index(" ipk-pack\n"))
         source = workflow("ci.yml").split("  source:", 1)[1].split("\n  native:", 1)[0]
         self.assertIn("python3 ci/check-package.py --tracked --product-config " + config, source)
 

@@ -134,9 +134,9 @@ def toolchain(source: Path) -> str:
 
 def build_env(args) -> dict:
     profile = control_discovery_profile(args)
-    optimization = getattr(args, "rust_opt_level", "2")
-    if optimization not in ("2", "s"):
-        fail("Native Rust optimization must be 2 or s")
+    optimization = getattr(args, "rust_opt_level", "z")
+    if optimization not in ("2", "s", "z"):
+        fail("Native Rust optimization must be 2, s, or z")
     env = dict(os.environ)
     for key in list(env):
         if (key.startswith(("PLX_", "SENTRY_", "POSTHOG_", "OTTPLAY_", "CARGO_PROFILE_", "CARGO_TARGET_"))
@@ -217,7 +217,7 @@ def native_compile_evidence(args, spec, source, configuration):
     if len(artifacts) != 1:
         fail("Expected exactly one native application Cargo artifact")
     artifact = artifacts[0]
-    expected_profile = {"opt_level": getattr(args, "rust_opt_level", "2"), "debuginfo": 0,
+    expected_profile = {"opt_level": getattr(args, "rust_opt_level", "z"), "debuginfo": 0,
                         "debug_assertions": False, "overflow_checks": False, "test": False}
     actual_profile = artifact.get("profile", {})
     if (artifact.get("manifest_path") != str(source / "rust-modules/Cargo.toml")
@@ -866,7 +866,7 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--package", type=Path, help="Candidate IPK to inspect with verify")
     parser.add_argument("--jobs", type=int, choices=(1, 2), default=2)
-    parser.add_argument("--rust-opt-level", choices=("2", "s"), default="s")
+    parser.add_argument("--rust-opt-level", choices=("2", "s", "z"), default="z")
     parser.add_argument("--companion-bundle", type=Path, help="Optional prebuilt bundle with matching source/link evidence")
     parser.add_argument("--companion-source", type=Path, help="Explicit source checkout matching that companion bundle")
     parser.add_argument("--control-discovery-url")

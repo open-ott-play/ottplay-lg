@@ -4,6 +4,14 @@
 
 `.github/workflows/native-release-pipeline.yml` is the manually dispatched release entry point. It accepts `channel=beta|rc|stable` and runs only from `main`. The beta and RC paths freeze a release plan, run required CI, call the reusable `.github/workflows/native-candidate.yml` build, verify the resulting IPK and evidence, and publish an immutable GitHub prerelease. Stable promotion validates an accepted RC and its physical-device qualification, waits at the `release` environment, then publishes the exact RC package bytes without rebuilding.
 
+The official ARM producer and the local `scripts/lg-build.py` producer use Rust's
+`z` optimization for the application, level `2` for the media crate and `s` for
+graphics. FFmpeg retains its own build configuration. The candidate pipeline
+checks the stripped executable against `ci/build-budgets.json` before packaging.
+To reproduce these flags with a direct Make invocation, set
+`CARGO_PROFILE_RELEASE_OPT_LEVEL=z` in its environment.
+
+
 The first pipeline beta, `v0.3.3-beta.1`, was published from source `14c5af1f09d35d71af5c179338c5deeb088ffb21` by Actions run `42617296886`. Its build and publication gates passed. No physical LG qualification record is supplied by this document. The first actual beta/RC run and physical acceptance must be recorded against the exact artifact before making release claims.
 
 ## Release identity and dispatch inputs
