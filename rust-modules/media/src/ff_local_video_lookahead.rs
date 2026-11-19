@@ -90,7 +90,21 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
         // read() validates sequence, URI, object size, content and lease as usual. A media
         // request can only use a segment declared by a parsed playlist. At the live edge
         // its existing poll cadence, timeout and retry budget remain in force.
-        let object = hls.read(&mut [], control).map(|_| {
+        let mut result = if ahead {
+            hls.read_available(&mut [], control, super::LIVE_READ_BUDGET, true)
+        } else {
+            hls.read(&mut [], control)
+        };
+        if ahead && result.is_ok() && hls.bytes.is_empty() && !hls.playlist.ended {
+            // The playlist still ends at our current segment. Release the early
+            // lookup and start a fresh timeout when FFmpeg actually needs bytes.
+            if requests.recv().is_err() {
+                return;
+            }
+            ahead = false;
+            result = hls.read(&mut [], control);
+        }
+        let object = result.map(|_| {
             hls.pos = 0;
             std::mem::take(&mut hls.bytes)
         });
@@ -327,5 +341,38 @@ mod tests {
         });
         assert_eq!(output, [b'A']);
         assert_eq!(server.heads().len(), 4);
+    }
+    #[test]
+    fn early_lookup_of_an_unpublished_edge_preserves_the_later_demand() {
+        let _serial = curl();
+        let c = Control::default();
+        let initial = b"#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXTINF:60,\na.ts\n";
+        let published =
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:60,\nb.ts\n";
+        let server = SessionServer::new(vec![
+            Reply::ok("", initial),
+            Reply::ok("", b"A"),
+            Reply::ok("", initial),
+            Reply::ok("", published),
+            Reply::ok("", b"B"),
+        ]);
+        let mut hls = Hls::open(format!("{}/edge.m3u8", server.base), 1024, &c).unwrap();
+        assert_eq!(hls.read(&mut [], &c), Ok(0));
+        assert_eq!(std::mem::take(&mut hls.bytes), b"A");
+        hls.checked -= Duration::from_secs(2);
+        assert_eq!(
+            hls.read_available(&mut [], &c, Duration::from_millis(350), true),
+            Ok(0)
+        );
+        assert!(hls.bytes.is_empty() && !hls.playlist.ended);
+        assert_eq!(server.heads().len(), 3);
+        hls.checked -= Duration::from_secs(2);
+        let mut next = [0];
+        assert_eq!(
+            hls.read_with_budget(&mut next, &c, Duration::from_millis(350)),
+            Ok(1)
+        );
+        assert_eq!(next, [b'B']);
+        assert_eq!(server.heads().len(), 5);
     }
 }

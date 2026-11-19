@@ -525,6 +525,8 @@ fn media_segment_bytes(bytes: &[u8]) -> bool {
         || (bytes.len() >= 8 && matches!(&bytes[4..8], b"styp" | b"sidx" | b"moof" | b"mdat"))
 }
 
+const LIVE_READ_BUDGET: Duration = Duration::from_secs(30);
+
 struct Hls {
     remote: Remote,
     url: String,
@@ -676,10 +678,15 @@ impl Hls {
     }
 
     fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
-        self.read_with_budget(out, c, Duration::from_secs(30))
+        self.read_with_budget(out, c, LIVE_READ_BUDGET)
     }
 
     fn read_with_budget(&mut self, out: &mut [u8], c: &Control, budget: Duration) -> Result<usize, Error> {
+        self.read_available(out, c, budget, false)
+    }
+
+    fn read_available(&mut self, out: &mut [u8], c: &Control, budget: Duration, lookahead: bool) -> Result<usize, Error> {
+        let mut refreshed_edge = false;
         if c.stopped() { return Err(Error::Cancelled); }
         let mut deadline = Instant::now() + budget;
         let mut remaining = 2;
@@ -740,7 +747,9 @@ impl Hls {
                 }
                 continue;
             }
-            if self.playlist.ended {
+            // An early lookup may precede publication of a long next segment.
+            // Resume on decoder demand with the usual live-edge timeout.
+            if self.playlist.ended || (lookahead && refreshed_edge) {
                 return Ok(0);
             }
             let now = Instant::now();
@@ -749,6 +758,7 @@ impl Hls {
                 return Err(Error::Cancelled);
             }
             self.refresh_retry(c, &mut remaining, &mut deadline)?;
+            refreshed_edge = true;
         }
         let n = out.len().min(self.bytes.len() - self.pos);
         out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
