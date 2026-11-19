@@ -139,6 +139,8 @@ pub(crate) struct Control {
     hls_media_live: OnceLock<AtomicBool>,
     pub video_decoded: AtomicBool,
     pub hls_request: AtomicU64,
+    /// Physical output tile, or zero for full-resolution publication.
+    output_tile: AtomicU64,
     pub duration_us: AtomicI64,
     pub seek: Mutex<Option<(u64, i64)>>,
     pub mailbox: Mutex<Mailbox>,
@@ -152,6 +154,12 @@ pub(crate) struct Iteration {
     pub seek_generation: u64,
 }
 impl Control {
+    pub(crate) fn output_tile(&self) -> (u32, u32) {
+        let size = self.output_tile.load(Ordering::Relaxed);
+        ((size >> 32) as u32, size as u32)
+    }
+
+
     pub(crate) fn record_hls_media_leaf(&self, live: bool) {
         self.hls_media_live.get_or_init(|| AtomicBool::new(live)).store(live, Ordering::Release);
     }
@@ -241,6 +249,7 @@ impl Session {
             hls_media_live: OnceLock::new(),
             video_decoded: AtomicBool::new(false),
             hls_request: AtomicU64::new(0),
+            output_tile: AtomicU64::new(0),
             duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
@@ -381,6 +390,14 @@ impl Session {
         m.video = None;
         m.audio.clear();
     }
+    /// This hint affects copies sent to GLES. Input admission retains the source limits.
+    pub fn set_output_tile(&self, width: u32, height: u32) {
+        let size = (u64::from(width) << 32) | u64::from(height);
+        if self.control.output_tile.load(Ordering::Relaxed) != size {
+            self.control.output_tile.store(size, Ordering::Relaxed);
+        }
+    }
+
     /// Available only after this reader opened a seekable transport. HLS,
     /// unopened, withdrawn and retired readers never advertise seeking.
     pub fn is_seekable(&self) -> bool {
@@ -472,6 +489,7 @@ mod tests {
                 hls_media_live: OnceLock::new(),
                 video_decoded: AtomicBool::new(false),
                 hls_request: AtomicU64::new(0),
+                output_tile: AtomicU64::new(0),
                 duration_us: AtomicI64::new(0),
                 seek: Mutex::new(None),
                 mailbox: Mutex::new(Mailbox::default()),

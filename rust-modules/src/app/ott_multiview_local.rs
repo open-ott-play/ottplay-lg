@@ -727,10 +727,17 @@ impl Driver {
             };
             self.receive_job(runtime, app, job);
         }
+        let output_tile = if self.layout == Some(Layout::Grid4) {
+            let (_, _, width, height) = plx_base::surface::viewport();
+            ((width.max(0) as u32).div_ceil(2), (height.max(0) as u32).div_ceil(2))
+        } else {
+            (0, 0)
+        };
         for index in 0..9 {
             let Some(picture) = self.pictures[index].as_mut() else {
                 continue;
             };
+            picture.decoder.set_output_tile(output_tile.0, output_tile.1);
             if picture.receipt.input.reauthorize(runtime, app).is_err()
                 && self.stopping[index].is_none()
             {
