@@ -87,8 +87,13 @@ time between samples. For example, 250 new frames in ten seconds gives 25 fps.
 A growing media timestamp alone can also occur when the picture is jerky.
 `draw_interval_p95_ms` and `draw_interval_max_ms` summarize the most recent
 32 intervals between new pictures submitted to the renderer. A held picture
-adds no samples; its elapsed time becomes visible when a new picture arrives.
-Compare the values during continuous playback in the same window generation.
+adds no samples. `draw_intervals_ge_250ms_count` counts all intervals of at least
+250 ms in the current window generation. `draw_interval_lifetime_max_ms` is the
+longest measured interval, or `null` until the second picture.
+These two fields preserve gaps that have rolled out of the 32-interval sample.
+A deliberate pause contributes its full elapsed interval when the first new
+picture appears after resume. Compare samples during continuous playback in
+the same window generation to look for unexpected stalls.
 Once playback has started, the player reopens a window automatically only
 when its selected HLS playlist confirms a live broadcast. A movie with an
 unknown catalogue duration keeps its failure visible without rewinding.
@@ -98,7 +103,8 @@ and compare the same generation:
 
 ```sh
 ott -j l_ status --details | jq '.multiview_video_evidence.slots[] |
-  {window: (.slot_id + 1), slot_generation, drawn_frames, last_pts_us, last_stop}'
+  {window: (.slot_id + 1), slot_generation, drawn_frames, last_pts_us, last_stop,
+   draw_interval_p95_ms, draw_intervals_ge_250ms_count, draw_interval_lifetime_max_ms}'
 ```
 
 ### Replacing a channel on a session-limited HLS server
