@@ -402,6 +402,10 @@ impl Driver {
             .filter(|p| p.admitted && !p.terminal && self.stopping[slot.index()].is_none() && !p.receipt.input.is_cancelled())
             .map(|p| p.ticket)
     }
+    pub fn hls_lookahead_counts(&self, ticket: ResolveTicket) -> Option<(u32, u32)> {
+        self.pictures[ticket.slot().index()].as_ref().filter(|picture| picture.ticket == ticket)
+            .map(|picture| picture.decoder.hls_lookahead_counts())
+    }
     pub fn last_stop(&self, slot: SlotId) -> Option<&'static str> {
         self.last_stop[slot.index()]
     }

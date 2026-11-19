@@ -26,12 +26,15 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEST = "local_multiview::real_qualification::nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement"
 GRID_TEST = "local_multiview::real_qualification::four_live_hls_windows_advance_after_gateway_timeouts"
+GAP_TEST = "local_multiview::real_qualification::grid4_displays_frames_while_next_segment_is_delayed"
 OUTPUT_TEST = "local_multiview::real_qualification::output::nine_real_yuv_textures_and_virtual_sdl_audio"
 DECODERS = ("h264", "hevc", "mpeg2video", "mpeg4", "vp8", "vp9", "mjpeg", "vc1", "wmv3", "aac")
 INPUTS = ("ci/build-ffmpeg.sh", "ci/dependencies.json", "ci/ffabi-assert.c", "ci/sanitize-ffmpeg-config.py",
           "ci/qualify-local-multiview.py", "ci/generate-local-multiview-fixtures.py",
-          "rust-modules/media/src/ff.rs", "rust-modules/media/src/ff_local_video.rs",
-          "rust-modules/media/src/local_multiview.rs", "rust-modules/media/src/local_multiview_real_tests.rs")
+          "rust-modules/media/src/ff.rs", "rust-modules/media/src/ff_local_video.rs", "rust-modules/media/src/ff_local_video_lookahead.rs",
+          "rust-modules/media/src/ff_local_video_blocks.rs", "rust-modules/media/src/ff_local_video_box.rs",
+          "rust-modules/media/src/ff_local_video_box_arm.S", "rust-modules/media/src/local_multiview.rs",
+          "rust-modules/media/src/local_multiview_real_tests.rs")
 
 
 def sha(path):
@@ -549,12 +552,16 @@ def qualify(runner, ident, artifact, virtual=False):
         grid = runner.run("four-live-hls", [binary, GRID_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"], 60, env)
         if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in grid:
             raise RuntimeError("Four live HLS decoders did not pass gateway recovery")
+        gap = runner.run("grid4-delayed-segment", [binary, GAP_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"], 45, env)
+        if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in gap:
+            raise RuntimeError("HLS playback stopped while the next segment was delayed")
     assert_source(ident)
-    write(runner.out / "QUALIFIED.json", {"identity": ident, "test": test, "passed": 1 if virtual else 2, "failed": 0, "ignored": 0,
+    write(runner.out / "QUALIFIED.json", {"identity": ident, "test": test, "passed": 1 if virtual else 3, "failed": 0, "ignored": 0,
                                            "fixtures": manifest, "sources": {"held": 3, "http": 3, "hls": 3}, "scope": ("hosted Mesa/Xvfb and virtual PulseAudio null sink; no television or physical speaker claim"
                                                      if virtual else "software decoders only; no GL, audio sink or TV claim"),
                                            "virtual_output": proof if virtual else None,
                                            "four_live_hls_test": None if virtual else GRID_TEST,
+                                           "delayed_segment_test": None if virtual else GAP_TEST,
                                            "configurations": ["core", "es2"] if virtual else ["default"],
                                            "counts_scope": "per configuration"})
 

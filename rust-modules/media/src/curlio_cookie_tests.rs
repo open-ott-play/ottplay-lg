@@ -50,6 +50,9 @@ impl SessionServer {
                     continue;
                 };
                 accepted.fetch_add(1, Ordering::AcqRel);
+                // Darwin can inherit O_NONBLOCK from the listener. A large fixture
+                // body must wait for TCP buffer space within its write timeout.
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
                 socket.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
                 let stopped = Arc::clone(&stopped);

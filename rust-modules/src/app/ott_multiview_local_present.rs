@@ -100,6 +100,8 @@ struct RenderedFrames {
     count: u64,
     last_draw_ms: Option<u64>,
     intervals_ms: [u32; 32],
+    intervals_ge_250ms_count: u64,
+    lifetime_max_ms: Option<u64>,
 }
 impl RenderedFrames {
     fn submitted(&mut self, now_ms: u64) {
@@ -108,7 +110,12 @@ impl RenderedFrames {
                 // count is the number of pictures already drawn; the second
                 // picture supplies the first interval.
                 let index = (self.count.saturating_sub(1) % self.intervals_ms.len() as u64) as usize;
-                self.intervals_ms[index] = now_ms.saturating_sub(previous).min(u64::from(u32::MAX)) as u32;
+                let interval_ms = now_ms.saturating_sub(previous);
+                self.intervals_ms[index] = interval_ms.min(u64::from(u32::MAX)) as u32;
+                if interval_ms >= 250 {
+                    self.intervals_ge_250ms_count = self.intervals_ge_250ms_count.saturating_add(1);
+                }
+                self.lifetime_max_ms = Some(self.lifetime_max_ms.unwrap_or(0).max(interval_ms));
             }
             self.last_draw_ms = Some(now_ms);
             self.count = self.count.saturating_add(1);
@@ -621,10 +628,17 @@ pub(super) fn video_evidence(runtime: &Runtime) -> Option<Value> {
                     || row.status == "failed"))
             .map_or_else(RenderedFrames::default, |_| state.frames[i]);
         let intervals = frames.draw_intervals();
+        let lookahead = runtime.multiview_local.slot_ticket(row.slot)
+            .filter(|&ticket| runtime.multiview.require_current_ticket(ticket).is_ok())
+            .and_then(|ticket| runtime.multiview_local.hls_lookahead_counts(ticket));
         json!({"slot_id": i, "slot_generation": row.slot_generation, "source_revision": row.source_revision,
             "drawn_frames": frames.count, "last_pts_us": frames.last_pts_us,
+            "hls_prefetch_ready": lookahead.map(|v| v.0),
+            "hls_prefetch_budget_deferrals": lookahead.map(|v| v.1),
             "draw_interval_p95_ms": intervals.map(|pair| pair.0),
             "draw_interval_max_ms": intervals.map(|pair| pair.1),
+            "draw_intervals_ge_250ms_count": frames.intervals_ge_250ms_count,
+            "draw_interval_lifetime_max_ms": frames.lifetime_max_ms,
             "last_stop": runtime.multiview_local.last_stop(row.slot)})
     }).collect();
     Some(json!({"version": 1, "scene": scene.scene, "slots": slots}))
@@ -715,6 +729,42 @@ mod tests {
         assert_eq!(frames.draw_intervals(), Some((40, 40)));
     }
     #[test]
+    fn lifetime_draw_gaps_outlast_the_ring_and_reset_on_a_new_ticket() {
+        let _serial = plx_base::testlock::serial();
+        use plx_data::ott::multiview::{Layout, Scene};
+        let (_, _, _, handles, original, _) = crate::app::ott_runtime::multiview_local::lease_tests::queued_local_attempt();
+        let handle = handles[0];
+        let slot = original.slot();
+        let mut scene = Scene::new(original.scene());
+        scene.set_layout(Layout::Grid4).unwrap();
+        scene.bind_source(slot, handle.source_ref()).unwrap();
+        let first = scene.begin_resolution(slot, handle.source_ref(), handle.media_ref()).unwrap();
+        let mut output = State::default();
+        assert!(output.update_frame_ticket(slot.index(), Some(first)));
+        let frames = &mut output.frames[slot.index()];
+        let mut now = 0;
+        for interval in [0, 249, 250, 900].into_iter().chain([40; 32]) {
+            now += interval;
+            frames.submitted(now); // repainting a held texture cannot close a gap
+            frames.pending_pts_us = Some(now as i64 * 1_000);
+            frames.submitted(now);
+        }
+        assert_eq!(frames.draw_intervals(), Some((40, 40)));
+        assert_eq!(frames.intervals_ge_250ms_count, 2);
+        assert_eq!(frames.lifetime_max_ms, Some(900));
+
+        scene.report_pipeline_stopped(first).unwrap();
+        scene.bind_source(slot, handle.source_ref()).unwrap();
+        let second = scene.begin_resolution(slot, handle.source_ref(), handle.media_ref()).unwrap();
+        assert_ne!(first, second);
+        assert!(output.update_frame_ticket(slot.index(), Some(second)));
+        let frames = &mut output.frames[slot.index()];
+        frames.pending_pts_us = Some(0);
+        frames.submitted(now + 2_000);
+        assert_eq!(frames.intervals_ge_250ms_count, 0);
+        assert_eq!(frames.lifetime_max_ms, None);
+    }
+    #[test]
     fn a_failed_current_window_keeps_its_last_drawn_frame_count_until_stop() {
         let _serial = plx_base::testlock::serial();
         use crate::app::ott_runtime::multiview_local::lease_tests::{queued_local_attempt, resolve_attempt};
@@ -725,22 +775,28 @@ mod tests {
         let index = ticket.slot().index();
         let output = &mut runtime.multiview_local_present;
         assert!(output.update_frame_ticket(index, Some(ticket)));
-        output.frames[index].pending_pts_us = Some(42000);
+        output.frames[index].pending_pts_us = Some(41000);
         output.frames[index].submitted(0);
+        output.frames[index].pending_pts_us = Some(42000);
+        output.frames[index].submitted(300);
         output.frames[index].pending_pts_us = Some(43000);
         assert!(!output.update_frame_ticket(index, None));
-        output.frames[index].submitted(0);
+        output.frames[index].submitted(900);
         runtime.multiview.playback_failed(ticket).unwrap();
         runtime.multiview_local = driver;
         let failed = &video_evidence(&runtime).unwrap()["slots"][index];
-        assert_eq!(failed["drawn_frames"], 1);
+        assert_eq!(failed["drawn_frames"], 2);
         assert_eq!(failed["last_pts_us"], 42000);
+        assert_eq!(failed["draw_intervals_ge_250ms_count"], 1);
+        assert_eq!(failed["draw_interval_lifetime_max_ms"], 300);
         driver = std::mem::take(&mut runtime.multiview_local);
         driver.stop_slot(&mut runtime, ticket.slot()).unwrap();
         runtime.multiview_local = driver;
         let stopped = &video_evidence(&runtime).unwrap()["slots"][index];
         assert_eq!(stopped["drawn_frames"], 0);
         assert!(stopped["last_pts_us"].is_null());
+        assert_eq!(stopped["draw_intervals_ge_250ms_count"], 0);
+        assert_eq!(stopped.get("draw_interval_lifetime_max_ms"), Some(&Value::Null));
     }
 
     fn previous_favorite_fixture() -> (Runtime, Playing, Favorite) {

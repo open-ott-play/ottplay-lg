@@ -43,7 +43,9 @@ up to 30 fps in the focused window and 25 fps in the other three. Moving focus
 keeps the existing playback session and audio. Other layouts use a 15 fps ceiling.
 A 1080p frame can use half-size YUV planes on a 960×540 tile when both dimensions
 retain enough detail after cropping. Unsupported codecs, pixel formats or
-sources fail that slot independently. Supported output is 8-bit planar YUV420.
+sources fail that slot independently. Supported output is 8-bit planar YUV420. On ARMv7,
+the four-window half-size filter uses NEON when the kernel advertises it. Other
+CPUs and partial blocks use the same rounded four-sample average.
 Authorized local files and progressive HTTP media whose final response advertises
 byte ranges support seek. The decoder reports its opened transport capability to
 remote clients; HLS and unavailable windows do not advertise seek. Accepted paused
@@ -51,6 +53,13 @@ seeks publish a landing picture and remain paused. Seeking suppresses preroll PC
 until the target picture, and later pause changes cannot cancel an accepted seek. The initial HLS
 reader supports same-origin TS/fMP4 playlists; encrypted, byte-range,
 discontinuous and external-audio renditions are rejected. HLS seek is unavailable.
+A clear live MPEG-TS source opened in the four-window grid can read one segment
+ahead while its current segment plays. The same private HTTP session handles
+both segments. While the next segment is unpublished, the reader checks the
+playlist at its usual cadence. Decoder demand has its own timeout. Both compressed buffers share the
+slot’s segment budget. FFmpeg releases each consumed 128 KiB block so the
+reader can continue downloading the next segment while playback progresses.
+Moving an existing source from another layout keeps its original reader.
 Plex uses direct media; this path does not silently start a transcoder.
 
 Pause/resume and supported seeks target the active slot. Backgrounding, policy
@@ -73,7 +82,9 @@ uploaded video frame increments `drawn_frames` once. `last_pts_us` gives its
 media timestamp. UI redraws of a held picture leave both values unchanged.
 These readings measure rendering inside the application. Verify audio and
 the visible panel separately. If a window stops, `last_stop` can identify the
-source, decoder or renderer stage. A new source attempt clears the old reason.
+source, decoder or renderer stage. `hls_prefetch_ready` counts segments ready
+before the decoder requested them. `hls_prefetch_budget_deferrals` counts times
+the compressed-byte budget held back a read or allocation. A new source attempt clears the old reason.
 For example, `source_temporarily_unavailable` can result from an upstream
 timeout or HTTP 502, 503 or 504. `source_read` means the reader could not
 supply the requested bytes. To investigate a repeatable failure, record the
@@ -87,8 +98,13 @@ time between samples. For example, 250 new frames in ten seconds gives 25 fps.
 A growing media timestamp alone can also occur when the picture is jerky.
 `draw_interval_p95_ms` and `draw_interval_max_ms` summarize the most recent
 32 intervals between new pictures submitted to the renderer. A held picture
-adds no samples; its elapsed time becomes visible when a new picture arrives.
-Compare the values during continuous playback in the same window generation.
+adds no samples. `draw_intervals_ge_250ms_count` counts all intervals of at least
+250 ms in the current window generation. `draw_interval_lifetime_max_ms` is the
+longest measured interval, or `null` until the second picture.
+These two fields preserve gaps that have rolled out of the 32-interval sample.
+A deliberate pause contributes its full elapsed interval when the first new
+picture appears after resume. Compare samples during continuous playback in
+the same window generation to look for unexpected stalls.
 Once playback has started, the player reopens a window automatically only
 when its selected HLS playlist confirms a live broadcast. A movie with an
 unknown catalogue duration keeps its failure visible without rewinding.
@@ -98,7 +114,8 @@ and compare the same generation:
 
 ```sh
 ott -j l_ status --details | jq '.multiview_video_evidence.slots[] |
-  {window: (.slot_id + 1), slot_generation, drawn_frames, last_pts_us, last_stop}'
+  {window: (.slot_id + 1), slot_generation, drawn_frames, last_pts_us, last_stop,
+   draw_interval_p95_ms, draw_intervals_ge_250ms_count, draw_interval_lifetime_max_ms}'
 ```
 
 ### Replacing a channel on a session-limited HLS server
@@ -194,6 +211,8 @@ The Native checks workflow runs these checks:
   Verify both segments are requested again. For 23.976, 29.97, 25 and 50 fps
   inputs, count the frames each reader actually delivers over its media timeline
   both before and after moving focus from the first window to the second.
+- Delay a requested HLS segment and verify that the preceding segment continues
+  to deliver video frames during the delay.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 

@@ -46,6 +46,19 @@ fn provider_reply(bytes: &[u8]) -> Option<Error> {
     }
 }
 
+/// HLS-Proxy names TS objects /ts/<viewer>/<stream>.<sequence>.ts.
+fn gateway_chunk_stream(url: &str) -> Option<&str> {
+    let (_, path) = plx_plex::plex::origin::split(url);
+    let path = path.split('?').next()?;
+    let (viewer, object) = path.strip_prefix("/ts/")?.split_once('/')?;
+    let (stream, seq) = object.strip_suffix(".ts")?.split_once('.')?;
+    let hash = stream.strip_prefix('n').unwrap_or(stream);
+    if viewer.len() == 24 && viewer.bytes().all(|b| b.is_ascii_hexdigit())
+        && (1..=8).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit())
+    { Some(stream) } else { None }
+}
+
 fn open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
     if c.stopped() { Error::Cancelled }
     else if matches!(error, crate::curlio::OpenErr::Status(401 | 403 | 429)) { Error::SourceDenied }
@@ -68,6 +81,7 @@ struct Remote {
     source: Box<crate::curlio::CurlSource>,
     deadline: Option<Instant>,
     failure: Option<crate::curlio::OpenErr>,
+    expired_segment: bool,
     startup_retries: u8,
     position: i64,
     prefix: std::collections::VecDeque<u8>,
@@ -92,18 +106,34 @@ impl Remote {
             source,
             deadline: None,
             failure: None,
+            expired_segment: false,
             startup_retries: 2,
             position: 0,
             prefix: Default::default(),
         })
     }
     fn reopen(&mut self, url: &str, c: &Control) -> Result<(), Error> {
+        self.reopen_resource(url, c, false)
+    }
+    fn reopen_resource(&mut self, url: &str, c: &Control, segment: bool) -> Result<(), Error> {
         self.failure = None;
+        self.expired_segment = false;
         let deadline = self.deadline();
-        self.source.reopen_until(url, Some(deadline), &mut Check(c)).map_err(|e| {
+        let stream = if segment { gateway_chunk_stream(url) } else { None };
+        let (result, lost) = match stream {
+            Some(stream) if self.played_gateway_origin(url, c) => {
+                let expected = format!("getTsChunk: no stream name: {stream}");
+                self.source.reopen_matching_forbidden(url, deadline, &mut Check(c), expected.as_bytes())
+            }
+            _ => (self.source.reopen_until(url, Some(deadline), &mut Check(c)), false),
+        };
+        if let Err(e) = result {
             self.failure = Some(e);
-            open_error(e, c)
-        })?;
+            // The old segment disappeared. Only the selected playlist can confirm whether
+            // its session was lost or it already advertises a working replacement.
+            self.expired_segment = lost && self.source.effective_url() == url && self.played_gateway_origin(url, c);
+            return Err(open_error(e, c));
+        }
         if !(200..300).contains(&self.source.status()) {
             let error = crate::curlio::OpenErr::Status(self.source.status());
             self.failure = Some(error);
@@ -131,17 +161,24 @@ impl Remote {
     }
 
     fn played_gateway_resource(&self, url: &str, c: &Control) -> bool {
+        self.source.status() == 200 && self.played_gateway_origin(url, c)
+    }
+    fn played_gateway_origin(&self, url: &str, c: &Control) -> bool {
         let Some(origin) = c.hls_origin.get() else { return false; };
-        self.source.status() == 200 && c.video_decoded.load(Ordering::Acquire)
+        c.video_decoded.load(Ordering::Acquire)
             && c.hls_gateway_lease.load(Ordering::Acquire) && !c.paused.load(Ordering::Acquire) && !c.stopped()
             && crate::local_multiview::hls_handoff_origin(url).as_ref() == Some(origin)
             && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
     }
 
-    fn fetch(&mut self, url: &str, cap: usize, is_segment: bool, c: &Control) -> Result<Vec<u8>, Error> {
-        self.reopen(url, c)?;
-        let bytes = collect(self, cap, c)?;
-        if let Some(error) = self.provider_error(&bytes, is_segment.then_some(url), c) { return Err(error); }
+    fn fetch(&mut self, url: &str, cap: usize, segment: bool, blocked: bool, c: &Control) -> Result<MediaSegment, Error> {
+        self.reopen_resource(url, c, segment)?;
+        let bytes = if blocked { MediaSegment::collect(self, cap, c)? } else { MediaSegment::from_vec(collect(self, cap, c)?) };
+        // All classified gateway bodies fit in a single block. Require the complete
+        // response so a compressed payload cannot match a control prefix.
+        if bytes.len() <= 128 {
+            if let Some(error) = self.provider_error(bytes.head(), segment.then_some(url), c) { return Err(error); }
+        }
         Ok(bytes)
     }
     fn deadline(&self) -> Instant {
@@ -152,9 +189,12 @@ impl Remote {
         self.failure.is_some_and(|e| matches!(hls_curl_open_outcome(e),
             TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
     }
-    fn report_outage(&self, error: Error, c: &Control) -> Error {
+    fn report_outage(&self, error: Error, existing: Option<&str>, c: &Control) -> Error {
         if c.stopped() { Error::Cancelled }
-        else if error == Error::Source && self.failure.is_some_and(temporarily_unavailable) {
+        else if error == Error::Source && (self.failure.is_some_and(temporarily_unavailable)
+            || (matches!(self.failure, Some(crate::curlio::OpenErr::Transport(18 | 52 | 55 | 56)))
+                && existing.is_some_and(|url| self.played_gateway_origin(url, c))))
+        {
             Error::SourceTemporarilyUnavailable
         } else { error }
     }
@@ -182,7 +222,7 @@ impl Remote {
             open = true;
         };
         self.deadline = previous_deadline;
-        result.map_err(|error| self.report_outage(error, c))
+        result.map_err(|error| self.report_outage(error, None, c))
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
         let mut bytes = Vec::new();
@@ -257,8 +297,10 @@ fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
         if n == 0 {
             return Ok(out);
         }
-        if out.len().checked_add(n).is_none_or(|n| n > cap) {
-            return Err(Error::Budget);
+        let needed = out.len().checked_add(n).filter(|&size| size <= cap).ok_or(Error::Budget)?;
+        if needed > out.capacity() {
+            let capacity = needed.max(out.capacity().saturating_mul(2)).min(cap);
+            out.try_reserve_exact(capacity - out.len()).map_err(|_| Error::Budget)?;
         }
         out.extend_from_slice(&scratch[..n]);
     }
@@ -505,13 +547,19 @@ fn media_segment_bytes(bytes: &[u8]) -> bool {
         || (bytes.len() >= 8 && matches!(&bytes[4..8], b"styp" | b"sidx" | b"moof" | b"mdat"))
 }
 
+#[path = "ff_local_video_blocks.rs"]
+mod blocks;
+use blocks::Segment as MediaSegment;
+
+const LIVE_READ_BUDGET: Duration = Duration::from_secs(30);
+
 struct Hls {
     remote: Remote,
     url: String,
     playlist: Playlist,
     next: u64,
-    bytes: Vec<u8>,
-    pos: usize,
+    bytes: MediaSegment,
+    blocked_media: bool,
     init_sent: bool,
     delivered_segment: bool,
     teardown_checked: bool,
@@ -572,8 +620,8 @@ impl Hls {
             url,
             playlist,
             next,
-            bytes: Vec::new(),
-            pos: 0,
+            bytes: MediaSegment::default(),
+            blocked_media: false,
             init_sent: false,
             delivered_segment: false,
             teardown_checked: false,
@@ -646,7 +694,7 @@ impl Hls {
             // A failed follow-up to a transitional denial is not evidence of a recoverable outage.
             if verified_before != self.teardown_checked { return result; }
             let Err(error) = result else { return Ok(()); };
-            let error = self.remote.report_outage(error, c);
+            let error = self.remote.report_outage(error, Some(&self.url), c);
             if *remaining == 0 || !self.remote.transient_read(error) { return Err(error); }
             let delay = Duration::from_millis(200);
             if deadline.saturating_duration_since(Instant::now()) <= delay { return Err(error); }
@@ -656,50 +704,62 @@ impl Hls {
     }
 
     fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
-        self.read_with_budget(out, c, Duration::from_secs(30))
+        self.read_with_budget(out, c, LIVE_READ_BUDGET)
     }
 
     fn read_with_budget(&mut self, out: &mut [u8], c: &Control, budget: Duration) -> Result<usize, Error> {
+        self.read_available(out, c, budget, false)
+    }
+
+    fn read_available(&mut self, out: &mut [u8], c: &Control, budget: Duration, lookahead: bool) -> Result<usize, Error> {
+        let mut refreshed_edge = false;
         if c.stopped() { return Err(Error::Cancelled); }
         let mut deadline = Instant::now() + budget;
         let mut remaining = 2;
-        while self.pos == self.bytes.len() {
+        while self.bytes.is_empty() {
             if self.reprobe { return Err(Error::Source); }
             self.arm_request(c, &mut deadline)?;
             if !self.init_sent {
                 if let Some(url) = &self.playlist.init {
-                    self.bytes = self.remote.fetch(url, self.cap, false, c)?;
+                    self.bytes = self.remote.fetch(url, self.cap, false, false, c)?;
                     if self.bytes.is_empty() { return Err(Error::Source); }
-                    self.pos = 0;
                 }
                 self.init_sent = true;
                 if !self.bytes.is_empty() { break; }
             }
             if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
                 let order = admission_read_started(&segment.url, c);
-                let result = self.remote.fetch(&segment.url, self.cap, true, c)
-                    .map_err(|error| self.remote.report_outage(error, c));
+                let result = self.remote.fetch(&segment.url, self.cap, true, self.blocked_media, c)
+                    .map_err(|error| self.remote.report_outage(error, Some(&segment.url), c));
+                // A bounded reader can park this response while FFmpeg consumes the
+                // previous object. Preserve its transport retry time after a deferral.
+                deadline = self.remote.deadline.unwrap_or(deadline);
                 match result {
                     Ok(bytes) if !bytes.is_empty() => {
-                        if order.is_some() && media_segment_bytes(&bytes) {
+                        if order.is_some() && media_segment_bytes(bytes.head()) {
                             finish_admission_read(order, self.remote.source.effective_url(), c);
                         }
                         self.bytes = bytes;
-                        self.pos = 0;
                         self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
                         self.delivered_segment = true;
                         break;
                     }
                     Err(error) if !self.playlist.ended && remaining > 0
-                        && (self.remote.transient_read(error) || (error == Error::Source
+                        && (self.remote.expired_segment || self.remote.transient_read(error) || (error == Error::Source
                             && matches!(self.remote.failure, Some(crate::curlio::OpenErr::Status(404 | 410))))) => {
                         // Do not spend another request on a stale signed URI until
                         // the selected playlist has supplied a current segment.
+                        let expired_url = self.remote.expired_segment.then(|| segment.url.clone());
                         let delay = Duration::from_millis(200);
                         if deadline.saturating_duration_since(Instant::now()) <= delay { return Err(error); }
                         remaining -= 1;
                         if !c.wait(delay) { return Err(Error::Cancelled); }
                         self.refresh_retry(c, &mut remaining, &mut deadline)?;
+                        if expired_url.is_some_and(|old| self.playlist.segments.iter()
+                            .any(|s| s.sequence == self.next && s.url == old))
+                        {
+                            return Err(error);
+                        }
                         continue;
                     }
                     Ok(_) => return Err(Error::Source),
@@ -717,7 +777,9 @@ impl Hls {
                 }
                 continue;
             }
-            if self.playlist.ended {
+            // An early lookup may precede publication of a long next segment.
+            // Resume on decoder demand with the usual live-edge timeout.
+            if self.playlist.ended || (lookahead && refreshed_edge) {
                 return Ok(0);
             }
             let now = Instant::now();
@@ -726,17 +788,19 @@ impl Hls {
                 return Err(Error::Cancelled);
             }
             self.refresh_retry(c, &mut remaining, &mut deadline)?;
+            refreshed_edge = true;
         }
-        let n = out.len().min(self.bytes.len() - self.pos);
-        out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
+        Ok(self.bytes.read(out, None))
     }
 }
+#[path = "ff_local_video_lookahead.rs"]
+mod lookahead;
+
 enum Input {
     Local(file_source::FileSource),
     Http(Remote),
     Hls(Hls),
+    LivePipe(lookahead::Consumer),
 }
 struct Io<'a> {
     input: &'a mut Input,
@@ -757,6 +821,7 @@ extern "C" fn read(p: *mut c_void, out: *mut u8, len: c_int) -> c_int {
             Input::Local(f) => f.read(out).map_err(|_| Error::Source),
             Input::Http(r) => r.read(out, io.control),
             Input::Hls(h) => h.read(out, io.control),
+            Input::LivePipe(pipe) => pipe.read(out, io.control),
         }
     }))
     .unwrap_or(Err(Error::Source));
@@ -828,7 +893,7 @@ fn seek_inner(p: *mut c_void, offset: i64, whence: c_int) -> i64 {
                 }
             }
         }
-        Input::Hls(_) => -1,
+        Input::Hls(_) | Input::LivePipe(_) => -1,
     }
 }
 struct Decode {
@@ -861,6 +926,9 @@ fn can_halve_frame(w: usize, h: usize, aspect: f32, tile: (u32, u32)) -> bool {
     visible_w >= tw as f32 * 2.0 && visible_h >= th as f32 * 2.0
 }
 
+#[path = "ff_local_video_box.rs"]
+mod box_filter;
+
 unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool) -> Result<Vec<u8>, Error> {
     let ptr = std::ptr::read_unaligned(
         frame.add(OFF_FRAME_DATA + index * std::mem::size_of::<*const u8>()) as *const *const u8,
@@ -878,13 +946,9 @@ unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool)
         // The luma dimensions are divisible by four; its two 4:2:0 chroma
         // planes therefore have complete 2x2 blocks as well.
         let mut out = vec![0; size / 4];
+        let filter = box_filter::BoxFilter::detect();
         for (row, dst) in out.chunks_exact_mut(w / 2).enumerate() {
-            let top = input_row(2 * row).chunks_exact(2);
-            let bottom = input_row(2 * row + 1).chunks_exact(2);
-            for ((pixel, a), b) in dst.iter_mut().zip(top).zip(bottom) {
-                let sum = u16::from(a[0]) + u16::from(a[1]) + u16::from(b[0]) + u16::from(b[1]);
-                *pixel = ((sum + 2) / 4) as u8;
-            }
+            filter.row(input_row(2 * row), input_row(2 * row + 1), dst);
         }
         return Ok(out);
     }
@@ -979,7 +1043,15 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     };
     let mut reopens = std::collections::VecDeque::new();
     loop {
-        let result = decode_input(&mut input, limits, c);
+        let result = match &mut input {
+            Input::Hls(hls) if limits.prefetch_live_segment && !hls.playlist.ended && hls.playlist.init.is_none() => {
+                match lookahead::try_decode(hls, limits, c) {
+                    Some(result) => result,
+                    None => decode_input(&mut input, limits, c),
+                }
+            }
+            _ => decode_input(&mut input, limits, c),
+        };
         let Input::Hls(hls) = &mut input else { return result };
         if !hls.reprobe || c.stopped() { return result; }
         let now = Instant::now();
@@ -991,8 +1063,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         hls.reprobe = false;
         hls.delivered_segment = false;
         hls.init_sent = false;
-        hls.bytes.clear();
-        hls.pos = 0;
+        hls.bytes = MediaSegment::default();
         c.timeline.fetch_add(1, Ordering::AcqRel);
         c.audio_generation.fetch_add(1, Ordering::AcqRel);
         let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -1037,20 +1108,23 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
     let seekable = match &input {
         Input::Local(_) => true,
         Input::Http(remote) => remote.source.supports_byte_ranges(),
-        Input::Hls(_) => false,
+        Input::Hls(_) | Input::LivePipe(_) => false,
     };
-    let has_finite_duration = !matches!(&input, Input::Hls(_));
+    let has_finite_duration = !matches!(&input, Input::Hls(_) | Input::LivePipe(_));
     // On nonseekable TS the header reader consumes its full byte probe even when
     // PAT and PMT are present. Fit discovery within the downloaded live segment:
     // reading future segments here can make the next sequence expire while the
     // decoder plays its queued probe packets. Local files and fMP4 keep their budget.
-    let mut probe_bytes = 1024 * 1024;
+    let mut probe_bytes = match input {
+        Input::LivePipe(pipe) => pipe.probe_bytes,
+        _ => 1024 * 1024,
+    };
     if let Input::Hls(hls) = input {
         if !hls.playlist.ended && hls.playlist.init.is_none() {
             hls.read(&mut [], c)?;
-            if hls.bytes.first() == Some(&0x47)
-                && hls.bytes.get(188) == Some(&0x47)
-                && hls.bytes.get(376) == Some(&0x47)
+            if hls.bytes.head().first() == Some(&0x47)
+                && hls.bytes.head().get(188) == Some(&0x47)
+                && hls.bytes.head().get(376) == Some(&0x47)
             {
                 probe_bytes = (hls.bytes.len() / 2).clamp(2048, probe_bytes);
             }
@@ -1623,6 +1697,156 @@ mod tests {
             assert_eq!(heads.len(), 6, "one verification at most per worker");
             assert!(heads[1..].iter().all(|r| r.starts_with("GET /leaf.m3u8 ")));
         }
+    }
+
+    #[test]
+    fn expired_gateway_segment_reacquires_only_its_window_through_the_normal_master() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=80\nleaf.m3u8\n";
+        let live = b"#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXTINF:12,\n/ts/001122334455667788aabbcc/n1234abcd.41.ts\n#EXTINF:12,\n/ts/001122334455667788aabbcc/n1234abcd.42.ts\n";
+        let opt_in = "OTT-Multiview-Admission: refresh-peers-v1\r\n";
+        let missing = b"getTsChunk: no stream name: n1234abcd";
+        let server = SessionServer::new(vec![
+            Reply::ok(&format!("{opt_in}Set-Cookie: slot=one; Path=/\r\n"), master),
+            Reply::ok("", live).requiring("slot=one"),
+            Reply::ok(&format!("{opt_in}Set-Cookie: slot=two; Path=/\r\n"), master),
+            Reply::ok("", live).requiring("slot=two"),
+            Reply::ok("", b"A").requiring("slot=one"), Reply::ok("", b"B").requiring("slot=two"),
+            Reply { status: 403, ..Reply::ok("", missing).requiring("slot=one") },
+            Reply::ok("", MISSING_STREAM_HTML).requiring("slot=one"),
+            Reply::ok("", b"C").requiring("slot=two"),
+            Reply::ok(&format!("{opt_in}Set-Cookie: slot=new; Path=/\r\n"), master),
+            Reply::ok("", live).requiring("slot=new"), Reply::ok("", b"D").requiring("slot=new"),
+            Reply { status: 403, ..Reply::ok("", missing) },
+        ]);
+        let root = format!("{}/master.m3u8", server.base);
+        let c1 = Control::default();
+        let c2 = Control::default();
+        let mut first = Hls::open(root.clone(), 1024, &c1).unwrap();
+        let mut other = Hls::open(root.clone(), 1024, &c2).unwrap();
+        let mut b = [0];
+        assert_eq!(first.read(&mut b, &c1), Ok(1));
+        assert_eq!(b[0], b'A');
+        assert_eq!(other.read(&mut b, &c2), Ok(1));
+        assert_eq!(b[0], b'B');
+        c1.video_decoded.store(true, Ordering::Release);
+        assert_eq!(first.read(&mut b, &c1), Err(Error::LostProviderLease));
+        assert_eq!(other.read(&mut b, &c2), Ok(1));
+        assert_eq!(b[0], b'C');
+        let c3 = Control::default();
+        let mut replacement = Hls::open(root.clone(), 1024, &c3).unwrap();
+        assert_eq!(replacement.read(&mut b, &c3), Ok(1));
+        assert_eq!(b[0], b'D');
+        assert!(matches!(Hls::open(root, 1024, &Control::default()), Err(Error::SourceDenied)));
+        let heads = server.heads();
+        assert_eq!(heads.len(), 13);
+        assert!(heads[7].starts_with("GET /leaf.m3u8 "));
+    }
+
+    #[test]
+    fn replaced_gateway_segment_resumes_without_reopening_the_master() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXTINF:12,\n/ts/001122334455667788aabbcc/n1234abcd.41.ts\n";
+        let updated = b"#EXTM3U\n#EXTINF:12,\n/ts/001122334455667788aabbcc/9111beef.41.ts\n";
+        let server = SessionServer::new(vec![
+            Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\nSet-Cookie: slot=one; Path=/\r\n", live),
+            Reply { status: 403, ..Reply::ok("", b"getTsChunk: no stream name: n1234abcd").requiring("slot=one") },
+            Reply::ok("", updated).requiring("slot=one"), Reply::ok("", b"N").requiring("slot=one"),
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &c).unwrap();
+        c.video_decoded.store(true, Ordering::Release);
+        let mut out = [0];
+        assert_eq!(hls.read(&mut out, &c), Ok(1));
+        assert_eq!(out[0], b'N');
+        let heads = server.heads();
+        assert_eq!(heads.len(), 4);
+        assert!(heads[2].starts_with("GET /leaf.m3u8 "));
+        assert!(heads[3].starts_with("GET /ts/001122334455667788aabbcc/9111beef.41.ts "));
+    }
+
+    #[test]
+    fn unchanged_leaf_does_not_repeat_a_rejected_gateway_chunk() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXTINF:12,\n/ts/001122334455667788aabbcc/n1234abcd.41.ts\n";
+        let server = SessionServer::new(vec![
+            Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\n", live),
+            Reply { status: 403, ..Reply::ok("", b"getTsChunk: no stream name: n1234abcd") },
+            Reply::ok("", live),
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &c).unwrap();
+        c.video_decoded.store(true, Ordering::Release);
+        assert_eq!(hls.read(&mut [0], &c), Err(Error::SourceDenied));
+        assert_eq!(server.heads().len(), 3);
+    }
+
+    #[test]
+    fn connection_loss_is_recoverable_only_after_gateway_playback() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        use crate::curlio::OpenErr;
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXTINF:1,\na.ts\n";
+        let server = SessionServer::new(vec![Reply::ok("OTT-Multiview-Admission: refresh-peers-v1\r\n", live)]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &c).unwrap();
+        for code in [18, 52, 55, 56] {
+            hls.remote.failure = Some(OpenErr::Transport(code));
+            assert_eq!(hls.remote.report_outage(Error::Source, Some(&hls.url), &c), Error::Source);
+        }
+        c.video_decoded.store(true, Ordering::Release);
+        for code in [18, 52, 55, 56] {
+            hls.remote.failure = Some(OpenErr::Transport(code));
+            assert_eq!(hls.remote.report_outage(Error::Source, Some(&hls.url), &c), Error::SourceTemporarilyUnavailable);
+        }
+        assert_eq!(hls.remote.report_outage(Error::Source, None, &c), Error::Source);
+        assert_eq!(hls.remote.report_outage(Error::Source, Some("https://another.invalid/leaf.m3u8"), &c), Error::Source);
+        c.paused.store(true, Ordering::Release);
+        assert_eq!(hls.remote.report_outage(Error::Source, Some(&hls.url), &c), Error::Source);
+        c.paused.store(false, Ordering::Release);
+        for reason in [OpenErr::Transport(60), OpenErr::Status(403), OpenErr::Status(429)] {
+            hls.remote.failure = Some(reason);
+            assert_eq!(hls.remote.report_outage(Error::Source, Some(&hls.url), &c), Error::Source);
+        }
+        c.hls_gateway_lease.store(false, Ordering::Release);
+        hls.remote.failure = Some(OpenErr::Transport(56));
+        assert_eq!(hls.remote.report_outage(Error::Source, Some(&hls.url), &c), Error::Source);
+    }
+
+    #[test]
+    fn denied_segment_requires_the_exact_body_origin_stream_and_previously_played_gateway() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let opt_in = "OTT-Multiview-Admission: refresh-peers-v1\r\n";
+        let live = b"#EXTM3U\n#EXTINF:1,\n/ts/001122334455667788aabbcc/n1234abcd.41.ts\n";
+        let expected = b"getTsChunk: no stream name: n1234abcd".as_slice();
+        for (status, body, header, played) in [
+            (403, b"getTsChunk: no stream name: n1234abce".as_slice(), opt_in, true),
+            (403, b"Forbidden".as_slice(), opt_in, true),
+            (403, expected, "", true),
+            (403, expected, opt_in, false),
+            (401, expected, opt_in, true),
+            (429, expected, opt_in, true),
+        ] {
+            let server = SessionServer::new(vec![Reply::ok(header, live), Reply { status, ..Reply::ok("", body) }]);
+            let c = Control::default();
+            let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &c).unwrap();
+            c.video_decoded.store(played, Ordering::Release);
+            assert_eq!(hls.read(&mut [0], &c), Err(Error::SourceDenied));
+            assert_eq!(server.heads().len(), 2, "no retry after a real refusal");
+        }
+        let server = SessionServer::new(vec![
+            Reply::ok(opt_in, live),
+            Reply { status: 302, ..Reply::ok("Location: /unrelated\r\n", b"") },
+            Reply { status: 403, ..Reply::ok("", expected) },
+        ]);
+        let c = Control::default();
+        let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &c).unwrap();
+        c.video_decoded.store(true, Ordering::Release);
+        assert_eq!(hls.read(&mut [0], &c), Err(Error::SourceDenied));
     }
 
     #[test]

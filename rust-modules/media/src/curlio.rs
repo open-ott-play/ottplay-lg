@@ -664,6 +664,7 @@ pub struct CurlSource {
     published: bool,
     cookies: Option<EphemeralCookies>,
     owned_loopback: bool,
+    expected_forbidden_len: Option<usize>,
     multi: *mut CURLM,
     /// The easy handle for the transfer currently attached to `multi`, or null between them. A
     /// seek is a fresh easy handle, because a Range is a request header.
@@ -1042,6 +1043,7 @@ impl CurlSource {
             published,
             cookies: ephemeral_cookies.then(EphemeralCookies::default),
             owned_loopback,
+            expected_forbidden_len: None,
             multi,
             easy: std::ptr::null_mut(),
             hop_url: url_c.clone(),
@@ -1096,6 +1098,22 @@ impl CurlSource {
             *act = Some(Arc::clone(&self.abort));
         }
         self.start_range_until(0, None, deadline, checkpoint)
+    }
+
+    /// A known downstream resource can return a small control message with its refusal.
+    /// Preserve the ordinary HTTP error. Only report whether its complete body exactly matched;
+    /// no error page becomes readable media and no extra request is issued.
+    pub(crate) fn reopen_matching_forbidden(
+        &mut self, url: &str, deadline: std::time::Instant, checkpoint: &mut dyn Checkpoint,
+        expected: &[u8],
+    ) -> (Result<(), OpenErr>, bool) {
+        debug_assert!(!expected.is_empty() && expected.len() <= 128);
+        self.expected_forbidden_len = Some(expected.len());
+        let result = self.reopen_until(url, Some(deadline), checkpoint);
+        self.expected_forbidden_len = None;
+        let matched = result == Err(OpenErr::Status(403)) && self.done && !self.failed
+            && self.xfer.headers_done && self.xfer.buf.as_slice() == expected;
+        (result, matched)
     }
 
     /// Attach a fresh easy handle at byte `at` and pump until its headers are complete.
@@ -1600,11 +1618,17 @@ impl CurlSource {
                 log_target(Some(&next)),
                 hop.n + 1
             ));
-            self.finish_redirect_body(deadline);
+            self.finish_short_body(deadline, REDIRECT_BODY_MAX);
             self.stop();
             return Ok(Attempt::Redirect(next));
         }
         self.validate(at, setup_timeout_at).map_err(|e| {
+            if let Some(len) = self.expected_forbidden_len.filter(|&len| e == OpenErr::Status(403)
+                && (self.xfer.body_len < 0 || self.xfer.body_len == len as i64)
+                && self.xfer.buf.len() <= len)
+            {
+                self.finish_short_body(deadline, len);
+            }
             self.stop();
             e
         })?;
@@ -1687,18 +1711,18 @@ impl CurlSource {
         Ok(())
     }
 
-    /// Read a redirect's body to its end, within [`REDIRECT_BODY_MAX`] bytes and [`REDIRECT_BODY_WAIT`],
+    /// Finish a small control response within the caller's byte limit and [`REDIRECT_BODY_WAIT`],
     /// before the hop is left. A `3xx` body is a line of HTML or nothing, and a transfer that has
     /// finished is one whose connection libcurl keeps for the next request; one removed mid-body is
     /// closed. Best effort by design: a body that does not finish inside the bounds, an abort, or a
     /// multi failure costs the connection and nothing else — the `Location` is already in hand and
     /// the next attempt resets the transfer and rebuilds a failed multi.
-    fn finish_redirect_body(&mut self, deadline: Option<std::time::Instant>) {
+    fn finish_short_body(&mut self, deadline: Option<std::time::Instant>, max_body: usize) {
         let mut until = std::time::Instant::now() + REDIRECT_BODY_WAIT;
         if let Some(at) = deadline {
             until = until.min(at);
         }
-        while !self.done && !self.abort.is_set() && self.xfer.buf.len() <= REDIRECT_BODY_MAX {
+        while !self.done && !self.abort.is_set() && self.xfer.buf.len() <= max_body {
             let left_us = until.saturating_duration_since(std::time::Instant::now()).as_micros();
             if left_us == 0 || self.perform().is_err() || self.done {
                 return;

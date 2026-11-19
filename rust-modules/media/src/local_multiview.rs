@@ -2,7 +2,7 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
@@ -73,6 +73,7 @@ pub struct Limits {
     pub max_frame_bytes: usize,
     pub max_fps: u32,
     pub max_object_bytes: usize,
+    pub prefetch_live_segment: bool,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -81,13 +82,14 @@ impl Default for Limits {
             max_frame_bytes: 1920 * 1080 * 3 / 2 + 4096,
             max_fps: 15,
             max_object_bytes: 16 * 1024 * 1024,
+            prefetch_live_segment: false,
         }
     }
 }
 impl Limits {
     /// Four equally sized pictures retain film/PAL cadence, including background slots.
     pub fn grid4(focused: bool) -> Self {
-        Self { max_fps: if focused { 30 } else { 25 }, ..Self::default() }
+        Self { max_fps: if focused { 30 } else { 25 }, prefetch_live_segment: true, ..Self::default() }
     }
 
     pub(crate) fn valid(self) -> bool {
@@ -129,6 +131,12 @@ pub fn hls_handoff_origin(url: &str) -> Option<String> {
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
+    pub reader_abandoned: AtomicBool,
+    pub hls_retained_bytes: AtomicUsize,
+    #[cfg(test)]
+    pub hls_peak_compressed: AtomicUsize,
+    pub hls_prefetched: AtomicU32,
+    pub hls_prefetch_limited: AtomicU32,
     held: Option<crate::ff::HeldLocalFile>,
     pub retired: AtomicBool,
     pub paused: AtomicBool,
@@ -184,7 +192,7 @@ impl Control {
         }
     }
     pub(crate) fn stopped(&self) -> bool {
-        self.cancel.load(Ordering::Acquire)
+        self.cancel.load(Ordering::Acquire) || self.reader_abandoned.load(Ordering::Acquire)
             || self.held.as_ref().is_some_and(|file| !file.is_live())
     }
     pub(crate) fn wait(&self, d: Duration) -> bool {
@@ -242,6 +250,12 @@ impl Session {
         };
         let control = Arc::new(Control {
             cancel: AtomicBool::new(false),
+            reader_abandoned: AtomicBool::new(false),
+            hls_retained_bytes: AtomicUsize::new(0),
+            #[cfg(test)]
+            hls_peak_compressed: AtomicUsize::new(0),
+            hls_prefetched: AtomicU32::new(0),
+            hls_prefetch_limited: AtomicU32::new(0),
             held,
             retired: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -335,6 +349,12 @@ impl Session {
     pub fn duration_us(&self) -> Option<i64> {
         let duration = self.control.duration_us.load(Ordering::Acquire);
         (duration > 0).then_some(duration)
+    }
+
+    /// Counts completed lookahead hits and compressed-buffer budget deferrals for this source.
+    pub fn hls_lookahead_counts(&self) -> (u32, u32) {
+        (self.control.hls_prefetched.load(Ordering::Relaxed),
+         self.control.hls_prefetch_limited.load(Ordering::Relaxed))
     }
 
     /// Update presentation cadence without disturbing decoding, the media clock or PCM.
@@ -505,6 +525,12 @@ mod tests {
         Session {
             control: Arc::new(Control {
                 cancel: AtomicBool::new(false),
+                reader_abandoned: AtomicBool::new(false),
+                hls_retained_bytes: AtomicUsize::new(0),
+            #[cfg(test)]
+            hls_peak_compressed: AtomicUsize::new(0),
+                hls_prefetched: AtomicU32::new(0),
+                hls_prefetch_limited: AtomicU32::new(0),
                 held: None,
                 retired: AtomicBool::new(false),
                 paused: AtomicBool::new(false),
