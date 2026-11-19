@@ -32,7 +32,9 @@ DECODERS = ("h264", "hevc", "mpeg2video", "mpeg4", "vp8", "vp9", "mjpeg", "vc1",
 INPUTS = ("ci/build-ffmpeg.sh", "ci/dependencies.json", "ci/ffabi-assert.c", "ci/sanitize-ffmpeg-config.py",
           "ci/qualify-local-multiview.py", "ci/generate-local-multiview-fixtures.py",
           "rust-modules/media/src/ff.rs", "rust-modules/media/src/ff_local_video.rs", "rust-modules/media/src/ff_local_video_lookahead.rs",
-          "rust-modules/media/src/ff_local_video_blocks.rs", "rust-modules/media/src/local_multiview.rs", "rust-modules/media/src/local_multiview_real_tests.rs")
+          "rust-modules/media/src/ff_local_video_blocks.rs", "rust-modules/media/src/ff_local_video_box.rs",
+          "rust-modules/media/src/ff_local_video_box_arm.S", "rust-modules/media/src/local_multiview.rs",
+          "rust-modules/media/src/local_multiview_real_tests.rs")
 
 
 def sha(path):

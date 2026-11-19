@@ -926,6 +926,9 @@ fn can_halve_frame(w: usize, h: usize, aspect: f32, tile: (u32, u32)) -> bool {
     visible_w >= tw as f32 * 2.0 && visible_h >= th as f32 * 2.0
 }
 
+#[path = "ff_local_video_box.rs"]
+mod box_filter;
+
 unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool) -> Result<Vec<u8>, Error> {
     let ptr = std::ptr::read_unaligned(
         frame.add(OFF_FRAME_DATA + index * std::mem::size_of::<*const u8>()) as *const *const u8,
@@ -943,13 +946,9 @@ unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool)
         // The luma dimensions are divisible by four; its two 4:2:0 chroma
         // planes therefore have complete 2x2 blocks as well.
         let mut out = vec![0; size / 4];
+        let filter = box_filter::BoxFilter::detect();
         for (row, dst) in out.chunks_exact_mut(w / 2).enumerate() {
-            let top = input_row(2 * row).chunks_exact(2);
-            let bottom = input_row(2 * row + 1).chunks_exact(2);
-            for ((pixel, a), b) in dst.iter_mut().zip(top).zip(bottom) {
-                let sum = u16::from(a[0]) + u16::from(a[1]) + u16::from(b[0]) + u16::from(b[1]);
-                *pixel = ((sum + 2) / 4) as u8;
-            }
+            filter.row(input_row(2 * row), input_row(2 * row + 1), dst);
         }
         return Ok(out);
     }

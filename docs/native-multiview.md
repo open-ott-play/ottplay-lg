@@ -43,7 +43,9 @@ up to 30 fps in the focused window and 25 fps in the other three. Moving focus
 keeps the existing playback session and audio. Other layouts use a 15 fps ceiling.
 A 1080p frame can use half-size YUV planes on a 960×540 tile when both dimensions
 retain enough detail after cropping. Unsupported codecs, pixel formats or
-sources fail that slot independently. Supported output is 8-bit planar YUV420.
+sources fail that slot independently. Supported output is 8-bit planar YUV420. On ARMv7,
+the four-window half-size filter uses NEON when the kernel advertises it. Other
+CPUs and partial blocks use the same rounded four-sample average.
 Authorized local files and progressive HTTP media whose final response advertises
 byte ranges support seek. The decoder reports its opened transport capability to
 remote clients; HLS and unavailable windows do not advertise seek. Accepted paused
