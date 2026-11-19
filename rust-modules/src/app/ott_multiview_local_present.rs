@@ -368,7 +368,8 @@ impl State {
             };
             let result = (|| {
                 if self.textures[index].is_none() {
-                    self.textures[index] = Some(Texture::new(app.adapters.player.mt())?);
+                    let sibling = self.textures.iter().flatten().next();
+                    self.textures[index] = Some(Texture::new_shared(app.adapters.player.mt(), sibling)?);
                 }
                 self.textures[index]
                     .as_mut()
@@ -628,11 +629,18 @@ pub(super) fn video_evidence(runtime: &Runtime) -> Option<Value> {
                     || row.status == "failed"))
             .map_or_else(RenderedFrames::default, |_| state.frames[i]);
         let intervals = frames.draw_intervals();
-        let lookahead = runtime.multiview_local.slot_ticket(row.slot)
-            .filter(|&ticket| runtime.multiview.require_current_ticket(ticket).is_ok())
-            .and_then(|ticket| runtime.multiview_local.hls_lookahead_counts(ticket));
+        let reader_ticket = runtime.multiview_local.slot_ticket(row.slot)
+            .filter(|&ticket| runtime.multiview.require_current_ticket(ticket).is_ok());
+        let lookahead = reader_ticket.and_then(|t| runtime.multiview_local.hls_lookahead_counts(t));
+        let compressed = reader_ticket.and_then(|t| runtime.multiview_local.hls_compressed_bytes(t));
+        let texture = reader_ticket.filter(|ticket| Some(*ticket) == state.frame_tickets[i])
+            .and_then(|_| state.textures[i].as_ref()?.dimensions());
         json!({"slot_id": i, "slot_generation": row.slot_generation, "source_revision": row.source_revision,
             "drawn_frames": frames.count, "last_pts_us": frames.last_pts_us,
+            "hls_compressed_current_bytes": compressed.map(|v| v.0),
+            "hls_compressed_peak_bytes": compressed.map(|v| v.1),
+            "texture_width": texture.map(|(w, _)| w),
+            "texture_height": texture.map(|(_, h)| h),
             "hls_prefetch_ready": lookahead.map(|v| v.0),
             "hls_prefetch_budget_deferrals": lookahead.map(|v| v.1),
             "draw_interval_p95_ms": intervals.map(|pair| pair.0),
@@ -795,6 +803,9 @@ mod tests {
         let stopped = &video_evidence(&runtime).unwrap()["slots"][index];
         assert_eq!(stopped["drawn_frames"], 0);
         assert!(stopped["last_pts_us"].is_null());
+        for field in ["hls_compressed_current_bytes", "hls_compressed_peak_bytes", "texture_width", "texture_height"] {
+            assert_eq!(stopped.get(field), Some(&Value::Null));
+        }
         assert_eq!(stopped["draw_intervals_ge_250ms_count"], 0);
         assert_eq!(stopped.get("draw_interval_lifetime_max_ms"), Some(&Value::Null));
     }
