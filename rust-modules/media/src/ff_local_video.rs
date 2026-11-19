@@ -1090,27 +1090,37 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
 #[derive(Default)]
 struct VideoCadence {
     previous_pts: Option<i64>,
+    previous_grid_tick: Option<Instant>,
     fraction: u64,
 }
 impl VideoCadence {
-    fn accepts(&mut self, pts: i64, fps: u32) -> bool {
+    fn accepts(&mut self, pts: i64, fps: u32, grid_tick: Option<Instant>) -> bool {
         let Some(previous) = self.previous_pts else {
             self.previous_pts = Some(pts);
+            self.previous_grid_tick = grid_tick;
             // Round to the nearest input frame, including rounded 90 kHz broadcast timestamps.
             self.fraction = 499_999;
             return true;
         };
         if pts <= previous { return false; }
-        let elapsed = pts.saturating_sub(previous) as u64;
-        if fps <= Limits::default().max_fps {
-            // Keep the existing minimum inter-frame interval for dense layouts. Raising
-            // their average from 12.5 to 15 on PAL would add uploads to all nine windows.
-            if elapsed < 1_000_000 / u64::from(fps.max(1)) { return false; }
+        let media_elapsed = pts.saturating_sub(previous) as u64;
+        let last_grid_tick = std::mem::replace(&mut self.previous_grid_tick, grid_tick);
+        if grid_tick.is_none() && fps <= Limits::default().max_fps {
+            // PiP and perimeter retain their minimum interval between published pictures.
+            if media_elapsed < 1_000_000 / u64::from(fps.max(1)) { return false; }
             self.previous_pts = Some(pts);
             self.fraction = 499_999;
             return true;
         }
         self.previous_pts = Some(pts);
+        // The decoder already paces each frame to its PTS. In the nine-window grid,
+        // count real elapsed time so a batch of overdue frames after a late segment
+        // cannot spend a second's worth of copy/upload capacity in one render tick.
+        let elapsed = match (last_grid_tick, grid_tick) {
+            (Some(last), Some(now)) => now.saturating_duration_since(last).as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            _ => media_elapsed,
+        };
         let credit = self.fraction.saturating_add(elapsed.saturating_mul(u64::from(fps)));
         self.fraction = credit % 1_000_000;
         credit >= 1_000_000
@@ -1448,9 +1458,13 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                 if !c.wait(due.saturating_duration_since(Instant::now())) {
                     return Err(Error::Cancelled);
                 }
-                if cadence.accepts(pts, c.max_fps.load(Ordering::Relaxed)) {
+                let fps = c.max_fps.load(Ordering::Relaxed);
+                let tile = c.output_tile();
+                let grid_tick = (fps <= Limits::default().max_fps && tile.0 != 0 && tile.1 != 0)
+                    .then(Instant::now);
+                if cadence.accepts(pts, fps, grid_tick) {
                     let aspect = display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame));
-                    let scale = plane_scale(w, h, aspect, c.output_tile());
+                    let scale = plane_scale(w, h, aspect, tile);
                     let divisor = scale as usize;
                     let frame = FrameYuv {
                         width: (w / divisor) as u32,
@@ -1501,7 +1515,7 @@ mod tests {
             let mut cadence = VideoCadence::default();
             let shown = (0..).map(|i: i64| i * 1_000_000 * denominator / numerator)
                 .take_while(|&pts| pts < 10_000_000)
-                .filter(|&pts| cadence.accepts(pts, cap)).count();
+                .filter(|&pts| cadence.accepts(pts, cap, None)).count();
             assert_eq!(shown, expected, "{numerator}/{denominator} fps capped at {cap}");
         }
     }
@@ -1509,14 +1523,42 @@ mod tests {
     #[test]
     fn cadence_changes_without_replaying_pts_or_catching_up_after_a_gap() {
         let mut cadence = VideoCadence::default();
-        assert!(cadence.accepts(0, 25));
-        assert!(cadence.accepts(40_000, 25));
-        assert!(!cadence.accepts(40_000, 30));
-        assert!(!cadence.accepts(30_000, 30));
-        assert!(cadence.accepts(73_333, 30));
-        assert!(cadence.accepts(10_073_333, 15));
-        assert!(!cadence.accepts(10_073_334, 15));
-        assert!(VideoCadence::default().accepts(10, 25), "fresh seek landing");
+        assert!(cadence.accepts(0, 25, None));
+        assert!(cadence.accepts(40_000, 25, None));
+        assert!(!cadence.accepts(40_000, 30, None));
+        assert!(!cadence.accepts(30_000, 30, None));
+        assert!(cadence.accepts(73_333, 30, None));
+        assert!(cadence.accepts(10_073_333, 15, None));
+        assert!(!cadence.accepts(10_073_334, 15, None));
+        assert!(VideoCadence::default().accepts(10, 25, None), "fresh seek landing");
+    }
+
+    #[test]
+    fn nine_panes_deliver_the_full_fifteen_fps_budget_at_film_and_broadcast_rates() {
+        let start = Instant::now();
+        for (num, den) in [(24_000, 1001), (24, 1), (25, 1), (30_000, 1001), (50, 1)] {
+            let mut cadence = VideoCadence::default();
+            let shown = (0..).map(|i: i64| i * 1_000_000 * den / num)
+                .take_while(|pts| *pts < 10_000_000)
+                .filter(|pts| cadence.accepts(*pts, 15, Some(start + Duration::from_micros(*pts as u64))))
+                .count();
+            assert_eq!(shown, 150, "{num}/{den} fps");
+        }
+    }
+
+    #[test]
+    fn nine_panes_do_not_upload_a_burst_of_overdue_frames_after_an_origin_pause() {
+        let mut cadence = VideoCadence::default();
+        let start = Instant::now();
+        assert!(cadence.accepts(0, 15, Some(start)));
+        let late = start + Duration::from_secs(1);
+        let burst = (1..=25).filter(|frame| cadence.accepts(frame * 40_000, 15, Some(late))).count();
+        assert_eq!(burst, 1);
+        let shown = (1..=25).filter(|frame| {
+            let elapsed = frame * 40_000;
+            cadence.accepts(1_000_000 + elapsed, 15, Some(late + Duration::from_micros(elapsed as u64)))
+        }).count();
+        assert_eq!(shown, 15);
     }
 
     #[test]
