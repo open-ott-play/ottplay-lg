@@ -115,7 +115,7 @@ pub(super) struct State {
     lease: Option<LeaseClose>,
     lease_failed: bool,
     textures: [Option<Texture>; 9],
-    tickets: [Option<ResolveTicket>; 9],
+    frame_tickets: [Option<ResolveTicket>; 9],
     display_aspects: [f32; 9],
     frames: [RenderedFrames; 9],
     plan: Option<RasterPlan>,
@@ -135,7 +135,7 @@ impl Default for State {
             lease: None,
             lease_failed: false,
             textures: std::array::from_fn(|_| None),
-            tickets: [None; 9],
+            frame_tickets: [None; 9],
             display_aspects: [0.0; 9],
             frames: [RenderedFrames::default(); 9],
             plan: None,
@@ -205,7 +205,7 @@ impl State {
         self.audio = None;
         self.pending_pcm = None;
         self.textures = std::array::from_fn(|_| None);
-        self.tickets = [None; 9];
+        self.frame_tickets = [None; 9];
         self.frames = [RenderedFrames::default(); 9];
         self.plan = None;
     }
@@ -336,10 +336,8 @@ impl State {
                 continue;
             };
             let ticket = runtime.multiview_local.slot_ticket(slot);
-            if ticket != self.tickets[index] {
-                self.textures[index] = None;
-                self.tickets[index] = ticket;
-                self.frames[index] = RenderedFrames::default();
+            if !self.update_frame_ticket(index, ticket) {
+                continue;
             }
             let Some(frame) = runtime.multiview_local.take_frame(slot) else {
                 continue;
@@ -517,6 +515,22 @@ impl State {
             }
         }
     }
+    fn update_frame_ticket(&mut self, index: usize, ticket: Option<ResolveTicket>) -> bool {
+        let Some(ticket) = ticket else {
+            // Drop pixels immediately; keep only successfully drawn evidence under
+            // the original ticket. A pending upload was never shown.
+            self.textures[index] = None;
+            self.frames[index].pending_pts_us = None;
+            return false;
+        };
+        if self.frame_tickets[index] != Some(ticket) {
+            self.textures[index] = None;
+            self.frame_tickets[index] = Some(ticket);
+            self.frames[index] = RenderedFrames::default();
+        }
+        true
+    }
+
     fn draw(&mut self, app: &App) {
         let Some(plan) = self.plan.as_ref() else {
             return;
@@ -581,9 +595,10 @@ pub(super) fn video_evidence(runtime: &Runtime) -> Option<Value> {
     let state = &runtime.multiview_local_present;
     let slots: Vec<_> = scene.slots.iter().map(|row| {
         let i = row.slot.index();
-        let frames = state.tickets[i]
+        let frames = state.frame_tickets[i]
             .filter(|&ticket| runtime.multiview.require_current_ticket(ticket).is_ok()
-                && runtime.multiview_local.slot_ticket(row.slot) == Some(ticket))
+                && (runtime.multiview_local.slot_ticket(row.slot) == Some(ticket)
+                    || row.status == "failed"))
             .map_or_else(RenderedFrames::default, |_| state.frames[i]);
         json!({"slot_id": i, "slot_generation": row.slot_generation, "source_revision": row.source_revision,
             "drawn_frames": frames.count, "last_pts_us": frames.last_pts_us,
@@ -660,6 +675,35 @@ mod tests {
         frames.submitted();
         assert_eq!((frames.count, frames.last_pts_us), (2, Some(2)));
     }
+    #[test]
+    fn a_failed_current_window_keeps_its_last_drawn_frame_count_until_stop() {
+        let _serial = plx_base::testlock::serial();
+        use crate::app::ott_runtime::multiview_local::lease_tests::{queued_local_attempt, resolve_attempt};
+        use plx_data::ott::multiview::AdmissionOutcome;
+        let (app, mut runtime, mut driver, _, ticket, work) = queued_local_attempt();
+        resolve_attempt(&mut runtime, &app, work);
+        runtime.multiview.backend_start_completed(ticket, AdmissionOutcome::Admitted).unwrap();
+        let index = ticket.slot().index();
+        let output = &mut runtime.multiview_local_present;
+        assert!(output.update_frame_ticket(index, Some(ticket)));
+        output.frames[index].pending_pts_us = Some(42000);
+        output.frames[index].submitted();
+        output.frames[index].pending_pts_us = Some(43000);
+        assert!(!output.update_frame_ticket(index, None));
+        output.frames[index].submitted();
+        runtime.multiview.playback_failed(ticket).unwrap();
+        runtime.multiview_local = driver;
+        let failed = &video_evidence(&runtime).unwrap()["slots"][index];
+        assert_eq!(failed["drawn_frames"], 1);
+        assert_eq!(failed["last_pts_us"], 42000);
+        driver = std::mem::take(&mut runtime.multiview_local);
+        driver.stop_slot(&mut runtime, ticket.slot()).unwrap();
+        runtime.multiview_local = driver;
+        let stopped = &video_evidence(&runtime).unwrap()["slots"][index];
+        assert_eq!(stopped["drawn_frames"], 0);
+        assert!(stopped["last_pts_us"].is_null());
+    }
+
     fn previous_favorite_fixture() -> (Runtime, Playing, Favorite) {
         use plx_data::ott::favorites::{Locator, Origin};
         let mut runtime =

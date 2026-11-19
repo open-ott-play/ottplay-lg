@@ -6,18 +6,33 @@ use std::{
     collections::HashSet,
     fs::File,
     path::PathBuf,
+    sync::atomic::AtomicUsize,
     time::{Duration, Instant},
 };
 
-/// This listener is created only by the explicitly requested ignored fixture test.
-/// No arbitrary paths, upstream requests, persistent service or external network.
+#[derive(Default)]
+struct LiveGridFixture {
+    last_served: [AtomicUsize; 4],
+    segment_timeout_reads: AtomicUsize,
+    segment_503_reads: AtomicUsize,
+}
+
+/// Loopback listener for explicit fixture tests. All content comes from generated files.
 struct FixtureServer {
     address: std::net::SocketAddr,
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     redirects: Arc<std::sync::atomic::AtomicUsize>,
+    live_grid: Arc<LiveGridFixture>,
 }
+fn is_segment(name: &str) -> bool {
+    name.len() == 13
+        && name.starts_with("segment")
+        && name.ends_with(".ts")
+        && name.as_bytes()[7..10].iter().all(u8::is_ascii_digit)
+}
+
 impl FixtureServer {
     fn open(root: PathBuf) -> Self {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -26,6 +41,8 @@ impl FixtureServer {
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let redirects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let live_grid = Arc::new(LiveGridFixture::default());
+        let live_requests = Arc::clone(&live_grid);
         let flag = Arc::clone(&stop);
         let finished = Arc::clone(&done);
         let redirected = Arc::clone(&redirects);
@@ -43,7 +60,8 @@ impl FixtureServer {
                 while !flag.load(Ordering::Acquire) && Instant::now() < expiry {
                     match listener.accept() {
                         Ok((socket, _)) => {
-                            let _ = Self::serve(socket, &root, &redirected);
+                            let _ =
+                                Self::serve(socket, &root, &redirected, &live_requests);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(2))
@@ -59,6 +77,7 @@ impl FixtureServer {
             done,
             worker: Some(worker),
             redirects,
+            live_grid,
         }
     }
     fn url(&self, path: &str) -> String {
@@ -82,6 +101,7 @@ impl FixtureServer {
         mut socket: std::net::TcpStream,
         root: &std::path::Path,
         redirects: &std::sync::atomic::AtomicUsize,
+        live_grid: &LiveGridFixture,
     ) -> std::io::Result<()> {
         use std::io::Read;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -108,6 +128,49 @@ impl FixtureServer {
         for index in [1, 3, 5] {
             if path == format!("/files/{index}.mp4") {
                 file = Some(root.join(format!("slot{index}.mp4")));
+            }
+        }
+        // Advance each live playlist as its reader consumes segments. A slow test
+        // runner cannot skip either injected fault by joining at a later live edge.
+        if path.starts_with("/live/") {
+            for (slot, index) in [2, 6, 7, 8].into_iter().enumerate() {
+                if path == format!("/live/{index}/media.m3u8") {
+                    let last = (1 + live_grid.last_served[slot].load(Ordering::Acquire)).min(11);
+                    let first = last.saturating_sub(3);
+                    let mut playlist = format!(
+                        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n"
+                    );
+                    for seq in first..=last {
+                        playlist.push_str(&format!("#EXTINF:2,\nsegment{seq:03}.ts\n"));
+                    }
+                    return Self::response(
+                        &mut socket,
+                        "200 OK",
+                        "Content-Type: application/vnd.apple.mpegurl\r\n",
+                        playlist.as_bytes(),
+                    );
+                }
+                if path == format!("/live/{index}/segment002.ts") {
+                    if index == 2
+                        && live_grid
+                            .segment_timeout_reads
+                            .fetch_add(1, Ordering::AcqRel)
+                            == 0
+                    {
+                        return Self::response(&mut socket, "200 OK", "", b"ESOCKETTIMEDOUT");
+                    }
+                    if index == 6 && live_grid.segment_503_reads.fetch_add(1, Ordering::AcqRel) == 0
+                    {
+                        return Self::response(&mut socket, "503 Service Unavailable", "", b"");
+                    }
+                }
+                if let Some(name) = path.strip_prefix(&format!("/live/{index}/")) {
+                    if is_segment(name) {
+                        let sequence = name[7..10].parse::<usize>().unwrap();
+                        live_grid.last_served[slot].fetch_max(sequence, Ordering::AcqRel);
+                        file = Some(root.join(format!("slot{index}-hls")).join(name));
+                    }
+                }
             }
         }
         for index in [2, 6, 7] {
@@ -141,11 +204,7 @@ impl FixtureServer {
                 file = Some(root.join(format!("slot{index}-hls/media.m3u8")));
             }
             if let Some(name) = path.strip_prefix(&format!("/edge/{index}/")) {
-                if name.len() == 13
-                    && name.starts_with("segment")
-                    && name.ends_with(".ts")
-                    && name.as_bytes()[7..10].iter().all(u8::is_ascii_digit)
-                {
+                if is_segment(name) {
                     file = Some(root.join(format!("slot{index}-hls")).join(name));
                 }
             }
@@ -227,8 +286,8 @@ impl Drop for FixtureServer {
     }
 }
 struct Readers(Vec<Session>);
-impl Drop for Readers {
-    fn drop(&mut self) {
+impl Readers {
+    fn cancel_and_wait(&mut self) -> bool {
         for s in &mut self.0 {
             s.cancel();
         }
@@ -236,6 +295,12 @@ impl Drop for Readers {
         while self.0.iter().any(|s| !s.is_retired()) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(5));
         }
+        self.0.iter().all(Session::is_retired)
+    }
+}
+impl Drop for Readers {
+    fn drop(&mut self) {
+        self.cancel_and_wait();
     }
 }
 fn open_mixed_readers(
@@ -630,15 +695,8 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         Some(4),
         |s| s[4].failure,
     );
-    for s in &mut readers.0 {
-        s.cancel();
-    }
-    let end = Instant::now() + Duration::from_secs(4);
-    while readers.0.iter().any(|s| !s.is_retired()) && Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(5));
-    }
     assert!(
-        readers.0.iter().all(Session::is_retired),
+        readers.cancel_and_wait(),
         "cancel was incorrectly reported as retirement"
     );
     let path = root.join("slot0.mp4");
@@ -658,6 +716,64 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
     }
     assert!(reopened.is_retired());
     assert!(server.stop(), "owned fixture HTTP worker did not retire");
+}
+
+#[test]
+#[ignore = "Explicit real bundled-decoder qualification; requires generated HLS fixtures"]
+fn four_live_hls_windows_advance_after_gateway_timeouts() {
+    let _serial = plx_base::testlock::serial();
+    let root = PathBuf::from(std::env::var_os("PLXNATIVE_LOCAL_VIDEO_FIXTURES").unwrap());
+    assert!(plx_net::net::global_init());
+    crate::ff::boot();
+    assert!(available(), "bundled H264 decoder unavailable");
+    let mut server = FixtureServer::open(root);
+    let mut readers = Readers(Vec::new());
+    for index in [2, 6, 7, 8] {
+        let source = ExternalSource::Hls(server.url(&format!("/live/{index}/media.m3u8")));
+        readers
+            .0
+            .push(Session::open(source, Limits::default()).unwrap());
+    }
+    let mut seen: Vec<Seen> = (0..4).map(|_| Seen::default()).collect();
+    until(
+        &mut readers,
+        &mut seen,
+        Duration::from_secs(15),
+        None,
+        |slots| {
+            server
+                .live_grid
+                .segment_timeout_reads
+                .load(Ordering::Acquire)
+                >= 2
+                && server.live_grid.segment_503_reads.load(Ordering::Acquire) >= 2
+                && slots.iter().all(|slot| slot.frames >= 3)
+        },
+    );
+    let at_recovery: Vec<_> = seen.iter().map(|s| s.last.unwrap()).collect();
+    until(
+        &mut readers,
+        &mut seen,
+        Duration::from_secs(12),
+        None,
+        |slots| {
+            slots
+                .iter()
+                .zip(&at_recovery)
+                .all(|(slot, start)| slot.last.unwrap() >= start + 4_000_000)
+        },
+    );
+    assert_eq!(
+        seen.iter()
+            .filter_map(|s| s.hash)
+            .collect::<HashSet<_>>()
+            .len(),
+        4
+    );
+    eprintln!("four live HLS streams at and after recovery: {at_recovery:?} -> {:?}",
+        seen.iter().map(|s| s.last.unwrap()).collect::<Vec<_>>());
+    assert!(readers.cancel_and_wait(), "grid workers did not retire");
+    assert!(server.stop());
 }
 
 #[path = "local_multiview_output_tests.rs"]

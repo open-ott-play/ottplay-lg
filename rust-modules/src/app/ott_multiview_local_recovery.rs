@@ -1,12 +1,13 @@
-//! Reacquire a previously playing window only after the provider identifies
-//! the loss of its live session. The slot retains no playable URL or authority.
+//! Reacquire a live HLS source after an explicit temporary outage or provider
+//! session loss. A pending restart holds no playable URL or authority.
 use super::super::{multiview, multiview_sources::SourceHandle, App, Runtime};
 use super::{handoff::direct_hls, Driver, Picture};
-use plx_data::ott::multiview::{ResolveTicket, SlotId};
+use plx_data::ott::multiview::{ResolveTicket, SceneId, SlotId};
 use plx_media::local_multiview::{Error as MediaError, Event};
 use std::time::Duration;
 
 const WINDOW: Duration = Duration::from_secs(5 * 60);
+const COLD_DELAY: Duration = Duration::from_secs(8);
 const FOLLOWUP_DELAY: Duration = Duration::from_secs(25);
 const FOLLOWUP_LIMIT: Duration = Duration::from_secs(90);
 
@@ -97,7 +98,12 @@ impl Budget {
         now: Duration,
     ) -> bool {
         let Some(proof) = self.proof.take() else {
-            return false;
+            // One cold restart per selection, and only for a transport-classified
+            // outage. Stagger windows recovering from the same gateway outage.
+            let delay = COLD_DELAY + Duration::from_millis(400 * ticket.slot().index() as u64);
+            return error == MediaError::SourceTemporarilyUnavailable
+                && self.attempts.iter().all(Option::is_none)
+                && self.enqueue(ticket, handle, now, now + delay, now + FOLLOWUP_LIMIT);
         };
         matches!(
             error,
@@ -138,6 +144,9 @@ impl Budget {
             {
                 self.confirmed_loss(picture.ticket, handle, url, now)
             }
+            Event::Failure(MediaError::SourceTemporarilyUnavailable) if picture.admitted => {
+                self.schedule(picture.ticket, handle, now)
+            }
             Event::Failure(error) if !picture.admitted => {
                 self.startup_outcome(*error, picture.ticket, handle, url, now)
             }
@@ -168,6 +177,10 @@ impl Budget {
 }
 
 impl Driver {
+    pub(in crate::app::ott_runtime) fn recovering(&self, scene: SceneId, slot: SlotId) -> bool {
+        self.recovery[slot.index()].next.is_some_and(|(ticket, ..)| ticket.scene() == scene)
+    }
+
     pub(super) fn recover_drained_slot(
         &mut self,
         runtime: &mut Runtime,
@@ -276,7 +289,29 @@ mod tests {
     }
 
     #[test]
-    fn cold_access_failures_changed_urls_and_expired_ownership_cannot_spend_a_retry() {
+    fn cold_temporary_outage_allows_one_delayed_restart_per_selection() {
+        let _serial = plx_base::testlock::serial();
+        let (_, _, _, handle, original) = super::super::lease_tests::receipt();
+        let (first, fresh) = test_tickets(handle, original.input.ticket);
+        let url = "https://fixture.invalid:443/channel.m3u8";
+        let now = Duration::ZERO;
+        for error in [MediaError::SourceDenied, MediaError::Source, MediaError::Playlist,
+            MediaError::SourceInterrupted, MediaError::LostProviderLease, MediaError::Cancelled] {
+            let mut budget = Budget::default();
+            assert!(!budget.startup_outcome(error, first, handle, url, now));
+            assert!(!budget.pending());
+        }
+        let mut budget = Budget::default();
+        assert!(budget.startup_outcome(MediaError::SourceTemporarilyUnavailable, first, handle, url, now));
+        assert!(budget.take_due(now + Duration::from_secs(1)).is_none());
+        assert_eq!(budget.take_due(now + COLD_DELAY), Some((first, handle)));
+        assert!(!budget.startup_outcome(MediaError::SourceTemporarilyUnavailable, fresh, handle, url,
+            now + COLD_DELAY + Duration::from_secs(1)));
+        assert!(!budget.pending());
+    }
+
+    #[test]
+    fn confirmed_session_followup_rejects_changed_urls_denial_and_expired_ownership() {
         let _serial = plx_base::testlock::serial();
         let (_, _, _, handle, original) = super::super::lease_tests::receipt();
         let (first, fresh) = test_tickets(handle, original.input.ticket);
@@ -296,7 +331,6 @@ mod tests {
             (MediaError::SourceInterrupted, fresh, url, 91),
         ] {
             let mut budget = Budget::default();
-            assert!(!budget.startup_outcome(error, target, handle, identity, now));
             assert!(budget.confirmed_loss(first, handle, url, now));
             budget.take_due(now + Duration::from_secs(1)).unwrap();
             assert!(!budget.startup_outcome(

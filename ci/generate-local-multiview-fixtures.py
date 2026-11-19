@@ -32,7 +32,7 @@ def main():
         subprocess.run(command, check=True, timeout=45)
         records.append({"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                         "bytes": path.stat().st_size, "command": command})
-        if index in (2, 6, 7):
+        if index in (2, 6, 7, 8):
             hls = args.destination / f"slot{index}-hls"
             hls.mkdir()
             hls_command = [args.ffmpeg, "-nostdin", "-v", "error", "-threads", "1", "-i", str(path),

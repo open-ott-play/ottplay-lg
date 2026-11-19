@@ -52,7 +52,7 @@ fn open_error(error: crate::curlio::OpenErr, c: &Control) -> Error {
     else { Error::Source }
 }
 
-// A restore coordinator can schedule a later ordinary request only from these explicit facts.
+// Preserve explicit gateway outages for the window's bounded, policy-checked recovery.
 // Certificate, permission, rate-limit, DNS, parse and unspecified transport failures stay final.
 fn temporarily_unavailable(error: crate::curlio::OpenErr) -> bool {
     use crate::curlio::OpenErr;
@@ -117,7 +117,8 @@ impl Remote {
     /// HTML bodies after the provider stopped that stream. An authentication/limit status, a
     /// denial opening the source itself, and an arbitrary HTML body retain their ordinary errors.
     fn provider_error(&self, bytes: &[u8], existing: Option<&str>, c: &Control) -> Option<Error> {
-        if existing.is_none() && self.source.status() == 200 && bytes == UPSTREAM_TIMEOUT {
+        // A gateway can return this control body for a playlist or a media segment.
+        if self.source.status() == 200 && bytes == UPSTREAM_TIMEOUT {
             return Some(Error::SourceTemporarilyUnavailable);
         }
         let error = provider_reply(bytes)?;
@@ -151,6 +152,16 @@ impl Remote {
         self.failure.is_some_and(|e| matches!(hls_curl_open_outcome(e),
             TraceOutcome::Transport | TraceOutcome::Deadline | TraceOutcome::ServerState))
     }
+    fn report_outage(&self, error: Error, c: &Control) -> Error {
+        if c.stopped() { Error::Cancelled }
+        else if error == Error::Source && self.failure.is_some_and(temporarily_unavailable) {
+            Error::SourceTemporarilyUnavailable
+        } else { error }
+    }
+    fn transient_read(&self, error: Error) -> bool {
+        matches!(error, Error::SourceInterrupted | Error::SourceTemporarilyUnavailable)
+            || (error == Error::Source && self.retryable())
+    }
     /// The root and selected variant share a retry allowance and private
     /// transfer context. Reopening preserves cookies received during redirects.
     fn startup<T>(&mut self, url: &str, mut open: bool, c: &Control,
@@ -171,10 +182,7 @@ impl Remote {
             open = true;
         };
         self.deadline = previous_deadline;
-        if matches!(&result, Err(Error::Source)) && !c.stopped() && self.failure.is_some_and(temporarily_unavailable) {
-            return Err(Error::SourceTemporarilyUnavailable);
-        }
-        result
+        result.map_err(|error| self.report_outage(error, c))
     }
     fn sniff_hls(&mut self, c: &Control) -> Result<bool, Error> {
         let mut bytes = Vec::new();
@@ -630,15 +638,16 @@ impl Hls {
         loop {
             self.arm_request(c, deadline)?;
             let verified_before = self.teardown_checked;
-            match self.refresh(c) {
-                Err(error) if *remaining > 0 && verified_before == self.teardown_checked
-                    && (error == Error::SourceInterrupted
-                    || (error == Error::Source && self.remote.retryable())) => {
-                    *remaining -= 1;
-                    if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
-                }
-                result => return result,
-            }
+            let result = self.refresh(c);
+            // A failed follow-up to a transitional denial is not evidence of a recoverable outage.
+            if verified_before != self.teardown_checked { return result; }
+            let Err(error) = result else { return Ok(()); };
+            let error = self.remote.report_outage(error, c);
+            if *remaining == 0 || !self.remote.transient_read(error) { return Err(error); }
+            let delay = Duration::from_millis(200);
+            if deadline.saturating_duration_since(Instant::now()) <= delay { return Err(error); }
+            *remaining -= 1;
+            if !c.wait(delay) { return Err(Error::Cancelled); }
         }
     }
 
@@ -664,7 +673,8 @@ impl Hls {
             }
             if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
                 let order = admission_read_started(&segment.url, c);
-                let result = self.remote.fetch(&segment.url, self.cap, true, c);
+                let result = self.remote.fetch(&segment.url, self.cap, true, c)
+                    .map_err(|error| self.remote.report_outage(error, c));
                 match result {
                     Ok(bytes) if !bytes.is_empty() => {
                         if order.is_some() && media_segment_bytes(&bytes) {
@@ -677,13 +687,14 @@ impl Hls {
                         break;
                     }
                     Err(error) if !self.playlist.ended && remaining > 0
-                        && (error == Error::SourceInterrupted || (error == Error::Source
-                            && (self.remote.retryable() || matches!(self.remote.failure,
-                                Some(crate::curlio::OpenErr::Status(404 | 410)))))) => {
+                        && (self.remote.transient_read(error) || (error == Error::Source
+                            && matches!(self.remote.failure, Some(crate::curlio::OpenErr::Status(404 | 410))))) => {
                         // Do not spend another request on a stale signed URI until
                         // the selected playlist has supplied a current segment.
+                        let delay = Duration::from_millis(200);
+                        if deadline.saturating_duration_since(Instant::now()) <= delay { return Err(error); }
                         remaining -= 1;
-                        if !c.wait(Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now()))) { return Err(Error::Cancelled); }
+                        if !c.wait(delay) { return Err(Error::Cancelled); }
                         self.refresh_retry(c, &mut remaining, &mut deadline)?;
                         continue;
                     }
@@ -1374,6 +1385,71 @@ mod tests {
         let heads = server.heads();
         assert_eq!(heads.len(), 4);
         assert!(heads[1..].iter().all(|r| r.starts_with("GET /leaf.m3u8 ")));
+    }
+
+    #[test]
+    fn live_segment_timeout_body_refreshes_the_leaf_before_returning_media_bytes() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let initial = b"#EXTM3U\n#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n";
+        let rotated = b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\nnew-b.ts\n";
+        let server = SessionServer::new(vec![
+            Reply::ok("Set-Cookie: slot=one; Path=/\r\n", initial),
+            Reply::ok("", b"A").requiring("slot=one"),
+            Reply::ok("", UPSTREAM_TIMEOUT).requiring("slot=one"),
+            Reply::ok("", rotated).requiring("slot=one"),
+            Reply::ok("", b"B").requiring("slot=one"),
+        ]);
+        let control = Control::default();
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), 1024, &control).unwrap();
+        let mut out = [0; 32];
+        assert_eq!(hls.read(&mut out, &control), Ok(1));
+        assert_eq!(out[0], b'A');
+        assert_eq!(hls.read(&mut out, &control), Ok(1));
+        assert_eq!(out[0], b'B');
+        let heads = server.heads();
+        assert_eq!(heads.len(), 5);
+        assert!(heads[3].starts_with("GET /live.m3u8 "));
+        assert!(heads[4].starts_with("GET /new-b.ts "));
+    }
+
+    #[test]
+    fn live_leaf_outage_keeps_its_evidence_after_bounded_same_session_retries() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXTINF:1,\na.ts\n";
+        for (status, body) in [(503, &b""[..]), (200, UPSTREAM_TIMEOUT)] {
+            let outage = || Reply { status, ..Reply::ok("", body) };
+            let server = SessionServer::new(vec![
+                Reply::ok("", live), outage(), outage(), outage(),
+            ]);
+            let control = Control::default();
+            let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &control).unwrap();
+            let mut deadline = Instant::now() + Duration::from_secs(10);
+            let mut remaining = 2;
+            assert_eq!(hls.refresh_retry(&control, &mut remaining, &mut deadline), Err(Error::SourceTemporarilyUnavailable));
+            assert_eq!(remaining, 0);
+            assert_eq!(server.heads().len(), 4);
+        }
+    }
+
+    #[test]
+    fn exhausted_live_segment_uses_only_the_current_request_for_its_outage_evidence() {
+        use crate::curlio::cookie_tests::{curl, Reply, SessionServer};
+        let _serial = curl();
+        let live = b"#EXTM3U\n#EXTINF:1,\na.ts\n";
+        for (status, expected) in [(504, Error::SourceTemporarilyUnavailable),
+            (404, Error::Source), (403, Error::SourceDenied)] {
+            let timeout = || Reply { status: 504, ..Reply::ok("", b"") };
+            let server = SessionServer::new(vec![
+                Reply::ok("", live), timeout(), Reply::ok("", live), timeout(), Reply::ok("", live),
+                Reply { status, ..Reply::ok("", b"") },
+            ]);
+            let control = Control::default();
+            let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 1024, &control).unwrap();
+            assert_eq!(hls.read(&mut [0; 32], &control), Err(expected));
+            assert_eq!(server.heads().len(), 6);
+        }
     }
 
     #[test]

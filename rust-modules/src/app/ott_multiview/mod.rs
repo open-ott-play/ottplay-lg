@@ -392,7 +392,7 @@ impl Coordinator {
             && self.scene_id == Some(ticket.scene())
             && self.tickets[slot.index()].is_none()
             && self.stopping[slot.index()].is_none()
-            && self.slot_status(slot) == Ok(SlotStatus::Empty)
+            && self.scene.as_ref().is_some_and(|scene| scene.just_retired(ticket))
     }
 
     pub fn local_step_source(
@@ -469,11 +469,20 @@ impl Coordinator {
     }
 
     pub fn scene_status(&self, runtime: &Runtime) -> Option<SceneStatus> {
+        self.scene_status_with_local(runtime, &runtime.multiview_local)
+    }
+
+    pub(super) fn scene_status_with_local(
+        &self,
+        runtime: &Runtime,
+        local: &super::multiview_local::Driver,
+    ) -> Option<SceneStatus> {
         let scene = self.scene.as_ref()?;
         if !self.snapshot.as_ref()?.current_for(runtime) {
             return None;
         }
         let scene_token = self.scene_token.as_ref()?.clone();
+        let scene_id = self.scene_id?;
         let revisions = scene.revisions();
         let slots = scene
             .visible_slots()
@@ -481,6 +490,9 @@ impl Coordinator {
                 let (source_generation, request_generation) = scene.slot_revisions(slot).ok()?;
                 let source = self.sources[slot.index()];
                 let (status, error) = match scene.slot_status(slot).ok()? {
+                    _ if source.is_some() && local.recovering(scene_id, slot) => {
+                        ("starting", None)
+                    }
                     SlotStatus::Empty => ("empty", None),
                     SlotStatus::Resolving { .. } | SlotStatus::Resolved { .. } => {
                         ("starting", None)
@@ -945,6 +957,16 @@ impl Coordinator {
             .as_ref()
             .map_or(transition.revision, Scene::revisions);
         Ok(transition)
+    }
+
+    pub(super) fn playback_failed(&mut self, ticket: ResolveTicket) -> Result<Transition, Error> {
+        self.require_current_ticket(ticket)?;
+        if self.stopping[ticket.slot().index()].is_some() {
+            return Err(Error::BackendPending);
+        }
+        let scene = self.scene.as_mut().ok_or(Error::SceneInactive)?;
+        scene.report_playback_failed(ticket)?;
+        Ok(Transition::new(scene))
     }
 
     /// Publish only the exact admitted pipeline's transport state. Repeated
