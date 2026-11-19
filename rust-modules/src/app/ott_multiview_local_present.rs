@@ -98,13 +98,31 @@ struct RenderedFrames {
     pending_pts_us: Option<i64>,
     last_pts_us: Option<i64>,
     count: u64,
+    last_draw: Option<std::time::Instant>,
+    intervals_ms: [u32; 32],
 }
 impl RenderedFrames {
-    fn submitted(&mut self) {
+    fn submitted(&mut self, now: std::time::Instant) {
         if let Some(pts) = self.pending_pts_us.take() {
+            if let Some(previous) = self.last_draw {
+                // count is the number of pictures already drawn; the second
+                // picture supplies the first interval.
+                let index = (self.count.saturating_sub(1) % self.intervals_ms.len() as u64) as usize;
+                self.intervals_ms[index] = now.saturating_duration_since(previous)
+                    .as_millis().min(u128::from(u32::MAX)) as u32;
+            }
+            self.last_draw = Some(now);
             self.count = self.count.saturating_add(1);
             self.last_pts_us = Some(pts);
         }
+    }
+
+    fn draw_intervals(&self) -> Option<(u32, u32)> {
+        let count = self.count.saturating_sub(1).min(self.intervals_ms.len() as u64) as usize;
+        if count == 0 { return None; }
+        let mut ordered = self.intervals_ms;
+        ordered[..count].sort_unstable();
+        Some((ordered[(count * 95).div_ceil(100) - 1], ordered[count - 1]))
     }
 }
 
@@ -548,6 +566,7 @@ impl State {
             0.0,
             1.0,
         );
+        let draw_time = std::time::Instant::now();
         for slot in plan.slots() {
             let index = usize::from(slot.id);
             let Some(texture) = self.textures[index].as_ref() else {
@@ -557,7 +576,7 @@ impl State {
             if texture.draw_uv(app.adapters.player.mt(), rect, uv, 1.0) == Ok(true)
                 && !plx_gfx::gfx::blur_source_pass()
             {
-                self.frames[index].submitted();
+                self.frames[index].submitted(draw_time);
             }
         }
     }
@@ -600,8 +619,11 @@ pub(super) fn video_evidence(runtime: &Runtime) -> Option<Value> {
                 && (runtime.multiview_local.slot_ticket(row.slot) == Some(ticket)
                     || row.status == "failed"))
             .map_or_else(RenderedFrames::default, |_| state.frames[i]);
+        let intervals = frames.draw_intervals();
         json!({"slot_id": i, "slot_generation": row.slot_generation, "source_revision": row.source_revision,
             "drawn_frames": frames.count, "last_pts_us": frames.last_pts_us,
+            "draw_interval_p95_ms": intervals.map(|pair| pair.0),
+            "draw_interval_max_ms": intervals.map(|pair| pair.1),
             "last_stop": runtime.multiview_local.last_stop(row.slot)})
     }).collect();
     Some(json!({"version": 1, "scene": scene.scene, "slots": slots}))
@@ -664,16 +686,33 @@ mod tests {
     #[test]
     fn rendered_frames_count_new_successful_draws_only() {
         let mut frames = RenderedFrames::default();
-        frames.submitted();
+        frames.submitted(std::time::Instant::now());
         assert_eq!(frames.count, 0);
         frames.pending_pts_us = Some(12);
         frames.pending_pts_us = Some(16); // a newer upload superseded it before draw
-        frames.submitted();
-        frames.submitted(); // a UI redraw of the same texture
+        frames.submitted(std::time::Instant::now());
+        frames.submitted(std::time::Instant::now()); // a UI redraw of the same texture
         assert_eq!((frames.count, frames.last_pts_us), (1, Some(16)));
         frames.pending_pts_us = Some(2); // a new picture after seek
-        frames.submitted();
+        frames.submitted(std::time::Instant::now());
         assert_eq!((frames.count, frames.last_pts_us), (2, Some(2)));
+    }
+    #[test]
+    fn draw_intervals_measure_new_pictures_and_expire_old_pauses() {
+        use std::time::{Duration, Instant};
+        let mut frames = RenderedFrames::default();
+        let mut now = Instant::now();
+        frames.pending_pts_us = Some(0);
+        frames.submitted(now);
+        assert_eq!(frames.draw_intervals(), None);
+        for i in 1..=33 {
+            now += Duration::from_millis(if i == 1 { 900 } else { 40 });
+            frames.submitted(now); // ordinary UI redraw
+            frames.pending_pts_us = Some(i * 40_000);
+            frames.submitted(now);
+            if i == 32 { assert_eq!(frames.draw_intervals(), Some((40, 900))); }
+        }
+        assert_eq!(frames.draw_intervals(), Some((40, 40)));
     }
     #[test]
     fn a_failed_current_window_keeps_its_last_drawn_frame_count_until_stop() {
@@ -687,10 +726,10 @@ mod tests {
         let output = &mut runtime.multiview_local_present;
         assert!(output.update_frame_ticket(index, Some(ticket)));
         output.frames[index].pending_pts_us = Some(42000);
-        output.frames[index].submitted();
+        output.frames[index].submitted(std::time::Instant::now());
         output.frames[index].pending_pts_us = Some(43000);
         assert!(!output.update_frame_ticket(index, None));
-        output.frames[index].submitted();
+        output.frames[index].submitted(std::time::Instant::now());
         runtime.multiview.playback_failed(ticket).unwrap();
         runtime.multiview_local = driver;
         let failed = &video_evidence(&runtime).unwrap()["slots"][index];

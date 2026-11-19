@@ -22,12 +22,15 @@ def main():
     hls_objects = []
     for index in range(9):
         path = args.destination / f"slot{index}.mp4"
+        # The four rolling broadcasts exercise film, PAL and fractional/double-rate TV.
+        rate, gop = {2: ("24000/1001", 24), 6: ("30000/1001", 30),
+                     7: ("25", 25), 8: ("50", 50)}.get(index, ("10", 10))
         command = [args.ffmpeg, "-nostdin", "-v", "error", "-y", "-filter_threads", "1",
                    "-filter_complex_threads", "1", "-f", "lavfi", "-i",
-                   f"testsrc2=size=96x64:rate=10:duration=24,hue=h={index * 37},lutyuv=y=val*0.7+{index * 4}",
+                   f"testsrc2=size=96x64:rate={rate}:duration=24,hue=h={index * 37},lutyuv=y=val*0.7+{index * 4}",
                    "-f", "lavfi", "-i", f"sine=frequency={300 + index * 37}:sample_rate=48000:duration=24",
                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
-                   "-threads", "1", "-g", "10", "-c:a", "aac", "-ac", "2", "-movflags", "+faststart",
+                   "-threads", "1", "-g", str(gop), "-c:a", "aac", "-ac", "2", "-movflags", "+faststart",
                    "-shortest", str(path)]
         subprocess.run(command, check=True, timeout=45)
         records.append({"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

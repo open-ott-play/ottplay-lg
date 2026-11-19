@@ -765,11 +765,11 @@ fn four_live_hls_windows_advance_after_gateway_timeouts() {
     boot_real_decoders();
     let mut server = FixtureServer::open(root);
     let mut readers = Readers(Vec::new());
-    for index in [2, 6, 7, 8] {
+    for (slot, index) in [2, 6, 7, 8].into_iter().enumerate() {
         let source = ExternalSource::Hls(server.url(&format!("/live/{index}/media.m3u8")));
         readers
             .0
-            .push(Session::open(source, Limits::default()).unwrap());
+            .push(Session::open(source, Limits::grid4(slot == 0)).unwrap());
     }
     let mut seen: Vec<Seen> = (0..4).map(|_| Seen::default()).collect();
     until(
@@ -787,19 +787,28 @@ fn four_live_hls_windows_advance_after_gateway_timeouts() {
                 && slots.iter().all(|slot| slot.frames >= 3)
         },
     );
-    let at_recovery: Vec<_> = seen.iter().map(|s| s.last.unwrap()).collect();
-    until(
-        &mut readers,
-        &mut seen,
-        Duration::from_secs(12),
-        None,
-        |slots| {
-            slots
-                .iter()
-                .zip(&at_recovery)
-                .all(|(slot, start)| slot.last.unwrap() >= start + 4_000_000)
-        },
-    );
+    // Keep the original assignments when focus moves from the film to the
+    // 29.97 fps broadcast. Compare delivered frames to EACH source's media
+    // time: one advancing PTS every few seconds would otherwise pass.
+    for focused in [0, 1] {
+        for (slot, session) in readers.0.iter_mut().enumerate() {
+            session.set_max_fps(Limits::grid4(slot == focused).max_fps);
+        }
+        let start: Vec<_> = seen.iter().map(|s| (s.last.unwrap(), s.frames)).collect();
+        until(&mut readers, &mut seen, Duration::from_secs(12), None, |slots| {
+            slots.iter().zip(&start).all(|(s, (pts, _))| s.last.unwrap() - pts >= 4_000_000)
+        });
+        for (slot, (s, (pts, count))) in seen.iter().zip(&start).enumerate() {
+            let elapsed_us = (s.last.unwrap() - pts) as f64;
+            let frames = (s.frames - count) as f64;
+            let fps = frames * 1_000_000.0 / elapsed_us;
+            let source_fps = [24_000.0 / 1_001.0, 30_000.0 / 1_001.0, 25.0, 50.0][slot];
+            let target = f64::min(source_fps, if slot == focused { 30.0 } else { 25.0 });
+            eprintln!("grid4 slot {} focus {} delivered {fps:.2} fps, target {target:.2}", slot + 1, focused + 1);
+            assert!(fps >= target * 0.9 && frames <= target * elapsed_us / 1_000_000.0 + 2.0,
+                    "slot {}: {fps:.2} fps for {target:.2} target", slot + 1);
+        }
+    }
     assert_eq!(
         seen.iter()
             .filter_map(|s| s.hash)
@@ -807,8 +816,6 @@ fn four_live_hls_windows_advance_after_gateway_timeouts() {
             .len(),
         4
     );
-    eprintln!("four live HLS streams at and after recovery: {at_recovery:?} -> {:?}",
-        seen.iter().map(|s| s.last.unwrap()).collect::<Vec<_>>());
     assert!(readers.cancel_and_wait(), "grid workers did not retire");
     assert!(server.stop());
 }
