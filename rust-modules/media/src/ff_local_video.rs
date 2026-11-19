@@ -1098,13 +1098,17 @@ impl VideoCadence {
         let Some(previous) = self.previous_pts else {
             self.previous_pts = Some(pts);
             self.previous_grid_tick = grid_tick;
-            // Round to the nearest input frame, including rounded 90 kHz broadcast timestamps.
-            self.fraction = 499_999;
+            // A source-timed grid rounds to the nearest input frame. A wall-paced grid
+            // spends its initial frame immediately and starts the next interval empty.
+            self.fraction = if grid_tick.is_some() { 0 } else { 499_999 };
             return true;
         };
         if pts <= previous { return false; }
         let media_elapsed = pts.saturating_sub(previous) as u64;
         let last_grid_tick = std::mem::replace(&mut self.previous_grid_tick, grid_tick);
+        if last_grid_tick.is_some() != grid_tick.is_some() {
+            self.fraction = if grid_tick.is_some() { 0 } else { 499_999 };
+        }
         if grid_tick.is_none() && fps <= Limits::default().max_fps {
             // PiP and perimeter retain their minimum interval between published pictures.
             if media_elapsed < 1_000_000 / u64::from(fps.max(1)) { return false; }
@@ -1458,13 +1462,10 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                 if !c.wait(due.saturating_duration_since(Instant::now())) {
                     return Err(Error::Cancelled);
                 }
-                let fps = c.max_fps.load(Ordering::Relaxed);
-                let tile = c.output_tile();
-                let grid_tick = (fps <= Limits::default().max_fps && tile.0 != 0 && tile.1 != 0)
-                    .then(Instant::now);
-                if cadence.accepts(pts, fps, grid_tick) {
+                let (fps, wall_paced) = c.frame_pacing();
+                if cadence.accepts(pts, fps, wall_paced.then(Instant::now)) {
                     let aspect = display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame));
-                    let scale = plane_scale(w, h, aspect, tile);
+                    let scale = plane_scale(w, h, aspect, c.output_tile());
                     let divisor = scale as usize;
                     let frame = FrameYuv {
                         width: (w / divisor) as u32,

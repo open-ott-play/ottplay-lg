@@ -72,6 +72,8 @@ pub struct Limits {
     pub max_source_pixels: u32,
     pub max_frame_bytes: usize,
     pub max_fps: u32,
+    /// Pace texture publication against elapsed wall time when a dense grid catches up.
+    pub wall_paced_video: bool,
     pub max_object_bytes: usize,
     pub prefetch_live_segment: bool,
 }
@@ -81,6 +83,7 @@ impl Default for Limits {
             max_source_pixels: 1920 * 1080,
             max_frame_bytes: 1920 * 1080 * 3 / 2 + 4096,
             max_fps: 15,
+            wall_paced_video: false,
             max_object_bytes: 16 * 1024 * 1024,
             prefetch_live_segment: false,
         }
@@ -94,7 +97,11 @@ impl Limits {
 
     /// Small pictures keep their presentation limit while reading the next live segment.
     pub fn grid9() -> Self {
-        Self { prefetch_live_segment: true, ..Self::default() }
+        Self { wall_paced_video: true, prefetch_live_segment: true, ..Self::default() }
+    }
+
+    fn frame_pacing(self) -> u32 {
+        self.max_fps | if self.wall_paced_video { WALL_PACED } else { 0 }
     }
 
     pub(crate) fn valid(self) -> bool {
@@ -178,6 +185,9 @@ impl CompressedMemory {
     }
 }
 
+// Rate and clock must change together when a playing slot moves between layouts.
+const WALL_PACED: u32 = 1 << 31;
+
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
@@ -194,7 +204,7 @@ pub(crate) struct Control {
     pub timeline: AtomicU64,
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
-    pub max_fps: AtomicU32,
+    frame_pacing: AtomicU32,
     pub seekable: AtomicBool,
     pub hls_origin: OnceLock<String>,
     pub hls_gateway_lease: AtomicBool,
@@ -217,6 +227,11 @@ pub(crate) struct Iteration {
     pub seek_generation: u64,
 }
 impl Control {
+    pub(crate) fn frame_pacing(&self) -> (u32, bool) {
+        let packed = self.frame_pacing.load(Ordering::Relaxed);
+        (packed & !WALL_PACED, packed & WALL_PACED != 0)
+    }
+
     pub(crate) fn output_tile(&self) -> (u32, u32) {
         let size = self.output_tile.load(Ordering::Relaxed);
         ((size >> 32) as u32, size as u32)
@@ -316,7 +331,7 @@ impl Session {
             audio_generation: AtomicU64::new(1),
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
-            max_fps: AtomicU32::new(limits.max_fps),
+            frame_pacing: AtomicU32::new(limits.frame_pacing()),
             seekable: AtomicBool::new(false),
             hls_origin: OnceLock::new(),
             hls_gateway_lease: AtomicBool::new(false),
@@ -423,10 +438,21 @@ impl Session {
         }
     }
 
-    /// Update presentation cadence without disturbing decoding, the media clock or PCM.
+    /// Apply a layout's presentation rate and clock without restarting video or PCM.
+    pub fn set_presentation_limits(&self, limits: Limits) {
+        let pacing = limits.frame_pacing();
+        if (1..=60).contains(&limits.max_fps) && self.control.frame_pacing.load(Ordering::Relaxed) != pacing {
+            self.control.frame_pacing.store(pacing, Ordering::Relaxed);
+        }
+    }
+
+    /// Change only the rate of the current pacing policy.
     pub fn set_max_fps(&self, fps: u32) {
-        if (1..=60).contains(&fps) && self.control.max_fps.load(Ordering::Relaxed) != fps {
-            self.control.max_fps.store(fps, Ordering::Relaxed);
+        if (1..=60).contains(&fps) {
+            let _ = self.control.frame_pacing.try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                let new = (old & WALL_PACED) | fps;
+                (old != new).then_some(new)
+            });
         }
     }
     pub fn set_audio(&mut self, on: bool) {
@@ -578,10 +604,20 @@ mod tests {
         let source_timeline = c.timeline.load(Ordering::Acquire);
         let audio_generation = c.audio_generation.load(Ordering::Acquire);
         for (focused, expected_fps) in [(true, 30), (false, 25), (true, 30)] {
-            session.set_max_fps(Limits::grid4(focused).max_fps);
-            assert_eq!(c.max_fps.load(Ordering::Relaxed), expected_fps);
+            session.set_presentation_limits(Limits::grid4(focused));
+            assert_eq!(c.frame_pacing(), (expected_fps, false));
         }
         let nine = Limits::grid9();
+        session.set_presentation_limits(nine);
+        assert_eq!(c.frame_pacing(), (15, true));
+        assert_eq!(c.output_tile(), (0, 0), "cadence is active before the drawable is known");
+        session.set_output_tile(640, 360);
+        session.set_output_tile(0, 0);
+        assert_eq!(c.frame_pacing(), (15, true), "resizing cannot select another clock");
+        session.set_max_fps(14);
+        assert_eq!(c.frame_pacing(), (14, true));
+        session.set_presentation_limits(Limits::default());
+        assert_eq!(c.frame_pacing(), (15, false), "restore PiP pacing for a surviving slot");
         assert_eq!(nine.max_fps, 15);
         assert!(nine.prefetch_live_segment);
         assert!(!Limits::default().prefetch_live_segment);
@@ -590,7 +626,7 @@ mod tests {
         session.set_hls_prefetch(false);
         assert!(!c.hls_prefetch.load(Ordering::Acquire));
         session.set_max_fps(0);
-        assert_eq!(c.max_fps.load(Ordering::Relaxed), 30);
+        assert_eq!(c.frame_pacing(), (15, false));
         assert_eq!(c.timeline.load(Ordering::Acquire), source_timeline);
         assert_eq!(c.audio_generation.load(Ordering::Acquire), audio_generation);
     }
@@ -611,7 +647,7 @@ mod tests {
                 audio_generation: AtomicU64::new(1),
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
-                max_fps: AtomicU32::new(Limits::default().max_fps),
+                frame_pacing: AtomicU32::new(Limits::default().frame_pacing()),
                 seekable: AtomicBool::new(true),
                 hls_origin: OnceLock::new(),
                 hls_gateway_lease: AtomicBool::new(false),

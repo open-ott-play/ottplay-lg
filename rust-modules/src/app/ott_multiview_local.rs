@@ -799,7 +799,7 @@ impl Driver {
                 && self.stopping[index].is_none() && !picture.terminal && !picture.paused
                 && !picture.receipt.input.is_cancelled();
             let limits = picture_limits(runtime, picture.ticket.slot());
-            picture.decoder.set_max_fps(limits.max_fps);
+            picture.decoder.set_presentation_limits(limits);
             picture.decoder.set_hls_prefetch(limits.prefetch_live_segment);
             picture.decoder.set_audio(audible);
             for _ in 0..8 {
@@ -1106,7 +1106,6 @@ impl Drop for Driver {
 #[cfg(all(test, feature = "hostsim"))]
 #[path = "ott_multiview_local_lease_tests.rs"]
 pub(super) mod lease_tests;
-
 
 #[cfg(test)]
 mod tile_tests {
