@@ -628,8 +628,13 @@ pub(super) fn video_evidence(runtime: &Runtime) -> Option<Value> {
                     || row.status == "failed"))
             .map_or_else(RenderedFrames::default, |_| state.frames[i]);
         let intervals = frames.draw_intervals();
+        let lookahead = runtime.multiview_local.slot_ticket(row.slot)
+            .filter(|&ticket| runtime.multiview.require_current_ticket(ticket).is_ok())
+            .and_then(|ticket| runtime.multiview_local.hls_lookahead_counts(ticket));
         json!({"slot_id": i, "slot_generation": row.slot_generation, "source_revision": row.source_revision,
             "drawn_frames": frames.count, "last_pts_us": frames.last_pts_us,
+            "hls_prefetch_ready": lookahead.map(|v| v.0),
+            "hls_prefetch_budget_deferrals": lookahead.map(|v| v.1),
             "draw_interval_p95_ms": intervals.map(|pair| pair.0),
             "draw_interval_max_ms": intervals.map(|pair| pair.1),
             "draw_intervals_ge_250ms_count": frames.intervals_ge_250ms_count,

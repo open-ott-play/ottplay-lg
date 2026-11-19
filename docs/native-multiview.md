@@ -51,6 +51,11 @@ seeks publish a landing picture and remain paused. Seeking suppresses preroll PC
 until the target picture, and later pause changes cannot cancel an accepted seek. The initial HLS
 reader supports same-origin TS/fMP4 playlists; encrypted, byte-range,
 discontinuous and external-audio renditions are rejected. HLS seek is unavailable.
+A clear live MPEG-TS source opened in the four-window grid can read one segment
+ahead while its current segment plays. The same private HTTP session handles
+both segments. Their combined compressed buffers share the slot’s segment
+budget. A full buffer defers the read until the decoder releases space.
+Moving an existing source from another layout keeps its original reader.
 Plex uses direct media; this path does not silently start a transcoder.
 
 Pause/resume and supported seeks target the active slot. Backgrounding, policy
@@ -73,7 +78,9 @@ uploaded video frame increments `drawn_frames` once. `last_pts_us` gives its
 media timestamp. UI redraws of a held picture leave both values unchanged.
 These readings measure rendering inside the application. Verify audio and
 the visible panel separately. If a window stops, `last_stop` can identify the
-source, decoder or renderer stage. A new source attempt clears the old reason.
+source, decoder or renderer stage. `hls_prefetch_ready` counts segments ready
+before the decoder requested them. `hls_prefetch_budget_deferrals` counts times
+the compressed-byte budget held back a read or allocation. A new source attempt clears the old reason.
 For example, `source_temporarily_unavailable` can result from an upstream
 timeout or HTTP 502, 503 or 504. `source_read` means the reader could not
 supply the requested bytes. To investigate a repeatable failure, record the
@@ -200,6 +207,8 @@ The Native checks workflow runs these checks:
   Verify both segments are requested again. For 23.976, 29.97, 25 and 50 fps
   inputs, count the frames each reader actually delivers over its media timeline
   both before and after moving focus from the first window to the second.
+- Delay a requested HLS segment and verify that the preceding segment continues
+  to deliver video frames during the delay.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 

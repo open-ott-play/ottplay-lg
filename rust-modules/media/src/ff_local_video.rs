@@ -140,7 +140,7 @@ impl Remote {
 
     fn fetch(&mut self, url: &str, cap: usize, is_segment: bool, c: &Control) -> Result<Vec<u8>, Error> {
         self.reopen(url, c)?;
-        let bytes = collect(self, cap, c)?;
+        let bytes = collect_with_budget(self, cap, c, is_segment)?;
         if let Some(error) = self.provider_error(&bytes, is_segment.then_some(url), c) { return Err(error); }
         Ok(bytes)
     }
@@ -245,9 +245,12 @@ impl Remote {
     }
 }
 fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
+    collect_with_budget(r, cap, c, false)
+}
+fn collect_with_budget(r: &mut Remote, cap: usize, c: &Control, media: bool) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut scratch = [0; 16 * 1024];
-    let expires = r.deadline();
+    let mut expires = r.deadline();
     loop {
         if Instant::now() >= expires {
             r.failure = Some(crate::curlio::OpenErr::Deadline);
@@ -257,8 +260,25 @@ fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
         if n == 0 {
             return Ok(out);
         }
-        if out.len().checked_add(n).is_none_or(|n| n > cap) {
-            return Err(Error::Budget);
+        let needed = out.len().checked_add(n).filter(|&size| size <= cap).ok_or(Error::Budget)?;
+        if media && needed > out.capacity() {
+            let retained = c.hls_retained_bytes.load(Ordering::Acquire);
+            let mut available = cap.saturating_sub(retained);
+            if needed > available {
+                // Wait for FFmpeg to release the consumed object before growing the buffer.
+                // Keep the current response and cookie context; no duplicate GET.
+                c.hls_prefetch_limited.fetch_add(1, Ordering::Relaxed);
+                let parked = Instant::now();
+                while c.hls_retained_bytes.load(Ordering::Acquire) != 0 {
+                    if !c.wait(Duration::from_millis(5)) { return Err(Error::Cancelled); }
+                }
+                let delay = parked.elapsed();
+                expires += delay;
+                if let Some(end) = &mut r.deadline { *end += delay; }
+                available = cap;
+            }
+            let capacity = needed.max(out.capacity().saturating_mul(2)).min(available);
+            out.try_reserve_exact(capacity - out.len()).map_err(|_| Error::Budget)?;
         }
         out.extend_from_slice(&scratch[..n]);
     }
@@ -679,6 +699,9 @@ impl Hls {
                 let order = admission_read_started(&segment.url, c);
                 let result = self.remote.fetch(&segment.url, self.cap, true, c)
                     .map_err(|error| self.remote.report_outage(error, c));
+                // A bounded reader can park this response while FFmpeg consumes the
+                // previous object. Preserve its transport retry time after a deferral.
+                deadline = self.remote.deadline.unwrap_or(deadline);
                 match result {
                     Ok(bytes) if !bytes.is_empty() => {
                         if order.is_some() && media_segment_bytes(&bytes) {
@@ -733,10 +756,14 @@ impl Hls {
         Ok(n)
     }
 }
+#[path = "ff_local_video_lookahead.rs"]
+mod lookahead;
+
 enum Input {
     Local(file_source::FileSource),
     Http(Remote),
     Hls(Hls),
+    LivePipe(lookahead::Consumer),
 }
 struct Io<'a> {
     input: &'a mut Input,
@@ -757,6 +784,7 @@ extern "C" fn read(p: *mut c_void, out: *mut u8, len: c_int) -> c_int {
             Input::Local(f) => f.read(out).map_err(|_| Error::Source),
             Input::Http(r) => r.read(out, io.control),
             Input::Hls(h) => h.read(out, io.control),
+            Input::LivePipe(pipe) => pipe.read(out, io.control),
         }
     }))
     .unwrap_or(Err(Error::Source));
@@ -828,7 +856,7 @@ fn seek_inner(p: *mut c_void, offset: i64, whence: c_int) -> i64 {
                 }
             }
         }
-        Input::Hls(_) => -1,
+        Input::Hls(_) | Input::LivePipe(_) => -1,
     }
 }
 struct Decode {
@@ -979,7 +1007,15 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     };
     let mut reopens = std::collections::VecDeque::new();
     loop {
-        let result = decode_input(&mut input, limits, c);
+        let result = match &mut input {
+            Input::Hls(hls) if limits.prefetch_live_segment && !hls.playlist.ended && hls.playlist.init.is_none() => {
+                match lookahead::try_decode(hls, limits, c) {
+                    Some(result) => result,
+                    None => decode_input(&mut input, limits, c),
+                }
+            }
+            _ => decode_input(&mut input, limits, c),
+        };
         let Input::Hls(hls) = &mut input else { return result };
         if !hls.reprobe || c.stopped() { return result; }
         let now = Instant::now();
@@ -1037,14 +1073,17 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
     let seekable = match &input {
         Input::Local(_) => true,
         Input::Http(remote) => remote.source.supports_byte_ranges(),
-        Input::Hls(_) => false,
+        Input::Hls(_) | Input::LivePipe(_) => false,
     };
-    let has_finite_duration = !matches!(&input, Input::Hls(_));
+    let has_finite_duration = !matches!(&input, Input::Hls(_) | Input::LivePipe(_));
     // On nonseekable TS the header reader consumes its full byte probe even when
     // PAT and PMT are present. Fit discovery within the downloaded live segment:
     // reading future segments here can make the next sequence expire while the
     // decoder plays its queued probe packets. Local files and fMP4 keep their budget.
-    let mut probe_bytes = 1024 * 1024;
+    let mut probe_bytes = match input {
+        Input::LivePipe(pipe) => pipe.probe_bytes,
+        _ => 1024 * 1024,
+    };
     if let Input::Hls(hls) = input {
         if !hls.playlist.ended && hls.playlist.init.is_none() {
             hls.read(&mut [], c)?;

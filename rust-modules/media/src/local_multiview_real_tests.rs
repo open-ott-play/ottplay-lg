@@ -15,6 +15,9 @@ struct LiveGridFixture {
     last_served: [AtomicUsize; 4],
     segment_timeout_reads: AtomicUsize,
     segment_503_reads: AtomicUsize,
+    delay_next_segment: AtomicBool,
+    segment_waiting: AtomicBool,
+    release_segment: AtomicBool,
 }
 
 /// Loopback listener for explicit fixture tests. All content comes from generated files.
@@ -152,6 +155,13 @@ impl FixtureServer {
                         "Content-Type: application/vnd.apple.mpegurl\r\n",
                         playlist.as_bytes(),
                     );
+                }
+                if path == "/live/2/segment004.ts" && live_grid.delay_next_segment.swap(false, Ordering::AcqRel) {
+                    live_grid.segment_waiting.store(true, Ordering::Release);
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    while !live_grid.release_segment.load(Ordering::Acquire) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
                 }
                 if path == format!("/live/{index}/segment002.ts") {
                     if index == 2
@@ -817,6 +827,34 @@ fn four_live_hls_windows_advance_after_gateway_timeouts() {
         4
     );
     assert!(readers.cancel_and_wait(), "grid workers did not retire");
+    assert!(server.stop());
+}
+
+#[test]
+#[ignore = "Explicit real bundled-decoder qualification; requires generated HLS fixtures"]
+fn grid4_displays_frames_while_next_segment_is_delayed() {
+    let _serial = plx_base::testlock::serial();
+    let root = PathBuf::from(std::env::var_os("PLXNATIVE_LOCAL_VIDEO_FIXTURES").unwrap());
+    boot_real_decoders();
+    let mut server = FixtureServer::open(root);
+    server.live_grid.delay_next_segment.store(true, Ordering::Release);
+    let source = ExternalSource::Hls(server.url("/live/2/media.m3u8"));
+    let mut readers = Readers(vec![Session::open(source, Limits::grid4(false)).unwrap()]);
+    let mut seen = [Seen::default()];
+    until(&mut readers, &mut seen, Duration::from_secs(15), None, |_| {
+        server.live_grid.segment_waiting.load(Ordering::Acquire)
+    });
+    let start = seen[0].frames;
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        pump(&mut readers, &mut seen, None);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    server.live_grid.release_segment.store(true, Ordering::Release);
+    let during_delay = seen[0].frames - start;
+    assert!(during_delay >= 4, "only {during_delay} frames during a stalled segment GET");
+    assert!(readers.0[0].hls_lookahead_counts().0 > 0);
+    assert!(readers.cancel_and_wait());
     assert!(server.stop());
 }
 
