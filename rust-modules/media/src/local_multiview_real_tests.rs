@@ -756,8 +756,30 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         Arc::new(AtomicBool::new(false)),
     )
     .unwrap();
-    let mut reopened = Session::open(ExternalSource::HeldLocal(held), Limits::default())
+    let mut reopened = Session::open_with_output_tile(ExternalSource::HeldLocal(held), Limits::default(), (48, 32))
         .expect("retired permits leaked");
+    // A grid supplies the tile before the worker starts. Changing geometry returns the
+    // next decoded picture at its new size, preserving the same demux and timeline.
+    let mut staged_pts = None;
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut resized = false;
+    while Instant::now() < end && !resized {
+        match reopened.poll() {
+            Some(Event::Video(frame)) if staged_pts.is_none() => {
+                assert_eq!((frame.width, frame.height, frame.y.len()), (48, 32, 48 * 32));
+                staged_pts = Some(frame.pts_us);
+                reopened.set_output_tile(0, 0);
+            }
+            Some(Event::Video(frame)) if frame.width == 96 => {
+                assert_eq!(frame.height, 64);
+                assert!(Some(frame.pts_us) > staged_pts);
+                resized = true;
+            }
+            Some(Event::Failure(error)) => panic!("resized session failed: {error:?}"),
+            _ => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    assert!(resized, "live tile did not resume full-resolution publication");
     reopened.cancel();
     let end = Instant::now() + Duration::from_secs(3);
     while !reopened.is_retired() && Instant::now() < end {

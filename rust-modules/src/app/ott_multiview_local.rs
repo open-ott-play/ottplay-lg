@@ -8,11 +8,26 @@ use plx_media::local_multiview::{Event, FrameYuv, Limits, PcmChunk, Session};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 fn picture_limits(runtime: &Runtime, slot: SlotId) -> Limits {
-    if runtime.multiview.layout() == Some(Layout::Grid4) {
-        Limits::grid4(runtime.multiview.active_slot() == Some(slot))
-    } else {
-        Limits::default()
+    match runtime.multiview.layout() {
+        Some(Layout::Grid4) => Limits::grid4(runtime.multiview.active_slot() == Some(slot)),
+        Some(Layout::Grid9) => Limits::grid9(),
+        _ => Limits::default(),
     }
+}
+
+// Round up on split pixel edges. Each texture retains enough samples for the larger tile.
+fn grid_output_tile(layout: Option<Layout>, width: i32, height: i32) -> (u32, u32) {
+    let divisions = match layout {
+        Some(Layout::Grid4) => 2,
+        Some(Layout::Grid9) => 3,
+        _ => return (0, 0),
+    };
+    ((width.max(0) as u32).div_ceil(divisions), (height.max(0) as u32).div_ceil(divisions))
+}
+
+fn current_grid_tile(layout: Option<Layout>) -> (u32, u32) {
+    let (_, _, width, height) = plx_base::surface::viewport();
+    grid_output_tile(layout, width, height)
 }
 
 #[path = "ott_multiview_local_commands.rs"]
@@ -406,6 +421,10 @@ impl Driver {
         self.pictures[ticket.slot().index()].as_ref().filter(|picture| picture.ticket == ticket)
             .map(|picture| picture.decoder.hls_lookahead_counts())
     }
+    pub(super) fn hls_compressed_bytes(&self, ticket: ResolveTicket) -> Option<(usize, usize)> {
+        self.pictures[ticket.slot().index()].as_ref().filter(|picture| picture.ticket == ticket)
+            .and_then(|picture| picture.decoder.hls_compressed_bytes())
+    }
     pub fn last_stop(&self, slot: SlotId) -> Option<&'static str> {
         self.last_stop[slot.index()]
     }
@@ -555,10 +574,7 @@ impl Driver {
                 self.queue(runtime, transition);
             }
             Job::Media(_, result) => {
-                let limits = picture_limits(runtime, ticket.slot());
-                self.media_ready_with(runtime, app, ticket, result, |source| {
-                    Session::open(source, limits)
-                })
+                self.media_ready(runtime, app, ticket, result)
             }
         }
     }
@@ -593,6 +609,19 @@ impl Driver {
             runtime.changed();
         }
         self.leases[index].pop_front();
+    }
+    fn media_ready(
+        &mut self,
+        runtime: &mut Runtime,
+        app: &App,
+        ticket: ResolveTicket,
+        result: Result<LocalResolved, multiview_sources::Error>,
+    ) {
+        let limits = picture_limits(runtime, ticket.slot());
+        let tile = current_grid_tile(self.layout);
+        self.media_ready_with(runtime, app, ticket, result, |source| {
+            Session::open_with_output_tile(source, limits, tile)
+        })
     }
     fn media_ready_with(
         &mut self,
@@ -740,12 +769,7 @@ impl Driver {
             };
             self.receive_job(runtime, app, job);
         }
-        let output_tile = if self.layout == Some(Layout::Grid4) {
-            let (_, _, width, height) = plx_base::surface::viewport();
-            ((width.max(0) as u32).div_ceil(2), (height.max(0) as u32).div_ceil(2))
-        } else {
-            (0, 0)
-        };
+        let output_tile = current_grid_tile(self.layout);
         for index in 0..9 {
             let Some(picture) = self.pictures[index].as_mut() else {
                 continue;
@@ -774,7 +798,9 @@ impl Driver {
             let audible = (routing_mix || self.audio_applied == Some(picture.ticket.slot()))
                 && self.stopping[index].is_none() && !picture.terminal && !picture.paused
                 && !picture.receipt.input.is_cancelled();
-            picture.decoder.set_max_fps(picture_limits(runtime, picture.ticket.slot()).max_fps);
+            let limits = picture_limits(runtime, picture.ticket.slot());
+            picture.decoder.set_max_fps(limits.max_fps);
+            picture.decoder.set_hls_prefetch(limits.prefetch_live_segment);
             picture.decoder.set_audio(audible);
             for _ in 0..8 {
                 let Some(event) = picture.decoder.poll() else {
@@ -1080,3 +1106,19 @@ impl Drop for Driver {
 #[cfg(all(test, feature = "hostsim"))]
 #[path = "ott_multiview_local_lease_tests.rs"]
 pub(super) mod lease_tests;
+
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+
+    #[test]
+    fn texture_sizes_follow_drawable_and_keep_all_split_pixels() {
+        assert_eq!(grid_output_tile(Some(Layout::Grid9), 1920, 1080), (640, 360));
+        assert_eq!(grid_output_tile(Some(Layout::Grid9), 3840, 2160), (1280, 720));
+        assert_eq!(grid_output_tile(Some(Layout::Grid9), 1921, 1081), (641, 361));
+        assert_eq!(grid_output_tile(Some(Layout::Grid4), 1921, 1081), (961, 541));
+        assert_eq!(grid_output_tile(Some(Layout::PictureInPicture), 1920, 1080), (0, 0));
+        assert_eq!(grid_output_tile(None, 1920, 1080), (0, 0));
+    }
+}

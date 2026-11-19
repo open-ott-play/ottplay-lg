@@ -914,22 +914,33 @@ impl Drop for Decode {
         }
     }
 }
-// Downsample only if the cropped area still covers every physical tile pixel.
-fn can_halve_frame(w: usize, h: usize, aspect: f32, tile: (u32, u32)) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaneScale { Full = 1, Half = 2, Third = 3 }
+
+// Keep complete blocks in all three 4:2:0 planes and enough physical samples after cover crop.
+fn plane_scale(w: usize, h: usize, aspect: f32, tile: (u32, u32)) -> PlaneScale {
     let (tw, th) = tile;
-    if tw == 0 || th == 0 || w % 4 != 0 || h % 4 != 0 || !aspect.is_finite() || aspect <= 0.0 {
-        return false;
+    if tw == 0 || th == 0 || !aspect.is_finite() || aspect <= 0.0 {
+        return PlaneScale::Full;
     }
     let tile_aspect = tw as f32 / th as f32;
     let visible_w = w as f32 * (tile_aspect / aspect).min(1.0);
     let visible_h = h as f32 * (aspect / tile_aspect).min(1.0);
-    visible_w >= tw as f32 * 2.0 && visible_h >= th as f32 * 2.0
+    for scale in [PlaneScale::Third, PlaneScale::Half] {
+        let divisor = scale as usize;
+        if w % (2 * divisor) == 0 && h % (2 * divisor) == 0
+            && visible_w >= tw as f32 * divisor as f32 && visible_h >= th as f32 * divisor as f32
+        {
+            return scale;
+        }
+    }
+    PlaneScale::Full
 }
 
 #[path = "ff_local_video_box.rs"]
 mod box_filter;
 
-unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool) -> Result<Vec<u8>, Error> {
+unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, scale: PlaneScale) -> Result<Vec<u8>, Error> {
     let ptr = std::ptr::read_unaligned(
         frame.add(OFF_FRAME_DATA + index * std::mem::size_of::<*const u8>()) as *const *const u8,
     );
@@ -939,16 +950,20 @@ unsafe fn plane(frame: *const u8, index: usize, w: usize, h: usize, halve: bool)
     }
     let input_row = |row: usize| std::slice::from_raw_parts(ptr.offset(row as isize * stride as isize), w);
     let size = w.checked_mul(h).ok_or(Error::Budget)?;
-    if !halve && stride as usize == w {
+    if scale == PlaneScale::Full && stride as usize == w {
         return Ok(std::slice::from_raw_parts(ptr, size).to_vec());
     }
-    if halve {
-        // The luma dimensions are divisible by four; its two 4:2:0 chroma
-        // planes therefore have complete 2x2 blocks as well.
-        let mut out = vec![0; size / 4];
+    if scale != PlaneScale::Full {
+        let divisor = scale as usize;
+        let mut out = vec![0; size / (divisor * divisor)];
         let filter = box_filter::BoxFilter::detect();
-        for (row, dst) in out.chunks_exact_mut(w / 2).enumerate() {
-            filter.row(input_row(2 * row), input_row(2 * row + 1), dst);
+        for (row, dst) in out.chunks_exact_mut(w / divisor).enumerate() {
+            let y = row * divisor;
+            if scale == PlaneScale::Third {
+                filter.row3(input_row(y), input_row(y + 1), input_row(y + 2), dst);
+            } else {
+                filter.row(input_row(y), input_row(y + 1), dst);
+            }
         }
         return Ok(out);
     }
@@ -1437,17 +1452,17 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
                 }
                 if cadence.accepts(pts, c.max_fps.load(Ordering::Relaxed)) {
                     let aspect = display_aspect(w, h, av_guess_sample_aspect_ratio(d.fmt, stream, d.frame));
-                    let halve = can_halve_frame(w, h, aspect, c.output_tile());
-                    let divisor = if halve { 2 } else { 1 };
+                    let scale = plane_scale(w, h, aspect, c.output_tile());
+                    let divisor = scale as usize;
                     let frame = FrameYuv {
                         width: (w / divisor) as u32,
                         height: (h / divisor) as u32,
                         display_aspect: aspect,
                         chroma_width: (cw / divisor) as u32,
                         chroma_height: (ch / divisor) as u32,
-                        y: plane(f, 0, w, h, halve)?,
-                        u: plane(f, 1, cw, ch, halve)?,
-                        v: plane(f, 2, cw, ch, halve)?,
+                        y: plane(f, 0, w, h, scale)?,
+                        u: plane(f, 1, cw, ch, scale)?,
+                        v: plane(f, 2, cw, ch, scale)?,
                         pts_us: pts,
                         range: if format == 12 {
                             ColorRange::Full
@@ -2145,13 +2160,17 @@ mod tests {
     #[test]
     fn grid_frame_scaling_respects_physical_tiles_crop_and_source_admission() {
         let aspect = 16.0 / 9.0;
-        assert!(can_halve_frame(1920, 1080, aspect, (960, 540)));
-        assert!(!can_halve_frame(1920, 1080, aspect, (1920, 1080)), "4K grid");
-        assert!(!can_halve_frame(1280, 720, aspect, (960, 540)));
-        assert!(!can_halve_frame(1920, 1080, aspect, (0, 0)), "full-size playback");
-        assert!(!can_halve_frame(1920, 1080, 2.4, (960, 540)), "visible width after cover crop");
-        assert!(!can_halve_frame(1920, 1080, 4.0 / 3.0, (960, 540)), "visible height after cover crop");
-        assert!(!can_halve_frame(1920, 1078, aspect, (640, 360)), "odd chroma rows");
+        assert_eq!(plane_scale(1920, 1080, aspect, (960, 540)), PlaneScale::Half);
+        assert_eq!(plane_scale(1920, 1080, aspect, (640, 360)), PlaneScale::Third);
+        assert_eq!(plane_scale(1920, 1080, aspect, (641, 361)), PlaneScale::Half);
+        assert_eq!(plane_scale(1920, 1080, aspect, (1280, 720)), PlaneScale::Full, "4K grid9");
+        assert_eq!(plane_scale(1920, 1080, aspect, (1920, 1080)), PlaneScale::Full, "4K grid4");
+        assert_eq!(plane_scale(1280, 720, aspect, (960, 540)), PlaneScale::Full);
+        assert_eq!(plane_scale(1920, 1080, aspect, (0, 0)), PlaneScale::Full, "full-size playback");
+        assert_eq!(plane_scale(1920, 1080, 2.4, (640, 360)), PlaneScale::Half, "wide cover crop");
+        assert_eq!(plane_scale(1920, 1080, 4.0 / 3.0, (960, 540)), PlaneScale::Full, "tall cover crop");
+        assert_eq!(plane_scale(1920, 1078, aspect, (640, 360)), PlaneScale::Full, "odd chroma rows");
+        assert_eq!(plane_scale(1280, 720, aspect, (640, 360)), PlaneScale::Half, "720p grid9");
         assert_eq!(dimensions(3840, 2160, Limits::default()), Err(Error::Budget));
     }
 
@@ -2166,12 +2185,32 @@ mod tests {
                 let stride = frame.as_mut_ptr().add(OFF_FRAME_LINESIZE + index * 4).cast::<i32>();
                 std::ptr::write_unaligned(address, rows[0].as_ptr());
                 std::ptr::write_unaligned(stride, 6);
-                assert_eq!(plane(frame.as_ptr(), index, 4, 4, true).unwrap(), [4, 12, 10, 100]);
+                assert_eq!(plane(frame.as_ptr(), index, 4, 4, PlaneScale::Half).unwrap(), [4, 12, 10, 100]);
                 std::ptr::write_unaligned(address, rows[3].as_ptr());
                 std::ptr::write_unaligned(stride, -6);
-                assert_eq!(plane(frame.as_ptr(), index, 4, 4, true).unwrap(), [10, 100, 4, 12]);
+                assert_eq!(plane(frame.as_ptr(), index, 4, 4, PlaneScale::Half).unwrap(), [10, 100, 4, 12]);
                 std::ptr::write_unaligned(stride, 2);
-                assert_eq!(plane(frame.as_ptr(), index, 4, 4, true), Err(Error::Decode));
+                assert_eq!(plane(frame.as_ptr(), index, 4, 4, PlaneScale::Half), Err(Error::Decode));
+            }
+        }
+    }
+
+    #[test]
+    fn third_scale_averages_all_nine_samples_and_ignores_plane_padding() {
+        let rows: Vec<u8> = (0..6).flat_map(|y| {
+            [9, 12, 15, 55, 60, 65].map(|value| value + y * 3).into_iter().chain([255, 255])
+        }).collect();
+        let mut frame = vec![0u8; OFF_FRAME_LINESIZE + 32];
+        unsafe {
+            for index in 0..3 {
+                let address = frame.as_mut_ptr().add(OFF_FRAME_DATA + index * std::mem::size_of::<*const u8>()).cast::<*const u8>();
+                let stride = frame.as_mut_ptr().add(OFF_FRAME_LINESIZE + index * 4).cast::<i32>();
+                std::ptr::write_unaligned(address, rows.as_ptr());
+                std::ptr::write_unaligned(stride, 8);
+                assert_eq!(plane(frame.as_ptr(), index, 6, 6, PlaneScale::Third).unwrap(), [15, 63, 24, 72]);
+                std::ptr::write_unaligned(address, rows.as_ptr().add(5 * 8));
+                std::ptr::write_unaligned(stride, -8);
+                assert_eq!(plane(frame.as_ptr(), index, 6, 6, PlaneScale::Third).unwrap(), [24, 72, 15, 63]);
             }
         }
     }
@@ -2186,9 +2225,9 @@ mod tests {
                 pixels.as_ptr().add(4),
             );
             std::ptr::write_unaligned(frame.as_mut_ptr().add(OFF_FRAME_LINESIZE).cast::<i32>(), -4);
-            assert_eq!(plane(frame.as_ptr(), 0, 2, 2, false).unwrap(), vec![3, 4, 1, 2]);
+            assert_eq!(plane(frame.as_ptr(), 0, 2, 2, PlaneScale::Full).unwrap(), vec![3, 4, 1, 2]);
             std::ptr::write_unaligned(frame.as_mut_ptr().add(OFF_FRAME_LINESIZE).cast::<i32>(), 1);
-            assert_eq!(plane(frame.as_ptr(), 0, 2, 2, false), Err(Error::Decode));
+            assert_eq!(plane(frame.as_ptr(), 0, 2, 2, PlaneScale::Full), Err(Error::Decode));
         }
     }
     #[test]

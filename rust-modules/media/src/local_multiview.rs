@@ -234,6 +234,11 @@ pub struct Session {
 }
 impl Session {
     pub fn open(source: ExternalSource, limits: Limits) -> Result<Self, Error> {
+        Self::open_with_output_tile(source, limits, (0, 0))
+    }
+
+    /// Apply the presentation size before the worker publishes its first frame.
+    pub fn open_with_output_tile(source: ExternalSource, limits: Limits, tile: (u32, u32)) -> Result<Self, Error> {
         if !limits.valid() {
             return Err(Error::InvalidLimits);
         }
@@ -270,7 +275,7 @@ impl Session {
             hls_media_live: OnceLock::new(),
             video_decoded: AtomicBool::new(false),
             hls_request: AtomicU64::new(0),
-            output_tile: AtomicU64::new(0),
+            output_tile: AtomicU64::new((u64::from(tile.0) << 32) | u64::from(tile.1)),
             duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
