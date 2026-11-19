@@ -26,6 +26,7 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEST = "local_multiview::real_qualification::nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement"
 GRID_TEST = "local_multiview::real_qualification::four_live_hls_windows_advance_after_gateway_timeouts"
+NINE_HLS_TEST = "local_multiview::real_qualification::load::nine_live_hls_streams_advance_under_buffer_pressure"
 GAP_TEST = "local_multiview::real_qualification::grid4_displays_frames_while_next_segment_is_delayed"
 OUTPUT_TEST = "local_multiview::real_qualification::output::nine_real_yuv_textures_and_virtual_sdl_audio"
 DECODERS = ("h264", "hevc", "mpeg2video", "mpeg4", "vp8", "vp9", "mjpeg", "vc1", "wmv3", "aac")
@@ -34,7 +35,7 @@ INPUTS = ("ci/build-ffmpeg.sh", "ci/dependencies.json", "ci/ffabi-assert.c", "ci
           "rust-modules/media/src/ff.rs", "rust-modules/media/src/ff_local_video.rs", "rust-modules/media/src/ff_local_video_lookahead.rs",
           "rust-modules/media/src/ff_local_video_blocks.rs", "rust-modules/media/src/ff_local_video_box.rs",
           "rust-modules/media/src/ff_local_video_box_arm.S", "rust-modules/media/src/local_multiview.rs",
-          "rust-modules/media/src/local_multiview_real_tests.rs")
+          "rust-modules/media/src/local_multiview_real_tests.rs", "rust-modules/media/src/local_multiview_load_tests.rs")
 
 
 def sha(path):
@@ -488,19 +489,24 @@ def png_rgba(path, width, height, pixels):
 def qualify(runner, ident, artifact, virtual=False):
     prefix = verify(runner, ident, artifact)
     fixtures = runner.out / "fixtures"
-    runner.run("fixtures", [sys.executable, "ci/generate-local-multiview-fixtures.py", str(fixtures)], 600)
+    options = [] if virtual else ["--grid9-resolution", "1280x720"]
+    runner.run("fixtures", [sys.executable, "ci/generate-local-multiview-fixtures.py", str(fixtures), *options], 600)
     manifest = json.loads((fixtures / "MANIFEST.json").read_text())
     records, hls = manifest["videos"], manifest["hls_objects"]
     if manifest.get("schema") != 1 or manifest.get("video_count") != 9 or len(records) != 9 or {r["name"] for r in records} != {f"slot{i}.mp4" for i in range(9)}:
         raise RuntimeError("Fixture video inventory is incomplete")
-    if not 6 <= len(hls) <= 100:
+    if not 8 <= len(hls) <= 216:
         raise RuntimeError("HLS fixture inventory is incomplete or unbounded")
-    for record in hls:
-        if re.fullmatch(r"slot[2678]-hls/(?:media\.m3u8|segment[0-9]{3}\.ts)", record["name"]) is None:
+    groups = {f"slot{slot}-hls" for slot in (2, 6, 7, 8)}
+    if not virtual:
+        groups.update(f"grid9-{slot}-hls" for slot in range(9))
+    names = {record["name"] for record in hls}
+    for name in names:
+        group, _, obj = name.partition("/")
+        if group not in groups or re.fullmatch(r"(?:media\.m3u8|segment[0-9]{3}\.ts)", obj) is None:
             raise RuntimeError("Unexpected HLS fixture object")
-    for slot in (2, 6, 7, 8):
-        names = {record["name"] for record in hls}
-        if f"slot{slot}-hls/media.m3u8" not in names or f"slot{slot}-hls/segment000.ts" not in names:
+    for group in groups:
+        if f"{group}/media.m3u8" not in names or f"{group}/segment000.ts" not in names:
             raise RuntimeError("HLS fixture playlist or segment is missing")
     expected_files = {record["name"] for record in records + hls}
     if len(expected_files) != len(records) + len(hls):
@@ -518,7 +524,10 @@ def qualify(runner, ident, artifact, virtual=False):
                PLXNATIVE_LOCAL_VIDEO_FIXTURES=str(fixtures), PLXNATIVE_RUNTIME_DIR=str(runner.out / "runtime"))
     env.pop("RUST_MIN_STACK", None)
     (runner.out / "runtime").mkdir()
+    # Exercise the shipped per-pixel hot loops under nine live feeds.
+    # Keep test assertions enabled and optimize only the media crate.
     compiled = runner.run("media-compile", ["cargo", "test", "--locked", "--lib", "-p", "plx_media", "--features", "hostsim",
+                                           "--config", "profile.test.package.plx_media.opt-level=2",
                                            "--no-run", "--message-format=json"], 1200, env, ROOT / "rust-modules")
     binaries = set()
     for line in compiled.splitlines():
@@ -555,12 +564,16 @@ def qualify(runner, ident, artifact, virtual=False):
         gap = runner.run("grid4-delayed-segment", [binary, GAP_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"], 45, env)
         if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in gap:
             raise RuntimeError("HLS playback stopped while the next segment was delayed")
+        stress = runner.run("nine-live-hls", [binary, NINE_HLS_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"], 90, env)
+        if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in stress:
+            raise RuntimeError("Nine simultaneous live HLS streams did not pass buffer qualification")
     assert_source(ident)
-    write(runner.out / "QUALIFIED.json", {"identity": ident, "test": test, "passed": 1 if virtual else 3, "failed": 0, "ignored": 0,
+    write(runner.out / "QUALIFIED.json", {"identity": ident, "test": test, "passed": 1 if virtual else 4, "failed": 0, "ignored": 0,
                                            "fixtures": manifest, "sources": {"held": 3, "http": 3, "hls": 3}, "scope": ("hosted Mesa/Xvfb and virtual PulseAudio null sink; no television or physical speaker claim"
                                                      if virtual else "software decoders only; no GL, audio sink or TV claim"),
                                            "virtual_output": proof if virtual else None,
                                            "four_live_hls_test": None if virtual else GRID_TEST,
+                                           "nine_live_hls_test": None if virtual else NINE_HLS_TEST,
                                            "delayed_segment_test": None if virtual else GAP_TEST,
                                            "configurations": ["core", "es2"] if virtual else ["default"],
                                            "counts_scope": "per configuration"})
