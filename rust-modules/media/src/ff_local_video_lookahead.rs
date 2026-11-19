@@ -3,35 +3,11 @@
 //! reader from starting N+2 before FFmpeg has finished consuming N.
 use super::{Control, Error, Hls, Input, Limits, MediaSegment};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::Ordering,
     mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
 };
 
 type Object = Result<MediaSegment, Error>;
-static READERS: AtomicUsize = AtomicUsize::new(0);
-struct Permit;
-impl Permit {
-    fn acquire() -> Option<Self> {
-        let mut current = READERS.load(Ordering::Acquire);
-        while current < 4 {
-            match READERS.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(Self),
-                Err(value) => current = value,
-            }
-        }
-        None
-    }
-}
-impl Drop for Permit {
-    fn drop(&mut self) {
-        READERS.fetch_sub(1, Ordering::AcqRel);
-    }
-}
 
 pub(super) struct Consumer {
     request: Sender<()>,
@@ -41,7 +17,7 @@ pub(super) struct Consumer {
     pub(super) probe_bytes: usize,
 }
 impl Consumer {
-    pub(super) fn read(&mut self, out: &mut [u8], c: &Control) -> Result<usize, Error> {
+    pub(super) fn read(&mut self, out: &mut [u8]) -> Result<usize, Error> {
         if let Some(terminal) = self.terminal {
             return terminal.map(|()| 0);
         }
@@ -66,7 +42,7 @@ impl Consumer {
                 }
             }
         }
-        Ok(self.bytes.read(out, Some(c)))
+        Ok(self.bytes.read(out))
     }
 }
 
@@ -83,6 +59,14 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
         // request can only use a segment declared by a parsed playlist. At the live edge
         // its existing poll cadence, timeout and retry budget remain in force.
         let result = loop {
+            // A layout change can disable speculation while the next live segment is
+            // still unpublished. Keep this source and wait for its decoder's demand.
+            if ahead && !control.hls_prefetch.load(Ordering::Acquire) {
+                if requests.recv().is_err() {
+                    return;
+                }
+                ahead = false;
+            }
             if !ahead {
                 break hls.read(&mut [], control);
             }
@@ -118,11 +102,6 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
             }
         }
         let terminal = object.as_ref().map_or(true, MediaSegment::is_empty);
-        let retained = object.as_ref().map_or(0, MediaSegment::capacity);
-        // The old allocation is already released when the decoder requests this object.
-        control
-            .hls_retained_bytes
-            .store(retained, Ordering::Release);
         if responses.send(object).is_err() {
             hls.reprobe = false;
             return;
@@ -131,7 +110,7 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
             return;
         }
         ahead = control.video_decoded.load(Ordering::Acquire)
-            && control.max_fps.load(Ordering::Relaxed) > Limits::default().max_fps
+            && control.hls_prefetch.load(Ordering::Acquire)
             && !control.paused.load(Ordering::Acquire)
             && !hls.playlist.ended;
     }
@@ -141,15 +120,13 @@ struct DecoderDone<'a>(&'a Control);
 impl Drop for DecoderDone<'_> {
     fn drop(&mut self) {
         self.0.reader_abandoned.store(true, Ordering::Release);
-        self.0.hls_retained_bytes.store(0, Ordering::Release);
     }
 }
 
-/// Keep short-lived FFI pointers on their owning threads. A rejected thread or a full
-/// reader budget falls back to the existing synchronous reader including its first bytes.
+/// Keep short-lived FFI pointers on their owning threads. The outer Session worker permit
+/// already bounds this helper to one per picture (nine total), including retiring sessions.
+/// A failed thread spawn falls back to the synchronous reader, retaining its first bytes.
 pub(super) fn try_decode(hls: &mut Hls, limits: Limits, c: &Control) -> Option<Result<(), Error>> {
-    let _permit = Permit::acquire()?;
-    hls.blocked_media = true;
     if let Err(error) = hls.read(&mut [], c) {
         return Some(Err(error));
     }
@@ -157,7 +134,6 @@ pub(super) fn try_decode(hls: &mut Hls, limits: Limits, c: &Control) -> Option<R
         .iter()
         .all(|&i| hls.bytes.head().get(i) == Some(&0x47))
     {
-        hls.blocked_media = false;
         return None;
     }
     let probe_bytes = (hls.bytes.len() / 2).clamp(2048, 1024 * 1024);
@@ -181,8 +157,6 @@ pub(super) fn try_decode(hls: &mut Hls, limits: Limits, c: &Control) -> Option<R
         serve(hls, c, requests, responses);
         Some(handle.join().unwrap_or(Err(Error::Decode)))
     });
-    hls.blocked_media = false;
-    c.hls_retained_bytes.store(0, Ordering::Release);
     c.reader_abandoned.store(false, Ordering::Release);
     result
 }
@@ -224,11 +198,10 @@ mod tests {
                     .send(error.map_or(Ok(MediaSegment::default()), Err))
                     .unwrap();
             });
-            let c = Control::default();
             let expected = error.map_or(Ok(0), Err);
-            assert_eq!(input.read(&mut [0; 4], &c), expected);
+            assert_eq!(input.read(&mut [0; 4]), expected);
             worker.join().unwrap();
-            assert_eq!(input.read(&mut [0; 4], &c), expected);
+            assert_eq!(input.read(&mut [0; 4]), expected);
         }
     }
 
@@ -237,7 +210,7 @@ mod tests {
         let _serial = curl();
         let c = Control::default();
         c.video_decoded.store(true, Ordering::Release);
-        c.max_fps.store(25, Ordering::Release);
+        c.hls_prefetch.store(true, Ordering::Release);
         let list = b"#EXTM3U\n#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n";
         let server = SessionServer::new(vec![
             Reply::ok("Set-Cookie: owner=tile; Path=/\r\n", list),
@@ -257,7 +230,7 @@ mod tests {
                     probe_bytes: 2048,
                 };
                 let mut byte = [0];
-                assert_eq!(input.read(&mut byte, &c), Ok(1));
+                assert_eq!(input.read(&mut byte), Ok(1));
                 assert_eq!(byte, [b'a']);
                 eventually(|| server.heads().len() == 3);
                 c.cancel.store(true, Ordering::Release);
@@ -279,14 +252,14 @@ mod tests {
             let mut remote =
                 super::super::Remote::open(&format!("{}/segment.ts", server.base), false, &c)
                     .unwrap();
-            c.hls_retained_bytes.store(40 * 1024, Ordering::Release);
+            assert!(c.hls_compressed.charge(40 * 1024, 64 * 1024));
             let result = std::thread::scope(|scope| {
                 scope.spawn(|| {
                     eventually(|| c.hls_prefetch_limited.load(Ordering::Relaxed) > 0);
                     if cancel {
                         c.cancel.store(true, Ordering::Release);
                     } else {
-                        c.hls_retained_bytes.store(0, Ordering::Release);
+                        c.hls_compressed.release(40 * 1024);
                     }
                 });
                 MediaSegment::collect(&mut remote, 64 * 1024, &c)
@@ -312,14 +285,13 @@ mod tests {
             Reply::ok("", b"A"),
         ]);
         let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 32, &c).unwrap();
-        hls.blocked_media = true;
-        c.hls_retained_bytes.store(31, Ordering::Release);
+        assert!(c.hls_compressed.charge(31, 32));
         let mut output = [0];
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 eventually(|| c.hls_prefetch_limited.load(Ordering::Relaxed) > 0);
                 std::thread::sleep(Duration::from_millis(550));
-                c.hls_retained_bytes.store(0, Ordering::Release);
+                c.hls_compressed.release(31);
             });
             assert_eq!(
                 hls.read_with_budget(&mut output, &c, Duration::from_millis(450)),
@@ -384,9 +356,8 @@ mod tests {
         ]);
         let c = Control::default();
         c.video_decoded.store(true, Ordering::Release);
-        c.max_fps.store(25, Ordering::Release);
+        c.hls_prefetch.store(true, Ordering::Release);
         let mut hls = Hls::open(format!("{}/live.m3u8", server.base), CAP, &c).unwrap();
-        hls.blocked_media = true;
         let (request, requests) = mpsc::channel();
         let (responses, objects) = mpsc::sync_channel(0);
         std::thread::scope(|scope| {
@@ -399,27 +370,27 @@ mod tests {
                     probe_bytes: 2048,
                 };
                 let mut buf = vec![0; 64 * 1024];
-                let mut used = input.read(&mut buf, &c).unwrap();
+                let mut used = input.read(&mut buf).unwrap();
                 assert_eq!(buf[..used], first[..used]);
                 eventually(|| c.hls_prefetch_limited.load(Ordering::Relaxed) != 0);
                 while first.len() - used > 2 * MIB {
-                    let n = input.read(&mut buf, &c).unwrap();
+                    let n = input.read(&mut buf).unwrap();
                     assert_eq!(buf[..n], first[used..used + n]);
                     used += n;
                 }
                 // The second segment is completely downloaded while FFmpeg still
                 // has almost two MiB of the first left to read.
                 eventually(|| c.hls_prefetched.load(Ordering::Relaxed) == 1);
-                assert!(c.hls_retained_bytes.load(Ordering::Acquire) >= MIB);
-                c.max_fps.store(15, Ordering::Release);
+                assert!(c.hls_compressed.usage().0 >= MIB);
+                c.hls_prefetch.store(false, Ordering::Release);
                 while used < first.len() {
-                    let n = input.read(&mut buf, &c).unwrap();
+                    let n = input.read(&mut buf).unwrap();
                     assert_eq!(buf[..n], first[used..used + n]);
                     used += n;
                 }
                 let mut used = 0;
                 while used < second.len() {
-                    let n = input.read(&mut buf, &c).unwrap();
+                    let n = input.read(&mut buf).unwrap();
                     assert_eq!(buf[..n], second[used..used + n]);
                     used += n;
                 }
@@ -427,12 +398,12 @@ mod tests {
             });
             serve(&mut hls, &c, requests, responses);
         });
-        let peak = c.hls_peak_compressed.load(Ordering::Relaxed);
+        let peak = c.hls_compressed.usage().1;
         assert!(
             peak <= CAP && peak > CAP - 256 * 1024,
             "unexpected peak {peak}"
         );
-        assert_eq!(c.hls_retained_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(c.hls_compressed.usage().0, 0);
         assert_eq!(server.heads().len(), 3);
     }
 }

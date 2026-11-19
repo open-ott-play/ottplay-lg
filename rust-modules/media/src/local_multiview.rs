@@ -2,8 +2,8 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+    Arc, Condvar, Mutex, OnceLock,
 };
 use std::time::Duration;
 
@@ -92,6 +92,11 @@ impl Limits {
         Self { max_fps: if focused { 30 } else { 25 }, prefetch_live_segment: true, ..Self::default() }
     }
 
+    /// Small pictures keep their presentation limit while reading the next live segment.
+    pub fn grid9() -> Self {
+        Self { prefetch_live_segment: true, ..Self::default() }
+    }
+
     pub(crate) fn valid(self) -> bool {
         self.max_source_pixels > 0
             && self.max_source_pixels <= 3840 * 2160
@@ -128,13 +133,57 @@ pub fn hls_handoff_origin(url: &str) -> Option<String> {
     Some(origin.base().to_ascii_lowercase())
 }
 
+/// Charged once per allocated compressed block, including one still filling from curl.
+#[derive(Default)]
+pub(crate) struct CompressedMemory {
+    usage: Mutex<(usize, usize)>, // reserved payload bytes and their lifetime peak
+    released: Condvar,
+}
+impl CompressedMemory {
+    pub(crate) fn usage(&self) -> (usize, usize) {
+        *self.usage.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn charge(&self, capacity: usize, limit: usize) -> bool {
+        let mut bytes = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        if capacity > limit.saturating_sub(bytes.0) { return false; }
+        bytes.0 += capacity;
+        bytes.1 = bytes.1.max(bytes.0);
+        true
+    }
+
+    pub(crate) fn release(&self, capacity: usize) {
+        let mut bytes = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        bytes.0 -= capacity;
+        self.released.notify_one();
+    }
+
+    /// Only this source's reader allocates. Its decoder can only make more room.
+    pub(crate) fn wait_for_room(&self, ceiling: usize, c: &Control, deferred: &mut bool) -> Result<Duration, Error> {
+        let mut bytes = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        if bytes.0 <= ceiling { return Ok(Duration::ZERO); }
+        if !*deferred {
+            c.hls_prefetch_limited.fetch_add(1, Ordering::Relaxed);
+            *deferred = true;
+        }
+        let parked = std::time::Instant::now();
+        while bytes.0 > ceiling {
+            if c.stopped() { return Err(Error::Cancelled); }
+            // Cancellation can also originate outside the decoder (e.g. source revocation).
+            let wait = self.released.wait_timeout(bytes, Duration::from_millis(50))
+                .unwrap_or_else(|e| e.into_inner());
+            bytes = wait.0;
+        }
+        Ok(parked.elapsed())
+    }
+}
+
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
     pub reader_abandoned: AtomicBool,
-    pub hls_retained_bytes: AtomicUsize,
-    #[cfg(test)]
-    pub hls_peak_compressed: AtomicUsize,
+    pub hls_compressed: Arc<CompressedMemory>,
+    pub hls_prefetch: AtomicBool,
     pub hls_prefetched: AtomicU32,
     pub hls_prefetch_limited: AtomicU32,
     held: Option<crate::ff::HeldLocalFile>,
@@ -256,9 +305,8 @@ impl Session {
         let control = Arc::new(Control {
             cancel: AtomicBool::new(false),
             reader_abandoned: AtomicBool::new(false),
-            hls_retained_bytes: AtomicUsize::new(0),
-            #[cfg(test)]
-            hls_peak_compressed: AtomicUsize::new(0),
+            hls_compressed: Arc::default(),
+            hls_prefetch: AtomicBool::new(limits.prefetch_live_segment),
             hls_prefetched: AtomicU32::new(0),
             hls_prefetch_limited: AtomicU32::new(0),
             held,
@@ -360,6 +408,19 @@ impl Session {
     pub fn hls_lookahead_counts(&self) -> (u32, u32) {
         (self.control.hls_prefetched.load(Ordering::Relaxed),
          self.control.hls_prefetch_limited.load(Ordering::Relaxed))
+    }
+
+    /// Live and peak payload allocation of the block reader; excludes codecs, curl and textures.
+    pub fn hls_compressed_bytes(&self) -> Option<(usize, usize)> {
+        let usage = self.control.hls_compressed.usage();
+        (usage.1 > 0).then_some(usage)
+    }
+
+    /// Takes effect at segment boundaries without replacing the private source or its decoder.
+    pub fn set_hls_prefetch(&self, enabled: bool) {
+        if self.control.hls_prefetch.load(Ordering::Relaxed) != enabled {
+            self.control.hls_prefetch.store(enabled, Ordering::Release);
+        }
     }
 
     /// Update presentation cadence without disturbing decoding, the media clock or PCM.
@@ -520,6 +581,14 @@ mod tests {
             session.set_max_fps(Limits::grid4(focused).max_fps);
             assert_eq!(c.max_fps.load(Ordering::Relaxed), expected_fps);
         }
+        let nine = Limits::grid9();
+        assert_eq!(nine.max_fps, 15);
+        assert!(nine.prefetch_live_segment);
+        assert!(!Limits::default().prefetch_live_segment);
+        session.set_hls_prefetch(nine.prefetch_live_segment);
+        assert!(c.hls_prefetch.load(Ordering::Acquire));
+        session.set_hls_prefetch(false);
+        assert!(!c.hls_prefetch.load(Ordering::Acquire));
         session.set_max_fps(0);
         assert_eq!(c.max_fps.load(Ordering::Relaxed), 30);
         assert_eq!(c.timeline.load(Ordering::Acquire), source_timeline);
@@ -531,9 +600,8 @@ mod tests {
             control: Arc::new(Control {
                 cancel: AtomicBool::new(false),
                 reader_abandoned: AtomicBool::new(false),
-                hls_retained_bytes: AtomicUsize::new(0),
-            #[cfg(test)]
-            hls_peak_compressed: AtomicUsize::new(0),
+                hls_compressed: Arc::default(),
+                hls_prefetch: AtomicBool::new(false),
                 hls_prefetched: AtomicU32::new(0),
                 hls_prefetch_limited: AtomicU32::new(0),
                 held: None,

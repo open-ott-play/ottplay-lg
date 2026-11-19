@@ -171,9 +171,9 @@ impl Remote {
             && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
     }
 
-    fn fetch(&mut self, url: &str, cap: usize, segment: bool, blocked: bool, c: &Control) -> Result<MediaSegment, Error> {
+    fn fetch(&mut self, url: &str, cap: usize, segment: bool, c: &Control) -> Result<MediaSegment, Error> {
         self.reopen_resource(url, c, segment)?;
-        let bytes = if blocked { MediaSegment::collect(self, cap, c)? } else { MediaSegment::from_vec(collect(self, cap, c)?) };
+        let bytes = MediaSegment::collect(self, cap, c)?;
         // All classified gateway bodies fit in a single block. Require the complete
         // response so a compressed payload cannot match a control prefix.
         if bytes.len() <= 128 {
@@ -559,7 +559,6 @@ struct Hls {
     playlist: Playlist,
     next: u64,
     bytes: MediaSegment,
-    blocked_media: bool,
     init_sent: bool,
     delivered_segment: bool,
     teardown_checked: bool,
@@ -621,7 +620,6 @@ impl Hls {
             playlist,
             next,
             bytes: MediaSegment::default(),
-            blocked_media: false,
             init_sent: false,
             delivered_segment: false,
             teardown_checked: false,
@@ -721,7 +719,7 @@ impl Hls {
             self.arm_request(c, &mut deadline)?;
             if !self.init_sent {
                 if let Some(url) = &self.playlist.init {
-                    self.bytes = self.remote.fetch(url, self.cap, false, false, c)?;
+                    self.bytes = self.remote.fetch(url, self.cap, false, c)?;
                     if self.bytes.is_empty() { return Err(Error::Source); }
                 }
                 self.init_sent = true;
@@ -729,7 +727,7 @@ impl Hls {
             }
             if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
                 let order = admission_read_started(&segment.url, c);
-                let result = self.remote.fetch(&segment.url, self.cap, true, self.blocked_media, c)
+                let result = self.remote.fetch(&segment.url, self.cap, true, c)
                     .map_err(|error| self.remote.report_outage(error, Some(&segment.url), c));
                 // A bounded reader can park this response while FFmpeg consumes the
                 // previous object. Preserve its transport retry time after a deferral.
@@ -790,7 +788,7 @@ impl Hls {
             self.refresh_retry(c, &mut remaining, &mut deadline)?;
             refreshed_edge = true;
         }
-        Ok(self.bytes.read(out, None))
+        Ok(self.bytes.read(out))
     }
 }
 #[path = "ff_local_video_lookahead.rs"]
@@ -821,7 +819,7 @@ extern "C" fn read(p: *mut c_void, out: *mut u8, len: c_int) -> c_int {
             Input::Local(f) => f.read(out).map_err(|_| Error::Source),
             Input::Http(r) => r.read(out, io.control),
             Input::Hls(h) => h.read(out, io.control),
-            Input::LivePipe(pipe) => pipe.read(out, io.control),
+            Input::LivePipe(pipe) => pipe.read(out),
         }
     }))
     .unwrap_or(Err(Error::Source));
@@ -1059,7 +1057,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
     let mut reopens = std::collections::VecDeque::new();
     loop {
         let result = match &mut input {
-            Input::Hls(hls) if limits.prefetch_live_segment && !hls.playlist.ended && hls.playlist.init.is_none() => {
+            Input::Hls(hls) if !hls.playlist.ended && hls.playlist.init.is_none() => {
                 match lookahead::try_decode(hls, limits, c) {
                     Some(result) => result,
                     None => decode_input(&mut input, limits, c),
