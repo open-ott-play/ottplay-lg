@@ -12,6 +12,7 @@ use std::{
 
 #[derive(Default)]
 struct LiveGridFixture {
+    load: Option<load::Origin>,
     last_served: [AtomicUsize; 4],
     segment_timeout_reads: AtomicUsize,
     segment_503_reads: AtomicUsize,
@@ -38,13 +39,16 @@ fn is_segment(name: &str) -> bool {
 
 impl FixtureServer {
     fn open(root: PathBuf) -> Self {
+        Self::with_state(root, LiveGridFixture::default())
+    }
+    fn with_state(root: PathBuf, state: LiveGridFixture) -> Self {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let redirects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let live_grid = Arc::new(LiveGridFixture::default());
+        let live_grid = Arc::new(state);
         let live_requests = Arc::clone(&live_grid);
         let flag = Arc::clone(&stop);
         let finished = Arc::clone(&done);
@@ -130,6 +134,9 @@ impl FixtureServer {
             return Self::response(&mut socket, "405 Method Not Allowed", "", b"");
         }
         let path = request.next().unwrap_or("");
+        if let Some(origin) = &live_grid.load {
+            return origin.serve(&mut socket, root, path);
+        }
         let mut file = None;
         for index in [1, 3, 5] {
             if path == format!("/files/{index}.mp4") {
@@ -389,6 +396,9 @@ struct Seen {
     failure: bool,
 }
 fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
+    pump_at_size(readers, seen, revoked, (96, 64));
+}
+fn pump_at_size(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>, (w, h): (u32, u32)) {
     for (index, session) in readers.0.iter_mut().enumerate() {
         for _ in 0..24 {
             let Some(event) = session.poll() else {
@@ -404,11 +414,11 @@ fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
                             frame.chroma_width,
                             frame.chroma_height
                         ),
-                        (96, 64, 48, 32)
+                        (w, h, w / 2, h / 2)
                     );
                     assert_eq!(
                         (frame.y.len(), frame.u.len(), frame.v.len()),
-                        (96 * 64, 48 * 32, 48 * 32)
+                        ((w * h) as usize, (w * h / 4) as usize, (w * h / 4) as usize)
                     );
                     if let Some(last) = seen[index].last {
                         assert!(frame.pts_us > last, "slot {index} PTS did not advance");
@@ -882,3 +892,6 @@ fn grid4_displays_frames_while_next_segment_is_delayed() {
 
 #[path = "local_multiview_output_tests.rs"]
 mod output;
+
+#[path = "local_multiview_load_tests.rs"]
+mod load;

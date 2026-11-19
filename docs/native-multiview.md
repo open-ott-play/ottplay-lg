@@ -213,6 +213,14 @@ The Native checks workflow runs these checks:
   both before and after moving focus from the first window to the second.
 - Delay a requested HLS segment and verify that the preceding segment continues
   to deliver video frames during the delay.
+- Start nine independent 720p H.264/AAC live streams on nine loopback origins. Each
+  stream sends four consecutive 10 MiB MPEG-TS segments with standard null
+  packet padding, and delays one response by 350–470 ms. Verify distinct
+  pictures, advancing timestamps in every window, PCM after moving audio
+  focus, per-window buffer bounds and worker retirement. The job log records
+  per-window peaks, sampled aggregate compressed memory and the longest
+  observed gap between delivered frames. Each 25 fps source publishes into
+  a 640 × 360 tile.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 
