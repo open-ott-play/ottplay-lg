@@ -171,10 +171,14 @@ impl Remote {
             && crate::local_multiview::hls_handoff_origin(self.source.effective_url()).as_ref() == Some(origin)
     }
 
-    fn fetch(&mut self, url: &str, cap: usize, is_segment: bool, c: &Control) -> Result<Vec<u8>, Error> {
-        self.reopen_resource(url, c, is_segment)?;
-        let bytes = collect_with_budget(self, cap, c, is_segment)?;
-        if let Some(error) = self.provider_error(&bytes, is_segment.then_some(url), c) { return Err(error); }
+    fn fetch(&mut self, url: &str, cap: usize, segment: bool, blocked: bool, c: &Control) -> Result<MediaSegment, Error> {
+        self.reopen_resource(url, c, segment)?;
+        let bytes = if blocked { MediaSegment::collect(self, cap, c)? } else { MediaSegment::from_vec(collect(self, cap, c)?) };
+        // All classified gateway bodies fit in a single block. Require the complete
+        // response so a compressed payload cannot match a control prefix.
+        if bytes.len() <= 128 {
+            if let Some(error) = self.provider_error(bytes.head(), segment.then_some(url), c) { return Err(error); }
+        }
         Ok(bytes)
     }
     fn deadline(&self) -> Instant {
@@ -281,12 +285,9 @@ impl Remote {
     }
 }
 fn collect(r: &mut Remote, cap: usize, c: &Control) -> Result<Vec<u8>, Error> {
-    collect_with_budget(r, cap, c, false)
-}
-fn collect_with_budget(r: &mut Remote, cap: usize, c: &Control, media: bool) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut scratch = [0; 16 * 1024];
-    let mut expires = r.deadline();
+    let expires = r.deadline();
     loop {
         if Instant::now() >= expires {
             r.failure = Some(crate::curlio::OpenErr::Deadline);
@@ -297,23 +298,8 @@ fn collect_with_budget(r: &mut Remote, cap: usize, c: &Control, media: bool) -> 
             return Ok(out);
         }
         let needed = out.len().checked_add(n).filter(|&size| size <= cap).ok_or(Error::Budget)?;
-        if media && needed > out.capacity() {
-            let retained = c.hls_retained_bytes.load(Ordering::Acquire);
-            let mut available = cap.saturating_sub(retained);
-            if needed > available {
-                // Wait for FFmpeg to release the consumed object before growing the buffer.
-                // Keep the current response and cookie context; no duplicate GET.
-                c.hls_prefetch_limited.fetch_add(1, Ordering::Relaxed);
-                let parked = Instant::now();
-                while c.hls_retained_bytes.load(Ordering::Acquire) != 0 {
-                    if !c.wait(Duration::from_millis(5)) { return Err(Error::Cancelled); }
-                }
-                let delay = parked.elapsed();
-                expires += delay;
-                if let Some(end) = &mut r.deadline { *end += delay; }
-                available = cap;
-            }
-            let capacity = needed.max(out.capacity().saturating_mul(2)).min(available);
+        if needed > out.capacity() {
+            let capacity = needed.max(out.capacity().saturating_mul(2)).min(cap);
             out.try_reserve_exact(capacity - out.len()).map_err(|_| Error::Budget)?;
         }
         out.extend_from_slice(&scratch[..n]);
@@ -561,6 +547,10 @@ fn media_segment_bytes(bytes: &[u8]) -> bool {
         || (bytes.len() >= 8 && matches!(&bytes[4..8], b"styp" | b"sidx" | b"moof" | b"mdat"))
 }
 
+#[path = "ff_local_video_blocks.rs"]
+mod blocks;
+use blocks::Segment as MediaSegment;
+
 const LIVE_READ_BUDGET: Duration = Duration::from_secs(30);
 
 struct Hls {
@@ -568,8 +558,8 @@ struct Hls {
     url: String,
     playlist: Playlist,
     next: u64,
-    bytes: Vec<u8>,
-    pos: usize,
+    bytes: MediaSegment,
+    blocked_media: bool,
     init_sent: bool,
     delivered_segment: bool,
     teardown_checked: bool,
@@ -630,8 +620,8 @@ impl Hls {
             url,
             playlist,
             next,
-            bytes: Vec::new(),
-            pos: 0,
+            bytes: MediaSegment::default(),
+            blocked_media: false,
             init_sent: false,
             delivered_segment: false,
             teardown_checked: false,
@@ -726,32 +716,30 @@ impl Hls {
         if c.stopped() { return Err(Error::Cancelled); }
         let mut deadline = Instant::now() + budget;
         let mut remaining = 2;
-        while self.pos == self.bytes.len() {
+        while self.bytes.is_empty() {
             if self.reprobe { return Err(Error::Source); }
             self.arm_request(c, &mut deadline)?;
             if !self.init_sent {
                 if let Some(url) = &self.playlist.init {
-                    self.bytes = self.remote.fetch(url, self.cap, false, c)?;
+                    self.bytes = self.remote.fetch(url, self.cap, false, false, c)?;
                     if self.bytes.is_empty() { return Err(Error::Source); }
-                    self.pos = 0;
                 }
                 self.init_sent = true;
                 if !self.bytes.is_empty() { break; }
             }
             if let Some(segment) = self.playlist.segments.iter().find(|s| s.sequence == self.next) {
                 let order = admission_read_started(&segment.url, c);
-                let result = self.remote.fetch(&segment.url, self.cap, true, c)
+                let result = self.remote.fetch(&segment.url, self.cap, true, self.blocked_media, c)
                     .map_err(|error| self.remote.report_outage(error, Some(&segment.url), c));
                 // A bounded reader can park this response while FFmpeg consumes the
                 // previous object. Preserve its transport retry time after a deferral.
                 deadline = self.remote.deadline.unwrap_or(deadline);
                 match result {
                     Ok(bytes) if !bytes.is_empty() => {
-                        if order.is_some() && media_segment_bytes(&bytes) {
+                        if order.is_some() && media_segment_bytes(bytes.head()) {
                             finish_admission_read(order, self.remote.source.effective_url(), c);
                         }
                         self.bytes = bytes;
-                        self.pos = 0;
                         self.next = self.next.checked_add(1).ok_or(Error::Playlist)?;
                         self.delivered_segment = true;
                         break;
@@ -802,10 +790,7 @@ impl Hls {
             self.refresh_retry(c, &mut remaining, &mut deadline)?;
             refreshed_edge = true;
         }
-        let n = out.len().min(self.bytes.len() - self.pos);
-        out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
+        Ok(self.bytes.read(out, None))
     }
 }
 #[path = "ff_local_video_lookahead.rs"]
@@ -1079,8 +1064,7 @@ unsafe fn run_inner(source: ExternalSource, limits: Limits, c: &Control) -> Resu
         hls.reprobe = false;
         hls.delivered_segment = false;
         hls.init_sent = false;
-        hls.bytes.clear();
-        hls.pos = 0;
+        hls.bytes = MediaSegment::default();
         c.timeline.fetch_add(1, Ordering::AcqRel);
         c.audio_generation.fetch_add(1, Ordering::AcqRel);
         let mut mailbox = c.mailbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -1139,9 +1123,9 @@ unsafe fn decode_input(input: &mut Input, limits: Limits, c: &Control) -> Result
     if let Input::Hls(hls) = input {
         if !hls.playlist.ended && hls.playlist.init.is_none() {
             hls.read(&mut [], c)?;
-            if hls.bytes.first() == Some(&0x47)
-                && hls.bytes.get(188) == Some(&0x47)
-                && hls.bytes.get(376) == Some(&0x47)
+            if hls.bytes.head().first() == Some(&0x47)
+                && hls.bytes.head().get(188) == Some(&0x47)
+                && hls.bytes.head().get(376) == Some(&0x47)
             {
                 probe_bytes = (hls.bytes.len() / 2).clamp(2048, probe_bytes);
             }

@@ -55,7 +55,8 @@ A clear live MPEG-TS source opened in the four-window grid can read one segment
 ahead while its current segment plays. The same private HTTP session handles
 both segments. While the next segment is unpublished, the reader checks the
 playlist at its usual cadence. Decoder demand has its own timeout. Both compressed buffers share the
-slot’s segment budget. A full buffer defers the read until the decoder releases space.
+slot’s segment budget. FFmpeg releases each consumed 128 KiB block so the
+reader can continue downloading the next segment while playback progresses.
 Moving an existing source from another layout keeps its original reader.
 Plex uses direct media; this path does not silently start a transcoder.
 

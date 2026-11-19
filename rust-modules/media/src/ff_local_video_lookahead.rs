@@ -1,13 +1,13 @@
 //! The existing worker retains exclusive ownership of its HLS request context and cookie jar.
 //! The decoder accepts one complete, validated object at a time. A rendezvous prevents the
 //! reader from starting N+2 before FFmpeg has finished consuming N.
-use super::{Control, Error, Hls, Input, Limits};
+use super::{Control, Error, Hls, Input, Limits, MediaSegment};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
 };
 
-type Object = Result<Vec<u8>, Error>;
+type Object = Result<MediaSegment, Error>;
 static READERS: AtomicUsize = AtomicUsize::new(0);
 struct Permit;
 impl Permit {
@@ -36,8 +36,7 @@ impl Drop for Permit {
 pub(super) struct Consumer {
     request: Sender<()>,
     objects: Receiver<Object>,
-    bytes: Vec<u8>,
-    pos: usize,
+    bytes: MediaSegment,
     terminal: Option<Result<(), Error>>,
     pub(super) probe_bytes: usize,
 }
@@ -49,10 +48,7 @@ impl Consumer {
         if out.is_empty() {
             return Ok(0);
         }
-        if self.pos == self.bytes.len() {
-            // Release the consumed object before permitting a new transfer.
-            self.bytes = Vec::new();
-            c.hls_retained_bytes.store(0, Ordering::Release);
+        if self.bytes.is_empty() {
             let object = self
                 .request
                 .send(())
@@ -61,7 +57,6 @@ impl Consumer {
             match object {
                 Ok(bytes) if !bytes.is_empty() => {
                     self.bytes = bytes;
-                    self.pos = 0;
                 }
                 terminal => {
                     // libav may read again after an IO error. Keep its original recovery class.
@@ -71,10 +66,7 @@ impl Consumer {
                 }
             }
         }
-        let n = out.len().min(self.bytes.len() - self.pos);
-        out[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
+        Ok(self.bytes.read(out, Some(c)))
     }
 }
 
@@ -107,16 +99,14 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
                 Err(TryRecvError::Disconnected) => return,
             }
         };
-        let object = result.map(|_| {
-            hls.pos = 0;
-            std::mem::take(&mut hls.bytes)
-        });
-        let mut ready_in_advance = false;
+        let object = result.map(|_| std::mem::take(&mut hls.bytes));
         if ahead {
             let requested = match requests.try_recv() {
                 Ok(()) => true,
                 Err(TryRecvError::Empty) => {
-                    ready_in_advance = true;
+                    if object.as_ref().is_ok_and(|bytes| !bytes.is_empty()) {
+                        control.hls_prefetched.fetch_add(1, Ordering::Relaxed);
+                    }
                     requests.recv().is_ok()
                 }
                 Err(TryRecvError::Disconnected) => false,
@@ -127,8 +117,8 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
                 return;
             }
         }
-        let terminal = object.as_ref().map_or(true, Vec::is_empty);
-        let retained = object.as_ref().map_or(0, Vec::capacity);
+        let terminal = object.as_ref().map_or(true, MediaSegment::is_empty);
+        let retained = object.as_ref().map_or(0, MediaSegment::capacity);
         // The old allocation is already released when the decoder requests this object.
         control
             .hls_retained_bytes
@@ -140,19 +130,10 @@ fn serve(hls: &mut Hls, control: &Control, requests: Receiver<()>, responses: Sy
         if terminal {
             return;
         }
-        if ready_in_advance {
-            control.hls_prefetched.fetch_add(1, Ordering::Relaxed);
-        }
-        // If no allocation room remains, wait for demand before opening another transfer.
-        // An unexpectedly large next object can also wait inside collect_with_budget.
         ahead = control.video_decoded.load(Ordering::Acquire)
             && control.max_fps.load(Ordering::Relaxed) > Limits::default().max_fps
             && !control.paused.load(Ordering::Acquire)
             && !hls.playlist.ended;
-        if ahead && retained >= hls.cap {
-            control.hls_prefetch_limited.fetch_add(1, Ordering::Relaxed);
-            ahead = false;
-        }
     }
 }
 
@@ -168,13 +149,15 @@ impl Drop for DecoderDone<'_> {
 /// reader budget falls back to the existing synchronous reader including its first bytes.
 pub(super) fn try_decode(hls: &mut Hls, limits: Limits, c: &Control) -> Option<Result<(), Error>> {
     let _permit = Permit::acquire()?;
+    hls.blocked_media = true;
     if let Err(error) = hls.read(&mut [], c) {
         return Some(Err(error));
     }
     if ![0, 188, 376]
         .iter()
-        .all(|&i| hls.bytes.get(i) == Some(&0x47))
+        .all(|&i| hls.bytes.head().get(i) == Some(&0x47))
     {
+        hls.blocked_media = false;
         return None;
     }
     let probe_bytes = (hls.bytes.len() / 2).clamp(2048, 1024 * 1024);
@@ -188,8 +171,7 @@ pub(super) fn try_decode(hls: &mut Hls, limits: Limits, c: &Control) -> Option<R
                 let mut input = Input::LivePipe(Consumer {
                     request,
                     objects,
-                    bytes: Vec::new(),
-                    pos: 0,
+                    bytes: MediaSegment::default(),
                     terminal: None,
                     probe_bytes,
                 });
@@ -199,6 +181,7 @@ pub(super) fn try_decode(hls: &mut Hls, limits: Limits, c: &Control) -> Option<R
         serve(hls, c, requests, responses);
         Some(handle.join().unwrap_or(Err(Error::Decode)))
     });
+    hls.blocked_media = false;
     c.hls_retained_bytes.store(0, Ordering::Release);
     c.reader_abandoned.store(false, Ordering::Release);
     result
@@ -231,14 +214,15 @@ mod tests {
             let mut input = Consumer {
                 request,
                 objects,
-                bytes: Vec::new(),
-                pos: 0,
+                bytes: MediaSegment::default(),
                 terminal: None,
                 probe_bytes: 2048,
             };
             let worker = std::thread::spawn(move || {
                 requests.recv().unwrap();
-                responses.send(error.map_or(Ok(Vec::new()), Err)).unwrap();
+                responses
+                    .send(error.map_or(Ok(MediaSegment::default()), Err))
+                    .unwrap();
             });
             let c = Control::default();
             let expected = error.map_or(Ok(0), Err);
@@ -268,8 +252,7 @@ mod tests {
                 let mut input = Consumer {
                     request,
                     objects,
-                    bytes: Vec::new(),
-                    pos: 0,
+                    bytes: MediaSegment::default(),
                     terminal: None,
                     probe_bytes: 2048,
                 };
@@ -306,12 +289,12 @@ mod tests {
                         c.hls_retained_bytes.store(0, Ordering::Release);
                     }
                 });
-                super::super::collect_with_budget(&mut remote, 64 * 1024, &c, true)
+                MediaSegment::collect(&mut remote, 64 * 1024, &c)
             });
             if cancel {
-                assert_eq!(result, Err(Error::Cancelled));
+                assert!(matches!(result, Err(Error::Cancelled)));
             } else {
-                assert_eq!(result.unwrap(), body);
+                assert_eq!(result.unwrap().head(), body);
             }
             assert_eq!(c.hls_prefetch_limited.load(Ordering::Relaxed), 1);
             assert_eq!(server.heads().len(), 1);
@@ -329,6 +312,7 @@ mod tests {
             Reply::ok("", b"A"),
         ]);
         let mut hls = Hls::open(format!("{}/leaf.m3u8", server.base), 32, &c).unwrap();
+        hls.blocked_media = true;
         c.hls_retained_bytes.store(31, Ordering::Release);
         let mut output = [0];
         std::thread::scope(|scope| {
@@ -361,7 +345,7 @@ mod tests {
         ]);
         let mut hls = Hls::open(format!("{}/edge.m3u8", server.base), 1024, &c).unwrap();
         assert_eq!(hls.read(&mut [], &c), Ok(0));
-        assert_eq!(std::mem::take(&mut hls.bytes), b"A");
+        assert_eq!(std::mem::take(&mut hls.bytes).head(), b"A");
         hls.checked -= Duration::from_secs(2);
         assert_eq!(
             hls.read_available(&mut [], &c, Duration::from_millis(350), true),
@@ -377,5 +361,78 @@ mod tests {
         );
         assert_eq!(next, [b'B']);
         assert_eq!(server.heads().len(), 5);
+    }
+    #[test]
+    fn two_large_ts_segments_prefetch_before_the_first_ends_within_one_budget() {
+        const MIB: usize = 1024 * 1024;
+        const CAP: usize = 16 * MIB;
+        let make_ts = |size, id| {
+            let mut packet = [id; 188];
+            packet[0] = 0x47;
+            packet.repeat(size / 188)
+        };
+        let first = make_ts(12 * MIB, 1);
+        let second = make_ts(10 * MIB, 2);
+        let _serial = curl();
+        let server = SessionServer::new(vec![
+            Reply::ok(
+                "",
+                b"#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXTINF:12,\na.ts\n#EXTINF:12,\nb.ts\n",
+            ),
+            Reply::ok("", &first),
+            Reply::ok("", &second),
+        ]);
+        let c = Control::default();
+        c.video_decoded.store(true, Ordering::Release);
+        c.max_fps.store(25, Ordering::Release);
+        let mut hls = Hls::open(format!("{}/live.m3u8", server.base), CAP, &c).unwrap();
+        hls.blocked_media = true;
+        let (request, requests) = mpsc::channel();
+        let (responses, objects) = mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut input = Consumer {
+                    request,
+                    objects,
+                    bytes: MediaSegment::default(),
+                    terminal: None,
+                    probe_bytes: 2048,
+                };
+                let mut buf = vec![0; 64 * 1024];
+                let mut used = input.read(&mut buf, &c).unwrap();
+                assert_eq!(buf[..used], first[..used]);
+                eventually(|| c.hls_prefetch_limited.load(Ordering::Relaxed) != 0);
+                while first.len() - used > 2 * MIB {
+                    let n = input.read(&mut buf, &c).unwrap();
+                    assert_eq!(buf[..n], first[used..used + n]);
+                    used += n;
+                }
+                // The second segment is completely downloaded while FFmpeg still
+                // has almost two MiB of the first left to read.
+                eventually(|| c.hls_prefetched.load(Ordering::Relaxed) == 1);
+                assert!(c.hls_retained_bytes.load(Ordering::Acquire) >= MIB);
+                c.max_fps.store(15, Ordering::Release);
+                while used < first.len() {
+                    let n = input.read(&mut buf, &c).unwrap();
+                    assert_eq!(buf[..n], first[used..used + n]);
+                    used += n;
+                }
+                let mut used = 0;
+                while used < second.len() {
+                    let n = input.read(&mut buf, &c).unwrap();
+                    assert_eq!(buf[..n], second[used..used + n]);
+                    used += n;
+                }
+                c.cancel.store(true, Ordering::Release);
+            });
+            serve(&mut hls, &c, requests, responses);
+        });
+        let peak = c.hls_peak_compressed.load(Ordering::Relaxed);
+        assert!(
+            peak <= CAP && peak > CAP - 256 * 1024,
+            "unexpected peak {peak}"
+        );
+        assert_eq!(c.hls_retained_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(server.heads().len(), 3);
     }
 }

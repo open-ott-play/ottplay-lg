@@ -133,6 +133,8 @@ pub(crate) struct Control {
     pub cancel: AtomicBool,
     pub reader_abandoned: AtomicBool,
     pub hls_retained_bytes: AtomicUsize,
+    #[cfg(test)]
+    pub hls_peak_compressed: AtomicUsize,
     pub hls_prefetched: AtomicU32,
     pub hls_prefetch_limited: AtomicU32,
     held: Option<crate::ff::HeldLocalFile>,
@@ -250,6 +252,8 @@ impl Session {
             cancel: AtomicBool::new(false),
             reader_abandoned: AtomicBool::new(false),
             hls_retained_bytes: AtomicUsize::new(0),
+            #[cfg(test)]
+            hls_peak_compressed: AtomicUsize::new(0),
             hls_prefetched: AtomicU32::new(0),
             hls_prefetch_limited: AtomicU32::new(0),
             held,
@@ -523,6 +527,8 @@ mod tests {
                 cancel: AtomicBool::new(false),
                 reader_abandoned: AtomicBool::new(false),
                 hls_retained_bytes: AtomicUsize::new(0),
+            #[cfg(test)]
+            hls_peak_compressed: AtomicUsize::new(0),
                 hls_prefetched: AtomicU32::new(0),
                 hls_prefetch_limited: AtomicU32::new(0),
                 held: None,
