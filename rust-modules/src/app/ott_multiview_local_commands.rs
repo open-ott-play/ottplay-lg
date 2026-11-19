@@ -76,7 +76,8 @@ impl Driver {
     pub fn status(&self, runtime: &Runtime) -> Value {
         let c = context(runtime);
         let cx = json!({"scene":c.scene,"layout_revision":c.layout_revision,"focus_revision":c.focus_revision,"audio_revision":c.audio_revision});
-        let Some(s) = runtime.multiview.scene_status(runtime) else {
+        // Dispatch temporarily owns this driver outside Runtime.
+        let Some(s) = runtime.multiview.scene_status_with_local(runtime, self) else {
             return json!({"context":cx,"layout":"off","satellites":0,"focus_slot":null,"audio_policy":"muted","audio_slot":null,"slots":[]});
         };
         let (layout, satellites) = match runtime.multiview.layout().unwrap_or(Layout::Single) {

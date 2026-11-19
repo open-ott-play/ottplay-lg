@@ -258,7 +258,7 @@ fn rapid_channel_steps_before_first_tick_replace_queued_attempt_and_off_cancels_
     assert_eq!(plx_media::route::play_request_ticket(), native_ticket);
 }
 
-fn queued_local_attempt() -> (App, Runtime, Driver, Vec<SourceHandle>, ResolveTicket, multiview_sources::SourceWork) {
+pub(in crate::app::ott_runtime) fn queued_local_attempt() -> (App, Runtime, Driver, Vec<SourceHandle>, ResolveTicket, multiview_sources::SourceWork) {
     let (app, mut runtime, _snapshot, _, _resolved) = receipt();
     let mut next = runtime.catalog.entries[0].clone();
     next.id = "second".into();
@@ -280,7 +280,7 @@ fn queued_local_attempt() -> (App, Runtime, Driver, Vec<SourceHandle>, ResolveTi
     (app, runtime, driver, handles, ticket, work)
 }
 
-fn resolve_attempt(runtime: &mut Runtime, app: &App, work: multiview_sources::SourceWork) {
+pub(in crate::app::ott_runtime) fn resolve_attempt(runtime: &mut Runtime, app: &App, work: multiview_sources::SourceWork) {
     let metadata = work.prepare_local_metadata(&plx_base::task::OffFrame::for_test()).unwrap();
     let mut coordinator = std::mem::take(&mut runtime.multiview);
     let transition = coordinator.metadata_succeeded(metadata, runtime, app).unwrap();
@@ -427,6 +427,65 @@ fn lost_playing_sessions_rebind_only_their_original_sources_after_a_long_gap() {
                 Ok(plx_data::ott::multiview::SlotStatus::Playing { .. })));
         }
     }
+}
+
+#[test]
+fn terminal_decoder_failure_retains_the_source_and_rejects_stale_or_stopping_tickets() {
+    let _serial = plx_base::testlock::serial();
+    let (app, mut runtime, mut driver, handles, ticket, work) = queued_local_attempt();
+    let slot = ticket.slot();
+    resolve_attempt(&mut runtime, &app, work);
+    runtime.multiview.backend_start_completed(ticket, AdmissionOutcome::Admitted).unwrap();
+    let before = runtime.multiview.scene_status(&runtime).unwrap().slots.remove(slot.index());
+    runtime.multiview.playback_failed(ticket).unwrap();
+    let after = runtime.multiview.scene_status(&runtime).unwrap().slots.remove(slot.index());
+    assert_eq!((after.status, after.error), ("failed", Some("unavailable")));
+    assert_eq!((after.source, after.slot_generation), (before.source, before.slot_generation));
+    assert_eq!(runtime.multiview.admitted_pipeline_slots(), 0);
+    assert!(runtime.multiview.playback_failed(ticket).is_err());
+
+    driver.stop_slot(&mut runtime, slot).unwrap();
+    assert_eq!(runtime.multiview.scene_status(&runtime).unwrap().slots[slot.index()].status, "empty");
+    driver.play_source(&mut runtime, &app, slot, handles[0]).unwrap();
+    assert!(!runtime.multiview.ready_after_retirement(ticket));
+    assert!(runtime.multiview.playback_failed(ticket).is_err());
+    let job = runtime.multiview_effects.iter().position(|e| matches!(e, SceneEffect::PrepareMetadata { .. })).unwrap();
+    let SceneEffect::PrepareMetadata { ticket: new, work } = runtime.multiview_effects.remove(job).unwrap() else { unreachable!() };
+    resolve_attempt(&mut runtime, &app, work);
+    runtime.multiview.backend_start_completed(new, AdmissionOutcome::Admitted).unwrap();
+    driver.stop_slot(&mut runtime, slot).unwrap();
+    assert!(runtime.multiview.playback_failed(new).is_err());
+    runtime.multiview.stop_completed(new, StopResult::Stopped).unwrap();
+    assert!(!runtime.multiview.ready_after_retirement(ticket), "late retry cannot claim a successor's empty window");
+}
+
+#[test]
+fn a_drained_slot_waiting_for_authorized_recovery_reports_starting_until_stop() {
+    let _serial = plx_base::testlock::serial();
+    let (mut app, mut runtime, mut driver, handles, ticket, work) = queued_local_attempt();
+    resolve_attempt(&mut runtime, &app, work);
+    runtime.multiview.backend_start_completed(ticket, AdmissionOutcome::Admitted).unwrap();
+    driver.recovery[0].schedule(ticket, handles[0], runtime.frame_time());
+    runtime.multiview.close_slot(ticket.slot()).unwrap();
+    runtime.multiview.stop_completed(ticket, StopResult::Stopped).unwrap();
+    runtime.multiview_local = driver;
+    let pending = runtime.multiview.scene_status(&runtime).unwrap().slots.remove(0);
+    assert_eq!(pending.status, "starting");
+    assert!(pending.source.is_some());
+
+    // Go through the real command router: it moves the local driver out of
+    // Runtime before dispatching the decoded request.
+    let now = runtime.now_ms();
+    let params = json!({"version":1,"op":"status"});
+    let invocation = runtime.remote.raw_poll_for_test(&json!({"commands":[],"server_time":1000,
+        "requests":[{"id":format!("{:032x}",17),"action":"multiview","params":params,"expires_at":1100}]}).to_string(), now).remove(0);
+    let reply = crate::app::ott_runtime::commands::command(&mut runtime, &mut app, &invocation).unwrap();
+    assert_eq!(reply["status"], "ok", "{reply}");
+    assert_eq!(reply["data"]["snapshot"]["slots"][0]["state"], "starting");
+    let mut driver = std::mem::take(&mut runtime.multiview_local);
+    driver.stop_slot(&mut runtime, ticket.slot()).unwrap();
+    runtime.multiview_local = driver;
+    assert_eq!(runtime.multiview.scene_status(&runtime).unwrap().slots[0].status, "empty");
 }
 
 #[test]

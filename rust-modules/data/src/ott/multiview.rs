@@ -679,6 +679,18 @@ impl Scene {
         self.set_current_status(ticket, next_status)
     }
 
+    /// The decoder finished with an error after admission. Retain the selected item and
+    /// its failure until an explicit stop or replacement retires this generation.
+    pub fn report_playback_failed(&mut self, ticket: ResolveTicket) -> Result<(), Error> {
+        if !self.current_slot_for(ticket)?.status.is_pipeline_admitted() {
+            return Err(Error::InvalidTransition);
+        }
+        self.set_current_status(ticket, SlotStatus::Failed {
+            media: Some(ticket.media),
+            reason: SlotFailure::BackendRejected,
+        })
+    }
+
     pub fn pause(&mut self, ticket: ResolveTicket) -> Result<(), Error> {
         let slot = self.current_slot_for(ticket)?;
         let SlotStatus::Playing { media } = slot.status else {
@@ -709,6 +721,16 @@ impl Scene {
     pub fn report_pipeline_stopped(&mut self, ticket: ResolveTicket) -> Result<(), Error> {
         let _ = self.current_slot_for(ticket)?;
         self.retire_slot(ticket.slot)
+    }
+
+    /// Verify the exact retirement before a delayed same-source recovery. A later
+    /// bind or request invalidates the proof even when the slot is empty again.
+    pub fn just_retired(&self, ticket: ResolveTicket) -> bool {
+        let slot = &self.slots[ticket.slot.index()];
+        self.id == ticket.scene && slot.status == SlotStatus::Empty
+            && slot.source == Some(ticket.source)
+            && slot.source_generation == ticket.source_generation
+            && ticket.request_generation.checked_add(1) == Some(slot.request_generation)
     }
 
     /// Predict the same checked transition used by report_pipeline_stopped, without mutation.

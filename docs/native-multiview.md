@@ -70,6 +70,24 @@ media timestamp. UI redraws of a held picture leave both values unchanged.
 These readings measure rendering inside the application. Verify audio and
 the visible panel separately. If a window stops, `last_stop` can identify the
 source, decoder or renderer stage. A new source attempt clears the old reason.
+For example, `source_temporarily_unavailable` can result from an upstream
+timeout or HTTP 502, 503 or 504. `source_read` means the reader could not
+supply the requested bytes. To investigate a repeatable failure, record the
+window, channel and time and compare that interval with the gateway log.
+A selected window waiting to retry reports `starting`. If recovery ends, it
+reports `failed` and keeps the last frame count and PTS for that selection.
+Stopping or replacing the window clears those measurements.
+Once playback has started, the player reopens a window automatically only
+when its selected HLS playlist confirms a live broadcast. A movie with an
+unknown catalogue duration keeps its failure visible without rewinding.
+
+Run this command twice several seconds apart to see each CLI window number
+and compare the same generation:
+
+```sh
+ott -j l_ status --details | jq '.multiview_video_evidence.slots[] |
+  {window: (.slot_id + 1), slot_generation, drawn_frames, last_pts_us, last_stop}'
+```
 
 ### Replacing a channel on a session-limited HLS server
 
@@ -152,12 +170,16 @@ not a decoded-frame or TV-capacity measurement.
 
 ## Hosted output qualification
 
-The Native checks workflow keeps three mandatory results separate:
+The Native checks workflow runs these checks:
 
 - Build the pinned bundled FFmpeg component set, assert the C ABI, and record
   source, configuration, library and header identities.
 - Execute the explicit mixed nine-session test: three held files, three HTTP
   sources and three HLS sources, with seek, cancellation and retirement checks.
+- Run four independent live HLS readers against rolling playlists on loopback.
+  Two feeds encounter a temporary fault on a media segment (HTTP 503 on one,
+  an HTTP 200 response containing the gateway timeout message on another).
+  Verify both segments are requested again and all four timelines continue.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 

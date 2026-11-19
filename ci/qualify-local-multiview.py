@@ -25,6 +25,7 @@ import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEST = "local_multiview::real_qualification::nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement"
+GRID_TEST = "local_multiview::real_qualification::four_live_hls_windows_advance_after_gateway_timeouts"
 OUTPUT_TEST = "local_multiview::real_qualification::output::nine_real_yuv_textures_and_virtual_sdl_audio"
 DECODERS = ("h264", "hevc", "mpeg2video", "mpeg4", "vp8", "vp9", "mjpeg", "vc1", "wmv3", "aac")
 INPUTS = ("ci/build-ffmpeg.sh", "ci/dependencies.json", "ci/ffabi-assert.c", "ci/sanitize-ffmpeg-config.py",
@@ -492,9 +493,9 @@ def qualify(runner, ident, artifact, virtual=False):
     if not 6 <= len(hls) <= 100:
         raise RuntimeError("HLS fixture inventory is incomplete or unbounded")
     for record in hls:
-        if re.fullmatch(r"slot[267]-hls/(?:media\.m3u8|segment[0-9]{3}\.ts)", record["name"]) is None:
+        if re.fullmatch(r"slot[2678]-hls/(?:media\.m3u8|segment[0-9]{3}\.ts)", record["name"]) is None:
             raise RuntimeError("Unexpected HLS fixture object")
-    for slot in (2, 6, 7):
+    for slot in (2, 6, 7, 8):
         names = {record["name"] for record in hls}
         if f"slot{slot}-hls/media.m3u8" not in names or f"slot{slot}-hls/segment000.ts" not in names:
             raise RuntimeError("HLS fixture playlist or segment is missing")
@@ -544,11 +545,16 @@ def qualify(runner, ident, artifact, virtual=False):
         result = runner.run("nine-sessions", [binary, test, "--exact", "--ignored", "--nocapture", "--test-threads=1"], 120, env)
     if "running 1 test" not in result or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in result:
         raise RuntimeError("Real decoder qualification did not execute exactly one passing test")
+    if not virtual:
+        grid = runner.run("four-live-hls", [binary, GRID_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"], 60, env)
+        if "test result: ok. 1 passed; 0 failed; 0 ignored;" not in grid:
+            raise RuntimeError("Four live HLS decoders did not pass gateway recovery")
     assert_source(ident)
-    write(runner.out / "QUALIFIED.json", {"identity": ident, "test": test, "passed": 1, "failed": 0, "ignored": 0,
+    write(runner.out / "QUALIFIED.json", {"identity": ident, "test": test, "passed": 1 if virtual else 2, "failed": 0, "ignored": 0,
                                            "fixtures": manifest, "sources": {"held": 3, "http": 3, "hls": 3}, "scope": ("hosted Mesa/Xvfb and virtual PulseAudio null sink; no television or physical speaker claim"
                                                      if virtual else "software decoders only; no GL, audio sink or TV claim"),
                                            "virtual_output": proof if virtual else None,
+                                           "four_live_hls_test": None if virtual else GRID_TEST,
                                            "configurations": ["core", "es2"] if virtual else ["default"],
                                            "counts_scope": "per configuration"})
 

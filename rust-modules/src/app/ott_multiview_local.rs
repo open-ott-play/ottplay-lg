@@ -832,7 +832,9 @@ impl Driver {
                             self.audio_applied = None;
                             self.audio.clear();
                         }
-                        let transition = if picture.admitted || retry_requested {
+                        let transition = if picture.admitted && !retry_requested && matches!(event, Event::Failure(_)) {
+                            runtime.multiview.playback_failed(picture.ticket)
+                        } else if picture.admitted || retry_requested {
                             runtime.multiview.close_slot(picture.ticket.slot())
                         } else {
                             runtime
@@ -1056,4 +1058,4 @@ impl Drop for Driver {
 
 #[cfg(all(test, feature = "hostsim"))]
 #[path = "ott_multiview_local_lease_tests.rs"]
-mod lease_tests;
+pub(super) mod lease_tests;

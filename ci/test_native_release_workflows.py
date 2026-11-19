@@ -240,7 +240,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertIn("range(9)", generator)
         self.assertIn("timeout=45", generator)
         self.assertIn("fixture destination must be empty", generator)
-        self.assertIn('if index in (2, 6, 7):', generator)
+        self.assertIn('if index in (2, 6, 7, 8):', generator)
         self.assertIn('"video_count": 9', generator)
         self.assertIn('"hls_objects": hls_objects', generator)
         self.assertIn("Fixture object escaped its source directory", body)
@@ -251,6 +251,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         build = body.split("def build(", 1)[1].split("def verify(", 1)[0]
         self.assertLess(build.index("assert_source(ident)"), build.index('"BUILD.json"'))
         self.assertLess(qualification.index('"nine-sessions"'), qualification.index("assert_source(ident)"))
+        self.assertLess(qualification.index('runner.run("four-live-hls", [binary, GRID_TEST'), qualification.index("assert_source(ident)"))
         self.assertLess(qualification.index("assert_source(ident)"), qualification.index('"QUALIFIED.json"'))
 
     def test_virtual_output_is_owned_dependent_and_part_of_the_gate(self):
