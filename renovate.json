@@ -2,5 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>victron-venus/venus-os-ci-toolkit:renovate-fleet"
+  ],
+  "commitTrailers": [
+    "Signed-off-by: alvit <272257197+4alvit@users.noreply.github.com>"
   ]
 }
