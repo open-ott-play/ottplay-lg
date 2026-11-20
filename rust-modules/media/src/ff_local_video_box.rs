@@ -1,4 +1,4 @@
-//! Rounded 2x2 box average for subsampled video planes.
+//! Rounded 2x2 and 3x3 box averages for subsampled video planes.
 pub(super) struct BoxFilter {
     #[cfg(all(target_arch = "arm", target_os = "linux"))]
     neon: bool,
@@ -39,6 +39,33 @@ impl BoxFilter {
             *pixel = ((sum + 2) / 4) as u8;
         }
     }
+
+    pub(super) fn row3(&self, top: &[u8], middle: &[u8], bottom: &[u8], dst: &mut [u8]) {
+        debug_assert_eq!(top.len(), dst.len() * 3);
+        debug_assert_eq!(middle.len(), top.len());
+        debug_assert_eq!(bottom.len(), top.len());
+        #[cfg(all(target_arch = "arm", target_os = "linux"))]
+        let complete = if self.neon {
+            let groups = (dst.len() / 8).min(top.len().min(middle.len()).min(bottom.len()) / 24);
+            if groups != 0 {
+                unsafe {
+                    arm::ott_grid_box3x8(dst.as_mut_ptr(), top.as_ptr(), middle.as_ptr(), bottom.as_ptr(), groups)
+                };
+            }
+            groups * 8
+        } else {
+            0
+        };
+        #[cfg(not(all(target_arch = "arm", target_os = "linux")))]
+        let complete = 0;
+        let triples = |row: &[u8; 3]| u16::from(row[0]) + u16::from(row[1]) + u16::from(row[2]);
+        let top = top[complete * 3..].as_chunks::<3>().0;
+        let middle = middle[complete * 3..].as_chunks::<3>().0;
+        let bottom = bottom[complete * 3..].as_chunks::<3>().0;
+        for (((pixel, a), b), c) in dst[complete..].iter_mut().zip(top).zip(middle).zip(bottom) {
+            *pixel = ((triples(a) + triples(b) + triples(c) + 4) / 9) as u8;
+        }
+    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "linux"))]
@@ -46,6 +73,7 @@ mod arm {
     use std::sync::OnceLock;
     core::arch::global_asm!(include_str!("ff_local_video_box_arm.S"), options(raw));
     unsafe extern "C" {
+        pub(super) fn ott_grid_box3x8(dst: *mut u8, top: *const u8, middle: *const u8, bottom: *const u8, groups: usize);
         pub(super) fn ott_grid_box8(dst: *mut u8, top: *const u8, bottom: *const u8, groups: usize);
     }
     pub(super) fn available() -> bool {
@@ -73,6 +101,29 @@ mod tests {
         BoxFilter::detect().row(&top, &bottom, &mut out);
         for (sum, pixel) in out.into_iter().enumerate() {
             assert_eq!(pixel, ((sum + 2) / 4) as u8);
+        }
+    }
+
+    #[test]
+    fn third_scale_rounds_every_sum_across_vectors_and_a_partial_tail() {
+        // Source rows and the destination intentionally start at an unaligned address.
+        let mut rows = [vec![0], vec![0], vec![0]];
+        for sum in 0u16..=9 * 255 {
+            for (i, row) in rows.iter_mut().enumerate() {
+                for x in 0..3 {
+                    row.push(sum.saturating_sub(((i * 3 + x) * 255) as u16).min(255) as u8);
+                }
+            }
+        }
+        let mut out = vec![0xaa; 2 + 9 * 255 + 1];
+        // 2296 possible sums fill a whole vector. Repeat the last sum for a scalar tail.
+        for row in &mut rows { row.extend_from_slice(&[255; 3]); }
+        out.push(0xaa);
+        let end = out.len() - 1;
+        BoxFilter::detect().row3(&rows[0][1..], &rows[1][1..], &rows[2][1..], &mut out[1..end]);
+        assert_eq!((out[0], out[end]), (0xaa, 0xaa));
+        for (sum, &pixel) in out[1..end].iter().enumerate() {
+            assert_eq!(pixel, ((sum.min(9 * 255) + 4) / 9) as u8);
         }
     }
 

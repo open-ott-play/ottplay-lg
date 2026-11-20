@@ -3,7 +3,7 @@
   "how_to_raise": "Edit this file in the SAME pull request that grows the number, set limit to the new ceiling, update measured and measured_on, and justify the growth in the PR body (what was added, why it cannot be smaller, what it cost). A budget is raised by a reviewed decision, never to make a red run green.",
   "budgets": {
     "binary_bytes": {
-      "what": "Size in bytes of the stripped ARM plxnative binary staged by the OTT native producer: RELEASE=1, FLAVOR=stable, ARM_PROFILE=release, --no-default-features, opt-level=s, fat LTO and one codegen unit. The baseline uses the pinned Darwin-hosted SDK; Linux CI independently rebuilds and grades its staged binary against the same ceiling.",
+      "what": "Size in bytes of the stripped ARM plxnative binary staged by the OTT native producer: RELEASE=1, FLAVOR=stable, ARM_PROFILE=release, --no-default-features, opt-level=z with media optimized for speed, fat LTO and one codegen unit. The original baseline used opt-level=s and the pinned Darwin-hosted SDK. Linux CI grades the packaged executable against the same ceiling.",
       "unit": "bytes",
       "mode": "fail",
       "limit": 18238176,

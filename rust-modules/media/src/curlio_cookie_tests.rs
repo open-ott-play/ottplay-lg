@@ -29,6 +29,9 @@ pub(crate) struct SessionServer {
 }
 impl SessionServer {
     pub(crate) fn new(replies: Vec<Reply>) -> Self {
+        Self::with_shared_replies(replies.into())
+    }
+    pub(crate) fn with_shared_replies(replies: Arc<[Reply]>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -41,7 +44,6 @@ impl SessionServer {
         let accepted = Arc::clone(&accepts);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
-        let replies = Arc::new(replies);
         let worker = std::thread::spawn(move || {
             let mut connections = Vec::new();
             while !stopped.load(Ordering::Acquire) {

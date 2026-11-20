@@ -41,11 +41,14 @@ streams. Each slot has one decoder thread, a 1080p input-pixel ceiling, a bounde
 mailbox and a layout-specific presentation limit. The four-window grid targets
 up to 30 fps in the focused window and 25 fps in the other three. Moving focus
 keeps the existing playback session and audio. Other layouts use a 15 fps ceiling.
-A 1080p frame can use half-size YUV planes on a 960×540 tile when both dimensions
-retain enough detail after cropping. Unsupported codecs, pixel formats or
-sources fail that slot independently. Supported output is 8-bit planar YUV420. On ARMv7,
-the four-window half-size filter uses NEON when the kernel advertises it. Other
-CPUs and partial blocks use the same rounded four-sample average.
+The renderer sizes each regular grid tile using the drawable in device pixels.
+On a 1920×1080 display, a 1080p source can produce a 960×540 texture for four
+windows or a 640×360 texture for nine. It keeps more samples when the display or
+aspect-ratio crop requires them. Both filters average the source pixels and can
+use NEON on compatible ARM devices. Nine 640×360 YUV420 pictures occupy
+3,110,400 bytes per set of textures. The decoder also needs memory for the
+original pictures and reference frames. Unsupported inputs fail independently
+in the affected window.
 Authorized local files and progressive HTTP media whose final response advertises
 byte ranges support seek. The decoder reports its opened transport capability to
 remote clients; HLS and unavailable windows do not advertise seek. Accepted paused
@@ -53,13 +56,15 @@ seeks publish a landing picture and remain paused. Seeking suppresses preroll PC
 until the target picture, and later pause changes cannot cancel an accepted seek. The initial HLS
 reader supports same-origin TS/fMP4 playlists; encrypted, byte-range,
 discontinuous and external-audio renditions are rejected. HLS seek is unavailable.
-A clear live MPEG-TS source opened in the four-window grid can read one segment
-ahead while its current segment plays. The same private HTTP session handles
-both segments. While the next segment is unpublished, the reader checks the
-playlist at its usual cadence. Decoder demand has its own timeout. Both compressed buffers share the
-slot’s segment budget. FFmpeg releases each consumed 128 KiB block so the
-reader can continue downloading the next segment while playback progresses.
-Moving an existing source from another layout keeps its original reader.
+A clear live MPEG-TS source can read one segment ahead in either regular grid.
+Each window uses one private HTTP session for both segments and allocates buffer
+space as data arrives. The current and next segments share a 16 MiB allowance
+per window, up to 64 MiB across four occupied windows or 144 MiB across nine.
+When that window's allowance is full, its reader waits until the decoder frees
+a block of up to 128 KiB. Other windows keep their own allowance. The limits
+apply to compressed segment payloads. Process and GPU memory also include the
+decoders, textures, audio and transport. A layout change updates the existing
+live reader at a segment boundary. VOD and fMP4 continue to read on demand.
 Plex uses direct media; this path does not silently start a transcoder.
 
 Pause/resume and supported seeks target the active slot. Backgrounding, policy
@@ -84,7 +89,14 @@ These readings measure rendering inside the application. Verify audio and
 the visible panel separately. If a window stops, `last_stop` can identify the
 source, decoder or renderer stage. `hls_prefetch_ready` counts segments ready
 before the decoder requested them. `hls_prefetch_budget_deferrals` counts times
-the compressed-byte budget held back a read or allocation. A new source attempt clears the old reason.
+the compressed-byte budget held back a read or allocation.
+`hls_compressed_current_bytes` and `hls_compressed_peak_bytes` give the current
+and highest compressed block capacity for this source attempt, including
+in-flight blocks. A null value means there is no measurement for the current
+reader. Adding the current readings gives an approximate grid snapshot.
+Individual peaks can occur at different times. `texture_width` and
+`texture_height` give the dimensions uploaded for the current selection.
+A new source attempt clears the old reason.
 For example, `source_temporarily_unavailable` can result from an upstream
 timeout or HTTP 502, 503 or 504. `source_read` means the reader could not
 supply the requested bytes. To investigate a repeatable failure, record the
@@ -115,7 +127,8 @@ and compare the same generation:
 ```sh
 ott -j l_ status --details | jq '.multiview_video_evidence.slots[] |
   {window: (.slot_id + 1), slot_generation, drawn_frames, last_pts_us, last_stop,
-   draw_interval_p95_ms, draw_intervals_ge_250ms_count, draw_interval_lifetime_max_ms}'
+   draw_interval_p95_ms, draw_intervals_ge_250ms_count, draw_interval_lifetime_max_ms,
+   hls_compressed_current_bytes, hls_compressed_peak_bytes, texture_width, texture_height}'
 ```
 
 ### Replacing a channel on a session-limited HLS server
@@ -213,6 +226,19 @@ The Native checks workflow runs these checks:
   both before and after moving focus from the first window to the second.
 - Delay a requested HLS segment and verify that the preceding segment continues
   to deliver video frames during the delay.
+- Start nine independent 720p H.264/AAC live streams on nine loopback origins. Each
+  stream sends four consecutive 10 MiB MPEG-TS segments with standard null
+  packet padding, and delays one response by 350–470 ms. Generated inputs
+  are loaded before timing starts. The process RSS includes these host
+  fixtures; the player’s compressed-buffer counters exclude them. Verify distinct
+  pictures, advancing timestamps in every window, PCM after moving audio
+  focus, per-window buffer bounds and worker retirement. The job log records
+  per-window peaks, sampled aggregate compressed memory and the longest
+  observed gap between delivered frames. Each 25 fps source publishes into
+  a 640 × 360 tile. All nine must advance by 8.2 seconds of media time
+  during the same observation. CI requires 85% of the configured frame
+  rate in media time and 50% in wall time. It rejects any delivery gap of
+  1.5 seconds, including a pane that stops before the observation finishes.
 - Execute the production YUV Texture and SDL Sink paths in separate OpenGL core
   and GLES processes using owned Mesa/Xvfb and virtual PulseAudio resources.
 

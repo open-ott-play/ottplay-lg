@@ -12,6 +12,8 @@ use std::{
 
 #[derive(Default)]
 struct LiveGridFixture {
+    load: Option<load::Origin>,
+    segments: [Vec<Vec<u8>>; 4],
     last_served: [AtomicUsize; 4],
     segment_timeout_reads: AtomicUsize,
     segment_503_reads: AtomicUsize,
@@ -38,13 +40,31 @@ fn is_segment(name: &str) -> bool {
 
 impl FixtureServer {
     fn open(root: PathBuf) -> Self {
+        Self::with_state(root, LiveGridFixture::default())
+    }
+    fn open_four_live(root: PathBuf) -> Self {
+        // The clocked tests control origin latency themselves. Stage the 24-second
+        // fixtures before starting the listener so host disk stalls cannot block all panes.
+        let segments = [2, 6, 7, 8].map(|index| {
+            let dir = root.join(format!("slot{index}-hls"));
+            (0..12)
+                .map(|n| {
+                    let path = dir.join(format!("segment{n:03}.ts"));
+                    assert!((1..=1_048_576).contains(&path.metadata().unwrap().len()));
+                    std::fs::read(path).unwrap()
+                })
+                .collect()
+        });
+        Self::with_state(root, LiveGridFixture { segments, ..Default::default() })
+    }
+    fn with_state(root: PathBuf, state: LiveGridFixture) -> Self {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let redirects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let live_grid = Arc::new(LiveGridFixture::default());
+        let live_grid = Arc::new(state);
         let live_requests = Arc::clone(&live_grid);
         let flag = Arc::clone(&stop);
         let finished = Arc::clone(&done);
@@ -130,6 +150,9 @@ impl FixtureServer {
             return Self::response(&mut socket, "405 Method Not Allowed", "", b"");
         }
         let path = request.next().unwrap_or("");
+        if let Some(origin) = &live_grid.load {
+            return origin.serve(&mut socket, path);
+        }
         let mut file = None;
         for index in [1, 3, 5] {
             if path == format!("/files/{index}.mp4") {
@@ -141,7 +164,10 @@ impl FixtureServer {
         if path.starts_with("/live/") {
             for (slot, index) in [2, 6, 7, 8].into_iter().enumerate() {
                 if path == format!("/live/{index}/media.m3u8") {
-                    let last = (1 + live_grid.last_served[slot].load(Ordering::Acquire)).min(11);
+                    let Some(end) = live_grid.segments[slot].len().checked_sub(1) else {
+                        return Self::response(&mut socket, "404 Not Found", "", b"");
+                    };
+                    let last = (1 + live_grid.last_served[slot].load(Ordering::Acquire)).min(end);
                     let first = last.saturating_sub(3);
                     let mut playlist = format!(
                         "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{first}\n"
@@ -180,8 +206,12 @@ impl FixtureServer {
                 if let Some(name) = path.strip_prefix(&format!("/live/{index}/")) {
                     if is_segment(name) {
                         let sequence = name[7..10].parse::<usize>().unwrap();
-                        live_grid.last_served[slot].fetch_max(sequence, Ordering::AcqRel);
-                        file = Some(root.join(format!("slot{index}-hls")).join(name));
+                        let Some(segment) = live_grid.segments[slot].get(sequence) else {
+                            return Self::response(&mut socket, "404 Not Found", "", b"");
+                        };
+                        Self::response(&mut socket, "200 OK", "Content-Type: video/mp2t\r\n", segment)?;
+                        live_grid.last_served[slot].fetch_max(sequence, Ordering::Release);
+                        return Ok(());
                     }
                 }
             }
@@ -389,6 +419,9 @@ struct Seen {
     failure: bool,
 }
 fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
+    pump_at_size(readers, seen, revoked, (96, 64));
+}
+fn pump_at_size(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>, (w, h): (u32, u32)) {
     for (index, session) in readers.0.iter_mut().enumerate() {
         for _ in 0..24 {
             let Some(event) = session.poll() else {
@@ -404,11 +437,11 @@ fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
                             frame.chroma_width,
                             frame.chroma_height
                         ),
-                        (96, 64, 48, 32)
+                        (w, h, w / 2, h / 2)
                     );
                     assert_eq!(
                         (frame.y.len(), frame.u.len(), frame.v.len()),
-                        (96 * 64, 48 * 32, 48 * 32)
+                        ((w * h) as usize, (w * h / 4) as usize, (w * h / 4) as usize)
                     );
                     if let Some(last) = seen[index].last {
                         assert!(frame.pts_us > last, "slot {index} PTS did not advance");
@@ -468,6 +501,7 @@ fn pump(readers: &mut Readers, seen: &mut [Seen], revoked: Option<usize>) {
         }
     }
 }
+#[track_caller]
 fn until(
     readers: &mut Readers,
     seen: &mut [Seen],
@@ -480,7 +514,8 @@ fn until(
         pump(readers, seen, revoked);
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(condition(seen), "actual decode condition timed out");
+    assert!(condition(seen), "actual decode condition timed out; (frames, last PTS) per slot: {:?}",
+            seen.iter().map(|s| (s.frames, s.last)).collect::<Vec<_>>());
 }
 fn paused_seek_lands_without_resuming(readers: &mut Readers, seen: &mut [Seen], index: usize) {
     readers.0[index].set_paused(true);
@@ -756,8 +791,30 @@ fn nine_independent_real_decoders_video_audio_seek_withdrawal_and_retirement() {
         Arc::new(AtomicBool::new(false)),
     )
     .unwrap();
-    let mut reopened = Session::open(ExternalSource::HeldLocal(held), Limits::default())
+    let mut reopened = Session::open_with_output_tile(ExternalSource::HeldLocal(held), Limits::default(), (48, 32))
         .expect("retired permits leaked");
+    // A grid supplies the tile before the worker starts. Changing geometry returns the
+    // next decoded picture at its new size, preserving the same demux and timeline.
+    let mut staged_pts = None;
+    let end = Instant::now() + Duration::from_secs(3);
+    let mut resized = false;
+    while Instant::now() < end && !resized {
+        match reopened.poll() {
+            Some(Event::Video(frame)) if staged_pts.is_none() => {
+                assert_eq!((frame.width, frame.height, frame.y.len()), (48, 32, 48 * 32));
+                staged_pts = Some(frame.pts_us);
+                reopened.set_output_tile(0, 0);
+            }
+            Some(Event::Video(frame)) if frame.width == 96 => {
+                assert_eq!(frame.height, 64);
+                assert!(Some(frame.pts_us) > staged_pts);
+                resized = true;
+            }
+            Some(Event::Failure(error)) => panic!("resized session failed: {error:?}"),
+            _ => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    assert!(resized, "live tile did not resume full-resolution publication");
     reopened.cancel();
     let end = Instant::now() + Duration::from_secs(3);
     while !reopened.is_retired() && Instant::now() < end {
@@ -773,7 +830,7 @@ fn four_live_hls_windows_advance_after_gateway_timeouts() {
     let _serial = plx_base::testlock::serial();
     let root = PathBuf::from(std::env::var_os("PLXNATIVE_LOCAL_VIDEO_FIXTURES").unwrap());
     boot_real_decoders();
-    let mut server = FixtureServer::open(root);
+    let mut server = FixtureServer::open_four_live(root);
     let mut readers = Readers(Vec::new());
     for (slot, index) in [2, 6, 7, 8].into_iter().enumerate() {
         let source = ExternalSource::Hls(server.url(&format!("/live/{index}/media.m3u8")));
@@ -836,7 +893,7 @@ fn grid4_displays_frames_while_next_segment_is_delayed() {
     let _serial = plx_base::testlock::serial();
     let root = PathBuf::from(std::env::var_os("PLXNATIVE_LOCAL_VIDEO_FIXTURES").unwrap());
     boot_real_decoders();
-    let mut server = FixtureServer::open(root);
+    let mut server = FixtureServer::open_four_live(root);
     server.live_grid.delay_next_segment.store(true, Ordering::Release);
     let source = ExternalSource::Hls(server.url("/live/2/media.m3u8"));
     let mut readers = Readers(vec![Session::open(source, Limits::grid4(false)).unwrap()]);
@@ -860,3 +917,6 @@ fn grid4_displays_frames_while_next_segment_is_delayed() {
 
 #[path = "local_multiview_output_tests.rs"]
 mod output;
+
+#[path = "local_multiview_load_tests.rs"]
+mod load;

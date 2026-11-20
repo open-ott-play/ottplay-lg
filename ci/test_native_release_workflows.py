@@ -100,6 +100,10 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         for tokens in commands:
             self.assertIn("OTT_PRODUCT_CONFIG=" + config, tokens,
                           "candidate packaging must not fall back to upstream release documents")
+        candidate = workflow("native-candidate.yml")
+        self.assertIn("CARGO_PROFILE_RELEASE_OPT_LEVEL: 'z'", candidate)
+        self.assertLess(candidate.index(" ipk-stage\n"), candidate.index("ci/check-build-budgets.py --binary "))
+        self.assertLess(candidate.index("ci/check-build-budgets.py --binary "), candidate.index(" ipk-pack\n"))
         source = workflow("ci.yml").split("  source:", 1)[1].split("\n  native:", 1)[0]
         self.assertIn("python3 ci/check-package.py --tracked --product-config " + config, source)
 
@@ -240,7 +244,6 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         self.assertIn("range(9)", generator)
         self.assertIn("timeout=45", generator)
         self.assertIn("fixture destination must be empty", generator)
-        self.assertIn('if index in (2, 6, 7, 8):', generator)
         self.assertIn('"video_count": 9', generator)
         self.assertIn('"hls_objects": hls_objects', generator)
         self.assertIn("Fixture object escaped its source directory", body)
@@ -251,6 +254,7 @@ class NativeReleaseWorkflowContracts(unittest.TestCase):
         build = body.split("def build(", 1)[1].split("def verify(", 1)[0]
         self.assertLess(build.index("assert_source(ident)"), build.index('"BUILD.json"'))
         self.assertLess(qualification.index('"nine-sessions"'), qualification.index("assert_source(ident)"))
+        self.assertLess(qualification.index('runner.run("nine-live-hls", [binary, NINE_HLS_TEST'), qualification.index("assert_source(ident)"))
         self.assertLess(qualification.index('runner.run("four-live-hls", [binary, GRID_TEST'), qualification.index("assert_source(ident)"))
         self.assertLess(qualification.index("assert_source(ident)"), qualification.index('"QUALIFIED.json"'))
 

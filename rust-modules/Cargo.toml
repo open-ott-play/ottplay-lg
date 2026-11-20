@@ -290,6 +290,16 @@ opt-level = 2
 lto = "fat"
 codegen-units = 1
 
+# Keep software decoding and paced frame delivery optimized for speed when
+# the native package producer selects a compact application binary. The
+# renderer keeps loop vectorization with "s"; its ARM tile filters use NEON
+# where available. Cargo profile overrides apply only to release builds.
+[profile.release.package.plx_media]
+opt-level = 2
+
+[profile.release.package.plx_gfx]
+opt-level = "s"
+
 # The LOCAL ARM development profile: what a plain `make` / `make deploy` builds, so the edit-rebuild
 # loop does not pay for the size work above. Same `opt-level`, same `panic` (unwind), same debug info
 # (none) and no symbol stripping, so it is the same program with the same codegen flags from
