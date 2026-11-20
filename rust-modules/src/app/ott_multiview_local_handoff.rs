@@ -5,7 +5,7 @@ use super::super::{App, ProviderKind, Runtime};
 use super::{Driver, LocalResolved, Picture};
 use plx_data::ott::multiview::{AdmissionOutcome, ResolveTicket};
 use plx_media::ff::ExternalSource;
-use plx_media::local_multiview::{hls_handoff_barrier, hls_handoff_origin, Limits, Session};
+use plx_media::local_multiview::{hls_handoff_barrier, hls_handoff_origin};
 use std::time::Duration;
 
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
@@ -227,13 +227,7 @@ impl Driver {
             if !cancelled {
                 if now >= wait.next_check || expired {
                     if !self.handoff_blocked(&wait.origin) {
-                        self.media_ready_with(
-                            runtime,
-                            app,
-                            wait.ticket,
-                            Ok(wait.receipt),
-                            |source| Session::open(source, Limits::default()),
-                        );
+                        self.media_ready(runtime, app, wait.ticket, Ok(wait.receipt));
                         continue;
                     }
                     wait.next_check = now + CHECK_INTERVAL;

@@ -84,7 +84,7 @@ class SourceAdmission(unittest.TestCase):
 class BuildAdmission(unittest.TestCase):
     def args(self, **values):
         return argparse.Namespace(work_dir=Path("/tmp/lg-build-test"), sdk=Path("/tmp/lg-sdk-test"),
-                                  jobs=2, rust_opt_level="s", control_discovery_url=None,
+                                  jobs=2, rust_opt_level="z", control_discovery_url=None,
                                   control_discovery_sha256=None, **values)
 
     def test_ambient_development_and_compiler_flags_do_not_enter_build(self):
@@ -102,7 +102,7 @@ class BuildAdmission(unittest.TestCase):
             environment = build.build_env(self.args())
         self.assertEqual(environment["FLAVOR"], "stable")
         self.assertEqual(environment["RELEASE"], "1")
-        self.assertEqual(environment["CARGO_PROFILE_RELEASE_OPT_LEVEL"], "s")
+        self.assertEqual(environment["CARGO_PROFILE_RELEASE_OPT_LEVEL"], "z")
         self.assertEqual(environment["CARGO_BUILD_JOBS"], "2")
         self.assertEqual(environment["JOBS"], "2")
         for key in ("PLX_CONTROL_DISCOVERY_URL", "RUSTFLAGS", "MAKEFLAGS", "CARGO_TARGET_DIR",
@@ -173,7 +173,7 @@ class BuildAdmission(unittest.TestCase):
                         "target": {"name": "plxnative_modules", "src_path": str(root / "rust-modules/src/lib.rs"),
                                    "kind": ["staticlib"], "crate_types": ["staticlib"]},
                         "features": ["devtriggers"], "filenames": [str(archive)],
-                        "profile": {"opt_level": "s", "debuginfo": 0, "debug_assertions": False,
+                        "profile": {"opt_level": "z", "debuginfo": 0, "debug_assertions": False,
                                     "overflow_checks": False, "test": False}}
             raw = "\n".join(json.dumps(row) for row in (artifact, {"reason": "build-finished", "success": True}))
             (target / ".lib-artifacts.json").write_text(raw)

@@ -144,11 +144,13 @@ jobs:
       - name: Build and verify release package
         env:
           WEBOS_SDK: ${{ steps.sdk.outputs.sdk-dir }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: 'z'
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
         run: |
           set -euo pipefail
           make FLAVOR=stable RELEASE=1 OTT_PRODUCT_CONFIG=ci/ottplay-integration/release/product.json WEBOS_SDK="$WEBOS_SDK" ipk-stage
+          python3 ci/check-build-budgets.py --binary ipkroot/data/usr/palm/applications/com.openottplay.player.native/plxnative
           python3 ci/native_companion.py stage --sdk "$WEBOS_SDK" \
             --source "$RUNNER_TEMP/companion-source" --bundle "$RUNNER_TEMP/companion-bundle"
           make FLAVOR=stable RELEASE=1 OTT_PRODUCT_CONFIG=ci/ottplay-integration/release/product.json WEBOS_SDK="$WEBOS_SDK" ipk-pack

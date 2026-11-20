@@ -2,8 +2,8 @@
 //! A grid is presentation geometry, never evidence that nine decoders fit a particular TV.
 use crate::ff::ExternalSource;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+    Arc, Condvar, Mutex, OnceLock,
 };
 use std::time::Duration;
 
@@ -72,6 +72,8 @@ pub struct Limits {
     pub max_source_pixels: u32,
     pub max_frame_bytes: usize,
     pub max_fps: u32,
+    /// Pace texture publication against elapsed wall time when a dense grid catches up.
+    pub wall_paced_video: bool,
     pub max_object_bytes: usize,
     pub prefetch_live_segment: bool,
 }
@@ -81,6 +83,7 @@ impl Default for Limits {
             max_source_pixels: 1920 * 1080,
             max_frame_bytes: 1920 * 1080 * 3 / 2 + 4096,
             max_fps: 15,
+            wall_paced_video: false,
             max_object_bytes: 16 * 1024 * 1024,
             prefetch_live_segment: false,
         }
@@ -90,6 +93,15 @@ impl Limits {
     /// Four equally sized pictures retain film/PAL cadence, including background slots.
     pub fn grid4(focused: bool) -> Self {
         Self { max_fps: if focused { 30 } else { 25 }, prefetch_live_segment: true, ..Self::default() }
+    }
+
+    /// Small pictures keep their presentation limit while reading the next live segment.
+    pub fn grid9() -> Self {
+        Self { wall_paced_video: true, prefetch_live_segment: true, ..Self::default() }
+    }
+
+    fn frame_pacing(self) -> u32 {
+        self.max_fps | if self.wall_paced_video { WALL_PACED } else { 0 }
     }
 
     pub(crate) fn valid(self) -> bool {
@@ -128,13 +140,60 @@ pub fn hls_handoff_origin(url: &str) -> Option<String> {
     Some(origin.base().to_ascii_lowercase())
 }
 
+/// Charged once per allocated compressed block, including one still filling from curl.
+#[derive(Default)]
+pub(crate) struct CompressedMemory {
+    usage: Mutex<(usize, usize)>, // reserved payload bytes and their lifetime peak
+    released: Condvar,
+}
+impl CompressedMemory {
+    pub(crate) fn usage(&self) -> (usize, usize) {
+        *self.usage.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn charge(&self, capacity: usize, limit: usize) -> bool {
+        let mut bytes = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        if capacity > limit.saturating_sub(bytes.0) { return false; }
+        bytes.0 += capacity;
+        bytes.1 = bytes.1.max(bytes.0);
+        true
+    }
+
+    pub(crate) fn release(&self, capacity: usize) {
+        let mut bytes = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        bytes.0 -= capacity;
+        self.released.notify_one();
+    }
+
+    /// Only this source's reader allocates. Its decoder can only make more room.
+    pub(crate) fn wait_for_room(&self, ceiling: usize, c: &Control, deferred: &mut bool) -> Result<Duration, Error> {
+        let mut bytes = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        if bytes.0 <= ceiling { return Ok(Duration::ZERO); }
+        if !*deferred {
+            c.hls_prefetch_limited.fetch_add(1, Ordering::Relaxed);
+            *deferred = true;
+        }
+        let parked = std::time::Instant::now();
+        while bytes.0 > ceiling {
+            if c.stopped() { return Err(Error::Cancelled); }
+            // Cancellation can also originate outside the decoder (e.g. source revocation).
+            let wait = self.released.wait_timeout(bytes, Duration::from_millis(50))
+                .unwrap_or_else(|e| e.into_inner());
+            bytes = wait.0;
+        }
+        Ok(parked.elapsed())
+    }
+}
+
+// Rate and clock must change together when a playing slot moves between layouts.
+const WALL_PACED: u32 = 1 << 31;
+
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct Control {
     pub cancel: AtomicBool,
     pub reader_abandoned: AtomicBool,
-    pub hls_retained_bytes: AtomicUsize,
-    #[cfg(test)]
-    pub hls_peak_compressed: AtomicUsize,
+    pub hls_compressed: Arc<CompressedMemory>,
+    pub hls_prefetch: AtomicBool,
     pub hls_prefetched: AtomicU32,
     pub hls_prefetch_limited: AtomicU32,
     held: Option<crate::ff::HeldLocalFile>,
@@ -145,7 +204,7 @@ pub(crate) struct Control {
     pub timeline: AtomicU64,
     /// Seek identity survives pause-only publication/audio invalidations.
     pub seek_generation: AtomicU64,
-    pub max_fps: AtomicU32,
+    frame_pacing: AtomicU32,
     pub seekable: AtomicBool,
     pub hls_origin: OnceLock<String>,
     pub hls_gateway_lease: AtomicBool,
@@ -168,6 +227,11 @@ pub(crate) struct Iteration {
     pub seek_generation: u64,
 }
 impl Control {
+    pub(crate) fn frame_pacing(&self) -> (u32, bool) {
+        let packed = self.frame_pacing.load(Ordering::Relaxed);
+        (packed & !WALL_PACED, packed & WALL_PACED != 0)
+    }
+
     pub(crate) fn output_tile(&self) -> (u32, u32) {
         let size = self.output_tile.load(Ordering::Relaxed);
         ((size >> 32) as u32, size as u32)
@@ -234,6 +298,11 @@ pub struct Session {
 }
 impl Session {
     pub fn open(source: ExternalSource, limits: Limits) -> Result<Self, Error> {
+        Self::open_with_output_tile(source, limits, (0, 0))
+    }
+
+    /// Apply the presentation size before the worker publishes its first frame.
+    pub fn open_with_output_tile(source: ExternalSource, limits: Limits, tile: (u32, u32)) -> Result<Self, Error> {
         if !limits.valid() {
             return Err(Error::InvalidLimits);
         }
@@ -251,9 +320,8 @@ impl Session {
         let control = Arc::new(Control {
             cancel: AtomicBool::new(false),
             reader_abandoned: AtomicBool::new(false),
-            hls_retained_bytes: AtomicUsize::new(0),
-            #[cfg(test)]
-            hls_peak_compressed: AtomicUsize::new(0),
+            hls_compressed: Arc::default(),
+            hls_prefetch: AtomicBool::new(limits.prefetch_live_segment),
             hls_prefetched: AtomicU32::new(0),
             hls_prefetch_limited: AtomicU32::new(0),
             held,
@@ -263,14 +331,14 @@ impl Session {
             audio_generation: AtomicU64::new(1),
             timeline: AtomicU64::new(1),
             seek_generation: AtomicU64::new(1),
-            max_fps: AtomicU32::new(limits.max_fps),
+            frame_pacing: AtomicU32::new(limits.frame_pacing()),
             seekable: AtomicBool::new(false),
             hls_origin: OnceLock::new(),
             hls_gateway_lease: AtomicBool::new(false),
             hls_media_live: OnceLock::new(),
             video_decoded: AtomicBool::new(false),
             hls_request: AtomicU64::new(0),
-            output_tile: AtomicU64::new(0),
+            output_tile: AtomicU64::new((u64::from(tile.0) << 32) | u64::from(tile.1)),
             duration_us: AtomicI64::new(0),
             seek: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
@@ -357,10 +425,34 @@ impl Session {
          self.control.hls_prefetch_limited.load(Ordering::Relaxed))
     }
 
-    /// Update presentation cadence without disturbing decoding, the media clock or PCM.
+    /// Live and peak payload allocation of the block reader; excludes codecs, curl and textures.
+    pub fn hls_compressed_bytes(&self) -> Option<(usize, usize)> {
+        let usage = self.control.hls_compressed.usage();
+        (usage.1 > 0).then_some(usage)
+    }
+
+    /// Takes effect at segment boundaries without replacing the private source or its decoder.
+    pub fn set_hls_prefetch(&self, enabled: bool) {
+        if self.control.hls_prefetch.load(Ordering::Relaxed) != enabled {
+            self.control.hls_prefetch.store(enabled, Ordering::Release);
+        }
+    }
+
+    /// Apply a layout's presentation rate and clock without restarting video or PCM.
+    pub fn set_presentation_limits(&self, limits: Limits) {
+        let pacing = limits.frame_pacing();
+        if (1..=60).contains(&limits.max_fps) && self.control.frame_pacing.load(Ordering::Relaxed) != pacing {
+            self.control.frame_pacing.store(pacing, Ordering::Relaxed);
+        }
+    }
+
+    /// Change only the rate of the current pacing policy.
     pub fn set_max_fps(&self, fps: u32) {
-        if (1..=60).contains(&fps) && self.control.max_fps.load(Ordering::Relaxed) != fps {
-            self.control.max_fps.store(fps, Ordering::Relaxed);
+        if (1..=60).contains(&fps) {
+            let _ = self.control.frame_pacing.try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                let new = (old & WALL_PACED) | fps;
+                (old != new).then_some(new)
+            });
         }
     }
     pub fn set_audio(&mut self, on: bool) {
@@ -512,11 +604,29 @@ mod tests {
         let source_timeline = c.timeline.load(Ordering::Acquire);
         let audio_generation = c.audio_generation.load(Ordering::Acquire);
         for (focused, expected_fps) in [(true, 30), (false, 25), (true, 30)] {
-            session.set_max_fps(Limits::grid4(focused).max_fps);
-            assert_eq!(c.max_fps.load(Ordering::Relaxed), expected_fps);
+            session.set_presentation_limits(Limits::grid4(focused));
+            assert_eq!(c.frame_pacing(), (expected_fps, false));
         }
+        let nine = Limits::grid9();
+        session.set_presentation_limits(nine);
+        assert_eq!(c.frame_pacing(), (15, true));
+        assert_eq!(c.output_tile(), (0, 0), "cadence is active before the drawable is known");
+        session.set_output_tile(640, 360);
+        session.set_output_tile(0, 0);
+        assert_eq!(c.frame_pacing(), (15, true), "resizing cannot select another clock");
+        session.set_max_fps(14);
+        assert_eq!(c.frame_pacing(), (14, true));
+        session.set_presentation_limits(Limits::default());
+        assert_eq!(c.frame_pacing(), (15, false), "restore PiP pacing for a surviving slot");
+        assert_eq!(nine.max_fps, 15);
+        assert!(nine.prefetch_live_segment);
+        assert!(!Limits::default().prefetch_live_segment);
+        session.set_hls_prefetch(nine.prefetch_live_segment);
+        assert!(c.hls_prefetch.load(Ordering::Acquire));
+        session.set_hls_prefetch(false);
+        assert!(!c.hls_prefetch.load(Ordering::Acquire));
         session.set_max_fps(0);
-        assert_eq!(c.max_fps.load(Ordering::Relaxed), 30);
+        assert_eq!(c.frame_pacing(), (15, false));
         assert_eq!(c.timeline.load(Ordering::Acquire), source_timeline);
         assert_eq!(c.audio_generation.load(Ordering::Acquire), audio_generation);
     }
@@ -526,9 +636,8 @@ mod tests {
             control: Arc::new(Control {
                 cancel: AtomicBool::new(false),
                 reader_abandoned: AtomicBool::new(false),
-                hls_retained_bytes: AtomicUsize::new(0),
-            #[cfg(test)]
-            hls_peak_compressed: AtomicUsize::new(0),
+                hls_compressed: Arc::default(),
+                hls_prefetch: AtomicBool::new(false),
                 hls_prefetched: AtomicU32::new(0),
                 hls_prefetch_limited: AtomicU32::new(0),
                 held: None,
@@ -538,7 +647,7 @@ mod tests {
                 audio_generation: AtomicU64::new(1),
                 timeline: AtomicU64::new(1),
                 seek_generation: AtomicU64::new(1),
-                max_fps: AtomicU32::new(Limits::default().max_fps),
+                frame_pacing: AtomicU32::new(Limits::default().frame_pacing()),
                 seekable: AtomicBool::new(true),
                 hls_origin: OnceLock::new(),
                 hls_gateway_lease: AtomicBool::new(false),
