@@ -1,4 +1,4 @@
-FROM node:24-alpine
+FROM node:26-alpine
 WORKDIR /opt/ott-home
 COPY bridge/server.cjs /opt/ott-home/bridge/server.cjs
 COPY dashboard/index.html dashboard/style.css dashboard/core.js dashboard/webos-host.js dashboard/app.js /opt/ott-home/dashboard/
